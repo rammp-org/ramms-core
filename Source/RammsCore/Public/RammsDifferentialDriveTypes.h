@@ -25,19 +25,19 @@ struct FMotorParameters
 
 	/** Maximum motor RPM */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
-	float MaxRPM = 300.0f;
+	float MaxRPM = 100.0f;
 
 	/** Maximum motor torque at stall (Newton-meters) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
-	float MaxTorque = 50.0f;
+	float MaxTorque = 7.0f;
 
 	/** Motor torque curve - torque decreases linearly with speed to this fraction at max RPM */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float TorqueAtMaxRPM = 0.3f;
 
 	FMotorParameters()
-		: MaxRPM(300.0f)
-		, MaxTorque(50.0f)
+		: MaxRPM(100.0f)
+		, MaxTorque(7.0f)
 		, TorqueAtMaxRPM(0.3f)
 	{}
 };

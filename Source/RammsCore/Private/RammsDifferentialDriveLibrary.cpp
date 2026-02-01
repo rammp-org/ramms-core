@@ -89,9 +89,27 @@ float URammsDifferentialDriveLibrary::EvaluateMotorTorque(
 	const FMotorParameters& MotorParams,
 	float RequestedTorque)
 {
-	// Clamp RPM to valid range
 	float AbsRPM = FMath::Abs(CurrentRPM);
-	AbsRPM = FMath::Clamp(AbsRPM, 0.0f, MotorParams.MaxRPM);
+	float Sign = FMath::Sign(RequestedTorque);
+	float AbsTorque = FMath::Abs(RequestedTorque);
+	
+	// Check if motor is at or beyond max RPM
+	if (AbsRPM >= MotorParams.MaxRPM)
+	{
+		// Motor has reached max speed
+		// Only allow torque in the opposite direction (braking)
+		float RPMSign = FMath::Sign(CurrentRPM);
+		if (Sign == RPMSign)
+		{
+			// Trying to accelerate further - no torque available
+			return 0.0f;
+		}
+		else
+		{
+			// Braking/reversing - allow full torque
+			return AbsTorque * Sign;
+		}
+	}
 
 	// Calculate available torque based on motor speed
 	// Linear interpolation between max torque at 0 RPM and reduced torque at max RPM
@@ -102,8 +120,6 @@ float URammsDifferentialDriveLibrary::EvaluateMotorTorque(
 		SpeedRatio);
 
 	// Clamp requested torque to available torque
-	float Sign = FMath::Sign(RequestedTorque);
-	float AbsTorque = FMath::Abs(RequestedTorque);
 	AbsTorque = FMath::Min(AbsTorque, AvailableTorque);
 
 	return AbsTorque * Sign;
