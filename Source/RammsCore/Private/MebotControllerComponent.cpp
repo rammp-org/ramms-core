@@ -13,50 +13,50 @@ UMebotControllerComponent::UMebotControllerComponent()
 	bAutoFindConstraints = true;
 	bAutoFindSkeletalMesh = true;
 	bEnableDebugLog = false;
-	bShowMotorGizmos = true;
+	bShowMotorGizmos = false;
 	GizmoSize = 50.0f;
 	CachedSkeletalMesh = nullptr;
 
 	// Initialize default motor configurations
 	// Front caster arm - angular motor
 	FAngularMotorConfig FrontCaster;
-	FrontCaster.ConstraintName = FName("FrontCasterArm");
+	FrontCaster.ConstraintName = FName("front_caster_arm");
 	FrontCaster.ControlAxis = EMotorAxis::Y;
 	FrontCaster.TargetAngle = 0.0f;
 	AngularMotors.Add(FrontCaster);
 
 	// Rear caster arm - angular motor
 	FAngularMotorConfig RearCaster;
-	RearCaster.ConstraintName = FName("RearCasterArm");
+	RearCaster.ConstraintName = FName("rear_caster_arm");
 	RearCaster.ControlAxis = EMotorAxis::Y;
 	RearCaster.TargetAngle = 0.0f;
 	AngularMotors.Add(RearCaster);
 
 	// Left motor elevator - angular motor
 	FAngularMotorConfig LeftElevator;
-	LeftElevator.ConstraintName = FName("LeftMotorElevator");
+	LeftElevator.ConstraintName = FName("left_motor_swing_arm");
 	LeftElevator.ControlAxis = EMotorAxis::Y;
 	LeftElevator.TargetAngle = 0.0f;
 	AngularMotors.Add(LeftElevator);
 
 	// Right motor elevator - angular motor
 	FAngularMotorConfig RightElevator;
-	RightElevator.ConstraintName = FName("RightMotorElevator");
+	RightElevator.ConstraintName = FName("right_motor_swing_arm");
 	RightElevator.ControlAxis = EMotorAxis::Y;
 	RightElevator.TargetAngle = 0.0f;
 	AngularMotors.Add(RightElevator);
 
 	// Left motor translator - linear motor
 	FLinearMotorConfig LeftTranslator;
-	LeftTranslator.ConstraintName = FName("LeftMotorTranslator");
-	LeftTranslator.ControlAxis = EMotorAxis::Z;
+	LeftTranslator.ConstraintName = FName("left_motor_horizontal_assembly");
+	LeftTranslator.ControlAxis = EMotorAxis::X;
 	LeftTranslator.TargetPosition = 0.0f;
 	LinearMotors.Add(LeftTranslator);
 
 	// Right motor translator - linear motor
 	FLinearMotorConfig RightTranslator;
-	RightTranslator.ConstraintName = FName("RightMotorTranslator");
-	RightTranslator.ControlAxis = EMotorAxis::Z;
+	RightTranslator.ConstraintName = FName("right_motor_horizontal_assembly");
+	RightTranslator.ControlAxis = EMotorAxis::X;
 	RightTranslator.TargetPosition = 0.0f;
 	LinearMotors.Add(RightTranslator);
 }
@@ -92,8 +92,8 @@ void UMebotControllerComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	UpdateAngularMotors();
-	UpdateLinearMotors();
+	UpdateAngularMotors(DeltaTime);
+	UpdateLinearMotors(DeltaTime);
 	DrawDebugVisualization();
 }
 
@@ -130,6 +130,82 @@ void UMebotControllerComponent::SetLinearMotorTarget(FName MotorName, float Targ
 			{
 				UE_LOG(LogTemp, Log, TEXT("MebotController: Set linear motor '%s' target to %.2f cm"), 
 					*MotorName.ToString(), TargetPosition);
+			}
+			return;
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("MebotController: Linear motor '%s' not found"), *MotorName.ToString());
+}
+
+void UMebotControllerComponent::SetAngularMotorMaxSpeed(FName MotorName, float MaxSpeed)
+{
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		if (Motor.ConstraintName == MotorName)
+		{
+			Motor.MaxSpeed = FMath::Max(0.0f, MaxSpeed);
+			
+			if (bEnableDebugLog)
+			{
+				UE_LOG(LogTemp, Log, TEXT("MebotController: Set angular motor '%s' max speed to %.2f deg/s"), 
+					*MotorName.ToString(), Motor.MaxSpeed);
+			}
+			return;
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("MebotController: Angular motor '%s' not found"), *MotorName.ToString());
+}
+
+void UMebotControllerComponent::SetLinearMotorMaxSpeed(FName MotorName, float MaxSpeed)
+{
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		if (Motor.ConstraintName == MotorName)
+		{
+			Motor.MaxSpeed = FMath::Max(0.0f, MaxSpeed);
+			
+			if (bEnableDebugLog)
+			{
+				UE_LOG(LogTemp, Log, TEXT("MebotController: Set linear motor '%s' max speed to %.2f cm/s"), 
+					*MotorName.ToString(), Motor.MaxSpeed);
+			}
+			return;
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("MebotController: Linear motor '%s' not found"), *MotorName.ToString());
+}
+
+void UMebotControllerComponent::SetAngularMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier)
+{
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		if (Motor.ConstraintName == MotorName)
+		{
+			Motor.SpeedMultiplier = FMath::Clamp(SpeedMultiplier, 0.0f, 1.0f);
+			
+			if (bEnableDebugLog)
+			{
+				UE_LOG(LogTemp, Log, TEXT("MebotController: Set angular motor '%s' speed multiplier to %.2f"), 
+					*MotorName.ToString(), Motor.SpeedMultiplier);
+			}
+			return;
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("MebotController: Angular motor '%s' not found"), *MotorName.ToString());
+}
+
+void UMebotControllerComponent::SetLinearMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier)
+{
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		if (Motor.ConstraintName == MotorName)
+		{
+			Motor.SpeedMultiplier = FMath::Clamp(SpeedMultiplier, 0.0f, 1.0f);
+			
+			if (bEnableDebugLog)
+			{
+				UE_LOG(LogTemp, Log, TEXT("MebotController: Set linear motor '%s' speed multiplier to %.2f"), 
+					*MotorName.ToString(), Motor.SpeedMultiplier);
 			}
 			return;
 		}
@@ -205,8 +281,23 @@ float UMebotControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) 
 void UMebotControllerComponent::ReinitializeMotors()
 {
 	FindConstraints();
-	UpdateAngularMotors();
-	UpdateLinearMotors();
+	
+	// Initialize current angles/positions from constraint states
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		if (Motor.CachedConstraint)
+		{
+			Motor.CurrentAngle = GetAngularMotorCurrentAngle(Motor.ConstraintName);
+		}
+	}
+	
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		Motor.CurrentPosition = Motor.TargetPosition;
+	}
+	
+	UpdateAngularMotors(0.0f);
+	UpdateLinearMotors(0.0f);
 	
 	if (bEnableDebugLog)
 	{
@@ -337,23 +428,53 @@ USkeletalMeshComponent* UMebotControllerComponent::GetOwnerSkeletalMesh()
 	return Owner->FindComponentByClass<USkeletalMeshComponent>();
 }
 
-void UMebotControllerComponent::UpdateAngularMotors()
+void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 {
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
 		if (Motor.bEnabled && Motor.CachedConstraint)
 		{
+			// Smoothly interpolate current angle toward target at specified speed
+			float EffectiveSpeed = Motor.MaxSpeed * Motor.SpeedMultiplier;
+			float MaxDelta = EffectiveSpeed * DeltaTime;
+			float AngleDiff = Motor.TargetAngle - Motor.CurrentAngle;
+			
+			// Clamp the movement to max speed
+			if (FMath::Abs(AngleDiff) > MaxDelta)
+			{
+				Motor.CurrentAngle += FMath::Sign(AngleDiff) * MaxDelta;
+			}
+			else
+			{
+				Motor.CurrentAngle = Motor.TargetAngle;
+			}
+			
 			ApplyAngularMotorSettings(Motor);
 		}
 	}
 }
 
-void UMebotControllerComponent::UpdateLinearMotors()
+void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
 {
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
 		if (Motor.bEnabled && Motor.CachedConstraint)
 		{
+			// Smoothly interpolate current position toward target at specified speed
+			float EffectiveSpeed = Motor.MaxSpeed * Motor.SpeedMultiplier;
+			float MaxDelta = EffectiveSpeed * DeltaTime;
+			float PositionDiff = Motor.TargetPosition - Motor.CurrentPosition;
+			
+			// Clamp the movement to max speed
+			if (FMath::Abs(PositionDiff) > MaxDelta)
+			{
+				Motor.CurrentPosition += FMath::Sign(PositionDiff) * MaxDelta;
+			}
+			else
+			{
+				Motor.CurrentPosition = Motor.TargetPosition;
+			}
+			
 			ApplyLinearMotorSettings(Motor);
 		}
 	}
@@ -374,18 +495,18 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 		// Set motor strength and damping
 		Motor.CachedConstraint->SetAngularDriveParams(Motor.MotorStrength, Motor.MotorDamping, 0.0f);
 		
-		// Set target orientation based on axis
+		// Set target orientation based on current interpolated angle (not target angle directly)
 		FQuat TargetQuat = FQuat::Identity;
 		switch (Motor.ControlAxis)
 		{
 		case EMotorAxis::X:
-			TargetQuat = FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(Motor.TargetAngle));
+			TargetQuat = FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(Motor.CurrentAngle));
 			break;
 		case EMotorAxis::Y:
-			TargetQuat = FQuat(FVector(0, 1, 0), FMath::DegreesToRadians(Motor.TargetAngle));
+			TargetQuat = FQuat(FVector(0, 1, 0), FMath::DegreesToRadians(Motor.CurrentAngle));
 			break;
 		case EMotorAxis::Z:
-			TargetQuat = FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(Motor.TargetAngle));
+			TargetQuat = FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(Motor.CurrentAngle));
 			break;
 		}
 		
@@ -412,18 +533,18 @@ void UMebotControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Mot
 	{
 		Motor.CachedConstraint->SetLinearDriveParams(Motor.MotorStrength, Motor.MotorDamping, 0.0f);
 		
-		// Set target position on the controlled axis
+		// Set target position based on current interpolated position (not target position directly)
 		FVector TargetPosition = FVector::ZeroVector;
 		switch (Motor.ControlAxis)
 		{
 		case EMotorAxis::X:
-			TargetPosition.X = Motor.TargetPosition;
+			TargetPosition.X = Motor.CurrentPosition;
 			break;
 		case EMotorAxis::Y:
-			TargetPosition.Y = Motor.TargetPosition;
+			TargetPosition.Y = Motor.CurrentPosition;
 			break;
 		case EMotorAxis::Z:
-			TargetPosition.Z = Motor.TargetPosition;
+			TargetPosition.Z = Motor.CurrentPosition;
 			break;
 		}
 		
@@ -473,8 +594,9 @@ void UMebotControllerComponent::DrawDebugVisualization()
 			10.0f, FColor::Cyan, false, 0.0f, 0, 2.0f);
 
 		// Draw motor info
-		FString MotorInfo = FString::Printf(TEXT("%s\n%.1f°"), 
-			*Motor.ConstraintName.ToString(), Motor.TargetAngle);
+		FString MotorInfo = FString::Printf(TEXT("%s\n%.1f° -> %.1f°\nSpeed: %.1f deg/s"), 
+			*Motor.ConstraintName.ToString(), Motor.CurrentAngle, Motor.TargetAngle, 
+			Motor.MaxSpeed * Motor.SpeedMultiplier);
 		DrawDebugString(World, MotorLocation + FVector(0, 0, 20.0f), 
 			MotorInfo, nullptr, FColor::White, 0.0f, true, 1.0f);
 		
@@ -508,8 +630,9 @@ void UMebotControllerComponent::DrawDebugVisualization()
 			10.0f, FColor::Magenta, false, 0.0f, 0, 2.0f);
 
 		// Draw motor info
-		FString MotorInfo = FString::Printf(TEXT("%s\n%.1fcm"), 
-			*Motor.ConstraintName.ToString(), Motor.TargetPosition);
+		FString MotorInfo = FString::Printf(TEXT("%s\n%.1fcm -> %.1fcm\nSpeed: %.1f cm/s"), 
+			*Motor.ConstraintName.ToString(), Motor.CurrentPosition, Motor.TargetPosition,
+			Motor.MaxSpeed * Motor.SpeedMultiplier);
 		DrawDebugString(World, MotorLocation + FVector(0, 0, 20.0f), 
 			MotorInfo, nullptr, FColor::Yellow, 0.0f, true, 1.0f);
 		

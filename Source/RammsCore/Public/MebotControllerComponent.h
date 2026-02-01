@@ -38,6 +38,18 @@ struct FAngularMotorConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	float TargetAngle;
 
+	// Current angle (for smooth interpolation)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Motor")
+	float CurrentAngle;
+
+	// Maximum angular speed in degrees per second
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Speed", meta = (ClampMin = "0.0"))
+	float MaxSpeed;
+
+	// Current movement speed (for dynamic control)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Speed", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SpeedMultiplier;
+
 	// Motor strength (spring constant)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "0.0"))
 	float MotorStrength;
@@ -54,6 +66,9 @@ struct FAngularMotorConfig
 		, ControlAxis(EMotorAxis::Z)
 		, bEnabled(true)
 		, TargetAngle(0.0f)
+		, CurrentAngle(0.0f)
+		, MaxSpeed(45.0f)
+		, SpeedMultiplier(1.0f)
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
 		, CachedConstraint(nullptr)
@@ -81,6 +96,18 @@ struct FLinearMotorConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	float TargetPosition;
 
+	// Current position (for smooth interpolation)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Motor")
+	float CurrentPosition;
+
+	// Maximum linear speed in cm per second
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Speed", meta = (ClampMin = "0.0"))
+	float MaxSpeed;
+
+	// Current movement speed (for dynamic control)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Speed", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SpeedMultiplier;
+
 	// Motor strength (spring constant)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "0.0"))
 	float MotorStrength;
@@ -97,6 +124,9 @@ struct FLinearMotorConfig
 		, ControlAxis(EMotorAxis::Z)
 		, bEnabled(true)
 		, TargetPosition(0.0f)
+		, CurrentPosition(0.0f)
+		, MaxSpeed(50.0f)
+		, SpeedMultiplier(1.0f)
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
 		, CachedConstraint(nullptr)
@@ -120,6 +150,22 @@ public:
 	// Set target position for a specific linear motor by name
 	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
 	void SetLinearMotorTarget(FName MotorName, float TargetPosition);
+
+	// Set max speed for a specific angular motor (degrees per second)
+	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	void SetAngularMotorMaxSpeed(FName MotorName, float MaxSpeed);
+
+	// Set max speed for a specific linear motor (cm per second)
+	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	void SetLinearMotorMaxSpeed(FName MotorName, float MaxSpeed);
+
+	// Set speed multiplier for a specific angular motor (0.0 to 1.0)
+	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	void SetAngularMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier);
+
+	// Set speed multiplier for a specific linear motor (0.0 to 1.0)
+	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	void SetLinearMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier);
 
 	// Enable or disable a specific angular motor by name
 	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
@@ -189,10 +235,10 @@ private:
 	USkeletalMeshComponent* GetOwnerSkeletalMesh();
 
 	// Update all angular motors
-	void UpdateAngularMotors();
+	void UpdateAngularMotors(float DeltaTime);
 
 	// Update all linear motors
-	void UpdateLinearMotors();
+	void UpdateLinearMotors(float DeltaTime);
 
 	// Apply angular motor settings to constraint
 	void ApplyAngularMotorSettings(FAngularMotorConfig& Motor);
