@@ -239,14 +239,9 @@ float URammsDifferentialDriveLibrary::ApplyDeadZone(float Value, float DeadZone)
 
 FVector2D URammsDifferentialDriveLibrary::ApplyDeadZone2D(FVector2D Value, float DeadZone)
 {
-	// Apply radial dead zone
-	float Magnitude = Value.Size();
-	if (Magnitude < DeadZone)
-	{
-		return FVector2D::ZeroVector;
-	}
-
-	// Scale the remaining range
-	float Scaled = (Magnitude - DeadZone) / (1.0f - DeadZone);
-	return Value.GetSafeNormal() * Scaled;
+	// Apply independent dead zone to each axis to preserve full diagonal input authority
+	float X = ApplyDeadZone(Value.X, DeadZone);
+	float Y = ApplyDeadZone(Value.Y, DeadZone);
+	
+	return FVector2D(X, Y);
 }

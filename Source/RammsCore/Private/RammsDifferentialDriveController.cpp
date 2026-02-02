@@ -45,6 +45,35 @@ void URammsDifferentialDriveController::BeginPlay()
 		{
 			UE_LOG(LogTemp, Warning, TEXT("RammsDifferentialDriveController: Failed to find skeletal mesh component on %s"), *Owner->GetName());
 		}
+		else
+		{
+			// Set max angular velocity on wheel body instances
+			FBodyInstance* LeftBodyInst = GetBoneBodyInstance(LeftWheelBoneName);
+			if (LeftBodyInst)
+			{
+				float MaxAngularVelRad = URammsDifferentialDriveLibrary::RPMToRadPerSec(LeftMotorParams.MaxRPM);
+				LeftBodyInst->SetMaxAngularVelocityInRadians(MaxAngularVelRad, false, true);
+				
+				if (bEnableDebugLogging)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Set left wheel max angular velocity: %.1f RPM (%.3f rad/s)"),
+						LeftMotorParams.MaxRPM, MaxAngularVelRad);
+				}
+			}
+			
+			FBodyInstance* RightBodyInst = GetBoneBodyInstance(RightWheelBoneName);
+			if (RightBodyInst)
+			{
+				float MaxAngularVelRad = URammsDifferentialDriveLibrary::RPMToRadPerSec(RightMotorParams.MaxRPM);
+				RightBodyInst->SetMaxAngularVelocityInRadians(MaxAngularVelRad, false, true);
+				
+				if (bEnableDebugLogging)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Set right wheel max angular velocity: %.1f RPM (%.3f rad/s)"),
+						RightMotorParams.MaxRPM, MaxAngularVelRad);
+				}
+			}
+		}
 
 		// Initialize odometry with actor's current transform
 		Odometry = URammsDifferentialDriveLibrary::ResetOdometry(
@@ -189,10 +218,63 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 	float LeftTorque = Command.LeftCommand * LeftMotorParams.MaxTorque * TorqueMultiplier;
 	float RightTorque = Command.RightCommand * RightMotorParams.MaxTorque * TorqueMultiplier;
 
+	// Get actual angular velocity of the wheelchair base for debug display
+	float CurrentTurningSpeed = 0.0f;
+	if (AActor* Owner = GetOwner())
+	{
+		if (UPrimitiveComponent* RootPrimitive = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+		{
+			if (RootPrimitive->IsSimulatingPhysics())
+			{
+				FVector AngularVelocity = RootPrimitive->GetPhysicsAngularVelocityInDegrees();
+				CurrentTurningSpeed = AngularVelocity.Z;
+			}
+		}
+	}
+	
+	float AbsTurningSpeed = FMath::Abs(CurrentTurningSpeed);
+	
+	// Apply turning speed limit using damping if enabled
+	if (MaxTurningSpeed > 0.0f && AbsTurningSpeed > MaxTurningSpeed)
+	{
+		float TurnSpeedError = AbsTurningSpeed - MaxTurningSpeed;
+		float DampingStrength = 0.5f; // Gentler damping - Nm per degree/s of overspeed
+		float TurnDampingTorque = TurnSpeedError * DampingStrength;
+		
+		// Only apply damping if we're significantly over the limit (>10% overshoot)
+		if (TurnSpeedError > MaxTurningSpeed * 0.1f)
+		{
+			float TurnDirection = FMath::Sign(CurrentTurningSpeed);
+			LeftTorque += TurnDirection * TurnDampingTorque;
+			RightTorque -= TurnDirection * TurnDampingTorque;
+			
+			if (bEnableDebugLogging)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Damping turn: %.1f deg/s (max: %.1f), damping torque: %.2f Nm"),
+					AbsTurningSpeed, MaxTurningSpeed, TurnDampingTorque);
+			}
+		}
+	}
+
+	// Apply resistive torque that opposes motion (simulates back-EMF, friction, drag)
+	float LeftResistiveTorque = -FMath::Sign(LeftWheelState.AngularVelocity) * 
+	                             ResistiveTorqueCoefficient * 
+	                             FMath::Abs(LeftWheelState.AngularVelocity);
+	float RightResistiveTorque = -FMath::Sign(RightWheelState.AngularVelocity) * 
+	                              ResistiveTorqueCoefficient * 
+	                              FMath::Abs(RightWheelState.AngularVelocity);
+
+	// Add resistive torque to commanded torque
+	LeftTorque += LeftResistiveTorque;
+	RightTorque += RightResistiveTorque;
+
 	if (bEnableDebugLogging)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] TorqueControl - LeftCmd=%.3f, RightCmd=%.3f, LeftTorque=%.3f Nm, RightTorque=%.3f Nm"),
-			Command.LeftCommand, Command.RightCommand, LeftTorque, RightTorque);
+		float LeftRPM = URammsDifferentialDriveLibrary::RadPerSecToRPM(LeftWheelState.AngularVelocity);
+		float RightRPM = URammsDifferentialDriveLibrary::RadPerSecToRPM(RightWheelState.AngularVelocity);
+		
+		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] TorqueControl - LeftCmd=%.3f, RightCmd=%.3f, LeftTorque=%.3f Nm, RightTorque=%.3f Nm, LeftRPM=%.1f, RightRPM=%.1f, TurnSpeed=%.1f deg/s"),
+			Command.LeftCommand, Command.RightCommand, LeftTorque, RightTorque, LeftRPM, RightRPM, AbsTurningSpeed);
 	}
 
 	// Store target for debugging
@@ -348,6 +430,14 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 
 void URammsDifferentialDriveController::UpdateOdometry(float DeltaTime)
 {
+	// Check if both wheels are moving slowly enough to ignore
+	float AvgVelocity = (FMath::Abs(LeftWheelState.LinearVelocity) + FMath::Abs(RightWheelState.LinearVelocity)) * 0.5f;
+	if (AvgVelocity < OdometryVelocityThreshold)
+	{
+		// Movement too small - ignore to prevent odometry drift
+		return;
+	}
+	
 	// Calculate wheel rotation deltas
 	float LeftDelta = LeftWheelState.TotalRotation - PreviousLeftRotation;
 	float RightDelta = RightWheelState.TotalRotation - PreviousRightRotation;
@@ -405,49 +495,63 @@ bool URammsDifferentialDriveController::ShouldApplyBrakes() const
 
 void URammsDifferentialDriveController::ApplyBrakes()
 {
-	// Apply braking by increasing angular damping and applying velocity damping forces
+	// Apply braking by applying damping torque proportional to velocity
+	// Add a deadband to prevent oscillation at very low speeds
+	const float BrakeDeadband = 0.1f; // rad/s - don't apply brakes below this angular velocity
+	
 	FBodyInstance* LeftBodyInst = GetBoneBodyInstance(LeftWheelBoneName);
 	if (LeftBodyInst && LeftBodyInst->IsInstanceSimulatingPhysics())
 	{
-		// Get current angular velocity
 		FVector AngVel = LeftBodyInst->GetUnrealWorldAngularVelocityInRadians();
+		float AngVelMagnitude = AngVel.Size();
 		
-		// Apply damping force proportional to angular velocity (opposes motion)
-		// This simulates friction/brake pads without reversing direction
-		FVector DampingTorque = -AngVel * BrakeTorque;
-		
-		// Convert to UE units and apply
-		DampingTorque *= 100.0f;
-		LeftBodyInst->AddTorqueInRadians(DampingTorque, false, true);
-		
-		LeftWheelState.AppliedTorque = -FMath::Sign(LeftWheelState.AngularVelocity) * BrakeTorque;
-
-		if (bEnableDebugLogging)
+		// Only apply braking above deadband to prevent oscillation
+		if (AngVelMagnitude > BrakeDeadband)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying LEFT brake damping: Torque Magnitude=%.3f Nm (AngVel: %.3f rad/s)"),
-				BrakeTorque, LeftWheelState.AngularVelocity);
+			// Apply damping torque proportional to angular velocity
+			FVector DampingTorque = -AngVel * BrakeTorque * 100.0f; // Convert to UE units
+			
+			LeftBodyInst->AddTorqueInRadians(DampingTorque, false, true);
+			LeftWheelState.AppliedTorque = -FMath::Sign(LeftWheelState.AngularVelocity) * BrakeTorque;
+
+			if (bEnableDebugLogging)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying LEFT brake: Damping=%.3f Nm (AngVel: %.3f rad/s)"),
+					BrakeTorque, LeftWheelState.AngularVelocity);
+			}
+		}
+		else
+		{
+			// Below deadband - just zero out the applied torque
+			LeftWheelState.AppliedTorque = 0.0f;
 		}
 	}
 
 	FBodyInstance* RightBodyInst = GetBoneBodyInstance(RightWheelBoneName);
 	if (RightBodyInst && RightBodyInst->IsInstanceSimulatingPhysics())
 	{
-		// Get current angular velocity
 		FVector AngVel = RightBodyInst->GetUnrealWorldAngularVelocityInRadians();
+		float AngVelMagnitude = AngVel.Size();
 		
-		// Apply damping force proportional to angular velocity (opposes motion)
-		FVector DampingTorque = -AngVel * BrakeTorque;
-		
-		// Convert to UE units and apply
-		DampingTorque *= 100.0f;
-		RightBodyInst->AddTorqueInRadians(DampingTorque, false, true);
-		
-		RightWheelState.AppliedTorque = -FMath::Sign(RightWheelState.AngularVelocity) * BrakeTorque;
-
-		if (bEnableDebugLogging)
+		// Only apply braking above deadband to prevent oscillation
+		if (AngVelMagnitude > BrakeDeadband)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying RIGHT brake damping: Torque Magnitude=%.3f Nm (AngVel: %.3f rad/s)"),
-				BrakeTorque, RightWheelState.AngularVelocity);
+			// Apply damping torque proportional to angular velocity
+			FVector DampingTorque = -AngVel * BrakeTorque * 100.0f; // Convert to UE units
+			
+			RightBodyInst->AddTorqueInRadians(DampingTorque, false, true);
+			RightWheelState.AppliedTorque = -FMath::Sign(RightWheelState.AngularVelocity) * BrakeTorque;
+
+			if (bEnableDebugLogging)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying RIGHT brake: Damping=%.3f Nm (AngVel: %.3f rad/s)"),
+					BrakeTorque, RightWheelState.AngularVelocity);
+			}
+		}
+		else
+		{
+			// Below deadband - just zero out the applied torque
+			RightWheelState.AppliedTorque = 0.0f;
 		}
 	}
 
@@ -485,14 +589,33 @@ void URammsDifferentialDriveController::DebugLogState()
 
 	if (bEnableDebugDisplay && Owner)
 	{
+		// Get actual turning speed from root component
+		float CurrentTurningSpeed = 0.0f;
+		if (UPrimitiveComponent* RootPrimitive = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+		{
+			if (RootPrimitive->IsSimulatingPhysics())
+			{
+				FVector AngularVelocity = RootPrimitive->GetPhysicsAngularVelocityInDegrees();
+				CurrentTurningSpeed = AngularVelocity.Z;
+			}
+		}
+		
 		FVector ActorLocation = Owner->GetActorLocation();
-		FString DebugText = FString::Printf(TEXT("Input: %.2f, %.2f\nMode: %s\nBraking: %s\nLeft: %.1f RPM, %.1f Nm\nRight: %.1f RPM, %.1f Nm"),
+		FString DebugText = FString::Printf(
+			TEXT("Input: %.2f, %.2f | Mode: %s | Braking: %s\n")
+			TEXT("Left: %.1f RPM, %.1f Nm | Right: %.1f RPM, %.1f Nm\n")
+			TEXT("Turn Speed: %.1f deg/s (Max: %.1f)\n")
+			TEXT("Odom Pos: X=%.0f Y=%.0f Yaw=%.1f°\n")
+			TEXT("Odom Vel: %.1f cm/s | Dist: %.1f cm"),
 			DriveInput.X, DriveInput.Y,
 			ControlMode == EDriveControlMode::TorqueControl ? TEXT("Torque") : TEXT("Velocity"),
 			bIsBraking ? TEXT("ON") : TEXT("OFF"),
 			URammsDifferentialDriveLibrary::RadPerSecToRPM(LeftWheelState.AngularVelocity), LeftWheelState.AppliedTorque,
-			URammsDifferentialDriveLibrary::RadPerSecToRPM(RightWheelState.AngularVelocity), RightWheelState.AppliedTorque);
+			URammsDifferentialDriveLibrary::RadPerSecToRPM(RightWheelState.AngularVelocity), RightWheelState.AppliedTorque,
+			CurrentTurningSpeed, MaxTurningSpeed,
+			Odometry.Position.X, Odometry.Position.Y, Odometry.Orientation.Yaw,
+			Odometry.LinearVelocity.Size(), Odometry.TotalDistance);
 
-		DrawDebugString(GetWorld(), ActorLocation + FVector(0, 0, 100), DebugText, nullptr, FColor::Yellow, 0.0f, true);
+		DrawDebugString(GetWorld(), ActorLocation + FVector(0, 0, 100), DebugText, nullptr, FColor::Yellow, 0.0f, true, 1.2f);
 	}
 }

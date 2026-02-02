@@ -31,7 +31,7 @@ public:
 
 	/** Control mode selection */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Control")
-	EDriveControlMode ControlMode = EDriveControlMode::VelocityControl;
+	EDriveControlMode ControlMode = EDriveControlMode::TorqueControl;
 
 	/** Name of the skeletal mesh component containing the wheel bones (leave empty to auto-find first skeletal mesh) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
@@ -69,6 +69,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Torque Control", meta = (ClampMin = "0.0"))
 	float TorqueMultiplier = 1.0f;
 
+	/** Resistive torque coefficient - opposes wheel motion (simulates back-EMF and friction) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Torque Control", meta = (ClampMin = "0.0"))
+	float ResistiveTorqueCoefficient = 0.5f;
+
+	/** Maximum turning speed (angular velocity) in degrees per second */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Torque Control", meta = (ClampMin = "0.0"))
+	float MaxTurningSpeed = 90.0f;
+
 	// ========== Velocity Control Settings ==========
 
 	/** Maximum target velocity in cm/s */
@@ -103,7 +111,7 @@ public:
 
 	/** Brake torque to apply when braking (N*m) - acts as damping coefficient */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
-	float BrakeTorque = 10.0f;
+	float BrakeTorque = 2.0f;
 
 	/** Velocity threshold below which brakes engage (cm/s) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
@@ -144,12 +152,16 @@ public:
 	FWheelState RightWheelState;
 
 	/** Current odometry data */
-	UPROPERTY(BlueprintReadOnly, Category = "Drive|State")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive|State")
 	FOdometryData Odometry;
 
 	/** Is braking currently engaged */
 	UPROPERTY(BlueprintReadOnly, Category = "Drive|State")
 	bool bIsBraking = false;
+
+	/** Velocity threshold for odometry updates (cm/s) - movements below this are ignored to prevent drift */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Odometry", meta = (ClampMin = "0.0"))
+	float OdometryVelocityThreshold = 0.5f;
 
 	// ========== Blueprint API ==========
 

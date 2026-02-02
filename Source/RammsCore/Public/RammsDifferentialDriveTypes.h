@@ -19,7 +19,7 @@ enum class EDriveControlMode : uint8
  * Motor parameters for electric wheelchair motors
  */
 USTRUCT(BlueprintType)
-struct FMotorParameters
+struct RAMMSCORE_API FMotorParameters
 {
 	GENERATED_BODY()
 
@@ -46,7 +46,7 @@ struct FMotorParameters
  * Wheel state information
  */
 USTRUCT(BlueprintType)
-struct FWheelState
+struct RAMMSCORE_API FWheelState
 {
 	GENERATED_BODY()
 
@@ -88,36 +88,36 @@ struct FWheelState
  * Odometry data for tracking wheelchair position and motion
  */
 USTRUCT(BlueprintType)
-struct FOdometryData
+struct RAMMSCORE_API FOdometryData
 {
 	GENERATED_BODY()
 
 	/** Position in world space (cm) */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	FVector Position = FVector::ZeroVector;
 
 	/** Orientation in world space */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	FRotator Orientation = FRotator::ZeroRotator;
 
 	/** Linear velocity (cm/s) */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	FVector LinearVelocity = FVector::ZeroVector;
 
 	/** Angular velocity (degrees/s) */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	FVector AngularVelocity = FVector::ZeroVector;
 
 	/** Distance traveled by left wheel (cm) */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	float LeftWheelDistance = 0.0f;
 
 	/** Distance traveled by right wheel (cm) */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	float RightWheelDistance = 0.0f;
 
 	/** Total distance traveled (cm) */
-	UPROPERTY(BlueprintReadOnly, Category = "Odometry")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odometry")
 	float TotalDistance = 0.0f;
 
 	FOdometryData()
@@ -135,7 +135,7 @@ struct FOdometryData
  * Differential drive output containing left and right wheel commands
  */
 USTRUCT(BlueprintType)
-struct FDifferentialDriveCommand
+struct RAMMSCORE_API FDifferentialDriveCommand
 {
 	GENERATED_BODY()
 
