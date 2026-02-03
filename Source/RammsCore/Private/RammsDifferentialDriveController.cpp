@@ -191,7 +191,48 @@ void URammsDifferentialDriveController::UpdateWheelState(FName BoneName, FWheelS
 	// Get actual linear velocity of the wheel
 	FVector WheelVelocity = BodyInst->GetUnrealWorldVelocity();
 	FVector ForwardDir = BoneTransform.GetUnitAxis(EAxis::X);
+	FVector RightDir = BoneTransform.GetUnitAxis(EAxis::Y);
 	float ActualLinearVel = FVector::DotProduct(WheelVelocity, ForwardDir);
+
+	// Calculate lateral (sideways) velocity for slip resistance
+	OutState.LateralVelocity = FVector::DotProduct(WheelVelocity, RightDir);
+
+	// Calculate suspension load (normal force on wheel)
+	if (bEnableLoadDependentTraction)
+	{
+		// Estimate load based on vehicle mass and vertical acceleration
+		// Assuming equal weight distribution between wheels
+		float GravityForce = VehicleMass * 980.665f; // Convert kg to Newtons (g = 9.80665 m/s²)
+		OutState.SuspensionLoad = GravityForce * 0.5f; // Split between two wheels
+		
+		// TODO: Could improve by reading actual suspension compression/force
+	}
+	else
+	{
+		OutState.SuspensionLoad = 0.0f;
+	}
+
+	// Query surface friction from physical material
+	OutState.SurfaceFriction = 1.0f; // Default
+	if (bUsePhysicalMaterialFriction)
+	{
+		// Raycast down from wheel to find ground material
+		FVector WheelLocation = BoneTransform.GetLocation();
+		FVector TraceStart = WheelLocation;
+		FVector TraceEnd = WheelLocation - FVector(0, 0, WheelRadius * 2.0f);
+		
+		FHitResult HitResult;
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(GetOwner());
+		
+		if (GetWorld()->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+		{
+			if (HitResult.PhysMaterial.IsValid())
+			{
+				OutState.SurfaceFriction = HitResult.PhysMaterial->Friction;
+			}
+		}
+	}
 
 	// Calculate slip if enabled
 	if (bEnableSlipModeling && FMath::Abs(OutState.LinearVelocity) > SMALL_NUMBER)
@@ -383,14 +424,42 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 	// Apply slip/traction modeling if enabled
 	if (bEnableSlipModeling)
 	{
-		// Reduce effective torque based on slip
-		if (WheelState.SlipRatio > SlipThreshold)
+		// Calculate traction multiplier from slip using realistic tire curve
+		float TractionMultiplier = URammsDifferentialDriveLibrary::GetTractionMultiplierFromSlip(
+			WheelState.SlipRatio, 
+			PeakSlipRatio);
+
+		// Calculate available grip force if load-dependent traction is enabled
+		if (bEnableLoadDependentTraction && WheelState.SuspensionLoad > 0.0f)
 		{
-			float TractionFactor = FMath::Lerp(
-				TractionCoefficient,
-				0.0f,
-				(WheelState.SlipRatio - SlipThreshold) / (1.0f - SlipThreshold));
-			AvailableTorque *= TractionFactor;
+			// Available grip force (Newtons)
+			float AvailableGripForce = URammsDifferentialDriveLibrary::CalculateAvailableGrip(
+				WheelState.SuspensionLoad,
+				WheelState.SurfaceFriction,
+				TractionCoefficient);
+
+			// Convert grip force to maximum torque
+			// Torque = Force × Radius, convert cm to m
+			float MaxTorqueFromGrip = (AvailableGripForce * (WheelRadius / 100.0f)) * TractionMultiplier;
+
+			// Limit available torque to what grip can support
+			AvailableTorque = FMath::Min(FMath::Abs(AvailableTorque), MaxTorqueFromGrip) * FMath::Sign(AvailableTorque);
+		}
+		else
+		{
+			// Simple traction multiplier without load dependency
+			AvailableTorque *= TractionMultiplier;
+		}
+
+		// Apply lateral slip resistance (reduces torque when sliding sideways)
+		if (bEnableLateralSlipResistance && FMath::Abs(WheelState.LateralVelocity) > LateralSlipThreshold)
+		{
+			// Reduce torque proportionally to lateral velocity
+			float LateralSlipFactor = FMath::Clamp(
+				1.0f - (FMath::Abs(WheelState.LateralVelocity) - LateralSlipThreshold) / 100.0f,
+				0.3f,
+				1.0f);
+			AvailableTorque *= LateralSlipFactor;
 		}
 	}
 
@@ -398,8 +467,9 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 
 	if (bEnableDebugLogging)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] ApplyTorque to %s: Requested=%.3f Nm, Available=%.3f Nm, CurrentRPM=%.1f, Slip=%.3f"),
-			*BoneName.ToString(), RequestedTorque, AvailableTorque, CurrentRPM, WheelState.SlipRatio);
+		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] ApplyTorque to %s: Requested=%.3f Nm, Available=%.3f Nm, CurrentRPM=%.1f, Slip=%.3f, Load=%.1f N, Friction=%.2f, LatVel=%.1f cm/s"),
+			*BoneName.ToString(), RequestedTorque, AvailableTorque, CurrentRPM, WheelState.SlipRatio, 
+			WheelState.SuspensionLoad, WheelState.SurfaceFriction, WheelState.LateralVelocity);
 	}
 
 	// Get bone transform to apply torque in correct direction

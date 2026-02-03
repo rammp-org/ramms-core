@@ -8,6 +8,9 @@ public class RammsCore : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		
+        // Suppress compiler warning C4702 for unreachable code, might be needed for eigen
+        PublicDefinitions.Add("EIGEN_IGNORE_UNREACHABLE_CODE_WARNING=1");
+
 		PublicIncludePaths.AddRange(
 			new string[] {
 				// ... add public include paths required here ...
@@ -40,6 +43,7 @@ public class RammsCore : ModuleRules
 				"SlateCore",
 				"PhysicsCore",
 				// ... add private dependencies that you statically link with here ...	
+                "Eigen",
 			}
 			);
 		

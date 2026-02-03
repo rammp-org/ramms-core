@@ -245,3 +245,37 @@ FVector2D URammsDifferentialDriveLibrary::ApplyDeadZone2D(FVector2D Value, float
 	
 	return FVector2D(X, Y);
 }
+
+float URammsDifferentialDriveLibrary::GetTractionMultiplierFromSlip(float SlipRatio, float PeakSlipRatio)
+{
+	// Realistic tire friction curve inspired by Pacejka/ChaosVehicle
+	// - Grip increases from 0 to peak slip ratio
+	// - Grip stays high near peak
+	// - Grip gradually decreases after peak
+	
+	if (SlipRatio <= 0.0f)
+		return 1.0f;
+	
+	if (SlipRatio < PeakSlipRatio)
+	{
+		// Rising portion: exponential approach to peak
+		// At PeakSlipRatio, reaches ~1.0
+		float Normalized = SlipRatio / PeakSlipRatio;
+		return 1.0f - 0.15f * FMath::Exp(-5.0f * Normalized);
+	}
+	else
+	{
+		// Falling portion: gradual linear decay
+		// From 1.0 at peak to ~0.3 at full slip (1.0)
+		float ExcessSlip = (SlipRatio - PeakSlipRatio) / (1.0f - PeakSlipRatio);
+		return FMath::Max(0.3f, 1.0f - 0.7f * ExcessSlip);
+	}
+}
+
+float URammsDifferentialDriveLibrary::CalculateAvailableGrip(float WheelLoad, float SurfaceFriction, float TractionCoefficient)
+{
+	// Available grip force = Normal force × friction coefficient × traction multiplier
+	// WheelLoad is in Newtons
+	// Returns force in Newtons
+	return WheelLoad * SurfaceFriction * TractionCoefficient;
+}

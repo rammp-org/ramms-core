@@ -74,6 +74,18 @@ struct RAMMSCORE_API FWheelState
 	UPROPERTY(BlueprintReadOnly, Category = "Wheel")
 	float SlipRatio = 0.0f;
 
+	/** Suspension load on wheel (Newtons) */
+	UPROPERTY(BlueprintReadOnly, Category = "Wheel")
+	float SuspensionLoad = 0.0f;
+
+	/** Surface friction coefficient from physical material */
+	UPROPERTY(BlueprintReadOnly, Category = "Wheel")
+	float SurfaceFriction = 1.0f;
+
+	/** Lateral velocity (sideways sliding) in cm/s */
+	UPROPERTY(BlueprintReadOnly, Category = "Wheel")
+	float LateralVelocity = 0.0f;
+
 	FWheelState()
 		: AngularVelocity(0.0f)
 		, TotalRotation(0.0f)
@@ -81,6 +93,9 @@ struct RAMMSCORE_API FWheelState
 		, TargetAngularVelocity(0.0f)
 		, AppliedTorque(0.0f)
 		, SlipRatio(0.0f)
+		, SuspensionLoad(0.0f)
+		, SurfaceFriction(1.0f)
+		, LateralVelocity(0.0f)
 	{}
 };
 

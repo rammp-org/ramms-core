@@ -135,4 +135,23 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
 	static FVector2D ApplyDeadZone2D(FVector2D Value, float DeadZone);
+
+	/**
+	 * Calculate traction multiplier from slip ratio using realistic tire curve
+	 * @param SlipRatio - Current slip ratio (0-1)
+	 * @param PeakSlipRatio - Slip ratio where peak grip occurs (typically 0.1-0.15)
+	 * @return Traction multiplier (0-1, peaks at PeakSlipRatio)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
+	static float GetTractionMultiplierFromSlip(float SlipRatio, float PeakSlipRatio = 0.15f);
+
+	/**
+	 * Calculate available grip force based on wheel load and surface friction
+	 * @param WheelLoad - Normal force on wheel (Newtons)
+	 * @param SurfaceFriction - Friction coefficient from physical material
+	 * @param TractionCoefficient - Base traction multiplier
+	 * @return Maximum grip force (Newtons)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
+	static float CalculateAvailableGrip(float WheelLoad, float SurfaceFriction, float TractionCoefficient);
 };
