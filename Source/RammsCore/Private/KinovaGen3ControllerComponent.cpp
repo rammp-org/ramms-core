@@ -290,8 +290,8 @@ void UKinovaGen3ControllerComponent::UpdatePositionControl(float DeltaTime)
 			continue;
 		}
 
-		// Read current angle from physics
-		Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
+		// Read current angle from physics (subtract offset to get FK angle)
+		Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis) - Joint.AngleOffset;
 
 		// Note: In IK mode, TargetAngle is set by IK solver directly
 		// We still apply it through ApplyJointSettings which handles clamping
@@ -368,8 +368,11 @@ void UKinovaGen3ControllerComponent::ApplyJointSettings(FRevoluteJointConfig& Jo
 		TargetForDrive = ClampToLimits(Joint, Joint.TargetAngle);
 	}
 	
+	// Add offset when commanding (FK angle -> constraint angle)
+	float ConstraintAngle = TargetForDrive + Joint.AngleOffset;
+	
 	// Set target orientation based on controlled axis
-	SetConstraintAngle(Constraint, Joint.ControlledAxis, TargetForDrive);
+	SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
 
 	if (bEnableDebugLogging)
 	{
@@ -1406,6 +1409,36 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToActor
 	}
 }
 
+void UKinovaGen3ControllerComponent::CalibrateAngleOffsets()
+{
+	if (!SkeletalMeshComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot calibrate: No skeletal mesh component"));
+		return;
+	}
+	
+	UE_LOG(LogTemp, Warning, TEXT("[Gen3] === Calibrating Angle Offsets ==="));
+	UE_LOG(LogTemp, Warning, TEXT("[Gen3] Make sure arm is in reference skeleton pose!"));
+	
+	for (int32 i = 0; i < Joints.Num(); i++)
+	{
+		FRevoluteJointConfig& Joint = Joints[i];
+		FName ConstraintName = (Joint.ConstraintName != NAME_None) ? Joint.ConstraintName : Joint.BoneName;
+		FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintName);
+		
+		if (Constraint)
+		{
+			float CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
+			Joint.AngleOffset = CurrentAngle;
+			
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] Joint[%d] '%s': Captured offset = %.2f°"), 
+				i, *Joint.BoneName.ToString(), Joint.AngleOffset);
+		}
+	}
+	
+	UE_LOG(LogTemp, Warning, TEXT("[Gen3] === Calibration Complete ==="));
+}
+
 void UKinovaGen3ControllerComponent::MoveEndEffectorTargetBy(const FVector& Offset)
 {
 	// Move target by world-space offset
@@ -1626,8 +1659,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	// ============================================================================
 	// STEP 3: Compute Joint Local Axes in Parent Frame
 	// ============================================================================
-	// Each axis needs to be in the parent's local coordinate frame for FK
-	// Frame1 from constraint gives us the axis in parent bone's local space
+	// Extract actual rotation axis from constraint Frame1
 	
 	TArray<FVector> JointAxesLocal;
 	JointAxesLocal.SetNum(Joints.Num());
@@ -1642,10 +1674,11 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		
 		if (Constraint)
 		{
+			// Try extracting from Frame2 (child frame) instead of Frame1 (parent frame)?
 			FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
+			FTransform Frame2 = Constraint->GetRefFrame(EConstraintFrame::Frame2);
 			
-			// Frame1 is in parent bone's local space
-			// Extract the rotation axis based on which constraint axis we're using
+			// Extract axis from Frame1 (parent frame)
 			FVector AxisInFrame1;
 			switch (Joint.ControlledAxis)
 			{
@@ -1661,23 +1694,37 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 				break;
 			}
 			
-			// Rotate by Frame1's rotation to get axis in parent's local frame
-			AxisLocal = Frame1.TransformVectorNoScale(AxisInFrame1).GetSafeNormal();
+			// EXPERIMENTAL: Use Frame2 (child frame) for twist joints, Frame1 for swing joints
+			// Hypothesis: Twist constraints may be defined in child frame, swing in parent frame
+			FVector AxisFrame1 = Frame1.TransformVectorNoScale(AxisInFrame1).GetSafeNormal();
+			FVector AxisFrame2 = Frame2.TransformVectorNoScale(AxisInFrame1).GetSafeNormal();
+			
+			if (Joint.ControlledAxis == EConstraintAxis::Twist)
+			{
+				AxisLocal = AxisFrame2; // Use Frame2 for twist
+			}
+			else
+			{
+				AxisLocal = AxisFrame1; // Use Frame1 for swing
+			}
 			
 			// Apply inversion if configured
 			if (Joint.bInvertAxisForIK)
 			{
 				AxisLocal = -AxisLocal;
 			}
+			
+			if (bEnableDebugLogging && i < 7)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[Gen3] Joint[%d] '%s': Frame1 axis=(%.3f,%.3f,%.3f) Frame2 axis=(%.3f,%.3f,%.3f) Using=%s"),
+					i, *Joint.BoneName.ToString(), 
+					AxisFrame1.X, AxisFrame1.Y, AxisFrame1.Z,
+					AxisFrame2.X, AxisFrame2.Y, AxisFrame2.Z,
+					(Joint.ControlledAxis == EConstraintAxis::Twist) ? TEXT("Frame2") : TEXT("Frame1"));
+			}
 		}
 		
 		JointAxesLocal[i] = AxisLocal;
-		
-		if (bEnableDebugLogging && i < 7)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[Gen3] Joint[%d] '%s' axis: (%.3f, %.3f, %.3f) Inverted=%d"),
-				i, *Joint.BoneName.ToString(), AxisLocal.X, AxisLocal.Y, AxisLocal.Z, Joint.bInvertAxisForIK ? 1 : 0);
-		}
 	}
 	
 	// ============================================================================
@@ -1744,12 +1791,15 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 					
 					if (bEnableDebugLogging)
 					{
-						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Socket parent ref: Loc=(%.1f, %.1f, %.1f)"),
-							ParentRefWorld.GetLocation().X, ParentRefWorld.GetLocation().Y, ParentRefWorld.GetLocation().Z);
-						// UE_LOG(LogTemp, Log, TEXT("[Gen3]   Socket ref world: Loc=(%.1f, %.1f, %.1f)"),
-						// 	SocketRefWorld.GetLocation().X, SocketRefWorld.GetLocation().Y, SocketRefWorld.GetLocation().Z);
-						// UE_LOG(LogTemp, Log, TEXT("[Gen3]   LastJoint ref: Loc=(%.1f, %.1f, %.1f)"),
-						// 	LastJointRef.GetLocation().X, LastJointRef.GetLocation().Y, LastJointRef.GetLocation().Z);
+						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Socket parent ref: Loc=(%.1f, %.1f, %.1f) Rot=(%.1f,%.1f,%.1f)"),
+							ParentRefWorld.GetLocation().X, ParentRefWorld.GetLocation().Y, ParentRefWorld.GetLocation().Z,
+							ParentRefWorld.Rotator().Pitch, ParentRefWorld.Rotator().Yaw, ParentRefWorld.Rotator().Roll);
+						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Socket ref world: Loc=(%.1f, %.1f, %.1f) Rot=(%.1f,%.1f,%.1f)"),
+							SocketRefWorld.GetLocation().X, SocketRefWorld.GetLocation().Y, SocketRefWorld.GetLocation().Z,
+							SocketRefWorld.Rotator().Pitch, SocketRefWorld.Rotator().Yaw, SocketRefWorld.Rotator().Roll);
+						UE_LOG(LogTemp, Log, TEXT("[Gen3]   LastJoint ref: Loc=(%.1f, %.1f, %.1f) Rot=(%.1f,%.1f,%.1f)"),
+							LastJointRef.GetLocation().X, LastJointRef.GetLocation().Y, LastJointRef.GetLocation().Z,
+							LastJointRef.Rotator().Pitch, LastJointRef.Rotator().Yaw, LastJointRef.Rotator().Roll);
 					}
 				}
 				else
@@ -1790,6 +1840,39 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	{
 		CurrentAngles[i] = Joints[i].CurrentAngle;
 		JointLimits[i] = FVector2D(Joints[i].MinAngleLimit, Joints[i].MaxAngleLimit);
+	}
+	
+	// Debug: Compare actual bone transform vs FK prediction for joint 0
+	if (bEnableDebugLogging && Joints.Num() > 0)
+	{
+		int32 BoneIdx = SkeletalMeshComponent->GetBoneIndex(Joints[0].BoneName);
+		if (BoneIdx != INDEX_NONE)
+		{
+			// Get actual bone transform in world space - use component space then transform to world
+			FTransform ActualBoneComp = SkeletalMeshComponent->GetBoneTransform(BoneIdx);
+			FTransform ActualBoneWorld = ActualBoneComp * SkeletalMeshComponent->GetComponentTransform();
+			FTransform ActualBoneRelBase = ActualBoneWorld.GetRelativeTransform(BaseTransform);
+			
+			// Compute FK for just joint 0
+			FTransform FK_J0 = BaseTransform;
+			FVector LocalOffset = JointLocalTransforms[0].GetTranslation();
+			FVector WorldOffset = FK_J0.TransformVectorNoScale(LocalOffset);
+			FK_J0.AddToTranslation(WorldOffset);
+			FVector WorldAxis = FK_J0.TransformVectorNoScale(JointAxesLocal[0]);
+			float AngleRad = FMath::DegreesToRadians(CurrentAngles[0]);
+			FQuat Rotation(WorldAxis, AngleRad);
+			FK_J0.SetRotation(Rotation * FK_J0.GetRotation());
+			
+			FTransform FK_J0_RelBase = FK_J0.GetRelativeTransform(BaseTransform);
+			
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] J0 Actual rel base: Loc=(%.1f,%.1f,%.1f) Rot=(%.1f,%.1f,%.1f)"),
+				ActualBoneRelBase.GetLocation().X, ActualBoneRelBase.GetLocation().Y, ActualBoneRelBase.GetLocation().Z,
+				ActualBoneRelBase.Rotator().Pitch, ActualBoneRelBase.Rotator().Yaw, ActualBoneRelBase.Rotator().Roll);
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] J0 FK rel base:     Loc=(%.1f,%.1f,%.1f) Rot=(%.1f,%.1f,%.1f) Angle=%.1f Axis=(%.2f,%.2f,%.2f)"),
+				FK_J0_RelBase.GetLocation().X, FK_J0_RelBase.GetLocation().Y, FK_J0_RelBase.GetLocation().Z,
+				FK_J0_RelBase.Rotator().Pitch, FK_J0_RelBase.Rotator().Yaw, FK_J0_RelBase.Rotator().Roll,
+				CurrentAngles[0], JointAxesLocal[0].X, JointAxesLocal[0].Y, JointAxesLocal[0].Z);
+		}
 	}
 	
 	// ============================================================================

@@ -64,6 +64,10 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	bool bInvertAxisForIK = false;
 
+	/** Angle offset (degrees) - calibration between constraint zero and reference skeleton pose */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
+	float AngleOffset = 0.0f;
+
 	/** Target angle in degrees */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	float TargetAngle = 0.0f;
@@ -411,6 +415,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
 	void ReinitializeConstraints();
+	
+	/**
+	 * Calibrate angle offsets - captures current constraint angles as offsets
+	 * Call this when the arm is in the reference skeleton pose
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void CalibrateAngleOffsets();
 
 	// ========== Debug ==========
 
