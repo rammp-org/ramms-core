@@ -46,11 +46,8 @@ FTransform URammsIKLibrary::ComputeForwardKinematics(
 		}
 	}
 	
-	// Apply end effector offset
-	FVector EELocalOffset = EndEffectorOffset.GetTranslation();
-	FVector EEWorldOffset = CurrentTransform.TransformVectorNoScale(EELocalOffset);
-	CurrentTransform.AddToTranslation(EEWorldOffset);
-	CurrentTransform.SetRotation(EndEffectorOffset.GetRotation() * CurrentTransform.GetRotation());
+	// Apply end effector offset (full transform)
+	CurrentTransform = EndEffectorOffset * CurrentTransform;
 	
 	if (bDebugLog)
 	{
