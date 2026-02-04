@@ -442,6 +442,9 @@ private:
 
 	/** Update using inverse kinematics to reach end effector target */
 	void UpdateInverseKinematics(float DeltaTime);
+	
+	/** Compute empirical rotation axis by perturbing the constraint and observing bone movement */
+	FVector ComputeEmpiricalRotationAxis(int32 JointIndex, const FTransform& ParentWorldTransform);
 
 	/** Initialize constraint drives for all joints (one-time setup) */
 	void InitializeJointConstraints();

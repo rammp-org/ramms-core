@@ -27,21 +27,21 @@ FTransform URammsIKLibrary::ComputeForwardKinematics(
 	// Apply each joint transformation
 	for (int32 i = 0; i < NumJoints; i++)
 	{
-		// 1. ROTATE at current pivot
+		// 1. TRANSLATE to this joint's pivot
+		FVector LocalOffset = JointLocalTransforms[i].GetTranslation();
+		FVector WorldOffset = CurrentTransform.TransformVectorNoScale(LocalOffset);
+		CurrentTransform.AddToTranslation(WorldOffset);
+		
+		// 2. ROTATE at this joint's pivot
 		FVector WorldAxis = CurrentTransform.TransformVectorNoScale(JointAxes[i]).GetSafeNormal();
 		float AngleRad = FMath::DegreesToRadians(JointAngles[i]);
 		FQuat JointRotation(WorldAxis, AngleRad);
 		CurrentTransform.SetRotation(JointRotation * CurrentTransform.GetRotation());
 		
-		// 2. TRANSLATE to next pivot
-		FVector LocalOffset = JointLocalTransforms[i].GetTranslation();
-		FVector WorldOffset = CurrentTransform.TransformVectorNoScale(LocalOffset);
-		CurrentTransform.AddToTranslation(WorldOffset);
-		
 		if (bDebugLog)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[FK] Joint[%d]: Angle=%.1f deg, Offset=(%.1f,%.1f,%.1f) -> Pos=(%.1f,%.1f,%.1f)"),
-				i, JointAngles[i], LocalOffset.X, LocalOffset.Y, LocalOffset.Z,
+			UE_LOG(LogTemp, Log, TEXT("[FK] Joint[%d]: Offset=(%.1f,%.1f,%.1f) Angle=%.1f deg -> Pos=(%.1f,%.1f,%.1f)"),
+				i, LocalOffset.X, LocalOffset.Y, LocalOffset.Z, JointAngles[i],
 				CurrentTransform.GetLocation().X, CurrentTransform.GetLocation().Y, CurrentTransform.GetLocation().Z);
 		}
 	}
