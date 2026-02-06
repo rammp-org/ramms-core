@@ -495,18 +495,21 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 		// Set motor strength and damping
 		Motor.CachedConstraint->SetAngularDriveParams(Motor.MotorStrength, Motor.MotorDamping, 0.0f);
 		
+		// Apply direction inversion if needed
+		float EffectiveAngle = Motor.bInvertDirection ? -Motor.CurrentAngle : Motor.CurrentAngle;
+		
 		// Set target orientation based on current interpolated angle (not target angle directly)
 		FQuat TargetQuat = FQuat::Identity;
 		switch (Motor.ControlAxis)
 		{
 		case EMotorAxis::X:
-			TargetQuat = FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(Motor.CurrentAngle));
+			TargetQuat = FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(EffectiveAngle));
 			break;
 		case EMotorAxis::Y:
-			TargetQuat = FQuat(FVector(0, 1, 0), FMath::DegreesToRadians(Motor.CurrentAngle));
+			TargetQuat = FQuat(FVector(0, 1, 0), FMath::DegreesToRadians(EffectiveAngle));
 			break;
 		case EMotorAxis::Z:
-			TargetQuat = FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(Motor.CurrentAngle));
+			TargetQuat = FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(EffectiveAngle));
 			break;
 		}
 		
