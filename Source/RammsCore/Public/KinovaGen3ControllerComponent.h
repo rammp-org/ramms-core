@@ -67,18 +67,24 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Angle offset (degrees) - calibration between constraint zero and reference skeleton pose */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	float AngleOffset = 0.0f;
+	
+	/** Computed Frame1 rotation offset (degrees) - automatic offset from constraint Frame1 orientation */
+	float ComputedFrameOffset = 0.0f;
 
 	/** Target angle in degrees */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	float TargetAngle = 0.0f;
 
-	/** Current angle in degrees (runtime) */
+	/** Current angle in degrees (read from constraint, runtime) */
 	UPROPERTY(BlueprintReadOnly, Category = "Joint")
 	float CurrentAngle = 0.0f;
+	
+	/** Smoothed angle for speed limiting (interpolates toward TargetAngle) */
+	float SmoothedAngle = 0.0f;
 
 	/** Maximum angular velocity (degrees/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
-	float MaxAngularSpeed = 15.0f;
+	float MaxAngularSpeed = 45.0f;
 
 	/** Speed multiplier (0-1) for dynamic speed adjustment */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -113,7 +119,7 @@ struct RAMMSCORE_API FRevoluteJointConfig
 		, ConstraintName(NAME_None)
 		, TargetAngle(0.0f)
 		, CurrentAngle(0.0f)
-		, MaxAngularSpeed(15.0f)
+		, MaxAngularSpeed(45.0f)
 		, SpeedMultiplier(1.0f)
 		, MaxTorque(39.0f)
 		, PositionStrength(5000000.0f)
@@ -257,6 +263,12 @@ public:
 	/** Current end-effector state */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Arm|State")
 	FEndEffectorState EndEffectorState;
+	
+	/** Last IK solve result (for debugging) */
+	float LastIKPositionError = 0.0f;
+	float LastIKRotationError = 0.0f;
+	int32 LastIKIterations = 0;
+	bool bLastIKSuccess = false;
 
 	// ========== Blueprint API ==========
 
@@ -423,6 +435,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
 	void CalibrateAngleOffsets();
 
+	/**
+	 * Validate FK accuracy by comparing FK prediction to actual bone positions
+	 * Returns maximum error in cm across all joints
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Kinova Gen3|Debug")
+	float ValidateForwardKinematics();
+
+	/**
+	 * Auto-calibrate angle offsets to make FK match actual bone positions
+	 * Computes what offsets are needed to make FK accurate
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Kinova Gen3|Debug")
+	void AutoCalibrateFK();
+
+	/**
+	 * Print detailed FK diagnostic information
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Kinova Gen3|Debug")
+	void PrintFKDiagnostics();
+
 	// ========== Debug ==========
 
 	/** Enable debug logging */
@@ -441,6 +473,11 @@ private:
 	// Cached skeletal mesh component reference
 	UPROPERTY(Transient)
 	USkeletalMeshComponent* SkeletalMeshComponent = nullptr;
+	
+	// Cached IK data (computed once per frame in UpdateInverseKinematics)
+	FTransform CachedEndEffectorOffset = FTransform::Identity;
+	TArray<FTransform> CachedJointLocalTransforms;
+	TArray<FVector> CachedJointAxesLocal;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);

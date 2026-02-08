@@ -1,352 +1,327 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-
 #include "RammsIKLibrary.h"
-#include "DrawDebugHelpers.h"
 
-// Forward Kinematics: Rotate then Translate
+#include "Math/UnrealMathUtility.h"
+#include "Logging/LogMacros.h"
+#include <Eigen/Dense>
+
+static FVector SafeNormalAxis(const FVector& V)
+{
+	const double S = V.Size();
+	if (S <= KINDA_SMALL_NUMBER)
+		return FVector(1, 0, 0);
+	return V / S;
+}
+
+static Eigen::Vector3d ToEigen(const FVector& V) { return {V.X, V.Y, V.Z}; }
+
+static Eigen::Vector3d RotationErrorAxisAngleRad(const FQuat& Current, const FQuat& Target)
+{
+	// q_err maps current -> target
+	FQuat Qerr = Target * Current.Inverse();
+	Qerr.Normalize();
+
+	// shortest path
+	if (Qerr.W < 0.0f)
+	{
+		Qerr.X *= -1.0f; Qerr.Y *= -1.0f; Qerr.Z *= -1.0f; Qerr.W *= -1.0f;
+	}
+
+	const double w = FMath::Clamp((double)Qerr.W, -1.0, 1.0);
+	const double angle = 2.0 * std::acos(w); // [0..pi]
+	const double s = std::sqrt(FMath::Max(0.0, 1.0 - w*w));
+
+	Eigen::Vector3d axis(1.0, 0.0, 0.0);
+	if (s > 1e-9)
+	{
+		axis = Eigen::Vector3d(Qerr.X / s, Qerr.Y / s, Qerr.Z / s);
+	}
+	return axis * angle; // axis * angle (rad)
+}
+
+static void ComputeChainKinematics(
+	const FTransform& BaseTransform,
+	const TArray<float>& JointAnglesDeg,
+	const TArray<FTransform>& JointLocalTransforms,
+	const TArray<FVector>& JointAxesLocal,
+	const FTransform& EndEffectorOffset,
+	TArray<FVector>& OutJointPosWorld,
+	TArray<FVector>& OutJointAxisWorld,
+	FTransform& OutEEWorld)
+{
+	const int32 N = JointAnglesDeg.Num();
+	OutJointPosWorld.SetNum(N);
+	OutJointAxisWorld.SetNum(N);
+
+	FTransform T = BaseTransform;
+
+	for (int32 i = 0; i < N; i++)
+	{
+		// parent -> joint_i (q=0)
+		T = JointLocalTransforms[i] * T;
+
+		OutJointPosWorld[i] = T.GetLocation();
+
+		// axis in joint frame -> world
+		const FVector AxisWorld = SafeNormalAxis(T.TransformVectorNoScale(JointAxesLocal[i]));
+		OutJointAxisWorld[i] = AxisWorld;
+
+		// apply revolute rotation about axis (at joint origin)
+		const float AngleRad = FMath::DegreesToRadians(JointAnglesDeg[i]);
+		const FQuat R(AxisWorld, AngleRad);
+		T.SetRotation((R * T.GetRotation()).GetNormalized());
+	}
+
+	OutEEWorld = EndEffectorOffset * T;
+}
+
 FTransform URammsIKLibrary::ComputeForwardKinematics(
 	const FTransform& BaseTransform,
-	const TArray<float>& JointAngles,
+	const TArray<float>& JointAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxes,
+	const TArray<FVector>& JointAxesLocal,
 	const FTransform& EndEffectorOffset,
-	bool bDebugLog)
+	bool bEnableDebugLogging)
 {
-	const int32 NumJoints = JointAngles.Num();
-	
-	// Start at base
-	FTransform CurrentTransform = BaseTransform;
-	
-	if (bDebugLog)
+	const int32 N = JointAnglesDeg.Num();
+	if (JointLocalTransforms.Num() != N || JointAxesLocal.Num() != N)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[FK] Base: Loc=(%.1f, %.1f, %.1f) Rot(P:%.1f, Y:%.1f, R:%.1f)"),
-			CurrentTransform.GetLocation().X, CurrentTransform.GetLocation().Y, CurrentTransform.GetLocation().Z,
-			CurrentTransform.Rotator().Pitch, CurrentTransform.Rotator().Yaw, CurrentTransform.Rotator().Roll);
+		UE_LOG(LogTemp, Warning, TEXT("[RammsIK] FK size mismatch (Angles=%d Local=%d Axes=%d)"),
+			N, JointLocalTransforms.Num(), JointAxesLocal.Num());
+		return BaseTransform;
 	}
-	
-	// Apply each joint transformation
-	for (int32 i = 0; i < NumJoints; i++)
+
+	TArray<FVector> JointPos, JointAxis;
+	FTransform EE;
+	ComputeChainKinematics(BaseTransform, JointAnglesDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset, JointPos, JointAxis, EE);
+
+	if (bEnableDebugLogging)
 	{
-		// 1. TRANSLATE to this joint's pivot
-		FVector LocalOffset = JointLocalTransforms[i].GetTranslation();
-		FVector WorldOffset = CurrentTransform.TransformVectorNoScale(LocalOffset);
-		CurrentTransform.AddToTranslation(WorldOffset);
-		
-		// 2. ROTATE at this joint's pivot
-		FVector WorldAxis = CurrentTransform.TransformVectorNoScale(JointAxes[i]).GetSafeNormal();
-		float AngleRad = FMath::DegreesToRadians(JointAngles[i]);
-		FQuat JointRotation(WorldAxis, AngleRad);
-		CurrentTransform.SetRotation(JointRotation * CurrentTransform.GetRotation());
-		
-		if (bDebugLog)
+		for (int32 i = 0; i < FMath::Min(N, 8); i++)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[FK] Joint[%d]: Offset=(%.1f,%.1f,%.1f) Angle=%.1f deg -> Pos=(%.1f,%.1f,%.1f)"),
-				i, LocalOffset.X, LocalOffset.Y, LocalOffset.Z, JointAngles[i],
-				CurrentTransform.GetLocation().X, CurrentTransform.GetLocation().Y, CurrentTransform.GetLocation().Z);
+			UE_LOG(LogTemp, Log, TEXT("[RammsIK] FK joint %d: pos=(%.2f,%.2f,%.2f) axis=(%.3f,%.3f,%.3f) q=%.2fdeg"),
+				i, JointPos[i].X, JointPos[i].Y, JointPos[i].Z, JointAxis[i].X, JointAxis[i].Y, JointAxis[i].Z, JointAnglesDeg[i]);
 		}
 	}
-	
-	// Apply end effector offset (full transform)
-	CurrentTransform = EndEffectorOffset * CurrentTransform;
-	
-	if (bDebugLog)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[FK] EE: Loc=(%.1f, %.1f, %.1f)"),
-			CurrentTransform.GetLocation().X, CurrentTransform.GetLocation().Y, CurrentTransform.GetLocation().Z);
-	}
-	
-	return CurrentTransform;
+
+	return EE;
 }
 
-// Damped Least Squares IK Solver
-FIKSolveResult URammsIKLibrary::SolveIK_DLS(
-	TArray<float>& JointAngles,
+FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	const FTransform& BaseTransform,
+	const TArray<float>& CurrentAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxes,
+	const TArray<FVector>& JointAxesLocal,
 	const FTransform& EndEffectorOffset,
-	const FTransform& TargetTransform,
-	const TArray<FVector2D>& JointLimits,
-	const TArray<bool>& TaskSpaceMask,
+	const FTransform& TargetEndEffectorWorld,
+	const TArray<FVector2D>& JointLimitsDeg,
+	const TArray<bool>& TaskSpaceMask6,
 	const TArray<float>& JointWeights,
-	float DampingFactor,
-	float StepClip,
+	bool bEnableNullSpaceOptimization,
+	float NullSpaceGain,
+	const TArray<float>& NullSpaceBiasDeg,
+	float Damping,
+	float StepClipDeg,
 	int32 MaxIterations,
-	float PositionTolerance,
-	float RotationTolerance,
-	const TArray<float>& NullSpaceBias,
-	float NullSpaceGain)
+	float PositionToleranceCm,
+	float RotationToleranceDeg)
 {
-	FIKSolveResult Result;
-	Result.JointAngles = JointAngles;
-	
-	const int32 N = JointAngles.Num();
-	if (N == 0 || N != JointLocalTransforms.Num() || N != JointAxes.Num() || N != JointLimits.Num())
+	FIKSolveResult Out;
+
+	const int32 N = CurrentAnglesDeg.Num();
+	if (N <= 0 ||
+		JointLocalTransforms.Num() != N ||
+		JointAxesLocal.Num() != N ||
+		JointLimitsDeg.Num() != N)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[IK] Invalid input sizes"));
-		return Result;
+		Out.bSuccess = false;
+		Out.JointAngles = CurrentAnglesDeg;
+		return Out;
 	}
-	
-	// Build task space selection matrix W (TaskDim x 6)
-	int32 TaskDim = 0;
-	TArray<int32> ActiveDOFs;
-	for (int32 i = 0; i < 6 && i < TaskSpaceMask.Num(); i++)
+
+	MaxIterations = FMath::Clamp(MaxIterations, 1, 500);
+
+	// Mask vector m(6)
+	double m[6] = {1,1,1,1,1,1};
+	for (int i = 0; i < 6; i++)
 	{
-		if (TaskSpaceMask[i])
-		{
-			ActiveDOFs.Add(i);
-			TaskDim++;
-		}
+		if (TaskSpaceMask6.Num() == 6)
+			m[i] = TaskSpaceMask6[i] ? 1.0 : 0.0;
 	}
-	if (TaskDim == 0) TaskDim = 6; // Default to full 6D
-	
-	Eigen::MatrixXd W = Eigen::MatrixXd::Zero(TaskDim, 6);
-	for (int32 i = 0; i < TaskDim; i++)
+
+	// Joint weighting: higher means move less => use inverse as "allowance"
+	Eigen::VectorXd Wdiag(N);
+	for (int32 i = 0; i < N; i++)
 	{
-		int32 dof = (ActiveDOFs.Num() > 0) ? ActiveDOFs[i] : i;
-		W(i, dof) = 1.0;
+		double w = 1.0;
+		if (JointWeights.Num() == N)
+			w = FMath::Max(0.0f, JointWeights[i]);
+
+		// If w==0 => freeze joint
+		if (w <= 0.0)
+			Wdiag(i) = 0.0;
+		else
+			Wdiag(i) = 1.0 / w;
 	}
+	const Eigen::MatrixXd W = Wdiag.asDiagonal();
+
+	const double lambda = FMath::Max(0.0f, Damping);
+
+	// Convert step clip
+	const double stepClipRad = FMath::DegreesToRadians(FMath::Max(0.0f, StepClipDeg));
+
+	// Balance units: treat rotation error as "cm-equivalent"
+	const double RotToCm = 20.0;
+
+	TArray<float> qDeg = CurrentAnglesDeg;
+
+	TArray<FVector> JointPosWorld, JointAxisWorld;
+	FTransform EEWorld = FTransform::Identity;
+
+	double posErrCm = 0.0;
+	double rotErrDeg = 0.0;
 	
-	// Joint weights (diagonal matrix Wq)
-	Eigen::MatrixXd Wq = Eigen::MatrixXd::Identity(N, N);
-	if (JointWeights.Num() == N)
+	static bool bLoggedBase = false;
+	if (!bLoggedBase)
 	{
-		for (int32 i = 0; i < N; i++)
-		{
-			Wq(i, i) = 1.0 / FMath::Max(JointWeights[i], 0.01f);
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[IK Solver] BaseTransform: Loc=(%.1f, %.1f, %.1f) Rot=(%.1f, %.1f, %.1f)"),
+			BaseTransform.GetLocation().X, BaseTransform.GetLocation().Y, BaseTransform.GetLocation().Z,
+			BaseTransform.Rotator().Pitch, BaseTransform.Rotator().Yaw, BaseTransform.Rotator().Roll);
+		UE_LOG(LogTemp, Warning, TEXT("[IK Solver] JointLocalTransforms[0]: Loc=(%.1f, %.1f, %.1f)"),
+			JointLocalTransforms[0].GetLocation().X, JointLocalTransforms[0].GetLocation().Y, JointLocalTransforms[0].GetLocation().Z);
+		bLoggedBase = true;
 	}
-	
-	// Task scaling matrix S (6x6) - scales cm to meters and keeps rotation in radians
-	Eigen::MatrixXd S = Eigen::MatrixXd::Identity(6, 6);
-	S(0, 0) = S(1, 1) = S(2, 2) = 0.01; // Position: cm -> m
-	// Rotation already in radians, no scaling needed
-	
-	// Damping matrix
-	const double lambda = FMath::Max(0.001, (double)DampingFactor);
-	Eigen::MatrixXd Lambda = Eigen::MatrixXd::Identity(TaskDim, TaskDim) * (lambda * lambda);
-	
-	// Null-space bias (if enabled)
-	bool bUseNullSpace = (NullSpaceGain > 1e-6f) && (NullSpaceBias.Num() == N) && (N > TaskDim);
-	Eigen::VectorXd q0_rad(N);
-	if (bUseNullSpace)
+
+	for (int32 it = 0; it < MaxIterations; it++)
 	{
-		for (int32 i = 0; i < N; i++)
-		{
-			q0_rad(i) = FMath::DegreesToRadians(NullSpaceBias[i]);
-		}
-	}
-	
-	// IK iteration loop
-	TArray<float> CurrentAngles = JointAngles;
-	for (int32 Iter = 0; Iter < MaxIterations; Iter++)
-	{
-		// Compute current end effector pose
-		FTransform CurrentEE = ComputeForwardKinematics(
-			BaseTransform, CurrentAngles, JointLocalTransforms, JointAxes, EndEffectorOffset, false);
+		ComputeChainKinematics(BaseTransform, qDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset,
+			JointPosWorld, JointAxisWorld, EEWorld);
+
+		const Eigen::Vector3d pCur = ToEigen(EEWorld.GetLocation());
+		const Eigen::Vector3d pTgt = ToEigen(TargetEndEffectorWorld.GetLocation());
+
+		const Eigen::Vector3d dp = (pTgt - pCur); // cm
+		const Eigen::Vector3d drot = RotationErrorAxisAngleRad(EEWorld.GetRotation().GetNormalized(),
+			TargetEndEffectorWorld.GetRotation().GetNormalized()); // rad
+
+		posErrCm = dp.norm();
+		rotErrDeg = FMath::RadiansToDegrees((float)drot.norm());
+
+		Out.PositionError = (float)posErrCm;
+		Out.RotationError = (float)rotErrDeg;
+		Out.IterationsUsed = it + 1;
 		
-		// Compute task space error
-		FVector PositionError = TargetTransform.GetLocation() - CurrentEE.GetLocation();
-		FQuat RotationErrorQuat = TargetTransform.GetRotation() * CurrentEE.GetRotation().Inverse();
-		
-		// Enforce shortest arc (flip quaternion if needed)
-		if ((TargetTransform.GetRotation() | CurrentEE.GetRotation()) < 0.0f)
+		// Debug: Log FK vs target on first and last iteration
+		static bool bLoggedOnce = false;
+		if (!bLoggedOnce || it == MaxIterations - 1 || (posErrCm <= PositionToleranceCm && rotErrDeg <= RotationToleranceDeg))
 		{
-			RotationErrorQuat = FQuat(-RotationErrorQuat.X, -RotationErrorQuat.Y, -RotationErrorQuat.Z, -RotationErrorQuat.W);
-		}
-		
-		// Convert rotation error to axis-angle (approximate)
-		FVector RotationErrorVec = FVector::ZeroVector;
-		{
-			FQuat q = RotationErrorQuat;
-			q.Normalize();
-			float w = FMath::Clamp(q.W, -1.0f, 1.0f);
-			FVector v(q.X, q.Y, q.Z);
-			float n = v.Size();
-			if (n > 1e-8f)
+			UE_LOG(LogTemp, Warning, TEXT("[IK Solver] Iter %d: FK EE=(%.1f, %.1f, %.1f) Target=(%.1f, %.1f, %.1f) Error=%.1fcm"),
+				it,
+				EEWorld.GetLocation().X, EEWorld.GetLocation().Y, EEWorld.GetLocation().Z,
+				TargetEndEffectorWorld.GetLocation().X, TargetEndEffectorWorld.GetLocation().Y, TargetEndEffectorWorld.GetLocation().Z,
+				posErrCm);
+			
+			if (it == 0)
 			{
-				float angle = 2.0f * FMath::Atan2(n, w);
-				RotationErrorVec = (angle / n) * v;
+				UE_LOG(LogTemp, Warning, TEXT("[IK Solver] Base: (%.1f, %.1f, %.1f)"),
+					BaseTransform.GetLocation().X, BaseTransform.GetLocation().Y, BaseTransform.GetLocation().Z);
 			}
-			else
-			{
-				RotationErrorVec = 2.0f * v; // Small angle approx
-			}
+			
+			if (!bLoggedOnce) bLoggedOnce = true;
 		}
-		
-		// Check convergence
-		float PosErr = PositionError.Size();
-		float RotErr = FMath::RadiansToDegrees(RotationErrorVec.Size());
-		Result.PositionError = PosErr;
-		Result.RotationError = RotErr;
-		Result.IterationsUsed = Iter + 1;
-		
-		if (PosErr < PositionTolerance && RotErr < RotationTolerance)
+
+		if (posErrCm <= PositionToleranceCm && rotErrDeg <= RotationToleranceDeg)
 		{
-			Result.bSuccess = true;
+			Out.bSuccess = true;
 			break;
 		}
-		
-		// Build 6D error vector
-		Eigen::VectorXd e_full(6);
-		e_full << PositionError.X, PositionError.Y, PositionError.Z,
-		          RotationErrorVec.X, RotationErrorVec.Y, RotationErrorVec.Z;
-		
-		// Apply task scaling and selection
-		Eigen::VectorXd e = W * (S * e_full);
-		
-		// Compute numerical Jacobian (6 x N)
-		Eigen::MatrixXd J_full(6, N);
-		J_full.setZero();
-		
-		const double h = 1e-4; // Perturbation in radians
+
+		// Build error vector e (6x1), masked
+		Eigen::Matrix<double, 6, 1> e;
+		e.setZero();
+		e(0) = m[0] * dp.x();
+		e(1) = m[1] * dp.y();
+		e(2) = m[2] * dp.z();
+
+		// rotation vector components (world), scaled to cm
+		e(3) = m[3] * (RotToCm * drot.x());
+		e(4) = m[4] * (RotToCm * drot.y());
+		e(5) = m[5] * (RotToCm * drot.z());
+
+		// Jacobian J (6xN)
+		Eigen::MatrixXd J(6, N);
+		J.setZero();
+
 		for (int32 j = 0; j < N; j++)
 		{
-			TArray<float> AnglesPerturbed = CurrentAngles;
-			AnglesPerturbed[j] += FMath::RadiansToDegrees(h);
-			
-			FTransform EE_perturbed = ComputeForwardKinematics(
-				BaseTransform, AnglesPerturbed, JointLocalTransforms, JointAxes, EndEffectorOffset, false);
-			
-			// Position derivative
-			FVector dPos = (EE_perturbed.GetLocation() - CurrentEE.GetLocation()) / h;
-			J_full(0, j) = dPos.X;
-			J_full(1, j) = dPos.Y;
-			J_full(2, j) = dPos.Z;
-			
-			// Rotation derivative (quaternion difference)
-			FQuat dQuat = EE_perturbed.GetRotation() * CurrentEE.GetRotation().Inverse();
-			FQuat dQuatNorm = dQuat;
-			dQuatNorm.Normalize();
-			float w = FMath::Clamp(dQuatNorm.W, -1.0f, 1.0f);
-			FVector v(dQuatNorm.X, dQuatNorm.Y, dQuatNorm.Z);
-			float n = v.Size();
-			FVector omega = FVector::ZeroVector;
-			if (n > 1e-8f)
-			{
-				float angle = 2.0f * FMath::Atan2(n, w);
-				omega = (angle / n) * v / h;
-			}
-			else
-			{
-				omega = 2.0f * v / h;
-			}
-			
-			J_full(3, j) = omega.X;
-			J_full(4, j) = omega.Y;
-			J_full(5, j) = omega.Z;
+			const FVector AxisU = JointAxisWorld[j].GetSafeNormal();
+			if (AxisU.IsNearlyZero())
+				continue;
+
+			const Eigen::Vector3d pj = ToEigen(JointPosWorld[j]);
+			const Eigen::Vector3d aj(AxisU.X, AxisU.Y, AxisU.Z);
+
+			const Eigen::Vector3d Jv = aj.cross(pCur - pj); // cm / rad
+			const Eigen::Vector3d Jw = aj;                  // rad / rad
+
+			J(0, j) = m[0] * Jv.x();
+			J(1, j) = m[1] * Jv.y();
+			J(2, j) = m[2] * Jv.z();
+
+			J(3, j) = m[3] * (RotToCm * Jw.x());
+			J(4, j) = m[4] * (RotToCm * Jw.y());
+			J(5, j) = m[5] * (RotToCm * Jw.z());
 		}
-		
-		// Apply task scaling and selection to Jacobian
-		Eigen::MatrixXd J = W * (S * J_full);
-		
-		// Solve for joint velocities using DLS with joint weights
-		// dq = Wq * J^T * (J * Wq * J^T + λ²I)^-1 * e
-		Eigen::MatrixXd JWq = J * Wq;
-		Eigen::MatrixXd A = JWq * J.transpose() + Lambda; // (TaskDim x TaskDim)
-		Eigen::MatrixXd JTWinv = Wq * J.transpose(); // (N x TaskDim)
-		
-		// Solve using LDLT (numerically stable)
-		Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
-		Eigen::MatrixXd A_inv = ldlt.solve(Eigen::MatrixXd::Identity(TaskDim, TaskDim));
-		Eigen::VectorXd dq_rad = JTWinv * (A_inv * e);
-		
-		// Null-space projection (only if redundant)
-		if (bUseNullSpace)
+
+		// DLS: dq = W J^T (J W J^T + λ^2 I)^-1 e
+		const Eigen::MatrixXd JW = J * W; // 6xN
+		Eigen::Matrix<double, 6, 6> A = (JW * J.transpose());
+		A += (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
+
+		const Eigen::Matrix<double, 6, 1> x = A.ldlt().solve(e);
+		Eigen::VectorXd dq = W * J.transpose() * x; // Nx1 (rad)
+
+		// Null-space bias (optional)
+		if (bEnableNullSpaceOptimization && NullSpaceGain > 0.0f && NullSpaceBiasDeg.Num() == N)
 		{
-			Eigen::MatrixXd J_pinv = JTWinv * A_inv; // (N x TaskDim)
-			Eigen::MatrixXd Nullspace = Eigen::MatrixXd::Identity(N, N) - (J_pinv * J);
-			
-			Eigen::VectorXd q_rad(N);
+			// J_pinv = W J^T A^-1
+			const Eigen::Matrix<double, 6, 6> Ainv = A.ldlt().solve(Eigen::Matrix<double, 6, 6>::Identity());
+			const Eigen::MatrixXd Jpinv = W * J.transpose() * Ainv; // Nx6
+
+			Eigen::VectorXd qCurRad(N), qPrefRad(N);
 			for (int32 i = 0; i < N; i++)
 			{
-				q_rad(i) = FMath::DegreesToRadians(CurrentAngles[i]);
+				qCurRad(i) = FMath::DegreesToRadians(qDeg[i]);
+				qPrefRad(i) = FMath::DegreesToRadians(NullSpaceBiasDeg[i]);
 			}
-			
-			Eigen::VectorXd dq_null = NullSpaceGain * (q0_rad - q_rad);
-			dq_rad += Nullspace * dq_null;
+
+			Eigen::VectorXd dqBias = (qPrefRad - qCurRad) * (double)NullSpaceGain;
+			const Eigen::MatrixXd Nmat = (Eigen::MatrixXd::Identity(N, N) - (Jpinv * J));
+			dq += Nmat * dqBias;
 		}
-		
-		// Clip step size
+
+		// Per-joint clip + apply limits
 		for (int32 i = 0; i < N; i++)
 		{
-			dq_rad(i) = FMath::Clamp((float)dq_rad(i), -StepClip, StepClip);
-		}
-		
-		// Update joint angles and apply limits
-		for (int32 i = 0; i < N; i++)
-		{
-			float DeltaDeg = FMath::RadiansToDegrees((float)dq_rad(i));
-			CurrentAngles[i] = FMath::Clamp(
-				CurrentAngles[i] + DeltaDeg,
-				JointLimits[i].X,
-				JointLimits[i].Y
-			);
+			double d = dq(i);
+
+			if (stepClipRad > 0.0)
+				d = FMath::Clamp((float)d, (float)-stepClipRad, (float)stepClipRad);
+
+			double newDeg = qDeg[i] + FMath::RadiansToDegrees((float)d);
+
+			const double minDeg = (double)JointLimitsDeg[i].X;
+			const double maxDeg = (double)JointLimitsDeg[i].Y;
+			if (minDeg < maxDeg)
+				newDeg = FMath::Clamp((float)newDeg, (float)minDeg, (float)maxDeg);
+
+			qDeg[i] = (float)newDeg;
 		}
 	}
-	
-	Result.JointAngles = CurrentAngles;
-	return Result;
-}
 
-// Utility functions
-float URammsIKLibrary::ClampJointAngle(float Angle, float Min, float Max)
-{
-	return FMath::Clamp(Angle, Min, Max);
-}
-
-void URammsIKLibrary::CalculateTransformError(
-	const FTransform& Transform1,
-	const FTransform& Transform2,
-	float& OutPositionError,
-	float& OutRotationError)
-{
-	OutPositionError = (Transform2.GetLocation() - Transform1.GetLocation()).Size();
-	
-	FQuat Q1 = Transform1.GetRotation();
-	FQuat Q2 = Transform2.GetRotation();
-	FQuat DeltaQ = Q2 * Q1.Inverse();
-	OutRotationError = FMath::RadiansToDegrees(DeltaQ.GetAngle());
-}
-
-float URammsIKLibrary::NormalizeAngle(float Angle)
-{
-	while (Angle > 180.0f) Angle -= 360.0f;
-	while (Angle < -180.0f) Angle += 360.0f;
-	return Angle;
-}
-
-// Legacy FABRIK and Jacobian Transpose (stub implementations)
-FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
-	const TArray<FVector>& JointPositions,
-	TArray<float>& JointAngles,
-	const FTransform& TargetTransform,
-	const TArray<FVector2D>& JointLimits,
-	int32 MaxIterations,
-	float PositionTolerance,
-	float RotationTolerance,
-	float StepSize)
-{
-	// Legacy - not implemented
-	FIKSolveResult Result;
-	Result.bSuccess = false;
-	return Result;
-}
-
-FIKSolveResult URammsIKLibrary::SolveIK_JacobianTranspose(
-	TArray<float>& JointAngles,
-	const TArray<FTransform>& JointTransforms,
-	const TArray<FVector>& JointAxes,
-	const FTransform& EndEffectorTransform,
-	const FTransform& TargetTransform,
-	const TArray<FVector2D>& JointLimits,
-	int32 MaxIterations,
-	float PositionTolerance,
-	float RotationTolerance,
-	float StepSize)
-{
-	// Legacy - not implemented
-	FIKSolveResult Result;
-	Result.bSuccess = false;
-	return Result;
+	Out.JointAngles = qDeg;
+	if (!Out.bSuccess)
+	{
+		Out.bSuccess = (posErrCm <= PositionToleranceCm) && (rotErrDeg <= RotationToleranceDeg);
+	}
+	return Out;
 }
