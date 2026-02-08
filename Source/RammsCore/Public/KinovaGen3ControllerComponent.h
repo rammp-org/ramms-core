@@ -254,6 +254,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (EditCondition = "bEnableNullSpaceOptimization"))
 	TArray<float> NullSpaceBias;
 
+	/** Use FABRIK solver instead of DLS (for testing/comparison) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|FABRIK")
+	bool bUseFABRIK = true;
+
+	/** Maximum FABRIK iterations per solve */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|FABRIK", meta = (ClampMin = "1", ClampMax = "100", EditCondition = "bUseFABRIK"))
+	int32 FABRIKMaxIterations = 15;
+
+	/** Position convergence tolerance for FABRIK (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|FABRIK", meta = (ClampMin = "0.01", EditCondition = "bUseFABRIK"))
+	float FABRIKPositionTolerance = 1.0f;
+
 	/** Joint configurations (5-7 joints for Kinova Gen3) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joints")
 	TArray<FRevoluteJointConfig> Joints;
@@ -454,6 +466,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Kinova Gen3|Debug")
 	void PrintFKDiagnostics();
+
+	/**
+	 * Validate FABRIK solution against physics asset constraints
+	 * Returns maximum constraint violation in degrees
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Kinova Gen3|Debug")
+	float ValidateFABRIKConstraints();
 
 	// ========== Debug ==========
 

@@ -325,3 +325,278 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	}
 	return Out;
 }
+
+// Helper function to calculate signed angle between two vectors around an axis
+static float CalculateSignedAngle(const FVector& From, const FVector& To, const FVector& Axis)
+{
+	// Project vectors onto plane perpendicular to axis
+	FVector FromProjected = (From - Axis * FVector::DotProduct(From, Axis)).GetSafeNormal();
+	FVector ToProjected = (To - Axis * FVector::DotProduct(To, Axis)).GetSafeNormal();
+
+	// Calculate angle
+	float CosAngle = FMath::Clamp(FVector::DotProduct(FromProjected, ToProjected), -1.0f, 1.0f);
+	float Angle = FMath::Acos(CosAngle);
+
+	// Determine sign using cross product
+	FVector Cross = FVector::CrossProduct(FromProjected, ToProjected);
+	float Sign = FVector::DotProduct(Cross, Axis);
+
+	if (Sign < 0.0f)
+	{
+		Angle = -Angle;
+	}
+
+	return FMath::RadiansToDegrees(Angle);
+}
+
+// Helper function to apply hard joint limit constraints
+static FVector ApplyJointLimitConstraint(
+	const FVector& ParentPos,
+	const FVector& JointPos,
+	const FVector& ChildPos,
+	const FVector& RefDirection,
+	const FVector& AxisWorld,
+	float MinAngleDeg,
+	float MaxAngleDeg,
+	float LinkLength)
+{
+	// Vector from joint to child (the direction we want to constrain)
+	FVector JointToChild = (ChildPos - JointPos).GetSafeNormal();
+	
+	// Calculate current angle relative to reference direction
+	// RefDirection is the direction the link points at angle=0 (from local transform)
+	float CurrentAngle = CalculateSignedAngle(RefDirection, JointToChild, AxisWorld);
+
+	// Hard clamp to limits
+	float ClampedAngle = FMath::Clamp(CurrentAngle, MinAngleDeg, MaxAngleDeg);
+
+	// If angle was clamped, reconstruct position
+	if (!FMath::IsNearlyEqual(CurrentAngle, ClampedAngle, 0.01f))
+	{
+		// Rotate reference direction by clamped angle around axis
+		float AngleRad = FMath::DegreesToRadians(ClampedAngle);
+		FQuat Rotation(AxisWorld, AngleRad);
+		FVector NewDirection = Rotation.RotateVector(RefDirection);
+		
+		return JointPos + NewDirection * LinkLength;
+	}
+
+	return ChildPos; // No clamping needed
+}
+
+FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
+	const FTransform& BaseTransform,
+	const TArray<float>& CurrentAnglesDeg,
+	const TArray<FTransform>& JointLocalTransforms,
+	const TArray<FVector>& JointAxesLocal,
+	const TArray<FVector2D>& JointLimitsDeg,
+	const FTransform& EndEffectorOffset,
+	const FTransform& TargetEndEffectorWorld,
+	const TArray<bool>& TaskSpaceMask6,
+	int32 MaxIterations,
+	float PositionToleranceCm)
+{
+	FIKSolveResult Result;
+	Result.bSuccess = false;
+	Result.IterationsUsed = 0;
+	Result.PositionError = 0.0f;
+	Result.RotationError = 0.0f;
+
+	const int32 NumJoints = CurrentAnglesDeg.Num();
+	if (NumJoints == 0 || NumJoints != JointLocalTransforms.Num() ||
+		NumJoints != JointAxesLocal.Num() || NumJoints != JointLimitsDeg.Num())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[FABRIK] Invalid input: joint count mismatch"));
+		return Result;
+	}
+
+	// Check if we should solve orientation (any of Roll/Pitch/Yaw enabled)
+	bool bSolveOrientation = false;
+	if (TaskSpaceMask6.Num() >= 6)
+	{
+		bSolveOrientation = TaskSpaceMask6[3] || TaskSpaceMask6[4] || TaskSpaceMask6[5];
+	}
+
+	// Build initial joint positions using FK from current angles
+	TArray<FVector> JointPositions; // World space
+	TArray<FVector> JointAxesWorld; // World space axes
+	TArray<FVector> RefDirections;  // Reference directions (angle=0) for each link
+	TArray<float> LinkLengths;
+	
+	JointPositions.SetNum(NumJoints + 1); // +1 for end-effector
+	JointAxesWorld.SetNum(NumJoints);
+	RefDirections.SetNum(NumJoints);
+	LinkLengths.SetNum(NumJoints);
+
+	// Compute forward kinematics to get initial positions
+	FTransform CurrentTransform = BaseTransform;
+	for (int32 i = 0; i < NumJoints; i++)
+	{
+		// CurrentTransform is currently in PARENT frame (or BASE for i=0)
+		
+		// Compute reference direction (link offset in parent frame -> world)
+		// This is the direction the link points at angle=0
+		FVector RefDirLocal = JointLocalTransforms[i].GetTranslation().GetSafeNormal();
+		RefDirections[i] = CurrentTransform.TransformVectorNoScale(RefDirLocal).GetSafeNormal();
+		
+		// Apply local transform to get joint frame
+		FTransform JointFrame = JointLocalTransforms[i] * CurrentTransform;
+
+		// Store joint position (in world space)
+		JointPositions[i] = JointFrame.GetLocation();
+		
+		// Compute world-space rotation axis
+		// JointAxesLocal[i] is in JOINT's local frame, so transform by JointFrame
+		JointAxesWorld[i] = JointFrame.TransformVectorNoScale(JointAxesLocal[i]).GetSafeNormal();
+
+		// Apply current joint rotation
+		float AngleRad = FMath::DegreesToRadians(CurrentAnglesDeg[i]);
+		FQuat Rotation(JointAxesWorld[i], AngleRad);
+		JointFrame.SetRotation(Rotation * JointFrame.GetRotation());
+		
+		// Update for next iteration
+		CurrentTransform = JointFrame;
+	}
+
+	// Add end-effector position
+	FTransform EETransform = EndEffectorOffset * CurrentTransform;
+	JointPositions[NumJoints] = EETransform.GetLocation();
+
+	// Compute link lengths
+	for (int32 i = 0; i < NumJoints; i++)
+	{
+		LinkLengths[i] = FVector::Dist(JointPositions[i], JointPositions[i + 1]);
+	}
+
+	// Store base position (never moves)
+	const FVector BasePosition = BaseTransform.GetLocation();
+	const FVector TargetPosition = TargetEndEffectorWorld.GetLocation();
+
+	// Check if target is reachable (sum of link lengths)
+	float TotalReach = 0.0f;
+	for (float Length : LinkLengths)
+	{
+		TotalReach += Length;
+	}
+
+	float DistanceToTarget = FVector::Dist(BasePosition, TargetPosition);
+	if (DistanceToTarget > TotalReach)
+	{
+		// Target unreachable - stretch toward it
+		FVector Direction = (TargetPosition - BasePosition).GetSafeNormal();
+		FVector CurrentPos = BasePosition;
+		for (int32 i = 0; i < NumJoints; i++)
+		{
+			JointPositions[i] = CurrentPos;
+			CurrentPos += Direction * LinkLengths[i];
+		}
+		JointPositions[NumJoints] = CurrentPos;
+
+		// Convert back to angles and return
+		Result.JointAngles = CurrentAnglesDeg; // Keep original angles
+		Result.PositionError = DistanceToTarget - TotalReach;
+		Result.bSuccess = false;
+		return Result;
+	}
+
+	// FABRIK iteration
+	for (int32 Iteration = 0; Iteration < MaxIterations; Iteration++)
+	{
+		Result.IterationsUsed = Iteration + 1;
+
+		// Check convergence
+		float CurrentError = FVector::Dist(JointPositions[NumJoints], TargetPosition);
+		if (CurrentError < PositionToleranceCm)
+		{
+			Result.bSuccess = true;
+			Result.PositionError = CurrentError;
+			break;
+		}
+
+		// ===== BACKWARD PASS: Start from target, reach back to base =====
+		JointPositions[NumJoints] = TargetPosition;
+
+		for (int32 i = NumJoints - 1; i >= 0; i--)
+		{
+			// Direction from next joint to current joint
+			FVector Direction = (JointPositions[i] - JointPositions[i + 1]).GetSafeNormal();
+			
+			// New position maintaining link length
+			FVector NewPosition = JointPositions[i + 1] + Direction * LinkLengths[i];
+
+			// Apply joint limit constraints for this joint
+			// Joint i connects JointPositions[i] to JointPositions[i+1]
+			if (i < NumJoints) // Valid joint
+			{
+				NewPosition = ApplyJointLimitConstraint(
+					(i > 0) ? JointPositions[i - 1] : BasePosition, // Parent position
+					JointPositions[i],     // Current joint position (will be NewPosition after)
+					JointPositions[i + 1], // Child position (end of link)
+					RefDirections[i],      // Reference direction for this link
+					JointAxesWorld[i],     // Rotation axis for this joint
+					JointLimitsDeg[i].X,   // Min angle
+					JointLimitsDeg[i].Y,   // Max angle
+					LinkLengths[i]);
+			}
+
+			JointPositions[i] = NewPosition;
+		}
+
+		// ===== FORWARD PASS: Start from base, reach toward target =====
+		JointPositions[0] = BasePosition;
+
+		for (int32 i = 0; i < NumJoints; i++)
+		{
+			// Direction from current joint to next joint
+			FVector Direction = (JointPositions[i + 1] - JointPositions[i]).GetSafeNormal();
+			
+			// New position maintaining link length
+			FVector NewPosition = JointPositions[i] + Direction * LinkLengths[i];
+
+			// Apply joint limit constraints
+			if (i < NumJoints) // Has a child
+			{
+				NewPosition = ApplyJointLimitConstraint(
+					(i > 0) ? JointPositions[i - 1] : BasePosition, // Parent position
+					JointPositions[i],     // Current joint position
+					NewPosition,           // Proposed next position
+					RefDirections[i],      // Reference direction for this link
+					JointAxesWorld[i],     // Rotation axis
+					JointLimitsDeg[i].X,   // Min angle
+					JointLimitsDeg[i].Y,   // Max angle
+					LinkLengths[i]);
+			}
+
+			JointPositions[i + 1] = NewPosition;
+		}
+	}
+
+	// Convert final positions back to joint angles
+	TArray<float> SolvedAngles;
+	SolvedAngles.SetNum(NumJoints);
+
+	FTransform FK_Transform = BaseTransform;
+	for (int32 i = 0; i < NumJoints; i++)
+	{
+		// Get direction from parent to next joint in FABRIK solution
+		FVector FABRIKDirection = (JointPositions[i + 1] - JointPositions[i]).GetSafeNormal();
+
+		// Use pre-computed reference direction and axis (already in world space)
+		// These were computed during FK initialization and stay constant during FABRIK
+		float Angle = CalculateSignedAngle(RefDirections[i], FABRIKDirection, JointAxesWorld[i]);
+		
+		// Clamp to joint limits
+		Angle = FMath::Clamp(Angle, JointLimitsDeg[i].X, JointLimitsDeg[i].Y);
+		SolvedAngles[i] = Angle;
+	}
+
+	Result.JointAngles = SolvedAngles;
+	Result.PositionError = FVector::Dist(JointPositions[NumJoints], TargetPosition);
+
+	if (!Result.bSuccess)
+	{
+		Result.bSuccess = (Result.PositionError <= PositionToleranceCm);
+	}
+
+	return Result;
+}

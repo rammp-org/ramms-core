@@ -1194,12 +1194,11 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 			
 			for (int32 i = 0; i < JointAxesLocal.Num(); i++)
 			{
-				// 1. Translate to joint pivot
-				FVector LocalOffset = JointLocalTransforms[i].GetTranslation();
-				FVector WorldOffset = CurrentTransform.TransformVectorNoScale(LocalOffset);
-				CurrentTransform.AddToTranslation(WorldOffset);
+				// 1. Apply joint local transform (translation + rotation from reference pose)
+				//    This must match the FK logic in FABRIK!
+				FTransform JointFrame = JointLocalTransforms[i] * CurrentTransform;
 				
-				FVector JointPivotWorld = CurrentTransform.GetLocation();
+				FVector JointPivotWorld = JointFrame.GetLocation();
 				
 				// Draw link from previous position to this joint pivot
 				DrawDebugLine(World, PrevPosWorld, JointPivotWorld, FColor::Orange, false, 0.0f, 0, 3.0f);
@@ -1209,10 +1208,14 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 				DrawDebugString(World, JointPivotWorld, FString::Printf(TEXT("J%d"), i), nullptr, FColor::Orange, 0.0f, true, 0.8f);
 				
 				// 2. Rotate at this joint pivot
-				FVector WorldAxis = CurrentTransform.TransformVectorNoScale(JointAxesLocal[i]).GetSafeNormal();
+				//    JointAxesLocal[i] is in joint's local frame, so transform via JointFrame
+				FVector WorldAxis = JointFrame.TransformVectorNoScale(JointAxesLocal[i]).GetSafeNormal();
 				float AngleRad = FMath::DegreesToRadians(CurrentAngles[i]);
 				FQuat JointRotation(WorldAxis, AngleRad);
-				CurrentTransform.SetRotation(JointRotation * CurrentTransform.GetRotation());
+				JointFrame.SetRotation(JointRotation * JointFrame.GetRotation());
+				
+				// Update for next iteration
+				CurrentTransform = JointFrame;
 				
 				// Draw joint axis after rotation
 				DrawDebugLine(World, JointPivotWorld, JointPivotWorld + WorldAxis * 15.0f, FColor::Purple, false, 0.0f, 0, 4.0f);
@@ -1679,10 +1682,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	}
 	
 	// ============================================================================
-	// STEP 2: Compute Joint Local Offsets (Pure Translations)
+	// STEP 2: Compute Joint Local Transforms (Translation + Rotation)
 	// ============================================================================
-	// Compute joint offsets in each parent's local frame (with identity rotation)
-	// This ensures FK correctly applies offsets without double-rotation
+	// Compute full local transforms (translation AND rotation) for each joint
+	// This captures the reference pose geometry including bone rotations
 	TArray<FTransform> JointLocalTransforms;
 	JointLocalTransforms.SetNum(Joints.Num());
 
@@ -1691,22 +1694,29 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		const FTransform ParentTransform = (i == 0) ? BaseRefTransform : JointRefTransforms[i - 1];
 		const FTransform ThisTransform = JointRefTransforms[i];
 
-		// Get world-space offset vector
-		FVector OffsetWorld = ThisTransform.GetLocation() - ParentTransform.GetLocation();
+		// Compute LOCAL transform: from parent frame to joint frame
+		// This includes BOTH translation and rotation from the reference skeleton
+		FTransform LocalTransform = ThisTransform.GetRelativeTransform(ParentTransform);
 		
-		// Transform offset into parent's local frame (accounting for parent's rotation)
-		// For consistency, we use BaseRefTransform's rotation for ALL joints (neutral frame)
-		// This way all offsets are in the same coordinate system as the BaseTransform
-		FVector OffsetLocal = ParentTransform.InverseTransformVectorNoScale(OffsetWorld);
+		// Store full transform (translation + rotation)
+		JointLocalTransforms[i] = LocalTransform;
 		
-		// Store as translation-only transform
-		JointLocalTransforms[i] = FTransform(FQuat::Identity, OffsetLocal);
-		
-		if (bEnableDebugLogging && i < 2)
+		if (bEnableDebugLogging)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[Gen3] J%d: OffsetWorld=(%.1f, %.1f, %.1f) OffsetLocal=(%.1f, %.1f, %.1f)"),
-				i, OffsetWorld.X, OffsetWorld.Y, OffsetWorld.Z,
-				OffsetLocal.X, OffsetLocal.Y, OffsetLocal.Z);
+			FVector Loc = LocalTransform.GetLocation();
+			FRotator Rot = LocalTransform.Rotator();
+			UE_LOG(LogTemp, Log, TEXT("[Gen3] J%d LocalTransform: Loc=(%.1f, %.1f, %.1f) Rot=(P:%.1f, Y:%.1f, R:%.1f)"),
+				i, Loc.X, Loc.Y, Loc.Z, Rot.Pitch, Rot.Yaw, Rot.Roll);
+			
+			// Also log parent and this reference transforms
+			FVector ParentLoc = ParentTransform.GetLocation();
+			FRotator ParentRot = ParentTransform.Rotator();
+			FVector ThisLoc = ThisTransform.GetLocation();
+			FRotator ThisRot = ThisTransform.Rotator();
+			UE_LOG(LogTemp, Log, TEXT("[Gen3]   Parent Ref: Loc=(%.1f, %.1f, %.1f) Rot=(P:%.1f, Y:%.1f, R:%.1f)"),
+				ParentLoc.X, ParentLoc.Y, ParentLoc.Z, ParentRot.Pitch, ParentRot.Yaw, ParentRot.Roll);
+			UE_LOG(LogTemp, Log, TEXT("[Gen3]   This Ref: Loc=(%.1f, %.1f, %.1f) Rot=(P:%.1f, Y:%.1f, R:%.1f)"),
+				ThisLoc.X, ThisLoc.Y, ThisLoc.Z, ThisRot.Pitch, ThisRot.Yaw, ThisRot.Roll);
 		}
 	}
 
@@ -1732,6 +1742,14 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
         if (Constraint)
           {
             const FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
+            
+            if (bEnableDebugLogging)
+            {
+                FVector F1Loc = Frame1.GetLocation();
+                FRotator F1Rot = Frame1.Rotator();
+                UE_LOG(LogTemp, Log, TEXT("[Gen3] J%d Constraint Frame1: Loc=(%.1f, %.1f, %.1f) Rot=(P:%.1f, Y:%.1f, R:%.1f)"),
+                    i, F1Loc.X, F1Loc.Y, F1Loc.Z, F1Rot.Pitch, F1Rot.Yaw, F1Rot.Roll);
+            }
 
             // Axis expressed in the PARENT frame (constraint Frame1 lives on parent)
             FVector AxisParent = FVector::XAxisVector;
@@ -1747,9 +1765,17 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
               AxisParent = -AxisParent;
 
             // Convert parent-frame axis into JOINT frame axis
-            AxisJoint = JointLocalTransforms[i].InverseTransformVectorNoScale(AxisParent).GetSafeNormal();
+            // JointLocalTransforms[i] transforms FROM parent TO joint
+            // So use TransformVectorNoScale (not Inverse!) to go parent->joint
+            AxisJoint = JointLocalTransforms[i].TransformVectorNoScale(AxisParent).GetSafeNormal();
           }
 
+        if (bEnableDebugLogging)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[Gen3] J%d AxisJoint (local): (%.3f, %.3f, %.3f)"),
+                i, AxisJoint.X, AxisJoint.Y, AxisJoint.Z);
+        }
+        
         JointAxesLocal[i] = AxisJoint;
       }
 	
@@ -1972,24 +1998,57 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 
     const float StepClipDeg = FMath::RadiansToDegrees(IKStepClip);
 
-    FIKSolveResult IKResult = URammsIKLibrary::SolveIK_FKChain(
-                                                               BaseTransform,
-                                                               CurrentAngles,
-                                                               JointLocalTransforms,
-                                                               JointAxesLocal,
-                                                               EndEffectorOffset,
-                                                               TargetEndEffectorTransform,
-                                                               JointLimits,
-                                                               TaskSpaceMask,
-                                                               JointWeights,
-                                                               bEnableNullSpaceOptimization,
-                                                               NullSpaceGain,
-                                                               NullSpaceBias,
-                                                               IKDampingFactor,
-                                                               StepClipDeg,
-                                                               MaxIKIterations,
-                                                               IKPositionTolerance,
-                                                               IKRotationTolerance);
+	FIKSolveResult IKResult;
+
+	if (bUseFABRIK)
+	{
+		// Use FABRIK solver with hard joint limits
+		IKResult = URammsIKLibrary::SolveIK_FABRIK(
+			BaseTransform,
+			CurrentAngles,
+			JointLocalTransforms,
+			JointAxesLocal,
+			JointLimits,
+			EndEffectorOffset,
+			TargetEndEffectorTransform,
+			TaskSpaceMask,
+			FABRIKMaxIterations,
+			FABRIKPositionTolerance);
+
+		if (bEnableDebugLogging)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[Gen3] FABRIK Solver: Success=%d, PosErr=%.2fcm, Iter=%d"),
+				IKResult.bSuccess, IKResult.PositionError, IKResult.IterationsUsed);
+		}
+	}
+	else
+	{
+		// Use DLS solver (original)
+		IKResult = URammsIKLibrary::SolveIK_FKChain(
+			BaseTransform,
+			CurrentAngles,
+			JointLocalTransforms,
+			JointAxesLocal,
+			EndEffectorOffset,
+			TargetEndEffectorTransform,
+			JointLimits,
+			TaskSpaceMask,
+			JointWeights,
+			bEnableNullSpaceOptimization,
+			NullSpaceGain,
+			NullSpaceBias,
+			IKDampingFactor,
+			StepClipDeg,
+			MaxIKIterations,
+			IKPositionTolerance,
+			IKRotationTolerance);
+
+		if (bEnableDebugLogging)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[Gen3] DLS Solver: Success=%d, PosErr=%.2fcm, RotErr=%.2fdeg, Iter=%d"),
+				IKResult.bSuccess, IKResult.PositionError, IKResult.RotationError, IKResult.IterationsUsed);
+		}
+	}
 
     for (int32 i = 0; i < FMath::Min(IKResult.JointAngles.Num(), Joints.Num()); i++)
       {
@@ -2285,4 +2344,69 @@ void UKinovaGen3ControllerComponent::PrintFKDiagnostics()
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("\n=== End FK Diagnostics ==="));
+}
+
+float UKinovaGen3ControllerComponent::ValidateFABRIKConstraints()
+{
+	if (!SkeletalMeshComponent || Joints.Num() == 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Gen3] ValidateFABRIK: No skeletal mesh or joints"));
+		return -1.0f;
+	}
+
+	float MaxViolation = 0.0f;
+	int32 ViolationCount = 0;
+
+	UE_LOG(LogTemp, Warning, TEXT("=== FABRIK Constraint Validation ==="));
+
+	for (int32 i = 0; i < Joints.Num(); i++)
+	{
+		const FRevoluteJointConfig& Joint = Joints[i];
+		float CurrentAngle = Joint.CurrentAngle;
+
+		// Check if current angle violates limits
+		bool bViolatesMin = (CurrentAngle < Joint.MinAngleLimit);
+		bool bViolatesMax = (CurrentAngle > Joint.MaxAngleLimit);
+
+		if (bViolatesMin || bViolatesMax)
+		{
+			float Violation = 0.0f;
+			if (bViolatesMin)
+			{
+				Violation = Joint.MinAngleLimit - CurrentAngle;
+			}
+			else
+			{
+				Violation = CurrentAngle - Joint.MaxAngleLimit;
+			}
+
+			MaxViolation = FMath::Max(MaxViolation, Violation);
+			ViolationCount++;
+
+			UE_LOG(LogTemp, Warning, TEXT("[Joint %d: %s] CONSTRAINT VIOLATION!"), i, *Joint.BoneName.ToString());
+			UE_LOG(LogTemp, Warning, TEXT("  Current: %.2f° | Limits: [%.2f°, %.2f°] | Violation: %.2f°"),
+				CurrentAngle, Joint.MinAngleLimit, Joint.MaxAngleLimit, Violation);
+		}
+		else
+		{
+			float MinMargin = CurrentAngle - Joint.MinAngleLimit;
+			float MaxMargin = Joint.MaxAngleLimit - CurrentAngle;
+			float MinToLimit = FMath::Min(MinMargin, MaxMargin);
+
+			UE_LOG(LogTemp, Log, TEXT("[Joint %d: %s] OK - Angle: %.2f° | Limits: [%.2f°, %.2f°] | Margin: %.2f°"),
+				i, *Joint.BoneName.ToString(), CurrentAngle, Joint.MinAngleLimit, Joint.MaxAngleLimit, MinToLimit);
+		}
+	}
+
+	if (ViolationCount > 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("=== VALIDATION FAILED: %d joints violate constraints, max violation: %.2f° ==="),
+			ViolationCount, MaxViolation);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("=== VALIDATION PASSED: All joints within constraints ==="));
+	}
+
+	return MaxViolation;
 }

@@ -24,6 +24,51 @@ struct FIKSolveResult
 	int32 IterationsUsed = 0;
 };
 
+/** Single joint in a FABRIK chain with 1-DOF revolute constraint */
+USTRUCT(BlueprintType)
+struct FFABRIKJoint
+{
+	GENERATED_BODY()
+
+	/** Joint position in world space (updated during solve) */
+	UPROPERTY(BlueprintReadWrite)
+	FVector Position = FVector::ZeroVector;
+
+	/** Parent joint index (-1 for base/root) */
+	UPROPERTY(BlueprintReadWrite)
+	int32 ParentIndex = -1;
+
+	/** Rotation axis in parent's local frame (1-DOF revolute) */
+	UPROPERTY(BlueprintReadWrite)
+	FVector AxisDirection = FVector::XAxisVector;
+
+	/** Minimum angle limit in degrees */
+	UPROPERTY(BlueprintReadWrite)
+	float MinAngleLimit = -180.0f;
+
+	/** Maximum angle limit in degrees */
+	UPROPERTY(BlueprintReadWrite)
+	float MaxAngleLimit = 180.0f;
+
+	/** Current joint angle in degrees */
+	UPROPERTY(BlueprintReadWrite)
+	float CurrentAngle = 0.0f;
+
+	/** Link length to next joint (cm) */
+	UPROPERTY(BlueprintReadWrite)
+	float LinkLength = 0.0f;
+
+	FFABRIKJoint()
+		: Position(FVector::ZeroVector)
+		, ParentIndex(-1)
+		, AxisDirection(FVector::XAxisVector)
+		, MinAngleLimit(-180.0f)
+		, MaxAngleLimit(180.0f)
+		, CurrentAngle(0.0f)
+		, LinkLength(0.0f)
+	{}
+};
+
 UCLASS()
 class URammsIKLibrary : public UBlueprintFunctionLibrary
 {
@@ -72,4 +117,35 @@ public:
 		int32 MaxIterations,
 		float PositionToleranceCm,
 		float RotationToleranceDeg);
+
+	/**
+	 * FABRIK (Forward And Backward Reaching Inverse Kinematics) solver with hard joint limits.
+	 * 
+	 * Solves IK for a serial chain of 1-DOF revolute joints with constraint limits.
+	 * Uses iterative position-based approach with hard clamping to joint limits.
+	 * 
+	 * @param BaseTransform World-space transform of the robot base
+	 * @param CurrentAnglesDeg Current joint angles in degrees
+	 * @param JointLocalTransforms Local transforms from parent to each joint (at q=0)
+	 * @param JointAxesLocal Rotation axis for each joint in joint's local frame
+	 * @param JointLimitsDeg Min/max angle limits for each joint (X=min, Y=max)
+	 * @param EndEffectorOffset Transform from last joint to end-effector
+	 * @param TargetEndEffectorWorld Target end-effector transform in world space
+	 * @param TaskSpaceMask6 Which DOFs to solve [X,Y,Z,Roll,Pitch,Yaw]
+	 * @param MaxIterations Maximum FABRIK iterations
+	 * @param PositionToleranceCm Position convergence tolerance in cm
+	 * @return Solve result with joint angles and convergence info
+	 */
+	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|FABRIK")
+	static FIKSolveResult SolveIK_FABRIK(
+		const FTransform& BaseTransform,
+		const TArray<float>& CurrentAnglesDeg,
+		const TArray<FTransform>& JointLocalTransforms,
+		const TArray<FVector>& JointAxesLocal,
+		const TArray<FVector2D>& JointLimitsDeg,
+		const FTransform& EndEffectorOffset,
+		const FTransform& TargetEndEffectorWorld,
+		const TArray<bool>& TaskSpaceMask6,
+		int32 MaxIterations,
+		float PositionToleranceCm);
 };
