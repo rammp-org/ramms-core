@@ -516,6 +516,9 @@ private:
 	/** Initialize constraint drives for all joints (one-time setup) */
 	void InitializeJointConstraints();
 
+	/** Cache joint rotation axes for FK/IK without modifying constraint drives */
+	void CacheJointAxes();
+
 	/** Apply settings to a revolute joint */
 	void ApplyJointSettings(FRevoluteJointConfig& Joint, float DeltaTime);
 
