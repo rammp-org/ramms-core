@@ -600,26 +600,37 @@ void UKinovaGen3ControllerComponent::SetConstraintAngle(FConstraintInstance* Con
 	if (!Constraint)
 		return;
 
-	// Convert to radians
-	float AngleRadians = FMath::DegreesToRadians(AngleDegrees);
+	// Ensure angular drives are enabled and configured for this axis
+	// (Safety check - drives should be configured in InitializeJointConstraints, but we ensure it here)
+	Constraint->SetAngularDriveMode(EAngularDriveMode::TwistAndSwing);
 	
-	// Create a quaternion target based on the controlled axis
-	// These are in the constraint's Frame1 local coordinate system
+	if (Axis == EConstraintAxis::Twist)
+	{
+		Constraint->SetOrientationDriveTwistAndSwing(true, false);
+	}
+	else // Swing1 or Swing2
+	{
+		Constraint->SetOrientationDriveTwistAndSwing(false, true);
+	}
+
+	// SetAngularOrientationTarget expects a quaternion representing the target orientation
+	// of the child body (Frame2) relative to the parent body (Frame1), in Frame1's coordinate system.
+	// Since our angle is already in Frame1's axes (Twist=X, Swing1=Z, Swing2=Y), we just create
+	// a rotation quaternion around the appropriate axis.
+	
+	float AngleRadians = FMath::DegreesToRadians(AngleDegrees);
 	FQuat TargetQuat = FQuat::Identity;
 	
 	switch (Axis)
 	{
 	case EConstraintAxis::Swing1:
-		// Swing1 around Z-axis  
-		TargetQuat = FQuat(FVector(0, 0, 1), AngleRadians);
+		TargetQuat = FQuat(FVector(0, 0, 1), AngleRadians); // Z-axis
 		break;
 	case EConstraintAxis::Swing2:
-		// Swing2 around Y-axis
-		TargetQuat = FQuat(FVector(0, 1, 0), AngleRadians);
+		TargetQuat = FQuat(FVector(0, 1, 0), AngleRadians); // Y-axis
 		break;
 	case EConstraintAxis::Twist:
-		// Twist around X-axis
-		TargetQuat = FQuat(FVector(1, 0, 0), AngleRadians);
+		TargetQuat = FQuat(FVector(1, 0, 0), AngleRadians); // X-axis
 		break;
 	}
 	
@@ -1858,23 +1869,66 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
                 continue;
             }
             
-            // Provide axis in joint-local space (will be transformed by FK's JointLocalTransforms[i])
-            // The FK applies: T = JointLocalTransforms[i] * T, then AxisWorld = T.Transform(AxisLocal)
-            // So AxisLocal should be in the joint's own frame, not parent-local
+            // Extract axis from Frame1 in WORLD space, then convert to joint-local
+            // This accounts for all rotations in the reference skeleton
+            FTransform ParentRefTransform = (i == 0) ? BaseRefTransform : JointRefTransforms[i - 1];
+            FTransform ThisRefTransform = JointRefTransforms[i];
             
-            FVector AxisJointLocal = FVector::XAxisVector;
+            // Get Frame1 in world space
+            FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
+            FTransform Frame1World = Frame1 * ParentRefTransform;
+            
+            // Extract the constraint axis in world space
+            FVector AxisWorld = FVector::XAxisVector;
             switch (Joints[i].ControlledAxis)
             {
             case EConstraintAxis::Twist:
-                AxisJointLocal = FVector::XAxisVector;
+                AxisWorld = Frame1World.GetUnitAxis(EAxis::X);
                 break;
             case EConstraintAxis::Swing1:
-                AxisJointLocal = FVector::ZAxisVector;
+                AxisWorld = Frame1World.GetUnitAxis(EAxis::Z);
                 break;
             case EConstraintAxis::Swing2:
-                AxisJointLocal = FVector::YAxisVector;
+                AxisWorld = Frame1World.GetUnitAxis(EAxis::Y);
                 break;
             }
+            
+            // Log Frame1 axis in world space for debugging
+            if (i < 7)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Frame1 AxisWorld: (%.3f, %.3f, %.3f)"),
+                    i, AxisWorld.X, AxisWorld.Y, AxisWorld.Z);
+            }
+            
+            // Auto-detect axis inversions based on expected robot geometry
+            // For vertical arms: J0,J2,J4,J6 (Twist) should point ~+Z, J1,J3,J5 (Swing1) should point ~+Y
+            FVector ExpectedDir = FVector::ZAxisVector;
+            if (Joints[i].ControlledAxis == EConstraintAxis::Swing1 || 
+                Joints[i].ControlledAxis == EConstraintAxis::Swing2)
+            {
+                ExpectedDir = FVector::YAxisVector; // Swing axes should point along arm chain (~+Y)
+            }
+            
+            // Check if Frame1 axis is reasonable (within 45° of expected)
+            float Alignment = FVector::DotProduct(AxisWorld.GetSafeNormal(), ExpectedDir);
+            
+            if (FMath::Abs(Alignment) < 0.707f) // >45° away from expected (0.707 = cos(45°))
+            {
+                // Frame1 is unreliable - use expected direction directly
+                AxisWorld = ExpectedDir;
+                UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Frame1 axis unreliable (%.1f° from expected), using expected direction"), 
+                    i, FMath::Acos(FMath::Abs(Alignment)) * 180.0f / PI);
+            }
+            else if (Alignment < 0.0f) // Pointing opposite direction
+            {
+                AxisWorld = -AxisWorld;
+                UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d auto-inverted axis (was pointing opposite to expected)"), i);
+            }
+            
+            // Convert world axis back to joint-local space (inverse of JointLocalTransforms[i])
+            // So FK will transform it back to world correctly
+            FTransform JointWorldTransform = JointLocalTransforms[i] * ParentRefTransform;
+            FVector AxisJointLocal = JointWorldTransform.InverseTransformVectorNoScale(AxisWorld).GetSafeNormal();
             
             CachedJointAxesLocal[i] = AxisJointLocal;
             
@@ -1882,28 +1936,6 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
             if (Joints[i].bInvertAxisForIK)
             {
                 CachedJointAxesLocal[i] = -CachedJointAxesLocal[i];
-            }
-            
-            // Auto-detect inversions by checking if the reference skeleton has 180° rotations
-            // that flip the axis direction (common in URDF imports)
-            FTransform ParentRefTransform = (i == 0) ? BaseRefTransform : JointRefTransforms[i - 1];
-            FTransform ThisRefTransform = JointRefTransforms[i];
-            FTransform RelativeTransform = ThisRefTransform.GetRelativeTransform(ParentRefTransform);
-            FRotator RelativeRot = RelativeTransform.Rotator();
-            
-            // If roll or pitch is ~180°, the axis might be inverted
-            bool bHasFlip = (FMath::Abs(FMath::Abs(RelativeRot.Roll) - 180.0f) < 10.0f) || 
-                           (FMath::Abs(FMath::Abs(RelativeRot.Pitch) - 180.0f) < 10.0f);
-            
-            if (bHasFlip && !Joints[i].bInvertAxisForIK)
-            {
-                // Check if this is a Swing1/Swing2 joint (Z-axis or Y-axis) that needs flipping
-                if (Joints[i].ControlledAxis == EConstraintAxis::Swing1 || 
-                    Joints[i].ControlledAxis == EConstraintAxis::Swing2)
-                {
-                    CachedJointAxesLocal[i] = -CachedJointAxesLocal[i];
-                    UE_LOG(LogTemp, Warning, TEXT("[Gen3] Auto-inverted J%d axis due to 180° rotation in skeleton"), i);
-                }
             }
             
             if (Joints[i].bInvertAxisForIK)
