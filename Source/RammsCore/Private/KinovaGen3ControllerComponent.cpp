@@ -366,9 +366,6 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		}
 
 		// Only solve IK while we are moving toward a target or the target has changed
-		const float TargetChangePosThreshold = 0.01f; // cm
-		const float TargetChangeRotThreshold = 0.1f;  // degrees
-
 		bool bTargetChanged = false;
 		if (!bIKTargetInitialized)
 		{
@@ -380,7 +377,7 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 			const float PosDelta = FVector::Dist(TargetEndEffectorTransform.GetLocation(), LastIKTargetTransform.GetLocation());
 			const float RotDelta = FMath::RadiansToDegrees(
 				TargetEndEffectorTransform.GetRotation().AngularDistance(LastIKTargetTransform.GetRotation()));
-			bTargetChanged = (PosDelta > TargetChangePosThreshold) || (RotDelta > TargetChangeRotThreshold);
+			bTargetChanged = (PosDelta > IKTargetChangePosThreshold) || (RotDelta > IKTargetChangeRotThreshold);
 		}
 
 		if (bTargetChanged)
@@ -2305,8 +2302,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 
 	FIKSolveResult IKResult;
 
-	if (false) // Temporarily disabled to debug DLS
-	// if (bUseFABRIK)
+	if (IKSolverType == EIKSolverType::FABRIK)
 	{
 		if (bEnableDebugLogging)
 		{

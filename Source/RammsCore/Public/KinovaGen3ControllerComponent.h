@@ -30,6 +30,16 @@ enum class EArmControlMode : uint8
 };
 
 /**
+ * IK solver selection
+ */
+UENUM(BlueprintType)
+enum class EIKSolverType : uint8
+{
+	DLS UMETA(DisplayName = "Damped Least Squares (DLS)"),
+	FABRIK UMETA(DisplayName = "FABRIK")
+};
+
+/**
  * Which angular axis of the constraint is being controlled
  */
 UENUM(BlueprintType)
@@ -210,63 +220,71 @@ public:
 	EJointControlMode ControlMode = EJointControlMode::PositionControl;
 
 	/** Optional target actor to follow for IK (if set, overrides TargetEndEffectorTransform) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Target")
 	AActor* TargetActor = nullptr;
 
 	/** Target end effector transform (world space) - used when ArmControlMode is EndEffectorControl and TargetActor is null */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Target")
 	FTransform TargetEndEffectorTransform;
 
+	/** IK solver technique */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver")
+	EIKSolverType IKSolverType = EIKSolverType::DLS;
+
 	/** IK convergence tolerance (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (ClampMin = "0.01"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.01"))
 	float IKPositionTolerance = 1.0f;
 
 	/** IK convergence tolerance (degrees) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.1"))
 	float IKRotationTolerance = 5.0f;
 
+	/** Task-space mask: control which DOFs [X, Y, Z, Roll, Pitch, Yaw] */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common")
+	TArray<bool> TaskSpaceMask = {true, true, true, false, false, true}; // Position + Yaw only by default
+
+	/** Threshold for detecting target position changes (cm). Smaller = more sensitive. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Target Change", meta = (ClampMin = "0.0"))
+	float IKTargetChangePosThreshold = 0.01f;
+
+	/** Threshold for detecting target rotation changes (degrees). Smaller = more sensitive. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Target Change", meta = (ClampMin = "0.0"))
+	float IKTargetChangeRotThreshold = 0.1f;
+
 	/** IK iterations per frame (DLS performs multiple iterations internally) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (ClampMin = "1", ClampMax = "500"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "1", ClampMax = "500", EditCondition = "IKSolverType == EIKSolverType::DLS"))
 	int32 MaxIKIterations = 300;
 
 	/** DLS damping factor (0.01-1.0, higher = more stable but slower convergence) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "IKSolverType == EIKSolverType::DLS"))
 	float IKDampingFactor = 0.1f;
 
 	/** Maximum joint velocity step per iteration (radians, prevents large jumps) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "0.01", ClampMax = "1.0", EditCondition = "IKSolverType == EIKSolverType::DLS"))
 	float IKStepClip = 0.2f;
 
-	/** Task-space mask: control which DOFs [X, Y, Z, Roll, Pitch, Yaw] */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector")
-	TArray<bool> TaskSpaceMask = {true, true, true, false, false, true}; // Position + Yaw only by default
-
 	/** Joint weights for DLS (empty = equal weights, higher = prefer not to move this joint) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (EditCondition = "IKSolverType == EIKSolverType::DLS"))
 	TArray<float> JointWeights;
 
 	/** Enable null-space optimization for redundant manipulators */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (EditCondition = "IKSolverType == EIKSolverType::DLS"))
 	bool bEnableNullSpaceOptimization = false;
 
 	/** Null-space gain (0-1, strength of bias toward preferred joint configuration) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bEnableNullSpaceOptimization"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "IKSolverType == EIKSolverType::DLS && bEnableNullSpaceOptimization"))
 	float NullSpaceGain = 0.1f;
 
 	/** Preferred joint angles for null-space optimization (degrees) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector", meta = (EditCondition = "bEnableNullSpaceOptimization"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (EditCondition = "IKSolverType == EIKSolverType::DLS && bEnableNullSpaceOptimization"))
 	TArray<float> NullSpaceBias;
 
-	/** Use FABRIK solver instead of DLS (for testing/comparison) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|FABRIK")
-	bool bUseFABRIK = true;
-
 	/** Maximum FABRIK iterations per solve */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|FABRIK", meta = (ClampMin = "1", ClampMax = "100", EditCondition = "bUseFABRIK"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "1", ClampMax = "100", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
 	int32 FABRIKMaxIterations = 15;
 
 	/** Position convergence tolerance for FABRIK (cm) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|FABRIK", meta = (ClampMin = "0.01", EditCondition = "bUseFABRIK"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.01", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
 	float FABRIKPositionTolerance = 1.0f;
 
 	/** Joint configurations (5-7 joints for Kinova Gen3) */
