@@ -107,6 +107,8 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 					// Get current angular position
 					Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
 					Joint.TargetAngle = Joint.CurrentAngle;
+					Joint.SmoothedAngle = Joint.CurrentAngle;
+					Joint.bSmoothedAngleInitialized = true;
 
 					if (bEnableDebugLogging)
 					{
@@ -357,8 +359,41 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 	// Update control based on arm control mode
 	if (ArmControlMode == EArmControlMode::EndEffectorControl)
 	{
-		// Use inverse kinematics to reach target
-		UpdateInverseKinematics(DeltaTime);
+		// Keep target in sync with actor if provided
+		if (TargetActor && TargetActor->IsValidLowLevel())
+		{
+			TargetEndEffectorTransform = TargetActor->GetActorTransform();
+		}
+
+		// Only solve IK while we are moving toward a target or the target has changed
+		const float TargetChangePosThreshold = 0.01f; // cm
+		const float TargetChangeRotThreshold = 0.1f;  // degrees
+
+		bool bTargetChanged = false;
+		if (!bIKTargetInitialized)
+		{
+			bTargetChanged = true;
+			bIKTargetInitialized = true;
+		}
+		else
+		{
+			const float PosDelta = FVector::Dist(TargetEndEffectorTransform.GetLocation(), LastIKTargetTransform.GetLocation());
+			const float RotDelta = FMath::RadiansToDegrees(
+				TargetEndEffectorTransform.GetRotation().AngularDistance(LastIKTargetTransform.GetRotation()));
+			bTargetChanged = (PosDelta > TargetChangePosThreshold) || (RotDelta > TargetChangeRotThreshold);
+		}
+
+		if (bTargetChanged)
+		{
+			bIKTargetSatisfied = false;
+			LastIKTargetTransform = TargetEndEffectorTransform;
+		}
+
+		if (!bIKTargetSatisfied)
+		{
+			UpdateInverseKinematics(DeltaTime);
+			bIKTargetSatisfied = bLastIKSuccess;
+		}
 	}
 
 	// Update joint control based on mode
@@ -490,21 +525,32 @@ void UKinovaGen3ControllerComponent::ApplyJointSettings(FRevoluteJointConfig& Jo
         TargetForDrive = ClampToLimits(Joint, TargetForDrive);
       }
 
-    // Enforce max speed (deg/sec) by limiting setpoint change per tick
+    // Enforce max speed (deg/sec) by limiting setpoint change per tick.
+    // Use current joint angle as the start to smoothly lerp toward the target.
+    if (!Joint.bSmoothedAngleInitialized)
+      {
+        Joint.SmoothedAngle = Joint.CurrentAngle;
+        Joint.bSmoothedAngleInitialized = true;
+      }
+
     const float MaxDeltaDeg = Joint.MaxAngularSpeed * Joint.SpeedMultiplier * DeltaTime;
     if (MaxDeltaDeg > 0.0f)
       {
         const float DeltaDeg = FMath::FindDeltaAngleDegrees(Joint.SmoothedAngle, TargetForDrive);
         const float ClampedDelta = FMath::Clamp(DeltaDeg, -MaxDeltaDeg, MaxDeltaDeg);
         Joint.SmoothedAngle = Joint.SmoothedAngle + ClampedDelta;
-
-        if (Joint.bEnableSoftwareLimits)
-          {
-            Joint.SmoothedAngle = ClampToLimits(Joint, Joint.SmoothedAngle);
-          }
-        
-        TargetForDrive = Joint.SmoothedAngle;
       }
+    else
+      {
+        Joint.SmoothedAngle = TargetForDrive;
+      }
+
+    if (Joint.bEnableSoftwareLimits)
+      {
+        Joint.SmoothedAngle = ClampToLimits(Joint, Joint.SmoothedAngle);
+      }
+
+    TargetForDrive = Joint.SmoothedAngle;
 
     // Add offsets when commanding (FK angle -> constraint angle)
     const float ConstraintAngle = TargetForDrive + Joint.AngleOffset; // (see note below)
@@ -1480,16 +1526,22 @@ TArray<float> UKinovaGen3ControllerComponent::GetAllJointAngles() const
 void UKinovaGen3ControllerComponent::SetEndEffectorTarget(const FTransform& TargetTransform)
 {
 	TargetEndEffectorTransform = TargetTransform;
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetPosition(const FVector& TargetPosition)
 {
 	TargetEndEffectorTransform.SetLocation(TargetPosition);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetRotation(const FRotator& TargetRotation)
 {
 	TargetEndEffectorTransform.SetRotation(TargetRotation.Quaternion());
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToBase(const FTransform& RelativeTransform)
@@ -1503,6 +1555,8 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToBase(const FT
 	// Convert from component-relative to world space
 	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
 	TargetEndEffectorTransform = RelativeTransform * BaseTransform;
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1525,6 +1579,8 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToBase(
 	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
 	FVector WorldPosition = BaseTransform.TransformPosition(RelativePosition);
 	TargetEndEffectorTransform.SetLocation(WorldPosition);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1545,6 +1601,8 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToActor(const F
 	// Convert from actor-relative to world space
 	FTransform ActorTransform = Owner->GetActorTransform();
 	TargetEndEffectorTransform = RelativeTransform * ActorTransform;
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1568,6 +1626,8 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToActor
 	FTransform ActorTransform = Owner->GetActorTransform();
 	FVector WorldPosition = ActorTransform.TransformPosition(RelativePosition);
 	TargetEndEffectorTransform.SetLocation(WorldPosition);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1613,6 +1673,8 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetBy(const FVector& Offs
 	// Move target by world-space offset
 	FVector CurrentPos = TargetEndEffectorTransform.GetLocation();
 	TargetEndEffectorTransform.SetLocation(CurrentPos + Offset);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1632,6 +1694,8 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetByLocal(const FVector&
 	
 	FVector CurrentPos = TargetEndEffectorTransform.GetLocation();
 	TargetEndEffectorTransform.SetLocation(CurrentPos + WorldOffset);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1713,26 +1777,6 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 {
 	if (!SkeletalMeshComponent || Joints.Num() == 0)
 		return;
-
-	// Update target transform from target actor if set
-	static FVector LastTargetPosition = FVector::ZeroVector;
-	static int32 FrameCounter = 0;
-	FrameCounter++;
-	
-	if (TargetActor && TargetActor->IsValidLowLevel())
-	{
-		TargetEndEffectorTransform = TargetActor->GetActorTransform();
-		
-		FVector CurrentTargetPos = TargetEndEffectorTransform.GetLocation();
-		float TargetMovement = FVector::Dist(CurrentTargetPos, LastTargetPosition);
-		
-		if (bEnableDebugLogging && (FrameCounter % 60 == 0 || TargetMovement > 0.1f))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Gen3] Frame %d: UpdateIK called, Target=(%.1f,%.1f,%.1f), Moved=%.2fcm"),
-				FrameCounter, CurrentTargetPos.X, CurrentTargetPos.Y, CurrentTargetPos.Z, TargetMovement);
-		}
-		LastTargetPosition = CurrentTargetPos;
-	}
 	
 	// Debug: Log joint order once
 	static bool bLoggedJointOrder = false;

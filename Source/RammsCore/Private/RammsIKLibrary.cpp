@@ -180,17 +180,6 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	double posErrCm = 0.0;
 	double rotErrDeg = 0.0;
 	
-	static bool bLoggedBase = false;
-	if (!bLoggedBase)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[IK Solver] BaseTransform: Loc=(%.1f, %.1f, %.1f) Rot=(%.1f, %.1f, %.1f)"),
-			BaseTransform.GetLocation().X, BaseTransform.GetLocation().Y, BaseTransform.GetLocation().Z,
-			BaseTransform.Rotator().Pitch, BaseTransform.Rotator().Yaw, BaseTransform.Rotator().Roll);
-		UE_LOG(LogTemp, Warning, TEXT("[IK Solver] JointLocalTransforms[0]: Loc=(%.1f, %.1f, %.1f)"),
-			JointLocalTransforms[0].GetLocation().X, JointLocalTransforms[0].GetLocation().Y, JointLocalTransforms[0].GetLocation().Z);
-		bLoggedBase = true;
-	}
-
 	for (int32 it = 0; it < MaxIterations; it++)
 	{
 		ComputeChainKinematics(BaseTransform, qDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset,
@@ -210,25 +199,6 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 		Out.RotationError = (float)rotErrDeg;
 		Out.IterationsUsed = it + 1;
 		
-		// Debug: Log FK vs target on first and last iteration
-		static bool bLoggedOnce = false;
-		if (!bLoggedOnce || it == MaxIterations - 1 || (posErrCm <= PositionToleranceCm && rotErrDeg <= RotationToleranceDeg))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[IK Solver] Iter %d: FK EE=(%.1f, %.1f, %.1f) Target=(%.1f, %.1f, %.1f) Error=%.1fcm"),
-				it,
-				EEWorld.GetLocation().X, EEWorld.GetLocation().Y, EEWorld.GetLocation().Z,
-				TargetEndEffectorWorld.GetLocation().X, TargetEndEffectorWorld.GetLocation().Y, TargetEndEffectorWorld.GetLocation().Z,
-				posErrCm);
-			
-			if (it == 0)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[IK Solver] Base: (%.1f, %.1f, %.1f)"),
-					BaseTransform.GetLocation().X, BaseTransform.GetLocation().Y, BaseTransform.GetLocation().Z);
-			}
-			
-			if (!bLoggedOnce) bLoggedOnce = true;
-		}
-
 		if (posErrCm <= PositionToleranceCm && rotErrDeg <= RotationToleranceDeg)
 		{
 			Out.bSuccess = true;

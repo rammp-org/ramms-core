@@ -81,6 +81,9 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	
 	/** Smoothed angle for speed limiting (interpolates toward TargetAngle) */
 	float SmoothedAngle = 0.0f;
+	
+	/** Tracks whether SmoothedAngle has been initialized from the current joint angle */
+	bool bSmoothedAngleInitialized = false;
 
 	/** Maximum angular velocity (degrees/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
@@ -281,6 +284,11 @@ public:
 	float LastIKRotationError = 0.0f;
 	int32 LastIKIterations = 0;
 	bool bLastIKSuccess = false;
+	
+	/** Cached target transform to detect changes and avoid unnecessary IK solving */
+	FTransform LastIKTargetTransform = FTransform::Identity;
+	bool bIKTargetInitialized = false;
+	bool bIKTargetSatisfied = false;
 
 	// ========== Blueprint API ==========
 
