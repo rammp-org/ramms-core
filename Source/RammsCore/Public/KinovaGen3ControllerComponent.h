@@ -97,7 +97,7 @@ struct RAMMSCORE_API FRevoluteJointConfig
 
 	/** Maximum angular velocity (degrees/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
-	float MaxAngularSpeed = 45.0f;
+	float MaxAngularSpeed = 60.0f;
 
 	/** Speed multiplier (0-1) for dynamic speed adjustment */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -307,6 +307,8 @@ public:
 	FTransform LastIKTargetTransform = FTransform::Identity;
 	bool bIKTargetInitialized = false;
 	bool bIKTargetSatisfied = false;
+	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
+	bool bIKSolverTypeInitialized = false;
 
 	// ========== Blueprint API ==========
 
@@ -446,34 +448,6 @@ public:
 	void AutoPopulateJoints(bool bOverwriteExisting = true);
 
 	/**
-	 * Auto-detect which constraint axis is free/limited (not locked) for a joint
-	 * @param JointIndex - Index of the joint to configure
-	 * @return True if a free/limited axis was found
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	bool AutoDetectJointAxis(int32 JointIndex);
-
-	/**
-	 * Auto-detect axes for all joints
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	void AutoDetectAllJointAxes();
-
-	/**
-	 * Initialize/reinitialize constraint drives for all joints
-	 * Call this after changing joint configuration or control parameters
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	void ReinitializeConstraints();
-	
-	/**
-	 * Calibrate angle offsets - captures current constraint angles as offsets
-	 * Call this when the arm is in the reference skeleton pose
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	void CalibrateAngleOffsets();
-
-	/**
 	 * Validate FK accuracy by comparing FK prediction to actual bone positions
 	 * Returns maximum error in cm across all joints
 	 */
@@ -536,14 +510,8 @@ private:
 	/** Update using inverse kinematics to reach end effector target */
 	void UpdateInverseKinematics(float DeltaTime);
 	
-	/** Compute empirical rotation axis by perturbing the constraint and observing bone movement */
-	FVector ComputeEmpiricalRotationAxis(int32 JointIndex, const FTransform& ParentWorldTransform);
-
 	/** Initialize constraint drives for all joints (one-time setup) */
 	void InitializeJointConstraints();
-
-	/** Cache joint rotation axes for FK/IK without modifying constraint drives */
-	void CacheJointAxes();
 
 	/** Apply settings to a revolute joint */
 	void ApplyJointSettings(FRevoluteJointConfig& Joint, float DeltaTime);

@@ -10,7 +10,11 @@
 UKinovaGen3ControllerComponent::UKinovaGen3ControllerComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+// #if WITH_EDITORONLY_DATA
+// 	bTickInEditor = true;
+// #endif
 }
 
 #if WITH_EDITOR
@@ -149,13 +153,6 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 			UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Initialized with %d joints"), Joints.Num());
 		}
 	}
-
-    // CalibrateAngleOffsets();
-    // // After calibration, reset targets to current FK angles (usually ~0)
-    // for (FRevoluteJointConfig& Joint : Joints)
-    //   {
-    //     Joint.TargetAngle = 0.0f;
-    //   }
 }
 
 void UKinovaGen3ControllerComponent::InitializeJointConstraints()
@@ -329,11 +326,6 @@ void UKinovaGen3ControllerComponent::InitializeJointConstraints()
 	UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Cached %d joint axes for FK/IK"), CachedJointAxesLocal.Num());
 }
 
-void UKinovaGen3ControllerComponent::ReinitializeConstraints()
-{
-	InitializeJointConstraints();
-}
-
 void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -359,6 +351,15 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 	// Update control based on arm control mode
 	if (ArmControlMode == EArmControlMode::EndEffectorControl)
 	{
+		// If solver type changes, force a fresh solve
+		if (!bIKSolverTypeInitialized || IKSolverType != LastIKSolverType)
+		{
+			bIKSolverTypeInitialized = true;
+			LastIKSolverType = IKSolverType;
+			bIKTargetInitialized = false;
+			bIKTargetSatisfied = false;
+		}
+
 		// Keep target in sync with actor if provided
 		if (TargetActor && TargetActor->IsValidLowLevel())
 		{
@@ -990,66 +991,6 @@ void UKinovaGen3ControllerComponent::AutoPopulateJointsFromConstraints()
 	AutoPopulateJoints(true);
 }
 
-bool UKinovaGen3ControllerComponent::AutoDetectJointAxis(int32 JointIndex)
-{
-	if (!Joints.IsValidIndex(JointIndex))
-		return false;
-
-	FRevoluteJointConfig& Joint = Joints[JointIndex];
-	
-	if (!SkeletalMeshComponent)
-		return false;
-
-	FName ConstraintToUse = Joint.ConstraintName != NAME_None ? Joint.ConstraintName : Joint.BoneName;
-	FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
-	
-	if (!Constraint)
-		return false;
-
-	// Check each axis in order of preference (Twist -> Swing1 -> Swing2)
-	if (IsAxisFreeOrLimited(Constraint, EConstraintAxis::Twist))
-	{
-		Joint.ControlledAxis = EConstraintAxis::Twist;
-	}
-	else if (IsAxisFreeOrLimited(Constraint, EConstraintAxis::Swing1))
-	{
-		Joint.ControlledAxis = EConstraintAxis::Swing1;
-	}
-	else if (IsAxisFreeOrLimited(Constraint, EConstraintAxis::Swing2))
-	{
-		Joint.ControlledAxis = EConstraintAxis::Swing2;
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] No free/limited axis found for joint %s"),
-			*Joint.BoneName.ToString());
-		return false;
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Joint %s configured to use %s axis"),
-		*Joint.BoneName.ToString(),
-		Joint.ControlledAxis == EConstraintAxis::Twist ? TEXT("Twist") :
-		Joint.ControlledAxis == EConstraintAxis::Swing1 ? TEXT("Swing1") : TEXT("Swing2"));
-
-	return true;
-}
-
-void UKinovaGen3ControllerComponent::AutoDetectAllJointAxes()
-{
-	int32 SuccessCount = 0;
-	
-	for (int32 i = 0; i < Joints.Num(); ++i)
-	{
-		if (AutoDetectJointAxis(i))
-		{
-			SuccessCount++;
-		}
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Auto-detected axes for %d/%d joints"),
-		SuccessCount, Joints.Num());
-}
-
 void UKinovaGen3ControllerComponent::DebugDraw()
 {
 	if (!SkeletalMeshComponent)
@@ -1058,6 +999,23 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 	UWorld* World = GetWorld();
 	if (!World)
 		return;
+
+	const bool bPersistent = !World->IsGameWorld();
+	const float DebugLife = bPersistent ? 0.0f : 0.2f;
+	if (bPersistent)
+	{
+		FlushPersistentDebugLines(World);
+	}
+
+	static bool bLoggedDebugDraw = false;
+	if (bEnableDebugLogging && !bLoggedDebugDraw)
+	{
+		bLoggedDebugDraw = true;
+		UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] DebugDraw active (WorldType=%d)"), (int32)World->WorldType);
+	}
+
+	// Always draw a small beacon so we can confirm debug draw is active
+	DrawDebugSphere(World, SkeletalMeshComponent->GetComponentLocation(), 6.0f, 8, FColor::White, bPersistent, DebugLife, 0, 1.5f);
 
 	// Draw joint frames
 	if (bShowJointFrames)
@@ -1078,9 +1036,9 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 			
 			// Draw coordinate frame
 			float AxisLength = 10.0f;
-			DrawDebugLine(World, Origin, Origin + BoneTransform.GetUnitAxis(EAxis::X) * AxisLength, FColor::Red, false, 0.0f, 0, 1.0f);
-			DrawDebugLine(World, Origin, Origin + BoneTransform.GetUnitAxis(EAxis::Y) * AxisLength, FColor::Green, false, 0.0f, 0, 1.0f);
-			DrawDebugLine(World, Origin, Origin + BoneTransform.GetUnitAxis(EAxis::Z) * AxisLength, FColor::Blue, false, 0.0f, 0, 1.0f);
+			DrawDebugLine(World, Origin, Origin + BoneTransform.GetUnitAxis(EAxis::X) * AxisLength, FColor::Red, bPersistent, DebugLife, 0, 1.0f);
+			DrawDebugLine(World, Origin, Origin + BoneTransform.GetUnitAxis(EAxis::Y) * AxisLength, FColor::Green, bPersistent, DebugLife, 0, 1.0f);
+			DrawDebugLine(World, Origin, Origin + BoneTransform.GetUnitAxis(EAxis::Z) * AxisLength, FColor::Blue, bPersistent, DebugLife, 0, 1.0f);
 			
 			// Draw the actual rotation axis for this joint (in IK mode, show which axis it rotates around)
 			if (ArmControlMode == EArmControlMode::EndEffectorControl)
@@ -1125,14 +1083,14 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 					float DebugAxisLen = AxisLength * 2.0f;
 					
 					// Draw all three axes with labels
-					DrawDebugLine(World, Origin, Origin + XAxis * DebugAxisLen, FColor::Red, false, 0.0f, 0, 3.0f);
-					DrawDebugString(World, Origin + XAxis * DebugAxisLen, TEXT("X(Twist)"), nullptr, FColor::Red, 0.0f, false, 1.0f);
+					DrawDebugLine(World, Origin, Origin + XAxis * DebugAxisLen, FColor::Red, bPersistent, DebugLife, 0, 3.0f);
+					DrawDebugString(World, Origin + XAxis * DebugAxisLen, TEXT("X(Twist)"), nullptr, FColor::Red, DebugLife, false, 1.0f);
 					
-					DrawDebugLine(World, Origin, Origin + YAxis * DebugAxisLen, FColor::Green, false, 0.0f, 0, 3.0f);
-					DrawDebugString(World, Origin + YAxis * DebugAxisLen, TEXT("Y(Swing2)"), nullptr, FColor::Green, 0.0f, false, 1.0f);
+					DrawDebugLine(World, Origin, Origin + YAxis * DebugAxisLen, FColor::Green, bPersistent, DebugLife, 0, 3.0f);
+					DrawDebugString(World, Origin + YAxis * DebugAxisLen, TEXT("Y(Swing2)"), nullptr, FColor::Green, DebugLife, false, 1.0f);
 					
-					DrawDebugLine(World, Origin, Origin + ZAxis * DebugAxisLen, FColor::Blue, false, 0.0f, 0, 3.0f);
-					DrawDebugString(World, Origin + ZAxis * DebugAxisLen, TEXT("Z(Swing1)"), nullptr, FColor::Blue, 0.0f, false, 1.0f);
+					DrawDebugLine(World, Origin, Origin + ZAxis * DebugAxisLen, FColor::Blue, bPersistent, DebugLife, 0, 3.0f);
+					DrawDebugString(World, Origin + ZAxis * DebugAxisLen, TEXT("Z(Swing1)"), nullptr, FColor::Blue, DebugLife, false, 1.0f);
 					
 					// Also highlight the axis being used for THIS joint in magenta
 					// CORRECT MAPPING: Twist=X, Swing1=Z, Swing2=Y
@@ -1161,28 +1119,28 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 						AxisName += TEXT(" [INV]");
 					}
 					
-					DrawDebugLine(World, Origin, Origin + ActiveAxis * DebugAxisLen * 1.2f, FColor::Magenta, false, 0.0f, 0, 5.0f);
-					DrawDebugString(World, Origin + ActiveAxis * DebugAxisLen * 1.2f, AxisName, nullptr, FColor::Magenta, 0.0f, true, 1.2f);
+					DrawDebugLine(World, Origin, Origin + ActiveAxis * DebugAxisLen * 1.2f, FColor::Magenta, bPersistent, DebugLife, 0, 5.0f);
+					DrawDebugString(World, Origin + ActiveAxis * DebugAxisLen * 1.2f, AxisName, nullptr, FColor::Magenta, DebugLife, true, 1.2f);
 				}
 			}
 			
 			// Draw a small label with joint name
-			DrawDebugString(World, Origin, Joint.BoneName.ToString(), nullptr, FColor::White, 0.0f, true, 0.8f);
+			DrawDebugString(World, Origin, Joint.BoneName.ToString(), nullptr, FColor::White, DebugLife, true, 0.8f);
 		}
 	}
 
 	// Draw end-effector
 	if (EndEffectorBoneName != NAME_None)
 	{
-		DrawDebugSphere(World, EndEffectorState.Position, 5.0f, 8, FColor::Yellow, false, 0.0f, 0, 2.0f);
+		DrawDebugSphere(World, EndEffectorState.Position, 5.0f, 8, FColor::Yellow, bPersistent, DebugLife, 0, 2.0f);
 		
 		// Draw end-effector frame
 		FTransform EndEffectorTransform = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
 		FVector Origin = EndEffectorTransform.GetLocation();
 		float AxisLength = 15.0f;
-		DrawDebugLine(World, Origin, Origin + EndEffectorTransform.GetUnitAxis(EAxis::X) * AxisLength, FColor::Red, false, 0.0f, 0, 2.0f);
-		DrawDebugLine(World, Origin, Origin + EndEffectorTransform.GetUnitAxis(EAxis::Y) * AxisLength, FColor::Green, false, 0.0f, 0, 2.0f);
-		DrawDebugLine(World, Origin, Origin + EndEffectorTransform.GetUnitAxis(EAxis::Z) * AxisLength, FColor::Blue, false, 0.0f, 0, 2.0f);
+		DrawDebugLine(World, Origin, Origin + EndEffectorTransform.GetUnitAxis(EAxis::X) * AxisLength, FColor::Red, bPersistent, DebugLife, 0, 2.0f);
+		DrawDebugLine(World, Origin, Origin + EndEffectorTransform.GetUnitAxis(EAxis::Y) * AxisLength, FColor::Green, bPersistent, DebugLife, 0, 2.0f);
+		DrawDebugLine(World, Origin, Origin + EndEffectorTransform.GetUnitAxis(EAxis::Z) * AxisLength, FColor::Blue, bPersistent, DebugLife, 0, 2.0f);
 	}
 
 	// Draw IK target when in end effector control mode
@@ -1192,22 +1150,22 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 		FQuat TargetRot = TargetEndEffectorTransform.GetRotation();
 		
 		// Draw target position as cyan sphere
-		DrawDebugSphere(World, TargetPos, 8.0f, 12, FColor::Cyan, false, 0.0f, 0, 3.0f);
+		DrawDebugSphere(World, TargetPos, 8.0f, 12, FColor::Cyan, bPersistent, DebugLife, 0, 3.0f);
 		
 		// Draw target orientation frame
 		float TargetAxisLength = 20.0f;
-		DrawDebugLine(World, TargetPos, TargetPos + TargetRot.GetAxisX() * TargetAxisLength, FColor::Red, false, 0.0f, 0, 3.0f);
-		DrawDebugLine(World, TargetPos, TargetPos + TargetRot.GetAxisY() * TargetAxisLength, FColor::Green, false, 0.0f, 0, 3.0f);
-		DrawDebugLine(World, TargetPos, TargetPos + TargetRot.GetAxisZ() * TargetAxisLength, FColor::Blue, false, 0.0f, 0, 3.0f);
+		DrawDebugLine(World, TargetPos, TargetPos + TargetRot.GetAxisX() * TargetAxisLength, FColor::Red, bPersistent, DebugLife, 0, 3.0f);
+		DrawDebugLine(World, TargetPos, TargetPos + TargetRot.GetAxisY() * TargetAxisLength, FColor::Green, bPersistent, DebugLife, 0, 3.0f);
+		DrawDebugLine(World, TargetPos, TargetPos + TargetRot.GetAxisZ() * TargetAxisLength, FColor::Blue, bPersistent, DebugLife, 0, 3.0f);
 		
 		// Draw line from current to target end effector
 		if (EndEffectorBoneName != NAME_None)
 		{
-			DrawDebugLine(World, EndEffectorState.Position, TargetPos, FColor::Cyan, false, 0.0f, 0, 1.0f);
+			DrawDebugLine(World, EndEffectorState.Position, TargetPos, FColor::Cyan, bPersistent, DebugLife, 0, 1.0f);
 		}
 		
 		// Draw label
-		DrawDebugString(World, TargetPos + FVector(0, 0, 15), TEXT("IK Target"), nullptr, FColor::Cyan, 0.0f, true, 1.0f);
+		DrawDebugString(World, TargetPos + FVector(0, 0, 15), TEXT("IK Target"), nullptr, FColor::Cyan, DebugLife, true, 1.0f);
 		
 		// ===== DEBUG: Draw FK skeleton to verify FK computation =====
 		if (Joints.Num() > 0)
@@ -1352,8 +1310,8 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 			
 			// Draw FK chain using RammsIKLibrary
 			FVector BasePosWorld = BaseTransform.GetLocation();
-			DrawDebugSphere(World, BasePosWorld, 3.0f, 8, FColor::Orange, false, 0.0f, 0, 2.0f);
-			DrawDebugString(World, BasePosWorld, TEXT("FK Base"), nullptr, FColor::Orange, 0.0f, true, 0.8f);
+			DrawDebugSphere(World, BasePosWorld, 3.0f, 8, FColor::Orange, bPersistent, DebugLife, 0, 2.0f);
+			DrawDebugString(World, BasePosWorld, TEXT("FK Base"), nullptr, FColor::Orange, DebugLife, true, 0.8f);
 			
 			// FVector PrevPosWorld = BasePosWorld;
 			
@@ -1370,11 +1328,11 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 				FVector JointPivotWorld = JointFrame.GetLocation();
 				
 				// Draw link from previous position to this joint pivot
-				DrawDebugLine(World, PrevPosWorld, JointPivotWorld, FColor::Orange, false, 0.0f, 0, 3.0f);
+				DrawDebugLine(World, PrevPosWorld, JointPivotWorld, FColor::Orange, bPersistent, DebugLife, 0, 3.0f);
 				
 				// Draw joint pivot sphere
-				DrawDebugSphere(World, JointPivotWorld, 3.0f, 8, FColor::Orange, false, 0.0f, 0, 2.0f);
-				DrawDebugString(World, JointPivotWorld, FString::Printf(TEXT("J%d"), i), nullptr, FColor::Orange, 0.0f, true, 0.8f);
+				DrawDebugSphere(World, JointPivotWorld, 3.0f, 8, FColor::Orange, bPersistent, DebugLife, 0, 2.0f);
+				DrawDebugString(World, JointPivotWorld, FString::Printf(TEXT("J%d"), i), nullptr, FColor::Orange, DebugLife, true, 0.8f);
 				
 				// 2. Rotate at this joint pivot
 				//    JointAxesLocal[i] is in joint's local frame, so transform via JointFrame
@@ -1387,7 +1345,7 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 				CurrentTransform = JointFrame;
 				
 				// Draw joint axis after rotation
-				DrawDebugLine(World, JointPivotWorld, JointPivotWorld + WorldAxis * 15.0f, FColor::Purple, false, 0.0f, 0, 4.0f);
+				DrawDebugLine(World, JointPivotWorld, JointPivotWorld + WorldAxis * 15.0f, FColor::Purple, bPersistent, DebugLife, 0, 4.0f);
 				
 				PrevPosWorld = JointPivotWorld;
 			}
@@ -1396,9 +1354,9 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 			FTransform FKEndEffectorWorld = URammsIKLibrary::ComputeForwardKinematics(
 				BaseTransform, CurrentAngles, JointLocalTransforms, JointAxesLocal, EndEffectorOffset, false);
 			
-			DrawDebugLine(World, PrevPosWorld, FKEndEffectorWorld.GetLocation(), FColor::Orange, false, 0.0f, 0, 3.0f);
-			DrawDebugSphere(World, FKEndEffectorWorld.GetLocation(), 5.0f, 12, FColor::Orange, false, 0.0f, 0, 3.0f);
-			DrawDebugString(World, FKEndEffectorWorld.GetLocation(), TEXT("FK EE"), nullptr, FColor::Orange, 0.0f, true, 1.0f);
+			DrawDebugLine(World, PrevPosWorld, FKEndEffectorWorld.GetLocation(), FColor::Orange, bPersistent, DebugLife, 0, 3.0f);
+			DrawDebugSphere(World, FKEndEffectorWorld.GetLocation(), 5.0f, 12, FColor::Orange, bPersistent, DebugLife, 0, 3.0f);
+			DrawDebugString(World, FKEndEffectorWorld.GetLocation(), TEXT("FK EE"), nullptr, FColor::Orange, DebugLife, true, 1.0f);
 		}
 	}
 
@@ -1633,38 +1591,6 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToActor
 	}
 }
 
-void UKinovaGen3ControllerComponent::CalibrateAngleOffsets()
-{
-	if (!SkeletalMeshComponent)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot calibrate: No skeletal mesh component"));
-		return;
-	}
-	
-	UE_LOG(LogTemp, Warning, TEXT("[Gen3] === Calibrating Angle Offsets ==="));
-	UE_LOG(LogTemp, Warning, TEXT("[Gen3] Make sure arm is in reference skeleton pose!"));
-	
-	for (int32 i = 0; i < Joints.Num(); i++)
-	{
-		FRevoluteJointConfig& Joint = Joints[i];
-		FName ConstraintName = (Joint.ConstraintName != NAME_None) ? Joint.ConstraintName : Joint.BoneName;
-		FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintName);
-		
-		if (Constraint)
-		{
-			float CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
-			Joint.AngleOffset = CurrentAngle;
-            Joint.CurrentAngle = 0.0f;
-            Joint.TargetAngle = 0.0f;
-			
-			UE_LOG(LogTemp, Warning, TEXT("[Gen3] Joint[%d] '%s': Captured offset = %.2f°"), 
-				i, *Joint.BoneName.ToString(), Joint.AngleOffset);
-		}
-	}
-	
-	UE_LOG(LogTemp, Warning, TEXT("[Gen3] === Calibration Complete ==="));
-}
-
 void UKinovaGen3ControllerComponent::MoveEndEffectorTargetBy(const FVector& Offset)
 {
 	// Move target by world-space offset
@@ -1702,72 +1628,6 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetByLocal(const FVector&
 			TargetEndEffectorTransform.GetLocation().Y,
 			TargetEndEffectorTransform.GetLocation().Z);
 	}
-}
-
-FVector UKinovaGen3ControllerComponent::ComputeEmpiricalRotationAxis(int32 JointIndex, const FTransform& ParentWorldTransform)
-{
-	if (!SkeletalMeshComponent || JointIndex < 0 || JointIndex >= Joints.Num())
-	{
-		return FVector::XAxisVector;
-	}
-	
-	FRevoluteJointConfig& Joint = Joints[JointIndex];
-	FName ConstraintName = (Joint.ConstraintName != NAME_None) ? Joint.ConstraintName : Joint.BoneName;
-	FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintName);
-	
-	if (!Constraint)
-	{
-		return FVector::XAxisVector;
-	}
-	
-	int32 BoneIdx = SkeletalMeshComponent->GetBoneIndex(Joint.BoneName);
-	if (BoneIdx == INDEX_NONE)
-	{
-		return FVector::XAxisVector;
-	}
-	
-	// Get current angle
-	float OriginalAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
-	
-	// Get bone transform at current angle (component space)
-	FTransform OriginalTransformCS = SkeletalMeshComponent->GetBoneTransform(BoneIdx, FTransform::Identity);
-	FVector OriginalPosWorld = OriginalTransformCS.GetLocation();
-	
-	// Apply small perturbation (+5 degrees)
-	float PerturbedAngle = OriginalAngle + 5.0f;
-	SetConstraintAngle(Constraint, Joint.ControlledAxis, PerturbedAngle);
-	
-	// Force a physics update to see the change
-	// Note: This is a hack - ideally we'd compute this from constraint frames directly
-	// For now, we'll just compute from constraint frame orientation
-	
-	// Restore original angle immediately
-	SetConstraintAngle(Constraint, Joint.ControlledAxis, OriginalAngle);
-	
-	// Instead, let's extract the axis from the constraint frame, but transform it properly
-	// through the parent's world transform
-	FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
-	
-	// Get axis in Frame1 local space
-	FVector AxisInFrame1;
-	switch (Joint.ControlledAxis)
-	{
-	case EConstraintAxis::Swing1:
-		AxisInFrame1 = Frame1.GetUnitAxis(EAxis::Z);
-		break;
-	case EConstraintAxis::Swing2:
-		AxisInFrame1 = Frame1.GetUnitAxis(EAxis::Y);
-		break;
-	case EConstraintAxis::Twist:
-	default:
-		AxisInFrame1 = Frame1.GetUnitAxis(EAxis::X);
-		break;
-	}
-	
-	// Transform axis through parent's world transform to get world-space axis
-	FVector AxisWorld = ParentWorldTransform.TransformVectorNoScale(AxisInFrame1);
-	
-	return AxisWorld.GetSafeNormal();
 }
 
 void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
