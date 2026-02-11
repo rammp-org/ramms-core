@@ -287,6 +287,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.01", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
 	float FABRIKPositionTolerance = 1.0f;
 
+	/** Angle gain multiplier for axis-constrained FABRIK (higher = more aggressive) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
+	float FABRIKAngleGain = 1.5f;
+
+	/** Maximum angle step per joint update (degrees) for FABRIK (stability near target) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.1", ClampMax = "45.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
+	float FABRIKMaxAngleStepDeg = 8.0f;
+
 	/** Joint configurations (5-7 joints for Kinova Gen3) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joints")
 	TArray<FRevoluteJointConfig> Joints;

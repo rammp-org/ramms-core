@@ -12,9 +12,6 @@ UKinovaGen3ControllerComponent::UKinovaGen3ControllerComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
-// #if WITH_EDITORONLY_DATA
-// 	bTickInEditor = true;
-// #endif
 }
 
 #if WITH_EDITOR
@@ -1000,18 +997,12 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 	if (!World)
 		return;
 
-	const bool bPersistent = !World->IsGameWorld();
-	const float DebugLife = bPersistent ? 0.0f : 0.2f;
+    // 0 life means single frame, >0 means persistent for that many seconds, negative means infinite
+	const float DebugLife = 0.0f;
+    const bool bPersistent = false; // Set to true if you want the debug lines to persist for a while
 	if (bPersistent)
 	{
 		FlushPersistentDebugLines(World);
-	}
-
-	static bool bLoggedDebugDraw = false;
-	if (bEnableDebugLogging && !bLoggedDebugDraw)
-	{
-		bLoggedDebugDraw = true;
-		UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] DebugDraw active (WorldType=%d)"), (int32)World->WorldType);
 	}
 
 	// Always draw a small beacon so we can confirm debug draw is active
@@ -2214,7 +2205,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			TargetEndEffectorTransform,
 			TaskSpaceMask,
 			FABRIKMaxIterations,
-			FABRIKPositionTolerance);
+			FABRIKPositionTolerance,
+			IKRotationTolerance,
+			FABRIKAngleGain,
+			FABRIKMaxAngleStepDeg);
 
 		if (bEnableDebugLogging)
 		{
@@ -2273,6 +2267,13 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	
 	if (bEnableDebugLogging)
 	{
+		// Predicted FK error using IKResult angles (model space)
+		const FTransform PredictedEE = URammsIKLibrary::ComputeForwardKinematics(
+			BaseTransform, IKResult.JointAngles, JointLocalTransforms, JointAxesLocal, EndEffectorOffset, false);
+		const float PredictedPosError = FVector::Dist(PredictedEE.GetLocation(), TargetEndEffectorTransform.GetLocation());
+		const FQuat PredictedRotErrQ = TargetEndEffectorTransform.GetRotation() * PredictedEE.GetRotation().Inverse();
+		const float PredictedRotErrDeg = FMath::RadiansToDegrees(PredictedRotErrQ.GetAngle());
+
 		// Log first 3 target angles to see if they're changing
 		FString TargetStr = TEXT("");
 		FString CurrentStr = TEXT("");
@@ -2287,6 +2288,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		
 		UE_LOG(LogTemp, Log, TEXT("[Gen3] IK: FK_Success=%d, Actual_Success=%d, FK_PosErr=%.1fcm, Actual_PosErr=%.1fcm, RotErr=%.1fdeg, Iter=%d"),
 			IKResult.bSuccess, bLastIKSuccess, IKResult.PositionError, ActualPosError, IKResult.RotationError, IKResult.IterationsUsed);
+		UE_LOG(LogTemp, Log, TEXT("[Gen3] IK Predicted: PosErr=%.2fcm, RotErr=%.2fdeg"), PredictedPosError, PredictedRotErrDeg);
 		UE_LOG(LogTemp, Log, TEXT("  Targets: %s | Current: %s"), *TargetStr, *CurrentStr);
 	}
 }

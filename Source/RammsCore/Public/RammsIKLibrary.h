@@ -134,6 +134,9 @@ public:
 	 * @param TaskSpaceMask6 Which DOFs to solve [X,Y,Z,Roll,Pitch,Yaw]
 	 * @param MaxIterations Maximum FABRIK iterations
 	 * @param PositionToleranceCm Position convergence tolerance in cm
+	 * @param RotationToleranceDeg Rotation convergence tolerance in degrees
+	 * @param AngleGain Multiplier for per-joint angle updates (FABRIK aggressiveness)
+	 * @param MaxAngleStepDeg Maximum per-joint step (deg) for stability near target
 	 * @return Solve result with joint angles and convergence info
 	 */
 	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|FABRIK")
@@ -147,5 +150,8 @@ public:
 		const FTransform& TargetEndEffectorWorld,
 		const TArray<bool>& TaskSpaceMask6,
 		int32 MaxIterations,
-		float PositionToleranceCm);
+		float PositionToleranceCm,
+		float RotationToleranceDeg,
+		float AngleGain,
+		float MaxAngleStepDeg);
 };

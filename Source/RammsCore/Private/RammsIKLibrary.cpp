@@ -364,7 +364,10 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 	const FTransform& TargetEndEffectorWorld,
 	const TArray<bool>& TaskSpaceMask6,
 	int32 MaxIterations,
-	float PositionToleranceCm)
+	float PositionToleranceCm,
+	float RotationToleranceDeg,
+	float AngleGain,
+	float MaxAngleStepDeg)
 {
 	FIKSolveResult Result;
 	Result.bSuccess = false;
@@ -390,6 +393,13 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 	TArray<FVector> JointAxisWorld;
 	FTransform EEWorld;
 
+	// Optional orientation refinement using the last few joints.
+	bool bSolveOrientation = false;
+	if (TaskSpaceMask6.Num() >= 6)
+	{
+		bSolveOrientation = TaskSpaceMask6[3] || TaskSpaceMask6[4] || TaskSpaceMask6[5];
+	}
+
 	for (int32 Iteration = 0; Iteration < MaxIterations; Iteration++)
 	{
 		Result.IterationsUsed = Iteration + 1;
@@ -405,14 +415,30 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 			EEWorld);
 
 		const float CurrentError = FVector::Dist(EEWorld.GetLocation(), TargetPosition);
-		if (CurrentError <= PositionToleranceCm)
+		const float GainScale = FMath::Clamp(CurrentError / FMath::Max(PositionToleranceCm * 5.0f, 1.0f), 0.1f, 1.0f);
+		if (!bSolveOrientation)
 		{
-			Result.bSuccess = true;
-			Result.PositionError = CurrentError;
-			break;
+			if (CurrentError <= PositionToleranceCm)
+			{
+				Result.bSuccess = true;
+				Result.PositionError = CurrentError;
+				break;
+			}
+		}
+		else
+		{
+			const FQuat CurRotErr = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+			const float CurRotDeg = FMath::RadiansToDegrees(CurRotErr.GetAngle());
+			if (CurrentError <= PositionToleranceCm && CurRotDeg <= RotationToleranceDeg)
+			{
+				Result.bSuccess = true;
+				Result.PositionError = CurrentError;
+				Result.RotationError = CurRotDeg;
+				break;
+			}
 		}
 
-		// Backward pass: adjust joints from end effector to base
+		// Backward pass: adjust joints from end effector to base (position only)
 		for (int32 i = NumJoints - 1; i >= 0; i--)
 		{
 			const FVector JointPos = JointPosWorld[i];
@@ -420,7 +446,8 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 			const FVector ToTarget = (TargetPosition - JointPos).GetSafeNormal();
 
 			const FVector Axis = (i < JointAxisWorld.Num()) ? JointAxisWorld[i] : FVector::XAxisVector;
-			const float Delta = CalculateSignedAngle(ToEE, ToTarget, Axis);
+			float Delta = CalculateSignedAngle(ToEE, ToTarget, Axis) * AngleGain * GainScale;
+			Delta = FMath::Clamp(Delta, -MaxAngleStepDeg, MaxAngleStepDeg);
 
 			float NewAngle = Angles[i] + Delta;
 			NewAngle = FMath::Clamp(NewAngle, JointLimitsDeg[i].X, JointLimitsDeg[i].Y);
@@ -438,11 +465,59 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 		}
 	}
 
+	if (bSolveOrientation)
+	{
+		// Small CCD-style orientation correction using end-effector rotation error.
+		const int32 StartIdx = FMath::Max(0, NumJoints - 3);
+		for (int32 Iter = 0; Iter < 5; Iter++)
+		{
+			ComputeChainKinematics(
+				BaseTransform,
+				Angles,
+				JointLocalTransforms,
+				JointAxesLocal,
+				EndEffectorOffset,
+				JointPosWorld,
+				JointAxisWorld,
+				EEWorld);
+
+			const FQuat Qerr = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+			if (Qerr.IsIdentity())
+			{
+				break;
+			}
+
+			for (int32 i = NumJoints - 1; i >= StartIdx; i--)
+			{
+				const FVector Axis = (i < JointAxisWorld.Num()) ? JointAxisWorld[i] : FVector::XAxisVector;
+				// Rotate around joint axis to reduce orientation error
+				float AngleRad;
+				FVector ErrAxis;
+				Qerr.ToAxisAndAngle(ErrAxis, AngleRad);
+
+				const float Sign = FVector::DotProduct(ErrAxis.GetSafeNormal(), Axis.GetSafeNormal()) >= 0.0f ? 1.0f : -1.0f;
+				float DeltaDeg = FMath::RadiansToDegrees(AngleRad) * Sign * 0.5f; // damp
+
+				float NewAngle = Angles[i] + DeltaDeg;
+				NewAngle = FMath::Clamp(NewAngle, JointLimitsDeg[i].X, JointLimitsDeg[i].Y);
+				Angles[i] = NewAngle;
+			}
+		}
+	}
+
 	Result.JointAngles = Angles;
+	// Final error metrics
+	Result.PositionError = FVector::Dist(EEWorld.GetLocation(), TargetPosition);
+	const FQuat FinalRotErr = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+	Result.RotationError = FMath::RadiansToDegrees(FinalRotErr.GetAngle());
+
 	if (!Result.bSuccess)
 	{
-		Result.PositionError = FVector::Dist(EEWorld.GetLocation(), TargetPosition);
 		Result.bSuccess = (Result.PositionError <= PositionToleranceCm);
+		if (bSolveOrientation)
+		{
+			Result.bSuccess = Result.bSuccess && (Result.RotationError <= RotationToleranceDeg);
+		}
 	}
 
 	return Result;
