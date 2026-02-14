@@ -59,10 +59,10 @@ public:
 	void InteractWithRamp();
 
 	// Manual control functions
-	UFUNCTION(BlueprintCallable, Category = "Van Ramp")
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Van Ramp")
 	void DeployRamp();
 
-	UFUNCTION(BlueprintCallable, Category = "Van Ramp")
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Van Ramp")
 	void RetractRamp();
 
 	// Get current ramp state

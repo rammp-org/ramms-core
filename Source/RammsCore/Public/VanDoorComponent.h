@@ -67,10 +67,10 @@ public:
 	void InteractWithDoor();
 
 	// Manual control functions
-	UFUNCTION(BlueprintCallable, Category = "Van Door")
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Van Door")
 	void OpenDoor();
 
-	UFUNCTION(BlueprintCallable, Category = "Van Door")
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Van Door")
 	void CloseDoor();
 
 	// Get current door state

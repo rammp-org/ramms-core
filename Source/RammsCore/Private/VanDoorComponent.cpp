@@ -183,6 +183,12 @@ void UVanDoorComponent::OpenDoor()
 	if (DoorState == EDoorState::Closed || DoorState == EDoorState::Closing)
 	{
 		DoorState = EDoorState::Opening;
+		// Ensure physics wakes up and target is applied immediately
+		if (CachedSkeletalMesh)
+		{
+			CachedSkeletalMesh->WakeAllRigidBodies();
+		}
+		UpdateDoorConstraint();
 		if (bEnableDebugLog)
 		{
 			UE_LOG(LogTemp, Log, TEXT("VanDoorComponent: Starting to OPEN door"));
@@ -195,6 +201,12 @@ void UVanDoorComponent::CloseDoor()
 	if (DoorState == EDoorState::Open || DoorState == EDoorState::Opening)
 	{
 		DoorState = EDoorState::Closing;
+		// Ensure physics wakes up and target is applied immediately
+		if (CachedSkeletalMesh)
+		{
+			CachedSkeletalMesh->WakeAllRigidBodies();
+		}
+		UpdateDoorConstraint();
 		if (bEnableDebugLog)
 		{
 			UE_LOG(LogTemp, Log, TEXT("VanDoorComponent: Starting to CLOSE door"));
@@ -350,8 +362,10 @@ void UVanDoorComponent::DrawDebugVisualization()
 		return;
 	}
 
-	// Use skeletal mesh location as base reference
-	FVector BaseLocation = CachedSkeletalMesh->GetComponentLocation();
+	// Use skeletal mesh transform as base reference (handles actor rotation)
+	const FTransform BaseTransform = CachedSkeletalMesh->GetComponentTransform();
+	const FVector BaseLocation = BaseTransform.GetLocation();
+	const FQuat BaseRotation = BaseTransform.GetRotation();
 
 	// Draw each keyframe with short lifetime to prevent accumulation
 	FVector PreviousWorldLocation = BaseLocation;
@@ -360,15 +374,15 @@ void UVanDoorComponent::DrawDebugVisualization()
 		const FDoorKeyframe& Keyframe = DoorKeyframes[i];
 		
 		// Calculate world position for this keyframe
-		FVector KeyframeOffset = Keyframe.LinearPosition;
-		FVector WorldLocation = BaseLocation + KeyframeOffset;
+		FVector WorldLocation = BaseTransform.TransformPosition(Keyframe.LinearPosition);
+		const FQuat WorldRotation = (BaseRotation * Keyframe.AngularPosition.Quaternion()).GetNormalized();
 
 		// Color gradient from green to red
 		FLinearColor LerpedColor = FLinearColor::LerpUsingHSV(FLinearColor::Green, FLinearColor::Red, Keyframe.Time);
 		FColor GizmoColor = LerpedColor.ToFColor(true);
 
 		// Draw coordinate system at keyframe location (0.0f lifetime = just this frame)
-		DrawDebugCoordinateSystem(World, WorldLocation, Keyframe.AngularPosition, GizmoSize, false, 0.0f, 0, 2.0f);
+		DrawDebugCoordinateSystem(World, WorldLocation, WorldRotation.Rotator(), GizmoSize, false, 0.0f, 0, 2.0f);
 
 		// Draw sphere at keyframe location
 		DrawDebugSphere(World, WorldLocation, 15.0f, 8, GizmoColor, false, 0.0f, 0, 3.0f);
@@ -391,7 +405,7 @@ void UVanDoorComponent::DrawDebugVisualization()
 	FVector CurrentTarget;
 	FRotator CurrentAngular;
 	GetKeyframePositions(NormalizedTime, CurrentTarget, CurrentAngular);
-	FVector CurrentWorldPos = BaseLocation + CurrentTarget;
+	FVector CurrentWorldPos = BaseTransform.TransformPosition(CurrentTarget);
 
 	// Draw current target position as a larger sphere
 	FColor StateColor = (DoorState == EDoorState::Open || DoorState == EDoorState::Opening) ? FColor::Green : FColor::Blue;
