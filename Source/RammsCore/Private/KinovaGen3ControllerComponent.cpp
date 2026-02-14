@@ -3,9 +3,19 @@
 #include "KinovaGen3ControllerComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/ConstraintInstance.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "DrawDebugHelpers.h"
 #include "RammsIKLibrary.h"
 #include "Engine/SkeletalMeshSocket.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "UObject/UnrealType.h"
+#include "Engine/SCS_Node.h"
+#if WITH_EDITOR
+#include "Engine/SimpleConstructionScript.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "ScopedTransaction.h"
+#endif
 
 UKinovaGen3ControllerComponent::UKinovaGen3ControllerComponent()
 {
@@ -39,6 +49,10 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 
 	// Find the skeletal mesh component
 	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		Owner = GetTypedOuter<AActor>();
+	}
 	if (Owner)
 	{
 		if (SkeletalMeshComponentName != NAME_None)
@@ -107,7 +121,10 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 
 					// Get current angular position
 					Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
-					Joint.TargetAngle = Joint.CurrentAngle;
+					if (!bPreserveJointTargetsOnBeginPlay || ArmControlMode == EArmControlMode::EndEffectorControl)
+					{
+						Joint.TargetAngle = Joint.CurrentAngle;
+					}
 					Joint.SmoothedAngle = Joint.CurrentAngle;
 					Joint.bSmoothedAngleInitialized = true;
 
@@ -809,35 +826,144 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 	if (!TempSkeletalMesh)
 	{
 		AActor* Owner = GetOwner();
-		if (!Owner)
+		if (Owner)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot auto-populate joints: No owner actor"));
-			return;
-		}
+			// print the name of the owner actor for debugging
+			UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] AutoPopulateJoints: Owner actor is %s"), *Owner->GetName());
 
-		if (SkeletalMeshComponentName != NAME_None)
-		{
-			TArray<USkeletalMeshComponent*> SkeletalMeshes;
-			Owner->GetComponents<USkeletalMeshComponent>(SkeletalMeshes);
-			
-			for (USkeletalMeshComponent* SkelMesh : SkeletalMeshes)
+			if (SkeletalMeshComponentName != NAME_None)
 			{
-				if (SkelMesh && SkelMesh->GetFName() == SkeletalMeshComponentName)
+				TArray<USkeletalMeshComponent*> SkeletalMeshes;
+				Owner->GetComponents<USkeletalMeshComponent>(SkeletalMeshes);
+				
+				for (USkeletalMeshComponent* SkelMesh : SkeletalMeshes)
 				{
-					TempSkeletalMesh = SkelMesh;
-					break;
+					if (SkelMesh && SkelMesh->GetFName() == SkeletalMeshComponentName)
+					{
+						TempSkeletalMesh = SkelMesh;
+						break;
+					}
 				}
+			}
+			else
+			{
+				TempSkeletalMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
 			}
 		}
 		else
 		{
-			TempSkeletalMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+			// Try SCS node template directly
+			if (USCS_Node* OwningNode = GetTypedOuter<USCS_Node>())
+			{
+				USkeletalMeshComponent* TemplateSkel = Cast<USkeletalMeshComponent>(OwningNode->ComponentTemplate);
+				if (TemplateSkel && (SkeletalMeshComponentName == NAME_None || TemplateSkel->GetFName() == SkeletalMeshComponentName))
+				{
+					TempSkeletalMesh = TemplateSkel;
+				}
+			}
+
+			// Blueprint editor/template path: find component on the CDO
+			UObject* OuterObj = GetOuter();
+			UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(OuterObj);
+			AActor* CDOActor = BPGC ? Cast<AActor>(BPGC->GetDefaultObject()) : nullptr;
+
+			if (!CDOActor && OuterObj)
+			{
+				UClass* OuterClass = OuterObj->GetClass();
+				UObject* CDOObj = OuterClass ? OuterClass->GetDefaultObject() : nullptr;
+				CDOActor = Cast<AActor>(CDOObj);
+			}
+
+			if (CDOActor)
+			{
+				if (bEnableDebugLogging)
+				{
+					TArray<UActorComponent*> CDOComponents;
+					CDOActor->GetComponents(CDOComponents);
+					UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] CDO component dump (%d components):"), CDOComponents.Num());
+					for (UActorComponent* Comp : CDOComponents)
+					{
+						USkeletalMeshComponent* SkelComp = Cast<USkeletalMeshComponent>(Comp);
+						UE_LOG(LogTemp, Warning, TEXT("  - %s (%s)"), *GetNameSafe(Comp), SkelComp ? TEXT("SkeletalMeshComponent") : TEXT("Other"));
+					}
+				}
+
+				if (SkeletalMeshComponentName != NAME_None)
+				{
+					TArray<USkeletalMeshComponent*> SkeletalMeshes;
+					CDOActor->GetComponents<USkeletalMeshComponent>(SkeletalMeshes);
+
+					for (USkeletalMeshComponent* SkelMesh : SkeletalMeshes)
+					{
+						if (SkelMesh && SkelMesh->GetFName() == SkeletalMeshComponentName)
+						{
+							TempSkeletalMesh = SkelMesh;
+							break;
+						}
+					}
+				}
+				else
+				{
+					TempSkeletalMesh = CDOActor->FindComponentByClass<USkeletalMeshComponent>();
+				}
+			}
+
+			// If still not found, scan SCS nodes on the blueprint class directly
+			if (!TempSkeletalMesh && BPGC && BPGC->SimpleConstructionScript)
+			{
+				const TArray<USCS_Node*> SCSNodes = BPGC->SimpleConstructionScript->GetAllNodes();
+				if (bEnableDebugLogging)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SCS node dump (%d nodes):"), SCSNodes.Num());
+				}
+				for (USCS_Node* Node : SCSNodes)
+				{
+					if (!Node)
+					{
+						continue;
+					}
+					UActorComponent* TemplateComp = Node->ComponentTemplate;
+					USkeletalMeshComponent* SkelTemplate = Cast<USkeletalMeshComponent>(TemplateComp);
+					if (bEnableDebugLogging)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("  - %s (%s)"),
+							*GetNameSafe(TemplateComp),
+							SkelTemplate ? TEXT("SkeletalMeshComponent") : TEXT("Other"));
+					}
+
+					if (!SkelTemplate)
+					{
+						continue;
+					}
+
+					const FName TemplateName = SkelTemplate->GetFName();
+					const FName VariableName = Node->GetVariableName();
+					const FString TemplateNameStr = TemplateName.ToString();
+					const FString TargetNameStr = SkeletalMeshComponentName.ToString();
+					const FString TemplateBase = TemplateNameStr.Replace(TEXT("_GEN_VARIABLE"), TEXT(""));
+
+					const bool bNameMatch =
+						SkeletalMeshComponentName == NAME_None ||
+						TemplateName == SkeletalMeshComponentName ||
+						VariableName == SkeletalMeshComponentName ||
+						TemplateBase == TargetNameStr;
+
+					if (bNameMatch)
+					{
+						TempSkeletalMesh = SkelTemplate;
+						break;
+					}
+				}
+			}
 		}
 	}
 
 	if (!TempSkeletalMesh)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot auto-populate joints: No skeletal mesh component"));
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot auto-populate joints: No skeletal mesh component (Owner=%s Outer=%s OuterClass=%s)"),
+			*GetNameSafe(GetOwner()),
+			*GetNameSafe(GetOuter()),
+			*GetNameSafe(GetOuter() ? GetOuter()->GetClass() : nullptr));
 		return;
 	}
 
@@ -850,19 +976,23 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 		Joints.Empty();
 	}
 
-	// Get all physics constraints from the skeletal mesh
+	TArray<FRevoluteJointConfig> NewJoints;
+	if (!bOverwriteExisting)
+	{
+		NewJoints = Joints;
+	}
+
+	// Get all physics constraints from the skeletal mesh (runtime) or physics asset (editor/CDO)
 	TArray<FConstraintInstanceAccessor> ConstraintAccessors;
 	TempSkeletalMesh->GetConstraints(false, ConstraintAccessors);
 
 	UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Found %d constraint accessors on skeletal mesh"), ConstraintAccessors.Num());
 
-	for (FConstraintInstanceAccessor& Accessor : ConstraintAccessors)
+	auto AddJointFromConstraint = [&](FConstraintInstance* Constraint)
 	{
-		FConstraintInstance* Constraint = Accessor.Get();
 		if (!Constraint)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Constraint accessor returned null constraint"));
-			continue;
+			return;
 		}
 
 		UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Checking constraint: %s"), *Constraint->JointName.ToString());
@@ -879,7 +1009,9 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 			IsAxisFreeOrLimited(Constraint, EConstraintAxis::Swing2));
 
 		if (!bHasFreeAxis)
-			continue;
+		{
+			return;
+		}
 
 		// Create a joint config for this constraint
 		FRevoluteJointConfig NewJoint;
@@ -970,7 +1102,7 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 		NewJoint.CurrentAngle = GetConstraintAngle(Constraint, NewJoint.ControlledAxis);
 		NewJoint.TargetAngle = NewJoint.CurrentAngle;
 
-		Joints.Add(NewJoint);
+		NewJoints.Add(NewJoint);
 
 		UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Added joint: %s (Constraint: %s, Axis: %s, Limits: %.1f to %.1f)"),
 			*NewJoint.BoneName.ToString(),
@@ -978,13 +1110,47 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 			NewJoint.ControlledAxis == EConstraintAxis::Twist ? TEXT("Twist") :
 			NewJoint.ControlledAxis == EConstraintAxis::Swing1 ? TEXT("Swing1") : TEXT("Swing2"),
 			NewJoint.MinAngleLimit, NewJoint.MaxAngleLimit);
+	};
+
+	if (ConstraintAccessors.Num() > 0)
+	{
+		for (FConstraintInstanceAccessor& Accessor : ConstraintAccessors)
+		{
+			AddJointFromConstraint(Accessor.Get());
+		}
 	}
+	else
+	{
+		// Fallback: use physics asset constraints (works in BP editor/when not simulating)
+		USkeletalMesh* SkelAsset = TempSkeletalMesh->GetSkeletalMeshAsset();
+		UPhysicsAsset* PhysAsset = SkelAsset ? SkelAsset->GetPhysicsAsset() : nullptr;
+		if (!PhysAsset)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] No physics asset found for skeletal mesh"));
+			return;
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Using PhysicsAsset '%s' with %d constraints"), *PhysAsset->GetName(), PhysAsset->ConstraintSetup.Num());
+		for (UPhysicsConstraintTemplate* Template : PhysAsset->ConstraintSetup)
+		{
+			if (!Template)
+			{
+				continue;
+			}
+			AddJointFromConstraint(&Template->DefaultInstance);
+		}
+	}
+
+	Joints = NewJoints;
 
 	UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Auto-populated %d joints"), Joints.Num());
 }
 
 void UKinovaGen3ControllerComponent::AutoPopulateJointsFromConstraints()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] AutoPopulateJointsFromConstraints invoked. IsTemplate=%d Outer=%s"),
+		IsTemplate() ? 1 : 0,
+		*GetNameSafe(GetOuter()));
 	AutoPopulateJoints(true);
 }
 
@@ -1774,24 +1940,17 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
             FVector AxisWorld = FVector::XAxisVector;
             switch (Joints[i].ControlledAxis)
             {
-            case EConstraintAxis::Twist:
-                AxisWorld = Frame1World.GetUnitAxis(EAxis::X);
-                break;
             case EConstraintAxis::Swing1:
                 AxisWorld = Frame1World.GetUnitAxis(EAxis::Z);
                 break;
             case EConstraintAxis::Swing2:
                 AxisWorld = Frame1World.GetUnitAxis(EAxis::Y);
                 break;
+            case EConstraintAxis::Twist:
+                AxisWorld = Frame1World.GetUnitAxis(EAxis::X);
+                break;
             }
-            
-            // Log Frame1 axis in world space for debugging
-            if (i < 7)
-            {
-                UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Frame1 AxisWorld: (%.3f, %.3f, %.3f)"),
-                    i, AxisWorld.X, AxisWorld.Y, AxisWorld.Z);
-            }
-            
+                        
             // Auto-detect axis inversions based on expected robot geometry
             // For vertical arms: J0,J2,J4,J6 (Twist) should point ~+Z, J1,J3,J5 (Swing1) should point ~+Y
             FVector ExpectedDir = FVector::ZAxisVector;
@@ -1917,7 +2076,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	CachedEndEffectorOffset = EndEffectorOffset;
 	CachedJointLocalTransforms = JointLocalTransforms;
 	CachedJointAxesLocal = JointAxesLocal;
-	
+
 	// ============================================================================
 	// STEP 5: Get Current State
 	// ============================================================================
@@ -1928,7 +2087,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	{
 		BaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
 	}
-	
+
 	if (bEnableDebugLogging)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[Gen3] BaseRefTransform: Loc=(%.1f, %.1f, %.1f) Rot=(%.1f, %.1f, %.1f)"),
@@ -1937,6 +2096,81 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		UE_LOG(LogTemp, Log, TEXT("[Gen3] BaseTransform (current): Loc=(%.1f, %.1f, %.1f) Rot=(%.1f, %.1f, %.1f)"),
 			BaseTransform.GetLocation().X, BaseTransform.GetLocation().Y, BaseTransform.GetLocation().Z,
 			BaseTransform.Rotator().Pitch, BaseTransform.Rotator().Yaw, BaseTransform.Rotator().Roll);
+	}
+
+	// ============================================================================
+	// Optional: Build solver chain directly from constraint frames (FABRIK/CCD)
+	// This avoids ref-skeleton frame mismatches for hinge-projected solvers.
+	// ============================================================================
+	TArray<FTransform> JointLocalTransformsForSolver = JointLocalTransforms;
+	TArray<FVector> JointAxesLocalForSolver = JointAxesLocal;
+	FTransform EndEffectorOffsetForSolver = EndEffectorOffset;
+	bool bUseConstraintChain = (IKSolverType == EIKSolverType::FABRIK || IKSolverType == EIKSolverType::CCD || IKSolverType == EIKSolverType::UEBuiltIn);
+
+	if (bUseConstraintChain)
+	{
+		TArray<FTransform> ConstraintLocalTransforms;
+		TArray<FVector> ConstraintAxesLocal;
+		ConstraintLocalTransforms.SetNum(Joints.Num());
+		ConstraintAxesLocal.SetNum(Joints.Num());
+
+		bool bConstraintChainValid = true;
+		for (int32 i = 0; i < Joints.Num(); i++)
+		{
+			const FRevoluteJointConfig& Joint = Joints[i];
+			FName ConstraintToUse = Joint.ConstraintName != NAME_None ? Joint.ConstraintName : Joint.BoneName;
+			FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+			if (!Constraint)
+			{
+				bConstraintChainValid = false;
+				break;
+			}
+
+			// Frame1 is expressed in parent body space (constraint frame)
+			const FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
+			ConstraintLocalTransforms[i] = Frame1;
+
+			// Axis is defined in joint (frame1) local space
+			FVector AxisLocal = FVector::XAxisVector;
+			switch (Joint.ControlledAxis)
+			{
+			case EConstraintAxis::Twist:
+				AxisLocal = FVector::XAxisVector;
+				break;
+			case EConstraintAxis::Swing1:
+				AxisLocal = FVector::YAxisVector;
+				break;
+			case EConstraintAxis::Swing2:
+				AxisLocal = FVector::ZAxisVector;
+				break;
+			}
+
+			if (Joint.bInvertAxisForIK)
+			{
+				AxisLocal = -AxisLocal;
+			}
+
+			ConstraintAxesLocal[i] = AxisLocal;
+		}
+
+		if (bConstraintChainValid)
+		{
+			// Compute end-effector offset relative to last joint frame (constraint chain)
+			FTransform ChainTransform = BaseTransform;
+			for (int32 i = 0; i < ConstraintLocalTransforms.Num(); i++)
+			{
+				ChainTransform = ConstraintLocalTransforms[i] * ChainTransform;
+			}
+
+			if (EndEffectorBoneName != NAME_None)
+			{
+				const FTransform EEWorld = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
+				EndEffectorOffsetForSolver = EEWorld.GetRelativeTransform(ChainTransform);
+			}
+
+			JointLocalTransformsForSolver = ConstraintLocalTransforms;
+			JointAxesLocalForSolver = ConstraintAxesLocal;
+		}
 	}
 	
 	// Get current joint angles (in degrees)
@@ -2175,7 +2409,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			
 			// Compute what FK predicts current EE position should be
 			FTransform FK_CurrentEE = URammsIKLibrary::ComputeForwardKinematics(
-				BaseTransform, CurrentAngles, JointLocalTransforms, JointAxesLocal, EndEffectorOffset, false);
+				BaseTransform, CurrentAngles, JointLocalTransformsForSolver, JointAxesLocalForSolver, EndEffectorOffsetForSolver, false);
 			UE_LOG(LogTemp, Warning, TEXT("[Gen3] FK Current EE: Loc=(%.1f, %.1f, %.1f)"),
 				FK_CurrentEE.GetLocation().X, FK_CurrentEE.GetLocation().Y, FK_CurrentEE.GetLocation().Z);
 			
@@ -2198,22 +2432,66 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		IKResult = URammsIKLibrary::SolveIK_FABRIK(
 			BaseTransform,
 			CurrentAngles,
-			JointLocalTransforms,
-			JointAxesLocal,
+			JointLocalTransformsForSolver,
+			JointAxesLocalForSolver,
 			JointLimits,
-			EndEffectorOffset,
+			EndEffectorOffsetForSolver,
 			TargetEndEffectorTransform,
 			TaskSpaceMask,
 			FABRIKMaxIterations,
 			FABRIKPositionTolerance,
 			IKRotationTolerance,
 			FABRIKAngleGain,
-			FABRIKMaxAngleStepDeg);
+			FABRIKMaxAngleStepDeg,
+			FABRIKLimitEscapeDeg,
+			FABRIKOrientationIterations,
+			FABRIKOrientationGain);
 
 		if (bEnableDebugLogging)
 		{
 			UE_LOG(LogTemp, Log, TEXT("[Gen3] FABRIK Solver: Success=%d, PosErr=%.2fcm, Iter=%d"),
 				IKResult.bSuccess, IKResult.PositionError, IKResult.IterationsUsed);
+		}
+	}
+	else if (IKSolverType == EIKSolverType::CCD)
+	{
+		IKResult = URammsIKLibrary::SolveIK_CCD(
+			BaseTransform,
+			CurrentAngles,
+			JointLocalTransformsForSolver,
+			JointAxesLocalForSolver,
+			JointLimits,
+			EndEffectorOffsetForSolver,
+			TargetEndEffectorTransform,
+			TaskSpaceMask,
+			CCDMaxIterations,
+			IKPositionTolerance,
+			IKRotationTolerance,
+			CCDPositionGain,
+			CCDOrientationGain,
+			CCDMaxAngleStepDeg);
+	}
+	else if (IKSolverType == EIKSolverType::UEBuiltIn)
+	{
+		IKResult = URammsIKLibrary::SolveIK_UEFabrik(
+			BaseTransform,
+			CurrentAngles,
+			JointLocalTransformsForSolver,
+			JointAxesLocalForSolver,
+			JointLimits,
+			EndEffectorOffsetForSolver,
+			TargetEndEffectorTransform,
+			TaskSpaceMask,
+			FABRIKMaxIterations,
+			FABRIKPositionTolerance,
+			IKRotationTolerance,
+			FABRIKLimitEscapeDeg,
+			false);
+
+		if (bEnableDebugLogging)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[Gen3] UE FABRIK Solver: Success=%d, PosErr=%.2fcm, RotErr=%.2fdeg, Iter=%d"),
+				IKResult.bSuccess, IKResult.PositionError, IKResult.RotationError, IKResult.IterationsUsed);
 		}
 	}
 	else
@@ -2268,8 +2546,11 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	if (bEnableDebugLogging)
 	{
 		// Predicted FK error using IKResult angles (model space)
+		const TArray<FTransform>& PredJointLocal = bUseConstraintChain ? JointLocalTransformsForSolver : JointLocalTransforms;
+		const TArray<FVector>& PredJointAxes = bUseConstraintChain ? JointAxesLocalForSolver : JointAxesLocal;
+		const FTransform PredEndOffset = bUseConstraintChain ? EndEffectorOffsetForSolver : EndEffectorOffset;
 		const FTransform PredictedEE = URammsIKLibrary::ComputeForwardKinematics(
-			BaseTransform, IKResult.JointAngles, JointLocalTransforms, JointAxesLocal, EndEffectorOffset, false);
+			BaseTransform, IKResult.JointAngles, PredJointLocal, PredJointAxes, PredEndOffset, false);
 		const float PredictedPosError = FVector::Dist(PredictedEE.GetLocation(), TargetEndEffectorTransform.GetLocation());
 		const FQuat PredictedRotErrQ = TargetEndEffectorTransform.GetRotation() * PredictedEE.GetRotation().Inverse();
 		const float PredictedRotErrDeg = FMath::RadiansToDegrees(PredictedRotErrQ.GetAngle());

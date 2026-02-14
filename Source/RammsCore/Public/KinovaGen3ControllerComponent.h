@@ -36,7 +36,9 @@ UENUM(BlueprintType)
 enum class EIKSolverType : uint8
 {
 	DLS UMETA(DisplayName = "Damped Least Squares (DLS)"),
-	FABRIK UMETA(DisplayName = "FABRIK")
+	FABRIK UMETA(DisplayName = "FABRIK"),
+	CCD UMETA(DisplayName = "CCD"),
+	UEBuiltIn UMETA(DisplayName = "UE Built-in IK (Pending)")
 };
 
 /**
@@ -201,7 +203,7 @@ public:
 
 	/** Name of the skeletal mesh component containing the arm bones (leave empty to auto-find first skeletal mesh) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Configuration")
-	FName SkeletalMeshComponentName = NAME_None;
+	FName SkeletalMeshComponentName = FName("ArmSkMesh");
 
 	/** When enabled, automatically populates joints when SkeletalMeshComponentName changes */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Configuration")
@@ -241,7 +243,7 @@ public:
 
 	/** Task-space mask: control which DOFs [X, Y, Z, Roll, Pitch, Yaw] */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common")
-	TArray<bool> TaskSpaceMask = {true, true, true, false, false, true}; // Position + Yaw only by default
+	TArray<bool> TaskSpaceMask = {true, true, true, true, true, true};
 
 	/** Threshold for detecting target position changes (cm). Smaller = more sensitive. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Target Change", meta = (ClampMin = "0.0"))
@@ -294,6 +296,34 @@ public:
 	/** Maximum angle step per joint update (degrees) for FABRIK (stability near target) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.1", ClampMax = "45.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
 	float FABRIKMaxAngleStepDeg = 8.0f;
+
+	/** Maximum "escape" step (deg) to move off joint limits if stuck */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.0", ClampMax = "20.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
+	float FABRIKLimitEscapeDeg = 2.0f;
+
+	/** Orientation refinement iterations after position solve */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0", ClampMax = "50", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
+	int32 FABRIKOrientationIterations = 10;
+
+	/** Orientation refinement gain (scaled relative to position gain) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
+	float FABRIKOrientationGain = 0.5f;
+
+	/** Maximum CCD iterations per solve */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "1", ClampMax = "200", EditCondition = "IKSolverType == EIKSolverType::CCD"))
+	int32 CCDMaxIterations = 60;
+
+	/** CCD position gain (higher = more aggressive) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "IKSolverType == EIKSolverType::CCD"))
+	float CCDPositionGain = 1.0f;
+
+	/** CCD orientation gain (higher = more aggressive) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "IKSolverType == EIKSolverType::CCD"))
+	float CCDOrientationGain = 0.5f;
+
+	/** Maximum CCD angle step per joint (degrees) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "0.1", ClampMax = "45.0", EditCondition = "IKSolverType == EIKSolverType::CCD"))
+	float CCDMaxAngleStepDeg = 8.0f;
 
 	/** Joint configurations (5-7 joints for Kinova Gen3) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joints")
@@ -455,6 +485,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
 	void AutoPopulateJoints(bool bOverwriteExisting = true);
 
+	/** Build joints from a skeletal mesh's PhysicsAsset constraints (editor-safe) */
+	bool BuildJointsFromPhysicsAsset(USkeletalMesh* SkeletalMeshAsset, TArray<FRevoluteJointConfig>& OutJoints) const;
+
 	/**
 	 * Validate FK accuracy by comparing FK prediction to actual bone positions
 	 * Returns maximum error in cm across all joints
@@ -487,6 +520,10 @@ public:
 	/** Enable debug logging */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Debug")
 	bool bEnableDebugLogging = false;
+
+	/** If true, keep per-joint TargetAngle values set in editor when PIE begins */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joint Control")
+	bool bPreserveJointTargetsOnBeginPlay = true;
 
 	/** Enable on-screen debug display */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Debug")

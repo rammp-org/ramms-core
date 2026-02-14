@@ -1,5 +1,6 @@
 #include "RammsIKLibrary.h"
 
+#include "FABRIK.h"
 #include "Math/UnrealMathUtility.h"
 #include "Logging/LogMacros.h"
 #include <Eigen/Dense>
@@ -319,6 +320,341 @@ static float CalculateSignedAngle(const FVector& From, const FVector& To, const 
 	return FMath::RadiansToDegrees(Angle);
 }
 
+static bool IsFreeLimit(const FVector2D& LimitsDeg)
+{
+	const float Range = LimitsDeg.Y - LimitsDeg.X;
+	return Range >= 359.0f;
+}
+
+static float WrapAngleDeg(float AngleDeg)
+{
+	return FMath::UnwindDegrees(AngleDeg);
+}
+
+static float ApplyAngleLimits(float AngleDeg, const FVector2D& LimitsDeg, float LimitEscapeDeg)
+{
+	if (IsFreeLimit(LimitsDeg))
+	{
+		return WrapAngleDeg(AngleDeg);
+	}
+
+	const float Clamped = FMath::Clamp(AngleDeg, LimitsDeg.X, LimitsDeg.Y);
+	if (FMath::IsNearlyEqual(Clamped, AngleDeg, 1e-3f) || LimitEscapeDeg <= 0.0f)
+	{
+		return Clamped;
+	}
+
+	// Nudge inward if we hit a hard limit
+	const float Center = 0.5f * (LimitsDeg.X + LimitsDeg.Y);
+	const float Dir = (Clamped < Center) ? 1.0f : -1.0f;
+	return FMath::Clamp(Clamped + Dir * LimitEscapeDeg, LimitsDeg.X, LimitsDeg.Y);
+}
+
+FIKSolveResult URammsIKLibrary::SolveIK_CCD(
+	const FTransform& BaseTransform,
+	const TArray<float>& CurrentAnglesDeg,
+	const TArray<FTransform>& JointLocalTransforms,
+	const TArray<FVector>& JointAxesLocal,
+	const TArray<FVector2D>& JointLimitsDeg,
+	const FTransform& EndEffectorOffset,
+	const FTransform& TargetEndEffectorWorld,
+	const TArray<bool>& TaskSpaceMask6,
+	int32 MaxIterations,
+	float PositionToleranceCm,
+	float RotationToleranceDeg,
+	float PositionGain,
+	float OrientationGain,
+	float MaxAngleStepDeg)
+{
+	FIKSolveResult Result;
+	Result.bSuccess = false;
+	Result.IterationsUsed = 0;
+	Result.PositionError = 0.0f;
+	Result.RotationError = 0.0f;
+
+	const int32 NumJoints = CurrentAnglesDeg.Num();
+	if (NumJoints == 0 || NumJoints != JointLocalTransforms.Num() ||
+		NumJoints != JointAxesLocal.Num() || NumJoints != JointLimitsDeg.Num())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CCD] Invalid input: joint count mismatch"));
+		return Result;
+	}
+
+	const FVector TargetPosition = TargetEndEffectorWorld.GetLocation();
+	TArray<float> Angles = CurrentAnglesDeg;
+	TArray<FVector> JointPosWorld;
+	TArray<FVector> JointAxisWorld;
+	FTransform EEWorld;
+
+	bool bSolveOrientation = false;
+	if (TaskSpaceMask6.Num() >= 6)
+	{
+		bSolveOrientation = TaskSpaceMask6[3] || TaskSpaceMask6[4] || TaskSpaceMask6[5];
+	}
+
+	for (int32 Iteration = 0; Iteration < MaxIterations; Iteration++)
+	{
+		Result.IterationsUsed = Iteration + 1;
+
+		ComputeChainKinematics(
+			BaseTransform,
+			Angles,
+			JointLocalTransforms,
+			JointAxesLocal,
+			EndEffectorOffset,
+			JointPosWorld,
+			JointAxisWorld,
+			EEWorld);
+
+		const float PosErr = FVector::Dist(EEWorld.GetLocation(), TargetPosition);
+		const FQuat RotErrQ = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+		const float RotErrDeg = FMath::RadiansToDegrees(RotErrQ.GetAngle());
+
+		if (!bSolveOrientation)
+		{
+			if (PosErr <= PositionToleranceCm)
+			{
+				Result.bSuccess = true;
+				Result.PositionError = PosErr;
+				Result.RotationError = RotErrDeg;
+				break;
+			}
+		}
+		else if (PosErr <= PositionToleranceCm && RotErrDeg <= RotationToleranceDeg)
+		{
+			Result.bSuccess = true;
+			Result.PositionError = PosErr;
+			Result.RotationError = RotErrDeg;
+			break;
+		}
+
+		for (int32 i = NumJoints - 1; i >= 0; i--)
+		{
+			ComputeChainKinematics(
+				BaseTransform,
+				Angles,
+				JointLocalTransforms,
+				JointAxesLocal,
+				EndEffectorOffset,
+				JointPosWorld,
+				JointAxisWorld,
+				EEWorld);
+
+			const FVector JointPos = JointPosWorld[i];
+			const FVector Axis = (i < JointAxisWorld.Num()) ? JointAxisWorld[i] : FVector::XAxisVector;
+
+			const FVector ToEE = (EEWorld.GetLocation() - JointPos).GetSafeNormal();
+			const FVector ToTarget = (TargetPosition - JointPos).GetSafeNormal();
+
+			float DeltaPos = CalculateSignedAngle(ToEE, ToTarget, Axis) * PositionGain;
+
+			float DeltaOri = 0.0f;
+			if (bSolveOrientation && OrientationGain > 0.0f)
+			{
+				const FQuat Qerr = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+				float AngleRad;
+				FVector ErrAxis;
+				Qerr.ToAxisAndAngle(ErrAxis, AngleRad);
+				const float Sign = FVector::DotProduct(ErrAxis.GetSafeNormal(), Axis.GetSafeNormal()) >= 0.0f ? 1.0f : -1.0f;
+				DeltaOri = FMath::RadiansToDegrees(AngleRad) * Sign * OrientationGain;
+			}
+
+			float Delta = DeltaPos + DeltaOri;
+			Delta = FMath::Clamp(Delta, -MaxAngleStepDeg, MaxAngleStepDeg);
+
+			float NewAngle = Angles[i] + Delta;
+			if (IsFreeLimit(JointLimitsDeg[i]))
+			{
+				NewAngle = WrapAngleDeg(NewAngle);
+			}
+			else
+			{
+				NewAngle = FMath::Clamp(NewAngle, JointLimitsDeg[i].X, JointLimitsDeg[i].Y);
+			}
+			Angles[i] = NewAngle;
+		}
+	}
+
+	ComputeChainKinematics(
+		BaseTransform,
+		Angles,
+		JointLocalTransforms,
+		JointAxesLocal,
+		EndEffectorOffset,
+		JointPosWorld,
+		JointAxisWorld,
+		EEWorld);
+
+	Result.JointAngles = Angles;
+	Result.PositionError = FVector::Dist(EEWorld.GetLocation(), TargetPosition);
+	const FQuat FinalRotErr = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+	Result.RotationError = FMath::RadiansToDegrees(FinalRotErr.GetAngle());
+
+	if (!Result.bSuccess)
+	{
+		Result.bSuccess = (Result.PositionError <= PositionToleranceCm);
+		if (bSolveOrientation)
+		{
+			Result.bSuccess = Result.bSuccess && (Result.RotationError <= RotationToleranceDeg);
+		}
+	}
+
+	return Result;
+}
+
+FIKSolveResult URammsIKLibrary::SolveIK_UEFabrik(
+	const FTransform& BaseTransform,
+	const TArray<float>& CurrentAnglesDeg,
+	const TArray<FTransform>& JointLocalTransforms,
+	const TArray<FVector>& JointAxesLocal,
+	const TArray<FVector2D>& JointLimitsDeg,
+	const FTransform& EndEffectorOffset,
+	const FTransform& TargetEndEffectorWorld,
+	const TArray<bool>& TaskSpaceMask6,
+	int32 MaxIterations,
+	float PositionToleranceCm,
+	float RotationToleranceDeg,
+	float LimitEscapeDeg,
+	bool bAxesInParentFrame)
+{
+	FIKSolveResult Result;
+	Result.bSuccess = false;
+	Result.IterationsUsed = 0;
+	Result.PositionError = 0.0f;
+	Result.RotationError = 0.0f;
+
+	const int32 NumJoints = CurrentAnglesDeg.Num();
+	if (NumJoints == 0 || NumJoints != JointLocalTransforms.Num() ||
+		NumJoints != JointAxesLocal.Num() || NumJoints != JointLimitsDeg.Num())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UEFABRIK] Invalid input: joint count mismatch"));
+		return Result;
+	}
+
+	TArray<FVector> JointPosWorld;
+	TArray<FVector> JointAxisWorld;
+	FTransform EEWorld;
+	ComputeChainKinematics(
+		BaseTransform,
+		CurrentAnglesDeg,
+		JointLocalTransforms,
+		JointAxesLocal,
+		EndEffectorOffset,
+		JointPosWorld,
+		JointAxisWorld,
+		EEWorld);
+
+	TArray<FVector> ChainPositions;
+	ChainPositions.SetNum(NumJoints + 1);
+	for (int32 i = 0; i < NumJoints; i++)
+	{
+		ChainPositions[i] = JointPosWorld[i];
+	}
+	ChainPositions[NumJoints] = EEWorld.GetLocation();
+
+	TArray<double> LinkLengths;
+	LinkLengths.SetNum(NumJoints + 1);
+	LinkLengths[0] = 0.0;
+	double MaximumReach = 0.0;
+	for (int32 i = 1; i < NumJoints + 1; i++)
+	{
+		const double Len = FVector::Dist(ChainPositions[i], ChainPositions[i - 1]);
+		LinkLengths[i] = Len;
+		MaximumReach += Len;
+	}
+
+	TArray<FFABRIKChainLink> Chain;
+	Chain.Reserve(NumJoints + 1);
+	for (int32 i = 0; i < NumJoints + 1; i++)
+	{
+		Chain.Add(FFABRIKChainLink(ChainPositions[i], LinkLengths[i], i, i));
+	}
+
+	MaxIterations = FMath::Clamp(MaxIterations, 1, 500);
+	const bool bModified = AnimationCore::SolveFabrik(
+		Chain,
+		TargetEndEffectorWorld.GetLocation(),
+		MaximumReach,
+		PositionToleranceCm,
+		MaxIterations);
+	Result.IterationsUsed = MaxIterations;
+
+	// Reconstruct joint angles from solved positions using hinge-projection in joint frames
+	TArray<float> Angles = CurrentAnglesDeg;
+	FTransform ParentTransform = BaseTransform;
+
+	for (int32 i = 0; i < NumJoints; i++)
+	{
+		FTransform JointFrame = JointLocalTransforms[i] * ParentTransform; // q=0 frame
+
+		const FVector CurrentChildWorld = (i + 1 < NumJoints) ? JointPosWorld[i + 1] : EEWorld.GetLocation();
+		const FVector DesiredChildWorld = Chain[i + 1].Position;
+		const FVector DesiredChildJoint = JointFrame.InverseTransformPositionNoScale(DesiredChildWorld);
+		FVector DesiredDirJoint = DesiredChildJoint.GetSafeNormal();
+
+		const FVector CurrentChildJoint = JointFrame.InverseTransformPositionNoScale(CurrentChildWorld);
+		FVector RefDirJoint = CurrentChildJoint.GetSafeNormal();
+		if (!RefDirJoint.Normalize())
+		{
+			RefDirJoint = FVector::XAxisVector;
+		}
+
+		FVector AxisJoint = JointAxesLocal[i].GetSafeNormal();
+		if (bAxesInParentFrame)
+		{
+			// Convert axis from parent frame into joint frame
+			AxisJoint = JointLocalTransforms[i].GetRotation().UnrotateVector(AxisJoint).GetSafeNormal();
+		}
+		if (DesiredDirJoint.IsNearlyZero())
+		{
+			DesiredDirJoint = RefDirJoint;
+		}
+
+		const float TargetAngle = CalculateSignedAngle(RefDirJoint, DesiredDirJoint, AxisJoint);
+		float NewAngle = ApplyAngleLimits(TargetAngle, JointLimitsDeg[i], LimitEscapeDeg);
+		Angles[i] = NewAngle;
+
+		const FVector AxisWorld = JointFrame.TransformVectorNoScale(AxisJoint).GetSafeNormal();
+		JointFrame.SetRotation((FQuat(AxisWorld, FMath::DegreesToRadians(NewAngle)) * JointFrame.GetRotation()).GetNormalized());
+		ParentTransform = JointFrame;
+	}
+
+	ComputeChainKinematics(
+		BaseTransform,
+		Angles,
+		JointLocalTransforms,
+		JointAxesLocal,
+		EndEffectorOffset,
+		JointPosWorld,
+		JointAxisWorld,
+		EEWorld);
+
+	Result.JointAngles = Angles;
+	Result.PositionError = FVector::Dist(EEWorld.GetLocation(), TargetEndEffectorWorld.GetLocation());
+	const FQuat FinalRotErr = TargetEndEffectorWorld.GetRotation() * EEWorld.GetRotation().Inverse();
+	Result.RotationError = FMath::RadiansToDegrees(FinalRotErr.GetAngle());
+
+	bool bSolveOrientation = false;
+	if (TaskSpaceMask6.Num() >= 6)
+	{
+		bSolveOrientation = TaskSpaceMask6[3] || TaskSpaceMask6[4] || TaskSpaceMask6[5];
+	}
+
+	Result.bSuccess = (Result.PositionError <= PositionToleranceCm);
+	if (bSolveOrientation)
+	{
+		Result.bSuccess = Result.bSuccess && (Result.RotationError <= RotationToleranceDeg);
+	}
+
+	if (!bModified)
+	{
+		// Solver reported no modifications; still return current angles and error metrics.
+		Result.JointAngles = Angles;
+	}
+
+	return Result;
+}
+
 // Helper function to apply hard joint limit constraints
 static FVector ApplyJointLimitConstraint(
 	const FVector& ParentPos,
@@ -367,7 +703,10 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 	float PositionToleranceCm,
 	float RotationToleranceDeg,
 	float AngleGain,
-	float MaxAngleStepDeg)
+	float MaxAngleStepDeg,
+	float LimitEscapeDeg,
+	int32 OrientationIterations,
+	float OrientationGain)
 {
 	FIKSolveResult Result;
 	Result.bSuccess = false;
@@ -438,38 +777,68 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 			}
 		}
 
-		// Backward pass: adjust joints from end effector to base (position only)
+		// Stage 1: Hinge-projected FABRIK (backward pass in joint angle space)
+		FVector DesiredChildPos = TargetPosition;
 		for (int32 i = NumJoints - 1; i >= 0; i--)
 		{
 			const FVector JointPos = JointPosWorld[i];
-			const FVector ToEE = (EEWorld.GetLocation() - JointPos).GetSafeNormal();
-			const FVector ToTarget = (TargetPosition - JointPos).GetSafeNormal();
+			const FVector DesiredDirWorld = (DesiredChildPos - JointPos).GetSafeNormal();
 
-			const FVector Axis = (i < JointAxisWorld.Num()) ? JointAxisWorld[i] : FVector::XAxisVector;
-			float Delta = CalculateSignedAngle(ToEE, ToTarget, Axis) * AngleGain * GainScale;
+			// Parent frame rotation (from base to parent of this joint)
+			FTransform ParentTransform = BaseTransform;
+			for (int32 k = 0; k < i; k++)
+			{
+				const FVector AxisWorld = JointAxisWorld[k];
+				const float AngleRad = FMath::DegreesToRadians(Angles[k]);
+				FTransform JointFrame = JointLocalTransforms[k] * ParentTransform;
+				JointFrame.SetRotation((FQuat(AxisWorld, AngleRad) * JointFrame.GetRotation()).GetNormalized());
+				ParentTransform = JointFrame;
+			}
+
+			// Convert desired direction to parent frame
+			const FVector DesiredDirParent = ParentTransform.InverseTransformVectorNoScale(DesiredDirWorld).GetSafeNormal();
+			const FVector AxisParent = JointLocalTransforms[i].TransformVectorNoScale(JointAxesLocal[i]).GetSafeNormal();
+			const FVector RefDirParent = JointLocalTransforms[i].GetTranslation().GetSafeNormal();
+
+			// Project desired direction onto hinge plane
+			FVector DesiredProj = DesiredDirParent - AxisParent * FVector::DotProduct(DesiredDirParent, AxisParent);
+			if (!DesiredProj.Normalize())
+			{
+				continue;
+			}
+
+			float TargetAngle = CalculateSignedAngle(RefDirParent, DesiredProj, AxisParent);
+			float Delta = (TargetAngle - Angles[i]) * AngleGain * GainScale;
 			Delta = FMath::Clamp(Delta, -MaxAngleStepDeg, MaxAngleStepDeg);
 
 			float NewAngle = Angles[i] + Delta;
-			NewAngle = FMath::Clamp(NewAngle, JointLimitsDeg[i].X, JointLimitsDeg[i].Y);
+			NewAngle = ApplyAngleLimits(NewAngle, JointLimitsDeg[i], LimitEscapeDeg);
 			Angles[i] = NewAngle;
 
-			ComputeChainKinematics(
-				BaseTransform,
-				Angles,
-				JointLocalTransforms,
-				JointAxesLocal,
-				EndEffectorOffset,
-				JointPosWorld,
-				JointAxisWorld,
-				EEWorld);
+			// Update desired child for next joint up the chain (keep link length)
+			const float LinkLength = JointLocalTransforms[i].GetTranslation().Size();
+			const FVector NewDirParent = FQuat(AxisParent, FMath::DegreesToRadians(NewAngle)).RotateVector(RefDirParent);
+			const FVector NewDirWorld = ParentTransform.TransformVectorNoScale(NewDirParent).GetSafeNormal();
+			DesiredChildPos = JointPos - NewDirWorld * LinkLength;
 		}
+
+		// Recompute chain after backward pass
+		ComputeChainKinematics(
+			BaseTransform,
+			Angles,
+			JointLocalTransforms,
+			JointAxesLocal,
+			EndEffectorOffset,
+			JointPosWorld,
+			JointAxisWorld,
+			EEWorld);
 	}
 
 	if (bSolveOrientation)
 	{
 		// Small CCD-style orientation correction using end-effector rotation error.
 		const int32 StartIdx = FMath::Max(0, NumJoints - 3);
-		for (int32 Iter = 0; Iter < 5; Iter++)
+		for (int32 Iter = 0; Iter < OrientationIterations; Iter++)
 		{
 			ComputeChainKinematics(
 				BaseTransform,
@@ -496,10 +865,11 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 				Qerr.ToAxisAndAngle(ErrAxis, AngleRad);
 
 				const float Sign = FVector::DotProduct(ErrAxis.GetSafeNormal(), Axis.GetSafeNormal()) >= 0.0f ? 1.0f : -1.0f;
-				float DeltaDeg = FMath::RadiansToDegrees(AngleRad) * Sign * 0.5f; // damp
+				float DeltaDeg = FMath::RadiansToDegrees(AngleRad) * Sign * OrientationGain;
+				DeltaDeg = FMath::Clamp(DeltaDeg, -MaxAngleStepDeg * OrientationGain, MaxAngleStepDeg * OrientationGain);
 
 				float NewAngle = Angles[i] + DeltaDeg;
-				NewAngle = FMath::Clamp(NewAngle, JointLimitsDeg[i].X, JointLimitsDeg[i].Y);
+				NewAngle = ApplyAngleLimits(NewAngle, JointLimitsDeg[i], LimitEscapeDeg);
 				Angles[i] = NewAngle;
 			}
 		}

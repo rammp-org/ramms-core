@@ -42,10 +42,21 @@ public class RammsCore : ModuleRules
 				"Slate",
 				"SlateCore",
 				"PhysicsCore",
+				"AnimationCore",
 				// ... add private dependencies that you statically link with here ...	
                 "Eigen",
 			}
 			);
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"UnrealEd"
+				}
+				);
+		}
 		
 		
 		DynamicallyLoadedModuleNames.AddRange(

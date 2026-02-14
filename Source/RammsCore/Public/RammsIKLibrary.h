@@ -137,6 +137,9 @@ public:
 	 * @param RotationToleranceDeg Rotation convergence tolerance in degrees
 	 * @param AngleGain Multiplier for per-joint angle updates (FABRIK aggressiveness)
 	 * @param MaxAngleStepDeg Maximum per-joint step (deg) for stability near target
+	 * @param LimitEscapeDeg Max step (deg) to move off joint limits if stuck
+	 * @param OrientationIterations Number of orientation refinement iterations
+	 * @param OrientationGain Gain multiplier for orientation refinement
 	 * @return Solve result with joint angles and convergence info
 	 */
 	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|FABRIK")
@@ -153,5 +156,47 @@ public:
 		float PositionToleranceCm,
 		float RotationToleranceDeg,
 		float AngleGain,
+		float MaxAngleStepDeg,
+		float LimitEscapeDeg,
+		int32 OrientationIterations,
+		float OrientationGain);
+
+	/**
+	 * CCD (Cyclic Coordinate Descent) solver with joint axis constraints.
+	 */
+	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|CCD")
+	static FIKSolveResult SolveIK_CCD(
+		const FTransform& BaseTransform,
+		const TArray<float>& CurrentAnglesDeg,
+		const TArray<FTransform>& JointLocalTransforms,
+		const TArray<FVector>& JointAxesLocal,
+		const TArray<FVector2D>& JointLimitsDeg,
+		const FTransform& EndEffectorOffset,
+		const FTransform& TargetEndEffectorWorld,
+		const TArray<bool>& TaskSpaceMask6,
+		int32 MaxIterations,
+		float PositionToleranceCm,
+		float RotationToleranceDeg,
+		float PositionGain,
+		float OrientationGain,
 		float MaxAngleStepDeg);
+
+	/**
+	 * UE built-in FABRIK solver (AnimationCore) with joint angle reconstruction.
+	 */
+	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|UE")
+	static FIKSolveResult SolveIK_UEFabrik(
+		const FTransform& BaseTransform,
+		const TArray<float>& CurrentAnglesDeg,
+		const TArray<FTransform>& JointLocalTransforms,
+		const TArray<FVector>& JointAxesLocal,
+		const TArray<FVector2D>& JointLimitsDeg,
+		const FTransform& EndEffectorOffset,
+		const FTransform& TargetEndEffectorWorld,
+		const TArray<bool>& TaskSpaceMask6,
+		int32 MaxIterations,
+		float PositionToleranceCm,
+		float RotationToleranceDeg,
+		float LimitEscapeDeg,
+		bool bAxesInParentFrame);
 };
