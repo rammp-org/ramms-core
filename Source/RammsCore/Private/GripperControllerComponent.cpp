@@ -10,37 +10,34 @@ UGripperControllerComponent::UGripperControllerComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	
 	bAutoFindSkeletalMesh = true;
-	bEnableDebugLog = false;
-	bEnableFingerCollision = true;
-	GripperMeshName = NAME_None;
+	GripperMeshName = FName("GripperSkMesh");
 	CachedGripperMesh = nullptr;
+	bEnableDebugLog = false;
 	
 	CurrentState = EGripperState::Open;
 	PreviousState = EGripperState::Open;
 	
-	OpenAngle = 0.0f;
-	ClosedAngle = 45.0f;
+	OpenAngle = -45.0f;
+	ClosedAngle = 0.0f;
 	AngleTolerance = 2.0f;
 	
-	Finger1PadBoneName = FName("finger_1_pad");
-	Finger2PadBoneName = FName("finger_2_pad");
-	
 	// Initialize default motor configurations
-	Finger1Motor.ConstraintName = FName("gripper_finger_1");
+	Finger1Motor.ConstraintName = FName("link_0_r");
 	Finger1Motor.ControlAxis = EMotorAxis::Z;
 	Finger1Motor.TargetAngle = OpenAngle;
 	Finger1Motor.CurrentAngle = OpenAngle;
-	Finger1Motor.MaxSpeed = 90.0f;
+	Finger1Motor.MaxSpeed = 45.0f;
 	Finger1Motor.SpeedMultiplier = 1.0f;
 	Finger1Motor.MotorStrength = 100000.0f;
 	Finger1Motor.MotorDamping = 10000.0f;
 	Finger1Motor.bEnabled = true;
+    Finger1Motor.bInvertDirection = true;
 	
-	Finger2Motor.ConstraintName = FName("gripper_finger_2");
+	Finger2Motor.ConstraintName = FName("link_0_l");
 	Finger2Motor.ControlAxis = EMotorAxis::Z;
 	Finger2Motor.TargetAngle = OpenAngle;
 	Finger2Motor.CurrentAngle = OpenAngle;
-	Finger2Motor.MaxSpeed = 90.0f;
+	Finger2Motor.MaxSpeed = 45.0f;
 	Finger2Motor.SpeedMultiplier = 1.0f;
 	Finger2Motor.MotorStrength = 100000.0f;
 	Finger2Motor.MotorDamping = 10000.0f;
@@ -52,7 +49,6 @@ void UGripperControllerComponent::BeginPlay()
 	Super::BeginPlay();
 	
 	FindConstraints();
-	SetupFingerCollision();
 	
 	if (bEnableDebugLog)
 	{
@@ -400,56 +396,5 @@ void UGripperControllerComponent::HandleStateChange()
 		}
 		
 		PreviousState = CurrentState;
-	}
-}
-
-void UGripperControllerComponent::SetupFingerCollision()
-{
-	if (!CachedGripperMesh || !bEnableFingerCollision)
-	{
-		return;
-	}
-	
-	// Get bone indices for finger pads
-	int32 Finger1BoneIndex = CachedGripperMesh->GetBoneIndex(Finger1PadBoneName);
-	int32 Finger2BoneIndex = CachedGripperMesh->GetBoneIndex(Finger2PadBoneName);
-	
-	if (Finger1BoneIndex == INDEX_NONE || Finger2BoneIndex == INDEX_NONE)
-	{
-		if (bEnableDebugLog)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("GripperController: Could not find finger pad bones - Finger1: %s, Finger2: %s"),
-				Finger1BoneIndex == INDEX_NONE ? TEXT("MISSING") : TEXT("OK"),
-				Finger2BoneIndex == INDEX_NONE ? TEXT("MISSING") : TEXT("OK"));
-		}
-		return;
-	}
-	
-	// Enable collision for these bones
-	// By default, bones in the same skeletal mesh don't collide with each other
-	// We need to explicitly enable collision between these specific bodies
-	FName Finger1BodyName = CachedGripperMesh->GetBoneName(Finger1BoneIndex);
-	FName Finger2BodyName = CachedGripperMesh->GetBoneName(Finger2BoneIndex);
-	
-	// Set collision enabled on both finger pad bodies
-	CachedGripperMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	
-	// Set the collision response to allow collision between the finger pads
-	// This requires modifying the physics asset's collision settings
-	// The skeletal mesh component has collision between bodies disabled by default
-	
-	// Enable self-collision for the skeletal mesh
-	CachedGripperMesh->SetEnableBodyGravity(false, Finger1BodyName);
-	CachedGripperMesh->SetEnableBodyGravity(false, Finger2BodyName);
-	
-	// Note: To truly enable collision between specific bones, you may need to:
-	// 1. Ensure the physics bodies have collision primitives defined in the Physics Asset
-	// 2. Set the skeletal mesh collision profile to allow self-collision
-	// 3. Or use constraint collision filters if the fingers are separate constrained bodies
-	
-	if (bEnableDebugLog)
-	{
-		UE_LOG(LogTemp, Log, TEXT("GripperController: Finger collision setup complete for bones '%s' and '%s'"),
-			*Finger1BodyName.ToString(), *Finger2BodyName.ToString());
 	}
 }

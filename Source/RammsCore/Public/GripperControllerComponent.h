@@ -122,18 +122,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Configuration")
 	bool bAutoFindSkeletalMesh;
 
-	// Bone name for finger 1 pad (for collision setup)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Configuration")
-	FName Finger1PadBoneName;
-
-	// Bone name for finger 2 pad (for collision setup)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Configuration")
-	FName Finger2PadBoneName;
-
-	// If true, enable collision between finger pads
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Configuration")
-	bool bEnableFingerCollision;
-
 	// Enable debug logging
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Debug")
 	bool bEnableDebugLog;
@@ -168,7 +156,4 @@ private:
 
 	// Fire appropriate events when state changes
 	void HandleStateChange();
-
-	// Setup collision between finger pads
-	void SetupFingerCollision();
 };
