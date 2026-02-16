@@ -820,6 +820,11 @@ bool UKinovaGen3ControllerComponent::ShouldInvertAxisForIK(FConstraintInstance* 
 
 void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 {
+	UE_LOG(LogTemp, Warning, TEXT("=== [KinovaGen3] AutoPopulateJoints CALLED ==="));
+	UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] IsTemplate: %d"), IsTemplate() ? 1 : 0);
+	UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Outer: %s"), *GetNameSafe(GetOuter()));
+	UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Owner: %s"), *GetNameSafe(GetOwner()));
+	
 	USkeletalMeshComponent* TempSkeletalMesh = SkeletalMeshComponent;
 	
 	// If not already set, try to find it
@@ -1144,6 +1149,20 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 	Joints = NewJoints;
 
 	UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Auto-populated %d joints"), Joints.Num());
+
+#if WITH_EDITOR
+	// Mark this component as modified so the blueprint saves the changes
+	Modify();
+	
+	// If we're a component template in a blueprint, mark the blueprint as modified
+	if (IsTemplate())
+	{
+		if (UBlueprint* Blueprint = Cast<UBlueprint>(GetOuter()->GetClass()->ClassGeneratedBy))
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+	}
+#endif
 }
 
 void UKinovaGen3ControllerComponent::AutoPopulateJointsFromConstraints()
@@ -2105,7 +2124,9 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	TArray<FTransform> JointLocalTransformsForSolver = JointLocalTransforms;
 	TArray<FVector> JointAxesLocalForSolver = JointAxesLocal;
 	FTransform EndEffectorOffsetForSolver = EndEffectorOffset;
-	bool bUseConstraintChain = (IKSolverType == EIKSolverType::FABRIK || IKSolverType == EIKSolverType::CCD || IKSolverType == EIKSolverType::UEBuiltIn);
+	// All solvers (DLS, FABRIK, CCD) now use the same bone-derived kinematic chain
+	// and ComputeChainKinematics FK. Only UEBuiltIn (stubbed) used constraint frames.
+	bool bUseConstraintChain = (IKSolverType == EIKSolverType::UEBuiltIn);
 
 	if (bUseConstraintChain)
 	{

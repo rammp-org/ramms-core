@@ -99,7 +99,7 @@ struct RAMMSCORE_API FRevoluteJointConfig
 
 	/** Maximum angular velocity (degrees/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
-	float MaxAngularSpeed = 60.0f;
+	float MaxAngularSpeed = 90.0f;
 
 	/** Speed multiplier (0-1) for dynamic speed adjustment */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -134,7 +134,7 @@ struct RAMMSCORE_API FRevoluteJointConfig
 		, ConstraintName(NAME_None)
 		, TargetAngle(0.0f)
 		, CurrentAngle(0.0f)
-		, MaxAngularSpeed(45.0f)
+		, MaxAngularSpeed(90.0f)
 		, SpeedMultiplier(1.0f)
 		, MaxTorque(39.0f)
 		, PositionStrength(5000000.0f)
@@ -282,20 +282,20 @@ public:
 	TArray<float> NullSpaceBias;
 
 	/** Maximum FABRIK iterations per solve */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "1", ClampMax = "100", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
-	int32 FABRIKMaxIterations = 15;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "1", ClampMax = "500", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
+	int32 FABRIKMaxIterations = 200;
 
 	/** Position convergence tolerance for FABRIK (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.01", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
 	float FABRIKPositionTolerance = 1.0f;
 
-	/** Angle gain multiplier for axis-constrained FABRIK (higher = more aggressive) */
+	/** Angle gain multiplier for per-joint scalar DLS (1.0 = optimal step, >1 more aggressive) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
-	float FABRIKAngleGain = 1.5f;
+	float FABRIKAngleGain = 1.0f;
 
-	/** Maximum angle step per joint update (degrees) for FABRIK (stability near target) */
+	/** Maximum angle step per joint per iteration (degrees) - like DLS StepClip */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.1", ClampMax = "45.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
-	float FABRIKMaxAngleStepDeg = 8.0f;
+	float FABRIKMaxAngleStepDeg = 12.0f;
 
 	/** Maximum "escape" step (deg) to move off joint limits if stuck */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|FABRIK", meta = (ClampMin = "0.0", ClampMax = "20.0", EditCondition = "IKSolverType == EIKSolverType::FABRIK"))
@@ -310,20 +310,20 @@ public:
 	float FABRIKOrientationGain = 0.5f;
 
 	/** Maximum CCD iterations per solve */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "1", ClampMax = "200", EditCondition = "IKSolverType == EIKSolverType::CCD"))
-	int32 CCDMaxIterations = 60;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "1", ClampMax = "500", EditCondition = "IKSolverType == EIKSolverType::CCD"))
+	int32 CCDMaxIterations = 100;
 
-	/** CCD position gain (higher = more aggressive) */
+	/** CCD position gain (scales the exact hinge-plane angle; 1.0 = full correction) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "0.1", ClampMax = "5.0", EditCondition = "IKSolverType == EIKSolverType::CCD"))
 	float CCDPositionGain = 1.0f;
 
-	/** CCD orientation gain (higher = more aggressive) */
+	/** CCD orientation gain (blended with position; 0 = position only) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "0.0", ClampMax = "5.0", EditCondition = "IKSolverType == EIKSolverType::CCD"))
-	float CCDOrientationGain = 0.5f;
+	float CCDOrientationGain = 0.3f;
 
-	/** Maximum CCD angle step per joint (degrees) */
+	/** Maximum CCD angle step per joint per iteration (degrees) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|CCD", meta = (ClampMin = "0.1", ClampMax = "45.0", EditCondition = "IKSolverType == EIKSolverType::CCD"))
-	float CCDMaxAngleStepDeg = 8.0f;
+	float CCDMaxAngleStepDeg = 12.0f;
 
 	/** Joint configurations (5-7 joints for Kinova Gen3) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joints")
@@ -482,7 +482,7 @@ public:
 	 * Auto-populate joints from all physics constraints on the skeletal mesh
 	 * @param bOverwriteExisting - If true, clears existing joints first
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Kinova Gen3")
 	void AutoPopulateJoints(bool bOverwriteExisting = true);
 
 	/** Build joints from a skeletal mesh's PhysicsAsset constraints (editor-safe) */
