@@ -8,6 +8,10 @@
 #include "Engine/SCS_Node.h"
 #include "KinovaGen3ControllerComponent.h"
 #include "ScopedTransaction.h"
+#include "ToolMenu.h"
+#include "ToolMenuContext.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Widgets/Docking/SDockTab.h"
 
 #define LOCTEXT_NAMESPACE "FRammsCoreEditorModule"
 
@@ -26,7 +30,7 @@ public:
 	}
 
 private:
-	static UBlueprint* GetActiveBlueprint()
+	static UBlueprint* GetActiveBlueprintEditor()
 	{
 		if (!GEditor)
 		{
@@ -39,11 +43,59 @@ private:
 			return nullptr;
 		}
 
+		// Try to find the window that has keyboard focus
+		TSharedPtr<SWindow> FocusedWindow = FSlateApplication::Get().FindBestParentWindowForDialogs(nullptr);
+		if (!FocusedWindow.IsValid())
+		{
+			FocusedWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
+		}
+
+		if (FocusedWindow.IsValid())
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Focused window: %s"), *FocusedWindow->GetTitle().ToString());
+			
+			// Get all open blueprint editors
+			TArray<UObject*> EditedAssets = AssetSubsystem->GetAllEditedAssets();
+			
+			for (UObject* Asset : EditedAssets)
+			{
+				if (UBlueprint* BP = Cast<UBlueprint>(Asset))
+				{
+					IAssetEditorInstance* Editor = AssetSubsystem->FindEditorForAsset(BP, false);
+					if (Editor && Editor->GetAssociatedTabManager())
+					{
+						TSharedPtr<SDockTab> EditorTab = Editor->GetAssociatedTabManager()->GetOwnerTab();
+						if (EditorTab.IsValid())
+						{
+							// Check if this editor's tab is in the focused window
+							TSharedPtr<SWindow> EditorWindow = EditorTab->GetParentWindow();
+							bool bInFocusedWindow = EditorWindow.IsValid() && EditorWindow == FocusedWindow;
+							bool bIsForeground = EditorTab->IsForeground();
+							
+							FString EditorTabLabel = EditorTab->GetTabLabel().ToString();
+							UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]   Blueprint: %s | InFocusedWindow: %d | IsForeground: %d | Tab: %s"), 
+								*BP->GetName(), bInFocusedWindow, bIsForeground, *EditorTabLabel);
+							
+							if (bInFocusedWindow && bIsForeground)
+							{
+								UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] >>> Selected blueprint: %s"), *BP->GetName());
+								return BP;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("[RammsCoreEditor] Could not determine focused blueprint editor"));
+
+		// Fallback: return first blueprint found
 		TArray<UObject*> EditedAssets = AssetSubsystem->GetAllEditedAssets();
 		for (UObject* Obj : EditedAssets)
 		{
 			if (UBlueprint* BP = Cast<UBlueprint>(Obj))
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[RammsCoreEditor] Fallback: returning first blueprint: %s"), *BP->GetName());
 				return BP;
 			}
 		}
@@ -128,27 +180,55 @@ private:
 
 			FToolMenuSection& Section = ToolbarMenu->AddSection("RammsCore", LOCTEXT("RammsCoreSection", "RammsCore"));
 
-			FToolMenuEntry Entry = FToolMenuEntry::InitToolBarButton(
+			FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitToolBarButton(
 				"RammsCore_PopulateGen3Joints",
-				FUIAction(
-					FExecuteAction::CreateLambda([]()
-					{
-						UBlueprint* BP = GetActiveBlueprint();
-						PopulateGen3Joints(BP);
-					}),
-					FCanExecuteAction::CreateLambda([]() -> bool
-					{
-						UBlueprint* BP = GetActiveBlueprint();
-						return BlueprintHasGen3Component(BP);
-					})
-				),
+				FToolUIActionChoice(FToolMenuExecuteAction::CreateStatic(&FRammsCoreEditorModule::ExecutePopulateGen3Joints)),
 				LOCTEXT("PopulateGen3JointsLabel", "Populate Gen3 Joints"),
 				LOCTEXT("PopulateGen3JointsTooltip", "Auto-populate Gen3 joint settings from the Physics Asset constraints."),
 				FSlateIcon()
-			);
+			));
 
-			Section.AddEntry(Entry);
+			Entry.Visibility = FToolMenuVisibilityChoice(TAttribute<bool>::CreateStatic(&FRammsCoreEditorModule::CanExecutePopulateGen3Joints));
 		}
+	}
+
+	static void ExecutePopulateGen3Joints(const FToolMenuContext& Context)
+	{
+		UBlueprint* BP = GetActiveBlueprintEditor();
+		if (BP)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Populating joints for blueprint: %s"), *BP->GetName());
+		}
+		PopulateGen3Joints(BP);
+	}
+
+	static bool CanExecutePopulateGen3Joints()
+	{
+		// Since we can't access the context in TAttribute<bool>, use the fallback method
+		if (!GEditor)
+		{
+			return false;
+		}
+
+		UAssetEditorSubsystem* AssetSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+		if (!AssetSubsystem)
+		{
+			return false;
+		}
+
+		TArray<UObject*> EditedAssets = AssetSubsystem->GetAllEditedAssets();
+		for (UObject* Obj : EditedAssets)
+		{
+			if (UBlueprint* BP = Cast<UBlueprint>(Obj))
+			{
+				if (BlueprintHasGen3Component(BP))
+				{
+					return true;
+				}
+			}
+		}
+
+		return false;
 	}
 };
 
