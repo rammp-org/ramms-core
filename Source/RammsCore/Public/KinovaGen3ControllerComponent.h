@@ -524,6 +524,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joint Control")
 	bool bPreserveJointTargetsOnBeginPlay = true;
 
+	/** If true (and bPreserveJointTargetsOnBeginPlay is true), snap constraints
+	 *  directly to their per-joint TargetAngle on BeginPlay so the arm starts
+	 *  in the desired configuration without having to drive there over time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Joint Control")
+	bool bSnapToTargetsOnBeginPlay = true;
+
 	/** Enable on-screen debug display */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Debug")
 	bool bEnableDebugDisplay = false;

@@ -165,6 +165,38 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 			}
 
 			UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Initialized with %d joints"), Joints.Num());
+
+			// --- Snap joints to their editor-set TargetAngle immediately ---
+			if (bPreserveJointTargetsOnBeginPlay && bSnapToTargetsOnBeginPlay
+				&& ArmControlMode == EArmControlMode::JointControl)
+			{
+				for (FRevoluteJointConfig& Joint : Joints)
+				{
+					if (Joint.BoneName == NAME_None)
+						continue;
+
+					FName ConstraintToUse = Joint.ConstraintName != NAME_None ? Joint.ConstraintName : Joint.BoneName;
+					FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+					if (!Constraint)
+						continue;
+
+					// Clamp if software limits are enabled
+					float SnapAngle = Joint.TargetAngle;
+					if (Joint.bEnableSoftwareLimits)
+					{
+						SnapAngle = ClampToLimits(Joint, SnapAngle);
+					}
+
+					// Set smoothed angle so the speed limiter doesn't fight on the first tick
+					Joint.SmoothedAngle = SnapAngle;
+
+					// Command the physics constraint directly
+					const float ConstraintAngle = SnapAngle + Joint.AngleOffset;
+					SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
+				}
+
+				UE_LOG(LogTemp, Log, TEXT("[KinovaGen3] Snapped %d joints to editor TargetAngle values"), Joints.Num());
+			}
 		}
 	}
 }
