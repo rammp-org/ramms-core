@@ -16,7 +16,7 @@ enum class EJointControlMode : uint8
 {
 	PositionControl UMETA(DisplayName = "Position Control"),
 	VelocityControl UMETA(DisplayName = "Velocity Control"),
-	TorqueControl UMETA(DisplayName = "Torque Control")
+	TorqueControl	UMETA(DisplayName = "Torque Control")
 };
 
 /**
@@ -25,7 +25,7 @@ enum class EJointControlMode : uint8
 UENUM(BlueprintType)
 enum class EArmControlMode : uint8
 {
-	JointControl UMETA(DisplayName = "Joint Control (Direct)"),
+	JointControl	   UMETA(DisplayName = "Joint Control (Direct)"),
 	EndEffectorControl UMETA(DisplayName = "End Effector Control (IK)")
 };
 
@@ -35,9 +35,9 @@ enum class EArmControlMode : uint8
 UENUM(BlueprintType)
 enum class EIKSolverType : uint8
 {
-	DLS UMETA(DisplayName = "Damped Least Squares (DLS)"),
+	DLS	   UMETA(DisplayName = "Damped Least Squares (DLS)"),
 	FABRIK UMETA(DisplayName = "FABRIK"),
-	CCD UMETA(DisplayName = "CCD")
+	CCD	   UMETA(DisplayName = "CCD")
 };
 
 /**
@@ -48,7 +48,7 @@ enum class EConstraintAxis : uint8
 {
 	Swing1 UMETA(DisplayName = "Swing1 (secondary rotation)"),
 	Swing2 UMETA(DisplayName = "Swing2 (tertiary rotation)"),
-	Twist UMETA(DisplayName = "Twist (primary rotation)")
+	Twist  UMETA(DisplayName = "Twist (primary rotation)")
 };
 
 /**
@@ -78,7 +78,7 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Angle offset (degrees) - calibration between constraint zero and reference skeleton pose */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	float AngleOffset = 0.0f;
-	
+
 	/** Computed Frame1 rotation offset (degrees) - automatic offset from constraint Frame1 orientation */
 	float ComputedFrameOffset = 0.0f;
 
@@ -89,10 +89,10 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Current angle in degrees (read from constraint, runtime) */
 	UPROPERTY(BlueprintReadOnly, Category = "Joint")
 	float CurrentAngle = 0.0f;
-	
+
 	/** Smoothed angle for speed limiting (interpolates toward TargetAngle) */
 	float SmoothedAngle = 0.0f;
-	
+
 	/** Tracks whether SmoothedAngle has been initialized from the current joint angle */
 	bool bSmoothedAngleInitialized = false;
 
@@ -141,7 +141,8 @@ struct RAMMSCORE_API FRevoluteJointConfig
 		, MinAngleLimit(-180.0f)
 		, MaxAngleLimit(180.0f)
 		, bEnableSoftwareLimits(true)
-	{}
+	{
+	}
 };
 
 /**
@@ -173,14 +174,15 @@ struct RAMMSCORE_API FEndEffectorState
 		, Rotation(FRotator::ZeroRotator)
 		, LinearVelocity(FVector::ZeroVector)
 		, AngularVelocity(FVector::ZeroVector)
-	{}
+	{
+	}
 };
 
 /**
  * Controller component for Kinova Gen3 robotic arm
  * Manages joint control, applies forces, tracks forward kinematics
  */
-UCLASS(ClassGroup=(Ramms), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UKinovaGen3ControllerComponent : public UActorComponent
 {
 	GENERATED_BODY()
@@ -242,7 +244,7 @@ public:
 
 	/** Task-space mask: control which DOFs [X, Y, Z, Roll, Pitch, Yaw] */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common")
-	TArray<bool> TaskSpaceMask = {true, true, true, true, true, true};
+	TArray<bool> TaskSpaceMask = { true, true, true, true, true, true };
 
 	/** Threshold for detecting target position changes (cm). Smaller = more sensitive. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Target Change", meta = (ClampMin = "0.0"))
@@ -333,19 +335,19 @@ public:
 	/** Current end-effector state */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Arm|State")
 	FEndEffectorState EndEffectorState;
-	
+
 	/** Last IK solve result (for debugging) */
 	float LastIKPositionError = 0.0f;
 	float LastIKRotationError = 0.0f;
 	int32 LastIKIterations = 0;
-	bool bLastIKSuccess = false;
-	
+	bool  bLastIKSuccess = false;
+
 	/** Cached target transform to detect changes and avoid unnecessary IK solving */
-	FTransform LastIKTargetTransform = FTransform::Identity;
-	bool bIKTargetInitialized = false;
-	bool bIKTargetSatisfied = false;
+	FTransform	  LastIKTargetTransform = FTransform::Identity;
+	bool		  bIKTargetInitialized = false;
+	bool		  bIKTargetSatisfied = false;
 	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
-	bool bIKSolverTypeInitialized = false;
+	bool		  bIKSolverTypeInitialized = false;
 
 	// ========== Blueprint API ==========
 
@@ -399,7 +401,10 @@ public:
 	 * Get end-effector state
 	 */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
-	FEndEffectorState GetEndEffectorState() const { return EndEffectorState; }
+	FEndEffectorState GetEndEffectorState() const
+	{
+		return EndEffectorState;
+	}
 
 	/**
 	 * Set target end effector transform (world space) for IK control
@@ -468,7 +473,10 @@ public:
 	 * Set control mode for all joints
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	void SetControlMode(EJointControlMode Mode) { ControlMode = Mode; }
+	void SetControlMode(EJointControlMode Mode)
+	{
+		ControlMode = Mode;
+	}
 
 	/**
 	 * Auto-populate joints from all physics constraints on the skeletal mesh (clears existing joints)
@@ -542,11 +550,11 @@ private:
 	// Cached skeletal mesh component reference
 	UPROPERTY(Transient)
 	USkeletalMeshComponent* SkeletalMeshComponent = nullptr;
-	
+
 	// Cached IK data (computed once per frame in UpdateInverseKinematics)
-	FTransform CachedEndEffectorOffset = FTransform::Identity;
+	FTransform		   CachedEndEffectorOffset = FTransform::Identity;
 	TArray<FTransform> CachedJointLocalTransforms;
-	TArray<FVector> CachedJointAxesLocal;
+	TArray<FVector>	   CachedJointAxesLocal;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);
@@ -559,7 +567,7 @@ private:
 
 	/** Update using inverse kinematics to reach end effector target */
 	void UpdateInverseKinematics(float DeltaTime);
-	
+
 	/** Initialize constraint drives for all joints (one-time setup) */
 	void InitializeJointConstraints();
 

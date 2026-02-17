@@ -13,7 +13,7 @@ class UPrimitiveComponent;
  * Differential drive controller component for powered wheelchair simulation
  * Manages motor control, applies forces to wheels, tracks odometry
  */
-UCLASS(ClassGroup=(Ramms), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent
 {
 	GENERATED_BODY()

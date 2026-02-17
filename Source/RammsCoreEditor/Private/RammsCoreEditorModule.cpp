@@ -53,10 +53,10 @@ private:
 		if (FocusedWindow.IsValid())
 		{
 			UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Focused window: %s"), *FocusedWindow->GetTitle().ToString());
-			
+
 			// Get all open blueprint editors
 			TArray<UObject*> EditedAssets = AssetSubsystem->GetAllEditedAssets();
-			
+
 			for (UObject* Asset : EditedAssets)
 			{
 				if (UBlueprint* BP = Cast<UBlueprint>(Asset))
@@ -69,13 +69,13 @@ private:
 						{
 							// Check if this editor's tab is in the focused window
 							TSharedPtr<SWindow> EditorWindow = EditorTab->GetParentWindow();
-							bool bInFocusedWindow = EditorWindow.IsValid() && EditorWindow == FocusedWindow;
-							bool bIsForeground = EditorTab->IsForeground();
-							
+							bool				bInFocusedWindow = EditorWindow.IsValid() && EditorWindow == FocusedWindow;
+							bool				bIsForeground = EditorTab->IsForeground();
+
 							FString EditorTabLabel = EditorTab->GetTabLabel().ToString();
-							UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]   Blueprint: %s | InFocusedWindow: %d | IsForeground: %d | Tab: %s"), 
+							UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]   Blueprint: %s | InFocusedWindow: %d | IsForeground: %d | Tab: %s"),
 								*BP->GetName(), bInFocusedWindow, bIsForeground, *EditorTabLabel);
-							
+
 							if (bInFocusedWindow && bIsForeground)
 							{
 								UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] >>> Selected blueprint: %s"), *BP->GetName());
@@ -133,7 +133,7 @@ private:
 		const FScopedTransaction Transaction(LOCTEXT("PopulateGen3Joints", "Populate Gen3 Joints"));
 		BP->Modify();
 
-		bool bAny = false;
+		bool					 bAny = false;
 		const TArray<USCS_Node*> Nodes = BP->SimpleConstructionScript->GetAllNodes();
 		for (USCS_Node* Node : Nodes)
 		{
@@ -185,8 +185,7 @@ private:
 				FToolUIActionChoice(FToolMenuExecuteAction::CreateStatic(&FRammsCoreEditorModule::ExecutePopulateGen3Joints)),
 				LOCTEXT("PopulateGen3JointsLabel", "Populate Gen3 Joints"),
 				LOCTEXT("PopulateGen3JointsTooltip", "Auto-populate Gen3 joint settings from the Physics Asset constraints."),
-				FSlateIcon()
-			));
+				FSlateIcon()));
 
 			Entry.Visibility = FToolMenuVisibilityChoice(TAttribute<bool>::CreateStatic(&FRammsCoreEditorModule::CanExecutePopulateGen3Joints));
 		}

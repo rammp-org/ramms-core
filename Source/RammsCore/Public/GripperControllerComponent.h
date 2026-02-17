@@ -12,8 +12,8 @@ class USkeletalMeshComponent;
 UENUM(BlueprintType)
 enum class EGripperState : uint8
 {
-	Open UMETA(DisplayName = "Open"),
-	Closed UMETA(DisplayName = "Closed"),
+	Open	UMETA(DisplayName = "Open"),
+	Closed	UMETA(DisplayName = "Closed"),
 	Opening UMETA(DisplayName = "Opening"),
 	Closing UMETA(DisplayName = "Closing")
 };
@@ -27,12 +27,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGripperStateChanged, EGripperStat
  * Controller component for a two-finger gripper with physics constraints
  * Each finger has an angular motor that can be controlled to open/close
  */
-UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UGripperControllerComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
-public:	
+public:
 	UGripperControllerComponent();
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

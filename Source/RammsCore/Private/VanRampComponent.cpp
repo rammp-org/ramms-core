@@ -58,12 +58,9 @@ void UVanRampComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyCh
 	if (PropertyChangedEvent.Property)
 	{
 		FName PropertyName = PropertyChangedEvent.Property->GetFName();
-		if (PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, RampKeyframes) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, bShowKeyframeGizmos) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, GizmoSize) ||
-			PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, bShowKeyframePath))
+		if (PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, RampKeyframes) || PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, bShowKeyframeGizmos) || PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, GizmoSize) || PropertyName == GET_MEMBER_NAME_CHECKED(UVanRampComponent, bShowKeyframePath))
 		{
-        }
+		}
 	}
 }
 
@@ -89,25 +86,25 @@ void UVanRampComponent::DrawKeyframeGizmos() const
 	for (int32 i = 0; i < RampKeyframes.Num(); ++i)
 	{
 		const FRampKeyframe& Keyframe = RampKeyframes[i];
-		
-        bool persistent = false;
-        float lifeTime = 0.0f; // 0 means single frame, >0 means persistent for that many seconds, negative means infinite
+
+		bool  persistent = false;
+		float lifeTime = 0.0f; // 0 means single frame, >0 means persistent for that many seconds, negative means infinite
 
 		// Calculate world transform for this keyframe
 		FTransform KeyframeWorldTransform = Keyframe.Transform * RetractedTransform * ParentTransform;
-		FVector WorldLocation = KeyframeWorldTransform.GetLocation();
-		FRotator WorldRotation = KeyframeWorldTransform.Rotator();
+		FVector	   WorldLocation = KeyframeWorldTransform.GetLocation();
+		FRotator   WorldRotation = KeyframeWorldTransform.Rotator();
 
 		// Draw coordinate system at keyframe location
 		FLinearColor LerpedColor = FLinearColor::LerpUsingHSV(FLinearColor::Green, FLinearColor::Red, Keyframe.Time);
-		FColor GizmoColor = LerpedColor.ToFColor(true);
+		FColor		 GizmoColor = LerpedColor.ToFColor(true);
 		DrawDebugCoordinateSystem(World, WorldLocation, WorldRotation, GizmoSize, persistent, lifeTime, 0, 2.0f);
 
 		// Draw sphere at keyframe location
 		DrawDebugSphere(World, WorldLocation, 10.0f, 8, GizmoColor, persistent, lifeTime, 0, 2.0f);
 
 		// Draw time label
-		DrawDebugString(World, WorldLocation + FVector(0, 0, GizmoSize + 20.0f), 
+		DrawDebugString(World, WorldLocation + FVector(0, 0, GizmoSize + 20.0f),
 			FString::Printf(TEXT("T: %.2f"), Keyframe.Time), nullptr, FColor::White, 0.0f, true, 1.5f);
 
 		// Draw line connecting to previous keyframe
@@ -125,7 +122,7 @@ void UVanRampComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    DrawKeyframeGizmos();
+	DrawKeyframeGizmos();
 
 	if (RampState == ERampState::Deploying || RampState == ERampState::Retracting)
 	{
@@ -191,7 +188,7 @@ void UVanRampComponent::UpdateRampTransform()
 
 	// Interpolate through keyframes
 	FTransform TargetTransform = InterpolateKeyframes(NormalizedTime);
-	
+
 	// Apply the transform relative to the retracted position
 	FTransform FinalTransform = TargetTransform * RetractedTransform;
 	SetRelativeTransform(FinalTransform);
@@ -204,7 +201,7 @@ FTransform UVanRampComponent::InterpolateKeyframes(float NormalizedTime) const
 	{
 		return FTransform::Identity;
 	}
-	
+
 	if (RampKeyframes.Num() == 1)
 	{
 		return RampKeyframes[0].Transform;
@@ -230,7 +227,7 @@ FTransform UVanRampComponent::InterpolateKeyframes(float NormalizedTime) const
 	{
 		return RampKeyframes[0].Transform;
 	}
-	
+
 	if (NextKeyframeIndex >= RampKeyframes.Num())
 	{
 		return RampKeyframes.Last().Transform;
@@ -246,7 +243,7 @@ FTransform UVanRampComponent::InterpolateKeyframes(float NormalizedTime) const
 
 	// Interpolate transform components
 	FVector InterpLocation = FMath::Lerp(PrevKeyframe.Transform.GetLocation(), NextKeyframe.Transform.GetLocation(), Alpha);
-	FQuat InterpRotation = FQuat::Slerp(PrevKeyframe.Transform.GetRotation(), NextKeyframe.Transform.GetRotation(), Alpha);
+	FQuat	InterpRotation = FQuat::Slerp(PrevKeyframe.Transform.GetRotation(), NextKeyframe.Transform.GetRotation(), Alpha);
 	FVector InterpScale = FMath::Lerp(PrevKeyframe.Transform.GetScale3D(), NextKeyframe.Transform.GetScale3D(), Alpha);
 
 	return FTransform(InterpRotation, InterpLocation, InterpScale);

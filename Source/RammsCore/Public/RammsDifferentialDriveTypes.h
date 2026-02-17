@@ -11,7 +11,7 @@
 UENUM(BlueprintType)
 enum class EDriveControlMode : uint8
 {
-	TorqueControl UMETA(DisplayName = "Torque Control"),
+	TorqueControl	UMETA(DisplayName = "Torque Control"),
 	VelocityControl UMETA(DisplayName = "Velocity Control")
 };
 
@@ -39,7 +39,8 @@ struct RAMMSCORE_API FMotorParameters
 		: MaxRPM(100.0f)
 		, MaxTorque(7.0f)
 		, TorqueAtMaxRPM(0.3f)
-	{}
+	{
+	}
 };
 
 /**
@@ -96,7 +97,8 @@ struct RAMMSCORE_API FWheelState
 		, SuspensionLoad(0.0f)
 		, SurfaceFriction(1.0f)
 		, LateralVelocity(0.0f)
-	{}
+	{
+	}
 };
 
 /**
@@ -143,7 +145,8 @@ struct RAMMSCORE_API FOdometryData
 		, LeftWheelDistance(0.0f)
 		, RightWheelDistance(0.0f)
 		, TotalDistance(0.0f)
-	{}
+	{
+	}
 };
 
 /**
@@ -165,10 +168,12 @@ struct RAMMSCORE_API FDifferentialDriveCommand
 	FDifferentialDriveCommand()
 		: LeftCommand(0.0f)
 		, RightCommand(0.0f)
-	{}
+	{
+	}
 
 	FDifferentialDriveCommand(float Left, float Right)
 		: LeftCommand(Left)
 		, RightCommand(Right)
-	{}
+	{
+	}
 };

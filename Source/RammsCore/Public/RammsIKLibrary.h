@@ -66,7 +66,8 @@ struct FFABRIKJoint
 		, MaxAngleLimit(180.0f)
 		, CurrentAngle(0.0f)
 		, LinkLength(0.0f)
-	{}
+	{
+	}
 };
 
 UCLASS()
@@ -75,14 +76,14 @@ class URammsIKLibrary : public UBlueprintFunctionLibrary
 	GENERATED_BODY()
 
 public:
-	UFUNCTION(BlueprintCallable, Category="RAMMS|IK")
+	UFUNCTION(BlueprintCallable, Category = "RAMMS|IK")
 	static FTransform ComputeForwardKinematics(
-		const FTransform& BaseTransform,
-		const TArray<float>& JointAnglesDeg,
+		const FTransform&		  BaseTransform,
+		const TArray<float>&	  JointAnglesDeg,
 		const TArray<FTransform>& JointLocalTransforms,
-		const TArray<FVector>& JointAxesLocal,
-		const FTransform& EndEffectorOffset,
-		bool bEnableDebugLogging);
+		const TArray<FVector>&	  JointAxesLocal,
+		const FTransform&		  EndEffectorOffset,
+		bool					  bEnableDebugLogging);
 
 	/**
 	 * Proper iterative DLS IK using an FK chain model.
@@ -98,32 +99,32 @@ public:
 	 * JointWeights: higher => prefer NOT to move that joint (1.0 normal, 10.0 moves ~10x less).
 	 * If empty => all 1.0.
 	 */
-	UFUNCTION(BlueprintCallable, Category="RAMMS|IK")
+	UFUNCTION(BlueprintCallable, Category = "RAMMS|IK")
 	static FIKSolveResult SolveIK_FKChain(
-		const FTransform& BaseTransform,
-		const TArray<float>& CurrentAnglesDeg,
+		const FTransform&		  BaseTransform,
+		const TArray<float>&	  CurrentAnglesDeg,
 		const TArray<FTransform>& JointLocalTransforms,
-		const TArray<FVector>& JointAxesLocal,
-		const FTransform& EndEffectorOffset,
-		const FTransform& TargetEndEffectorWorld,
-		const TArray<FVector2D>& JointLimitsDeg,
-		const TArray<bool>& TaskSpaceMask6,
-		const TArray<float>& JointWeights,
-		bool bEnableNullSpaceOptimization,
-		float NullSpaceGain,
-		const TArray<float>& NullSpaceBiasDeg,
-		float Damping,
-		float StepClipDeg,
-		int32 MaxIterations,
-		float PositionToleranceCm,
-		float RotationToleranceDeg);
+		const TArray<FVector>&	  JointAxesLocal,
+		const FTransform&		  EndEffectorOffset,
+		const FTransform&		  TargetEndEffectorWorld,
+		const TArray<FVector2D>&  JointLimitsDeg,
+		const TArray<bool>&		  TaskSpaceMask6,
+		const TArray<float>&	  JointWeights,
+		bool					  bEnableNullSpaceOptimization,
+		float					  NullSpaceGain,
+		const TArray<float>&	  NullSpaceBiasDeg,
+		float					  Damping,
+		float					  StepClipDeg,
+		int32					  MaxIterations,
+		float					  PositionToleranceCm,
+		float					  RotationToleranceDeg);
 
 	/**
 	 * FABRIK (Forward And Backward Reaching Inverse Kinematics) solver with hard joint limits.
-	 * 
+	 *
 	 * Solves IK for a serial chain of 1-DOF revolute joints with constraint limits.
 	 * Uses iterative position-based approach with hard clamping to joint limits.
-	 * 
+	 *
 	 * @param BaseTransform World-space transform of the robot base
 	 * @param CurrentAnglesDeg Current joint angles in degrees
 	 * @param JointLocalTransforms Local transforms from parent to each joint (at q=0)
@@ -142,43 +143,42 @@ public:
 	 * @param OrientationGain Gain multiplier for orientation refinement
 	 * @return Solve result with joint angles and convergence info
 	 */
-	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|FABRIK")
+	UFUNCTION(BlueprintCallable, Category = "RAMMS|IK|FABRIK")
 	static FIKSolveResult SolveIK_FABRIK(
-		const FTransform& BaseTransform,
-		const TArray<float>& CurrentAnglesDeg,
+		const FTransform&		  BaseTransform,
+		const TArray<float>&	  CurrentAnglesDeg,
 		const TArray<FTransform>& JointLocalTransforms,
-		const TArray<FVector>& JointAxesLocal,
-		const TArray<FVector2D>& JointLimitsDeg,
-		const FTransform& EndEffectorOffset,
-		const FTransform& TargetEndEffectorWorld,
-		const TArray<bool>& TaskSpaceMask6,
-		int32 MaxIterations,
-		float PositionToleranceCm,
-		float RotationToleranceDeg,
-		float AngleGain,
-		float MaxAngleStepDeg,
-		float LimitEscapeDeg,
-		int32 OrientationIterations,
-		float OrientationGain);
+		const TArray<FVector>&	  JointAxesLocal,
+		const TArray<FVector2D>&  JointLimitsDeg,
+		const FTransform&		  EndEffectorOffset,
+		const FTransform&		  TargetEndEffectorWorld,
+		const TArray<bool>&		  TaskSpaceMask6,
+		int32					  MaxIterations,
+		float					  PositionToleranceCm,
+		float					  RotationToleranceDeg,
+		float					  AngleGain,
+		float					  MaxAngleStepDeg,
+		float					  LimitEscapeDeg,
+		int32					  OrientationIterations,
+		float					  OrientationGain);
 
 	/**
 	 * CCD (Cyclic Coordinate Descent) solver with joint axis constraints.
 	 */
-	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|CCD")
+	UFUNCTION(BlueprintCallable, Category = "RAMMS|IK|CCD")
 	static FIKSolveResult SolveIK_CCD(
-		const FTransform& BaseTransform,
-		const TArray<float>& CurrentAnglesDeg,
+		const FTransform&		  BaseTransform,
+		const TArray<float>&	  CurrentAnglesDeg,
 		const TArray<FTransform>& JointLocalTransforms,
-		const TArray<FVector>& JointAxesLocal,
-		const TArray<FVector2D>& JointLimitsDeg,
-		const FTransform& EndEffectorOffset,
-		const FTransform& TargetEndEffectorWorld,
-		const TArray<bool>& TaskSpaceMask6,
-		int32 MaxIterations,
-		float PositionToleranceCm,
-		float RotationToleranceDeg,
-		float PositionGain,
-		float OrientationGain,
-		float MaxAngleStepDeg);
-
+		const TArray<FVector>&	  JointAxesLocal,
+		const TArray<FVector2D>&  JointLimitsDeg,
+		const FTransform&		  EndEffectorOffset,
+		const FTransform&		  TargetEndEffectorWorld,
+		const TArray<bool>&		  TaskSpaceMask6,
+		int32					  MaxIterations,
+		float					  PositionToleranceCm,
+		float					  RotationToleranceDeg,
+		float					  PositionGain,
+		float					  OrientationGain,
+		float					  MaxAngleStepDeg);
 };

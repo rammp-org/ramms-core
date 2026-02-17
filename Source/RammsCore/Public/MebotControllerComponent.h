@@ -77,7 +77,8 @@ struct FAngularMotorConfig
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
 		, CachedConstraint(nullptr)
-	{}
+	{
+	}
 };
 
 USTRUCT(BlueprintType)
@@ -135,15 +136,16 @@ struct FLinearMotorConfig
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
 		, CachedConstraint(nullptr)
-	{}
+	{
+	}
 };
 
-UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UMebotControllerComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
-public:	
+public:
 	UMebotControllerComponent();
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

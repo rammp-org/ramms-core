@@ -43,21 +43,23 @@ struct FDoorKeyframe
 		: Time(0.0f)
 		, LinearPosition(FVector::ZeroVector)
 		, AngularPosition(FRotator::ZeroRotator)
-	{}
+	{
+	}
 
 	FDoorKeyframe(float InTime, const FVector& InLinear, const FRotator& InAngular = FRotator::ZeroRotator)
 		: Time(InTime)
 		, LinearPosition(InLinear)
 		, AngularPosition(InAngular)
-	{}
+	{
+	}
 };
 
-UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UVanDoorComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
-public:	
+public:
 	UVanDoorComponent();
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -159,4 +161,3 @@ private:
 	// Get skeletal mesh from owner
 	USkeletalMeshComponent* GetOwnerSkeletalMesh();
 };
-

@@ -5,8 +5,8 @@
 
 FDifferentialDriveCommand URammsDifferentialDriveLibrary::JoystickToDifferentialDrive(
 	FVector2D JoystickInput,
-	float MaxValue,
-	float DeadZone)
+	float	  MaxValue,
+	float	  DeadZone)
 {
 	// Apply dead zone
 	FVector2D Input = ApplyDeadZone2D(JoystickInput, DeadZone);
@@ -50,7 +50,7 @@ FDifferentialDriveCommand URammsDifferentialDriveLibrary::CalculateWheelVelociti
 	// Where: V = linear velocity, omega = angular velocity, L = track width, R = wheel radius
 
 	float HalfTrack = TrackWidth * 0.5f;
-	
+
 	// Calculate linear velocity at each wheel
 	float LeftLinearVel = LinearVelocity - (AngularVelRad * HalfTrack);
 	float RightLinearVel = LinearVelocity + (AngularVelRad * HalfTrack);
@@ -63,17 +63,17 @@ FDifferentialDriveCommand URammsDifferentialDriveLibrary::CalculateWheelVelociti
 }
 
 void URammsDifferentialDriveLibrary::CalculateChassisVelocity(
-	float LeftWheelVelocity,
-	float RightWheelVelocity,
-	float TrackWidth,
-	float WheelRadius,
+	float  LeftWheelVelocity,
+	float  RightWheelVelocity,
+	float  TrackWidth,
+	float  WheelRadius,
 	float& OutLinearVelocity,
 	float& OutAngularVelocity)
 {
 	// Inverse differential drive kinematics
 	// V = R * (omega_left + omega_right) / 2
 	// omega = R * (omega_right - omega_left) / L
-	
+
 	// Linear velocity (cm/s)
 	OutLinearVelocity = WheelRadius * (LeftWheelVelocity + RightWheelVelocity) * 0.5f;
 
@@ -85,14 +85,14 @@ void URammsDifferentialDriveLibrary::CalculateChassisVelocity(
 }
 
 float URammsDifferentialDriveLibrary::EvaluateMotorTorque(
-	float CurrentRPM,
+	float					CurrentRPM,
 	const FMotorParameters& MotorParams,
-	float RequestedTorque)
+	float					RequestedTorque)
 {
 	float AbsRPM = FMath::Abs(CurrentRPM);
 	float Sign = FMath::Sign(RequestedTorque);
 	float AbsTorque = FMath::Abs(RequestedTorque);
-	
+
 	// Check if motor is at or beyond max RPM
 	if (AbsRPM >= MotorParams.MaxRPM)
 	{
@@ -139,11 +139,11 @@ float URammsDifferentialDriveLibrary::RPMToRadPerSec(float RPM)
 
 FOdometryData URammsDifferentialDriveLibrary::UpdateOdometry(
 	const FOdometryData& CurrentOdometry,
-	float LeftWheelDelta,
-	float RightWheelDelta,
-	float TrackWidth,
-	float WheelRadius,
-	float DeltaTime)
+	float				 LeftWheelDelta,
+	float				 RightWheelDelta,
+	float				 TrackWidth,
+	float				 WheelRadius,
+	float				 DeltaTime)
 {
 	FOdometryData NewOdometry = CurrentOdometry;
 
@@ -211,7 +211,7 @@ FOdometryData URammsDifferentialDriveLibrary::ResetOdometry(FVector Position, FR
 float URammsDifferentialDriveLibrary::CalculateSlipRatio(float DesiredVelocity, float ActualVelocity)
 {
 	float AbsDesired = FMath::Abs(DesiredVelocity);
-	
+
 	// Avoid division by zero
 	if (AbsDesired < SMALL_NUMBER)
 	{
@@ -242,7 +242,7 @@ FVector2D URammsDifferentialDriveLibrary::ApplyDeadZone2D(FVector2D Value, float
 	// Apply independent dead zone to each axis to preserve full diagonal input authority
 	float X = ApplyDeadZone(Value.X, DeadZone);
 	float Y = ApplyDeadZone(Value.Y, DeadZone);
-	
+
 	return FVector2D(X, Y);
 }
 
@@ -252,10 +252,10 @@ float URammsDifferentialDriveLibrary::GetTractionMultiplierFromSlip(float SlipRa
 	// - Grip increases from 0 to peak slip ratio
 	// - Grip stays high near peak
 	// - Grip gradually decreases after peak
-	
+
 	if (SlipRatio <= 0.0f)
 		return 1.0f;
-	
+
 	if (SlipRatio < PeakSlipRatio)
 	{
 		// Rising portion: exponential approach to peak

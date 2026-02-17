@@ -36,20 +36,22 @@ struct FRampKeyframe
 	FRampKeyframe()
 		: Time(0.0f)
 		, Transform(FTransform::Identity)
-	{}
+	{
+	}
 
 	FRampKeyframe(float InTime, const FTransform& InTransform)
 		: Time(InTime)
 		, Transform(InTransform)
-	{}
+	{
+	}
 };
 
-UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UVanRampComponent : public UStaticMeshComponent
 {
 	GENERATED_BODY()
 
-public:	
+public:
 	UVanRampComponent();
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

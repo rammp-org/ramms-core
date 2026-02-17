@@ -13,7 +13,10 @@ static FVector SafeNormalAxis(const FVector& V)
 	return V / S;
 }
 
-static Eigen::Vector3d ToEigen(const FVector& V) { return {V.X, V.Y, V.Z}; }
+static Eigen::Vector3d ToEigen(const FVector& V)
+{
+	return { V.X, V.Y, V.Z };
+}
 
 static Eigen::Vector3d RotationErrorAxisAngleRad(const FQuat& Current, const FQuat& Target)
 {
@@ -24,12 +27,15 @@ static Eigen::Vector3d RotationErrorAxisAngleRad(const FQuat& Current, const FQu
 	// shortest path
 	if (Qerr.W < 0.0f)
 	{
-		Qerr.X *= -1.0f; Qerr.Y *= -1.0f; Qerr.Z *= -1.0f; Qerr.W *= -1.0f;
+		Qerr.X *= -1.0f;
+		Qerr.Y *= -1.0f;
+		Qerr.Z *= -1.0f;
+		Qerr.W *= -1.0f;
 	}
 
 	const double w = FMath::Clamp((double)Qerr.W, -1.0, 1.0);
 	const double angle = 2.0 * std::acos(w); // [0..pi]
-	const double s = std::sqrt(FMath::Max(0.0, 1.0 - w*w));
+	const double s = std::sqrt(FMath::Max(0.0, 1.0 - w * w));
 
 	Eigen::Vector3d axis(1.0, 0.0, 0.0);
 	if (s > 1e-9)
@@ -40,14 +46,14 @@ static Eigen::Vector3d RotationErrorAxisAngleRad(const FQuat& Current, const FQu
 }
 
 static void ComputeChainKinematics(
-	const FTransform& BaseTransform,
-	const TArray<float>& JointAnglesDeg,
+	const FTransform&		  BaseTransform,
+	const TArray<float>&	  JointAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxesLocal,
-	const FTransform& EndEffectorOffset,
-	TArray<FVector>& OutJointPosWorld,
-	TArray<FVector>& OutJointAxisWorld,
-	FTransform& OutEEWorld)
+	const TArray<FVector>&	  JointAxesLocal,
+	const FTransform&		  EndEffectorOffset,
+	TArray<FVector>&		  OutJointPosWorld,
+	TArray<FVector>&		  OutJointAxisWorld,
+	FTransform&				  OutEEWorld)
 {
 	const int32 N = JointAnglesDeg.Num();
 	OutJointPosWorld.SetNum(N);
@@ -76,12 +82,12 @@ static void ComputeChainKinematics(
 }
 
 FTransform URammsIKLibrary::ComputeForwardKinematics(
-	const FTransform& BaseTransform,
-	const TArray<float>& JointAnglesDeg,
+	const FTransform&		  BaseTransform,
+	const TArray<float>&	  JointAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxesLocal,
-	const FTransform& EndEffectorOffset,
-	bool bEnableDebugLogging)
+	const TArray<FVector>&	  JointAxesLocal,
+	const FTransform&		  EndEffectorOffset,
+	bool					  bEnableDebugLogging)
 {
 	const int32 N = JointAnglesDeg.Num();
 	if (JointLocalTransforms.Num() != N || JointAxesLocal.Num() != N)
@@ -92,7 +98,7 @@ FTransform URammsIKLibrary::ComputeForwardKinematics(
 	}
 
 	TArray<FVector> JointPos, JointAxis;
-	FTransform EE;
+	FTransform		EE;
 	ComputeChainKinematics(BaseTransform, JointAnglesDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset, JointPos, JointAxis, EE);
 
 	if (bEnableDebugLogging)
@@ -108,31 +114,28 @@ FTransform URammsIKLibrary::ComputeForwardKinematics(
 }
 
 FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
-	const FTransform& BaseTransform,
-	const TArray<float>& CurrentAnglesDeg,
+	const FTransform&		  BaseTransform,
+	const TArray<float>&	  CurrentAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxesLocal,
-	const FTransform& EndEffectorOffset,
-	const FTransform& TargetEndEffectorWorld,
-	const TArray<FVector2D>& JointLimitsDeg,
-	const TArray<bool>& TaskSpaceMask6,
-	const TArray<float>& JointWeights,
-	bool bEnableNullSpaceOptimization,
-	float NullSpaceGain,
-	const TArray<float>& NullSpaceBiasDeg,
-	float Damping,
-	float StepClipDeg,
-	int32 MaxIterations,
-	float PositionToleranceCm,
-	float RotationToleranceDeg)
+	const TArray<FVector>&	  JointAxesLocal,
+	const FTransform&		  EndEffectorOffset,
+	const FTransform&		  TargetEndEffectorWorld,
+	const TArray<FVector2D>&  JointLimitsDeg,
+	const TArray<bool>&		  TaskSpaceMask6,
+	const TArray<float>&	  JointWeights,
+	bool					  bEnableNullSpaceOptimization,
+	float					  NullSpaceGain,
+	const TArray<float>&	  NullSpaceBiasDeg,
+	float					  Damping,
+	float					  StepClipDeg,
+	int32					  MaxIterations,
+	float					  PositionToleranceCm,
+	float					  RotationToleranceDeg)
 {
 	FIKSolveResult Out;
 
 	const int32 N = CurrentAnglesDeg.Num();
-	if (N <= 0 ||
-		JointLocalTransforms.Num() != N ||
-		JointAxesLocal.Num() != N ||
-		JointLimitsDeg.Num() != N)
+	if (N <= 0 || JointLocalTransforms.Num() != N || JointAxesLocal.Num() != N || JointLimitsDeg.Num() != N)
 	{
 		Out.bSuccess = false;
 		Out.JointAngles = CurrentAnglesDeg;
@@ -142,7 +145,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	MaxIterations = FMath::Clamp(MaxIterations, 1, 500);
 
 	// Mask vector m(6)
-	double m[6] = {1,1,1,1,1,1};
+	double m[6] = { 1, 1, 1, 1, 1, 1 };
 	for (int i = 0; i < 6; i++)
 	{
 		if (TaskSpaceMask6.Num() == 6)
@@ -176,11 +179,11 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	TArray<float> qDeg = CurrentAnglesDeg;
 
 	TArray<FVector> JointPosWorld, JointAxisWorld;
-	FTransform EEWorld = FTransform::Identity;
+	FTransform		EEWorld = FTransform::Identity;
 
 	double posErrCm = 0.0;
 	double rotErrDeg = 0.0;
-	
+
 	for (int32 it = 0; it < MaxIterations; it++)
 	{
 		ComputeChainKinematics(BaseTransform, qDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset,
@@ -199,7 +202,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 		Out.PositionError = (float)posErrCm;
 		Out.RotationError = (float)rotErrDeg;
 		Out.IterationsUsed = it + 1;
-		
+
 		if (posErrCm <= PositionToleranceCm && rotErrDeg <= RotationToleranceDeg)
 		{
 			Out.bSuccess = true;
@@ -232,7 +235,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 			const Eigen::Vector3d aj(AxisU.X, AxisU.Y, AxisU.Z);
 
 			const Eigen::Vector3d Jv = aj.cross(pCur - pj); // cm / rad
-			const Eigen::Vector3d Jw = aj;                  // rad / rad
+			const Eigen::Vector3d Jw = aj;					// rad / rad
 
 			J(0, j) = m[0] * Jv.x();
 			J(1, j) = m[1] * Jv.y();
@@ -244,19 +247,19 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 		}
 
 		// DLS: dq = W J^T (J W J^T + \u03bb^2 I)^-1 e
-		const Eigen::MatrixXd JW = J * W; // 6xN
+		const Eigen::MatrixXd		JW = J * W; // 6xN
 		Eigen::Matrix<double, 6, 6> A = (JW * J.transpose());
 		A += (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
 
 		const Eigen::Matrix<double, 6, 1> x = A.ldlt().solve(e);
-		Eigen::VectorXd dq = W * J.transpose() * x; // Nx1 (rad)
+		Eigen::VectorXd					  dq = W * J.transpose() * x; // Nx1 (rad)
 
 		// Null-space bias (optional)
 		if (bEnableNullSpaceOptimization && NullSpaceGain > 0.0f && NullSpaceBiasDeg.Num() == N)
 		{
 			// J_pinv = W J^T A^-1
 			const Eigen::Matrix<double, 6, 6> Ainv = A.ldlt().solve(Eigen::Matrix<double, 6, 6>::Identity());
-			const Eigen::MatrixXd Jpinv = W * J.transpose() * Ainv; // Nx6
+			const Eigen::MatrixXd			  Jpinv = W * J.transpose() * Ainv; // Nx6
 
 			Eigen::VectorXd qCurRad(N), qPrefRad(N);
 			for (int32 i = 0; i < N; i++)
@@ -265,7 +268,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 				qPrefRad(i) = FMath::DegreesToRadians(NullSpaceBiasDeg[i]);
 			}
 
-			Eigen::VectorXd dqBias = (qPrefRad - qCurRad) * (double)NullSpaceGain;
+			Eigen::VectorXd		  dqBias = (qPrefRad - qCurRad) * (double)NullSpaceGain;
 			const Eigen::MatrixXd Nmat = (Eigen::MatrixXd::Identity(N, N) - (Jpinv * J));
 			dq += Nmat * dqBias;
 		}
@@ -322,7 +325,7 @@ static float CalculateSignedAngle(const FVector& From, const FVector& To, const 
 
 	// Determine sign using cross product
 	FVector Cross = FVector::CrossProduct(FromProjected, ToProjected);
-	float Sign = FVector::DotProduct(Cross, Axis);
+	float	Sign = FVector::DotProduct(Cross, Axis);
 
 	if (Sign < 0.0f)
 	{
@@ -367,7 +370,13 @@ static FQuat ShortestPath(const FQuat& Q)
 {
 	FQuat R = Q;
 	R.Normalize();
-	if (R.W < 0.0f) { R.X = -R.X; R.Y = -R.Y; R.Z = -R.Z; R.W = -R.W; }
+	if (R.W < 0.0f)
+	{
+		R.X = -R.X;
+		R.Y = -R.Y;
+		R.Z = -R.Z;
+		R.W = -R.W;
+	}
 	return R;
 }
 
@@ -390,20 +399,20 @@ static float RotationErrorDeg(const FQuat& Current, const FQuat& Target)
 // per-joint using the respective gains.
 // =============================================================================
 FIKSolveResult URammsIKLibrary::SolveIK_CCD(
-	const FTransform& BaseTransform,
-	const TArray<float>& CurrentAnglesDeg,
+	const FTransform&		  BaseTransform,
+	const TArray<float>&	  CurrentAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxesLocal,
-	const TArray<FVector2D>& JointLimitsDeg,
-	const FTransform& EndEffectorOffset,
-	const FTransform& TargetEndEffectorWorld,
-	const TArray<bool>& TaskSpaceMask6,
-	int32 MaxIterations,
-	float PositionToleranceCm,
-	float RotationToleranceDeg,
-	float PositionGain,
-	float OrientationGain,
-	float MaxAngleStepDeg)
+	const TArray<FVector>&	  JointAxesLocal,
+	const TArray<FVector2D>&  JointLimitsDeg,
+	const FTransform&		  EndEffectorOffset,
+	const FTransform&		  TargetEndEffectorWorld,
+	const TArray<bool>&		  TaskSpaceMask6,
+	int32					  MaxIterations,
+	float					  PositionToleranceCm,
+	float					  RotationToleranceDeg,
+	float					  PositionGain,
+	float					  OrientationGain,
+	float					  MaxAngleStepDeg)
 {
 	FIKSolveResult Result;
 	Result.bSuccess = false;
@@ -412,8 +421,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_CCD(
 	Result.RotationError = 0.0f;
 
 	const int32 N = CurrentAnglesDeg.Num();
-	if (N == 0 || N != JointLocalTransforms.Num() ||
-		N != JointAxesLocal.Num() || N != JointLimitsDeg.Num())
+	if (N == 0 || N != JointLocalTransforms.Num() || N != JointAxesLocal.Num() || N != JointLimitsDeg.Num())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CCD] Invalid input: joint count mismatch"));
 		return Result;
@@ -428,10 +436,10 @@ FIKSolveResult URammsIKLibrary::SolveIK_CCD(
 		bSolveOrientation = TaskSpaceMask6[3] || TaskSpaceMask6[4] || TaskSpaceMask6[5];
 	}
 
-	TArray<float> Angles = CurrentAnglesDeg;
+	TArray<float>	Angles = CurrentAnglesDeg;
 	TArray<FVector> JointPosWorld;
 	TArray<FVector> JointAxisWorld;
-	FTransform EEWorld;
+	FTransform		EEWorld;
 
 	// No LimitEscape for CCD — use 0
 	const float LimitEscapeDeg = 0.0f;
@@ -480,12 +488,11 @@ FIKSolveResult URammsIKLibrary::SolveIK_CCD(
 				const FVector ToEEProj = ToEE - AxisW * FVector::DotProduct(ToEE, AxisW);
 				const FVector ToTargetProj = ToTarget - AxisW * FVector::DotProduct(ToTarget, AxisW);
 
-				if (ToEEProj.SizeSquared() > KINDA_SMALL_NUMBER &&
-					ToTargetProj.SizeSquared() > KINDA_SMALL_NUMBER)
+				if (ToEEProj.SizeSquared() > KINDA_SMALL_NUMBER && ToTargetProj.SizeSquared() > KINDA_SMALL_NUMBER)
 				{
 					const FVector FromN = ToEEProj.GetSafeNormal();
 					const FVector ToN = ToTargetProj.GetSafeNormal();
-					const float CosA = FMath::Clamp(FVector::DotProduct(FromN, ToN), -1.0f, 1.0f);
+					const float	  CosA = FMath::Clamp(FVector::DotProduct(FromN, ToN), -1.0f, 1.0f);
 					PosDeltaDeg = FMath::RadiansToDegrees(FMath::Acos(CosA));
 
 					// Sign via right-hand rule around axis
@@ -542,8 +549,6 @@ FIKSolveResult URammsIKLibrary::SolveIK_CCD(
 	return Result;
 }
 
-
-
 // =============================================================================
 // FABRIK Solver (angle-space, hinge-constrained)
 //
@@ -561,22 +566,22 @@ FIKSolveResult URammsIKLibrary::SolveIK_CCD(
 // because their hinge-plane projection is degenerate.
 // =============================================================================
 FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
-	const FTransform& BaseTransform,
-	const TArray<float>& CurrentAnglesDeg,
+	const FTransform&		  BaseTransform,
+	const TArray<float>&	  CurrentAnglesDeg,
 	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxesLocal,
-	const TArray<FVector2D>& JointLimitsDeg,
-	const FTransform& EndEffectorOffset,
-	const FTransform& TargetEndEffectorWorld,
-	const TArray<bool>& TaskSpaceMask6,
-	int32 MaxIterations,
-	float PositionToleranceCm,
-	float RotationToleranceDeg,
-	float AngleGain,
-	float MaxAngleStepDeg,
-	float LimitEscapeDeg,
-	int32 OrientationIterations,
-	float OrientationGain)
+	const TArray<FVector>&	  JointAxesLocal,
+	const TArray<FVector2D>&  JointLimitsDeg,
+	const FTransform&		  EndEffectorOffset,
+	const FTransform&		  TargetEndEffectorWorld,
+	const TArray<bool>&		  TaskSpaceMask6,
+	int32					  MaxIterations,
+	float					  PositionToleranceCm,
+	float					  RotationToleranceDeg,
+	float					  AngleGain,
+	float					  MaxAngleStepDeg,
+	float					  LimitEscapeDeg,
+	int32					  OrientationIterations,
+	float					  OrientationGain)
 {
 	FIKSolveResult Result;
 	Result.bSuccess = false;
@@ -585,8 +590,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 	Result.RotationError = 0.0f;
 
 	const int32 N = CurrentAnglesDeg.Num();
-	if (N == 0 || N != JointLocalTransforms.Num() ||
-		N != JointAxesLocal.Num() || N != JointLimitsDeg.Num())
+	if (N == 0 || N != JointLocalTransforms.Num() || N != JointAxesLocal.Num() || N != JointLimitsDeg.Num())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[FABRIK] Invalid input: joint count mismatch"));
 		return Result;
@@ -601,10 +605,10 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 		bSolveOrientation = TaskSpaceMask6[3] || TaskSpaceMask6[4] || TaskSpaceMask6[5];
 	}
 
-	TArray<float> Angles = CurrentAnglesDeg;
+	TArray<float>	Angles = CurrentAnglesDeg;
 	TArray<FVector> JointPosWorld;
 	TArray<FVector> JointAxisWorld;
-	FTransform EEWorld;
+	FTransform		EEWorld;
 
 	// Damping for per-joint scalar DLS (prevents huge steps when Jv is small)
 	const double Lambda2 = 0.01; // cm^2 damping (small — we rely on step clamp for stability)
@@ -671,7 +675,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 			NewAngle = ApplyAngleLimits(NewAngle, JointLimitsDeg[i], LimitEscapeDeg);
 
 			// Actual applied delta (may differ due to limits)
-			const float ActualDeltaDeg = NewAngle - Angles[i];
+			const float	 ActualDeltaDeg = NewAngle - Angles[i];
 			const double ActualDqRad = FMath::DegreesToRadians(ActualDeltaDeg);
 			Angles[i] = NewAngle;
 
@@ -686,7 +690,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FABRIK(
 	// ------------------------------------------------------------------
 	if (bSolveOrientation && OrientationIterations > 0 && OrientationGain > 0.0f)
 	{
-		const int32 StartIdx = FMath::Max(0, N - 3);
+		const int32	 StartIdx = FMath::Max(0, N - 3);
 		const double OriLambda2 = 0.01; // small damping for orientation
 
 		for (int32 OIter = 0; OIter < OrientationIterations; OIter++)
