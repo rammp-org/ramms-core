@@ -37,8 +37,7 @@ enum class EIKSolverType : uint8
 {
 	DLS UMETA(DisplayName = "Damped Least Squares (DLS)"),
 	FABRIK UMETA(DisplayName = "FABRIK"),
-	CCD UMETA(DisplayName = "CCD"),
-	UEBuiltIn UMETA(DisplayName = "UE Built-in IK (Pending)")
+	CCD UMETA(DisplayName = "CCD")
 };
 
 /**

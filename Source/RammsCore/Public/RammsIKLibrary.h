@@ -181,22 +181,4 @@ public:
 		float OrientationGain,
 		float MaxAngleStepDeg);
 
-	/**
-	 * UE built-in FABRIK solver (AnimationCore) with joint angle reconstruction.
-	 */
-	UFUNCTION(BlueprintCallable, Category="RAMMS|IK|UE")
-	static FIKSolveResult SolveIK_UEFabrik(
-		const FTransform& BaseTransform,
-		const TArray<float>& CurrentAnglesDeg,
-		const TArray<FTransform>& JointLocalTransforms,
-		const TArray<FVector>& JointAxesLocal,
-		const TArray<FVector2D>& JointLimitsDeg,
-		const FTransform& EndEffectorOffset,
-		const FTransform& TargetEndEffectorWorld,
-		const TArray<bool>& TaskSpaceMask6,
-		int32 MaxIterations,
-		float PositionToleranceCm,
-		float RotationToleranceDeg,
-		float LimitEscapeDeg,
-		bool bAxesInParentFrame);
 };

@@ -542,31 +542,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_CCD(
 	return Result;
 }
 
-FIKSolveResult URammsIKLibrary::SolveIK_UEFabrik(
-	const FTransform& BaseTransform,
-	const TArray<float>& CurrentAnglesDeg,
-	const TArray<FTransform>& JointLocalTransforms,
-	const TArray<FVector>& JointAxesLocal,
-	const TArray<FVector2D>& JointLimitsDeg,
-	const FTransform& EndEffectorOffset,
-	const FTransform& TargetEndEffectorWorld,
-	const TArray<bool>& TaskSpaceMask6,
-	int32 MaxIterations,
-	float PositionToleranceCm,
-	float RotationToleranceDeg,
-	float LimitEscapeDeg,
-	bool bAxesInParentFrame)
-{
-	// Stub: UE-FABRIK removed.
-	FIKSolveResult Result;
-	Result.bSuccess = false;
-	Result.JointAngles = CurrentAnglesDeg;
-	Result.PositionError = 999.0f;
-	Result.RotationError = 999.0f;
-	Result.IterationsUsed = 0;
-	UE_LOG(LogTemp, Warning, TEXT("[UEFabrik] Solver removed. Use DLS or FABRIK."));
-	return Result;
-}
+
 
 // =============================================================================
 // FABRIK Solver (angle-space, hinge-constrained)
