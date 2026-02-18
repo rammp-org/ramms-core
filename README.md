@@ -12,7 +12,36 @@
  For an example project, see the
  [RAMMS Sim Project](https://github.com/rammp-org/ramms-sim).
 
- ## Quick Start
+<!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
+**Table of Contents**
+
+- [Robotic Assistive Mobility and Manipulation Simulation (RAMMS) Core Plugin](#robotic-assistive-mobility-and-manipulation-simulation-ramms-core-plugin)
+  - [Quick Start](#quick-start)
+  - [Developing](#developing)
+    - [Code style](#code-style)
+  - [Components](#components)
+    - [Mobility](#mobility)
+    - [Manipulation](#manipulation)
+    - [Environment](#environment)
+  - [Kinova Gen3 Robotic Arm Controller](#kinova-gen3-robotic-arm-controller)
+    - [Arm Configuration](#arm-configuration)
+    - [Control Modes](#control-modes)
+    - [Joint Configuration (`FRevoluteJointConfig`)](#joint-configuration-frevolutejointconfig)
+  - [IK Solver System](#ik-solver-system)
+    - [Shared Infrastructure](#shared-infrastructure)
+      - [FK Pipeline (`ComputeChainKinematics`)](#fk-pipeline-computechainkinematics)
+    - [Common Solver Parameters](#common-solver-parameters)
+    - [Solver Comparison](#solver-comparison)
+    - [DLS (Damped Least Squares)](#dls-damped-least-squares)
+    - [FABRIK](#fabrik)
+    - [CCD (Cyclic Coordinate Descent)](#ccd-cyclic-coordinate-descent)
+  - [Blueprint API (`URammsIKLibrary`)](#blueprint-api-urammsiklibrary)
+    - [`FIKSolveResult`](#fiksolveresult)
+  - [Dependencies](#dependencies)
+
+<!-- markdown-toc end -->
+
+## Quick Start
 
  1. Clone or add this repository as a git submodule in `Plugins/`.
  2. Open your UE5 project. The plugin is automatically detected and compiled.
@@ -20,11 +49,27 @@
  4. Add the desired controller component to your actor (e.g.
     `UKinovaGen3ControllerComponent` for a robotic arm).
 
- ---
+## Developing
 
- ## Components
+If you want to contribute or customize the plugin, you can clone the repository
+and set it up in your Unreal project. If you want to make changes to the code,
+please follow the code style guidelines below.
 
- ### Mobility
+### Code style
+
+1. Ensure `clang-format` is installed
+2. Ensure [pre-commit](https://pre-commit.com) is installed
+3. Set up `pre-commit` for this repository:
+
+  ``` console
+  pre-commit install
+  ```
+
+This helps ensure that consistent code formatting is applied.
+
+## Components
+
+### Mobility
 
  | Component | Description |
  |---|---|
@@ -32,7 +77,7 @@
  | `URammsDifferentialDriveLibrary` | Blueprint function library with differential drive helpers |
  | `UMebotControllerComponent` | MEBot wheelchair base with linear and angular actuator control |
 
- ### Manipulation
+### Manipulation
 
  | Component | Description |
  |---|---|
@@ -40,7 +85,7 @@
  | `UGripperControllerComponent` | Gripper controller for robotic end effectors |
  | `URammsIKLibrary` | Static Blueprint function library exposing FK and IK solvers |
 
- ### Environment
+### Environment
 
  | Component | Description |
  |---|---|
@@ -49,14 +94,14 @@
 
  ---
 
- ## Kinova Gen3 Robotic Arm Controller
+## Kinova Gen3 Robotic Arm Controller
 
  `UKinovaGen3ControllerComponent` is the primary controller for articulated
  robotic arms. It reads joint angles from physics constraints on a
  SkeletalMesh, runs IK solvers to compute target angles, and drives the
  constraints to reach end-effector target poses.
 
- ### Arm Configuration
+### Arm Configuration
 
  | Property | Default | Description |
  |---|---|---|
@@ -64,7 +109,7 @@
  | `EndEffectorBoneName` | `"end_effector"` | Bone or socket name at the arm tip |
  | `bAutoPopulateOnSkeletalMeshChange` | `true` | Auto-detect joints from the skeleton |
 
- ### Control Modes
+### Control Modes
 
  | Property | Options | Description |
  |---|---|---|
@@ -72,7 +117,7 @@
  | `ControlMode` | `PositionControl`, `VelocityControl`, `TorqueControl` | How joint targets are applied to physics constraints |
  | `TargetActor` | (Actor reference) | Actor whose world transform is the IK target. If unset, uses `TargetEndEffectorTransform` |
 
- ### Joint Configuration (`FRevoluteJointConfig`)
+### Joint Configuration (`FRevoluteJointConfig`)
 
  The `Joints` array contains one entry per revolute (hinge) joint:
 
@@ -92,9 +137,9 @@
 
  ---
 
- ## IK Solver System
+## IK Solver System
 
- ### Shared Infrastructure
+### Shared Infrastructure
 
  All three solvers (DLS, FABRIK, CCD) share the same core:
 
@@ -107,7 +152,7 @@
    and `EndEffectorOffset` are derived from the reference skeleton so FK
    matches the physics simulation exactly.
 
- #### FK Pipeline (`ComputeChainKinematics`)
+#### FK Pipeline (`ComputeChainKinematics`)
 
  1. Start from `BaseTransform` (world-space arm base).
  2. For each joint `i` (root to tip):
@@ -116,7 +161,7 @@
     - Apply revolute rotation `FQuat(AxisWorld, q_i)` about the axis.
  3. Apply `EndEffectorOffset` after the last joint.
 
- ### Common Solver Parameters
+### Common Solver Parameters
 
  These apply regardless of which solver is selected:
 
@@ -132,7 +177,7 @@
  Set the orientation entries of `TaskSpaceMask` to `false` for position-only
  solving (faster, fewer DOFs to satisfy).
 
- ### Solver Comparison
+### Solver Comparison
 
  |  | DLS | FABRIK | CCD |
  |---|---|---|---|
@@ -146,7 +191,7 @@
 
  ---
 
- ### DLS (Damped Least Squares)
+### DLS (Damped Least Squares)
 
  The default and most capable solver. Builds the full 6×N Jacobian each
  iteration and solves: `dq = W J^T (J W J^T + λ²I)⁻¹ e`.
@@ -168,7 +213,7 @@
 
  ---
 
- ### FABRIK
+### FABRIK
 
  A per-joint Jacobian-column solver using the same math as DLS but without
  the matrix solve. For each joint (tip to root), it computes a scalar DLS
@@ -202,7 +247,7 @@
 
  ---
 
- ### CCD (Cyclic Coordinate Descent)
+### CCD (Cyclic Coordinate Descent)
 
  Classic CCD constrained to 1-DOF hinge joints. Unlike FABRIK, it
  recomputes FK for each joint during the sweep, giving exact
@@ -228,7 +273,7 @@
 
  ---
 
- ## Blueprint API (`URammsIKLibrary`)
+## Blueprint API (`URammsIKLibrary`)
 
  All solvers and FK are exposed as static `BlueprintCallable` functions:
 
@@ -248,7 +293,7 @@
  static FIKSolveResult SolveIK_CCD(...);
  ```
 
- ### `FIKSolveResult`
+### `FIKSolveResult`
 
  | Field | Type | Description |
  |---|---|---|
@@ -260,7 +305,7 @@
 
  ---
 
- ## Dependencies
+## Dependencies
 
  - **Eigen** — Matrix operations for DLS and rotation error computation.
    Included as a third-party dependency.
