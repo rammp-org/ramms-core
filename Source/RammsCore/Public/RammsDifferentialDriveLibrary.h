@@ -27,8 +27,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	static FDifferentialDriveCommand JoystickToDifferentialDrive(
 		FVector2D JoystickInput,
-		float MaxValue = 1.0f,
-		float DeadZone = 0.05f);
+		float	  MaxValue = 1.0f,
+		float	  DeadZone = 0.05f);
 
 	/**
 	 * Calculate wheel velocities from linear and angular velocities
@@ -56,10 +56,10 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	static void CalculateChassisVelocity(
-		float LeftWheelVelocity,
-		float RightWheelVelocity,
-		float TrackWidth,
-		float WheelRadius,
+		float  LeftWheelVelocity,
+		float  RightWheelVelocity,
+		float  TrackWidth,
+		float  WheelRadius,
 		float& OutLinearVelocity,
 		float& OutAngularVelocity);
 
@@ -72,9 +72,9 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	static float EvaluateMotorTorque(
-		float CurrentRPM,
+		float					CurrentRPM,
 		const FMotorParameters& MotorParams,
-		float RequestedTorque);
+		float					RequestedTorque);
 
 	/**
 	 * Convert angular velocity (rad/s) to RPM
@@ -101,18 +101,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	static FOdometryData UpdateOdometry(
 		const FOdometryData& CurrentOdometry,
-		float LeftWheelDelta,
-		float RightWheelDelta,
-		float TrackWidth,
-		float WheelRadius,
-		float DeltaTime);
+		float				 LeftWheelDelta,
+		float				 RightWheelDelta,
+		float				 TrackWidth,
+		float				 WheelRadius,
+		float				 DeltaTime);
 
 	/**
 	 * Reset odometry to given position and orientation
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	static FOdometryData ResetOdometry(
-		FVector Position = FVector::ZeroVector,
+		FVector	 Position = FVector::ZeroVector,
 		FRotator Orientation = FRotator::ZeroRotator);
 
 	/**
@@ -135,4 +135,23 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
 	static FVector2D ApplyDeadZone2D(FVector2D Value, float DeadZone);
+
+	/**
+	 * Calculate traction multiplier from slip ratio using realistic tire curve
+	 * @param SlipRatio - Current slip ratio (0-1)
+	 * @param PeakSlipRatio - Slip ratio where peak grip occurs (typically 0.1-0.15)
+	 * @return Traction multiplier (0-1, peaks at PeakSlipRatio)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
+	static float GetTractionMultiplierFromSlip(float SlipRatio, float PeakSlipRatio = 0.15f);
+
+	/**
+	 * Calculate available grip force based on wheel load and surface friction
+	 * @param WheelLoad - Normal force on wheel (Newtons)
+	 * @param SurfaceFriction - Friction coefficient from physical material
+	 * @param TractionCoefficient - Base traction multiplier
+	 * @return Maximum grip force (Newtons)
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
+	static float CalculateAvailableGrip(float WheelLoad, float SurfaceFriction, float TractionCoefficient);
 };

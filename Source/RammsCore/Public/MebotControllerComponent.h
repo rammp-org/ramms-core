@@ -34,6 +34,10 @@ struct FAngularMotorConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	bool bEnabled;
 
+	// Invert the rotation direction (multiply angle by -1)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
+	bool bInvertDirection;
+
 	// Target angle in degrees
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	float TargetAngle;
@@ -65,6 +69,7 @@ struct FAngularMotorConfig
 		: ConstraintName(NAME_None)
 		, ControlAxis(EMotorAxis::Z)
 		, bEnabled(true)
+		, bInvertDirection(false)
 		, TargetAngle(0.0f)
 		, CurrentAngle(0.0f)
 		, MaxSpeed(45.0f)
@@ -72,7 +77,8 @@ struct FAngularMotorConfig
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
 		, CachedConstraint(nullptr)
-	{}
+	{
+	}
 };
 
 USTRUCT(BlueprintType)
@@ -130,15 +136,16 @@ struct FLinearMotorConfig
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
 		, CachedConstraint(nullptr)
-	{}
+	{
+	}
 };
 
-UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UMebotControllerComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
-public:	
+public:
 	UMebotControllerComponent();
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

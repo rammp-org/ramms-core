@@ -16,5 +16,5 @@ void FRammsCoreModule::ShutdownModule()
 }
 
 #undef LOCTEXT_NAMESPACE
-	
+
 IMPLEMENT_MODULE(FRammsCoreModule, RammsCore)

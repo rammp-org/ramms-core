@@ -13,7 +13,7 @@ class UPrimitiveComponent;
  * Differential drive controller component for powered wheelchair simulation
  * Manages motor control, applies forces to wheels, tracks odometry
  */
-UCLASS(ClassGroup=(Ramms), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent
 {
 	GENERATED_BODY()
@@ -123,13 +123,33 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction")
 	bool bEnableSlipModeling = false;
 
-	/** Traction coefficient (0-1, higher = more grip) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float TractionCoefficient = 0.8f;
+	/** Base traction coefficient (multiplied by surface friction) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float TractionCoefficient = 1.0f;
 
-	/** Slip threshold before traction loss becomes significant */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float SlipThreshold = 0.1f;
+	/** Use physical material friction from ground surface */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction")
+	bool bUsePhysicalMaterialFriction = true;
+
+	/** Enable load-dependent traction (wheels with more weight get more grip) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction")
+	bool bEnableLoadDependentTraction = true;
+
+	/** Mass of the vehicle (kg) - used for load calculations */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction", meta = (ClampMin = "1.0"))
+	float VehicleMass = 100.0f;
+
+	/** Slip ratio where peak traction occurs (typically 0.1-0.15) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction", meta = (ClampMin = "0.01", ClampMax = "0.3"))
+	float PeakSlipRatio = 0.15f;
+
+	/** Enable lateral slip resistance (reduces torque when sliding sideways) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction")
+	bool bEnableLateralSlipResistance = true;
+
+	/** Lateral velocity threshold before slip resistance kicks in (cm/s) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Traction", meta = (ClampMin = "0.0"))
+	float LateralSlipThreshold = 10.0f;
 
 	// ========== Input ==========
 

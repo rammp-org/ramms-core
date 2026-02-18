@@ -19,6 +19,11 @@
 			"Name": "RammsCore",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "RammsCoreEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	]
 }
