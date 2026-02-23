@@ -63,16 +63,16 @@ static void ComputeChainKinematics(
 
 	for (int32 i = 0; i < N; i++)
 	{
-		// parent -> joint_i (q=0)
-		T = JointLocalTransforms[i] * T;
-
-		OutJointPosWorld[i] = T.GetLocation();
-
-		// axis in joint frame -> world
+		// T is currently the parent frame of joint i (includes prior rotations).
+		// Axis is stored in parent frame, so transform it to world BEFORE applying bone pose.
 		const FVector AxisWorld = SafeNormalAxis(T.TransformVectorNoScale(JointAxesLocal[i]));
 		OutJointAxisWorld[i] = AxisWorld;
 
-		// apply revolute rotation about axis (at joint origin)
+		// Advance through bone to joint i's position
+		T = JointLocalTransforms[i] * T;
+		OutJointPosWorld[i] = T.GetLocation();
+
+		// Apply revolute rotation about axis (at joint origin)
 		const float AngleRad = FMath::DegreesToRadians(JointAnglesDeg[i]);
 		const FQuat R(AxisWorld, AngleRad);
 		T.SetRotation((R * T.GetRotation()).GetNormalized());
@@ -130,7 +130,12 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	float					  StepClipDeg,
 	int32					  MaxIterations,
 	float					  PositionToleranceCm,
-	float					  RotationToleranceDeg)
+	float					  RotationToleranceDeg,
+	bool					  bUseGradientProjection,
+	bool					  bUseActiveSetMasking,
+	float					  MaxJointVelocityDegPerSec,
+	float					  IterationTimestepSec,
+	bool					  bAutoGenerateNullSpaceBias)
 {
 	FIKSolveResult Out;
 
@@ -175,6 +180,40 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 
 	// Balance units: treat rotation error as "cm-equivalent"
 	const double RotToCm = 20.0;
+
+	// Tolerance for "at limit" check (degrees)
+	const double ConstraintTolerance = 0.5;
+
+	// Detect free (unlimited) joints: range >= 359 degrees means no effective limit
+	std::vector<bool> isFreeJoint(N, false);
+	for (int32 i = 0; i < N; i++)
+	{
+		const double range = (double)JointLimitsDeg[i].Y - (double)JointLimitsDeg[i].X;
+		if (range >= 359.0)
+		{
+			isFreeJoint[i] = true;
+		}
+	}
+
+	// Auto-generate null-space bias toward center of joint ranges if enabled
+	TArray<float> EffectiveNullSpaceBias = NullSpaceBiasDeg;
+	if (bAutoGenerateNullSpaceBias && bEnableNullSpaceOptimization && NullSpaceGain > 0.0f && EffectiveNullSpaceBias.Num() != N)
+	{
+		EffectiveNullSpaceBias.SetNum(N);
+		for (int32 i = 0; i < N; i++)
+		{
+			if (isFreeJoint[i])
+			{
+				// Free joints: prefer 0 degrees (neutral position)
+				EffectiveNullSpaceBias[i] = 0.0f;
+			}
+			else
+			{
+				// Constrained joints: prefer center of range
+				EffectiveNullSpaceBias[i] = 0.5f * (JointLimitsDeg[i].X + JointLimitsDeg[i].Y);
+			}
+		}
+	}
 
 	TArray<float> qDeg = CurrentAnglesDeg;
 
@@ -225,6 +264,28 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 		Eigen::MatrixXd J(6, N);
 		J.setZero();
 
+		// Build active constraint set for active set masking
+		std::vector<bool> isConstrained(N, false);
+		if (bUseActiveSetMasking)
+		{
+			for (int32 i = 0; i < N; i++)
+			{
+				// Skip free joints - they have no constraints
+				if (isFreeJoint[i])
+					continue;
+
+				const double qCur = qDeg[i];
+				const double minDeg = (double)JointLimitsDeg[i].X;
+				const double maxDeg = (double)JointLimitsDeg[i].Y;
+
+				// Check if joint is at or near a limit
+				if (qCur <= minDeg + ConstraintTolerance || qCur >= maxDeg - ConstraintTolerance)
+				{
+					isConstrained[i] = true;
+				}
+			}
+		}
+
 		for (int32 j = 0; j < N; j++)
 		{
 			const FVector AxisU = JointAxisWorld[j].GetSafeNormal();
@@ -244,9 +305,15 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 			J(3, j) = m[3] * (RotToCm * Jw.x());
 			J(4, j) = m[4] * (RotToCm * Jw.y());
 			J(5, j) = m[5] * (RotToCm * Jw.z());
+
+			// Active set masking: zero out columns for constrained joints
+			if (bUseActiveSetMasking && isConstrained[j])
+			{
+				J.col(j).setZero();
+			}
 		}
 
-		// DLS: dq = W J^T (J W J^T + \u03bb^2 I)^-1 e
+		// DLS: dq = W J^T (J W J^T + λ^2 I)^-1 e
 		const Eigen::MatrixXd		JW = J * W; // 6xN
 		Eigen::Matrix<double, 6, 6> A = (JW * J.transpose());
 		A += (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
@@ -254,8 +321,36 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 		const Eigen::Matrix<double, 6, 1> x = A.ldlt().solve(e);
 		Eigen::VectorXd					  dq = W * J.transpose() * x; // Nx1 (rad)
 
+		// Gradient projection: zero out dq for joints at active constraints
+		if (bUseGradientProjection)
+		{
+			for (int32 i = 0; i < N; i++)
+			{
+				// Skip free joints - they have no constraints
+				if (isFreeJoint[i])
+					continue;
+
+				const double qCur = qDeg[i];
+				const double minDeg = (double)JointLimitsDeg[i].X;
+				const double maxDeg = (double)JointLimitsDeg[i].Y;
+				const double dqDeg = FMath::RadiansToDegrees((float)dq(i));
+
+				// If at lower limit and trying to go lower, zero the step
+				if (qCur <= minDeg + ConstraintTolerance && dqDeg < 0.0)
+				{
+					dq(i) = 0.0;
+				}
+
+				// If at upper limit and trying to go higher, zero the step
+				if (qCur >= maxDeg - ConstraintTolerance && dqDeg > 0.0)
+				{
+					dq(i) = 0.0;
+				}
+			}
+		}
+
 		// Null-space bias (optional)
-		if (bEnableNullSpaceOptimization && NullSpaceGain > 0.0f && NullSpaceBiasDeg.Num() == N)
+		if (bEnableNullSpaceOptimization && NullSpaceGain > 0.0f && EffectiveNullSpaceBias.Num() == N)
 		{
 			// J_pinv = W J^T A^-1
 			const Eigen::Matrix<double, 6, 6> Ainv = A.ldlt().solve(Eigen::Matrix<double, 6, 6>::Identity());
@@ -265,12 +360,24 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 			for (int32 i = 0; i < N; i++)
 			{
 				qCurRad(i) = FMath::DegreesToRadians(qDeg[i]);
-				qPrefRad(i) = FMath::DegreesToRadians(NullSpaceBiasDeg[i]);
+				qPrefRad(i) = FMath::DegreesToRadians(EffectiveNullSpaceBias[i]);
 			}
 
 			Eigen::VectorXd		  dqBias = (qPrefRad - qCurRad) * (double)NullSpaceGain;
 			const Eigen::MatrixXd Nmat = (Eigen::MatrixXd::Identity(N, N) - (Jpinv * J));
 			dq += Nmat * dqBias;
+		}
+
+		// Velocity limiting: clamp dq to enforce max joint velocity
+		if (MaxJointVelocityDegPerSec > 0.0f && IterationTimestepSec > 0.0f)
+		{
+			const double maxDqDeg = (double)MaxJointVelocityDegPerSec * (double)IterationTimestepSec;
+			for (int32 i = 0; i < N; i++)
+			{
+				double dqDeg = FMath::RadiansToDegrees((float)dq(i));
+				dqDeg = FMath::Clamp(dqDeg, -maxDqDeg, maxDqDeg);
+				dq(i) = FMath::DegreesToRadians((float)dqDeg);
+			}
 		}
 
 		// Per-joint clip + apply limits
@@ -283,16 +390,41 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 
 			double newDeg = qDeg[i] + FMath::RadiansToDegrees((float)d);
 
-			const double minDeg = (double)JointLimitsDeg[i].X;
-			const double maxDeg = (double)JointLimitsDeg[i].Y;
-			if (minDeg < maxDeg)
-				newDeg = FMath::Clamp((float)newDeg, (float)minDeg, (float)maxDeg);
+			if (isFreeJoint[i])
+			{
+				// Free joint: wrap angle to [-180, 180] for consistency
+				newDeg = FMath::UnwindDegrees((float)newDeg);
+			}
+			else
+			{
+				// Constrained joint: clamp to limits
+				const double minDeg = (double)JointLimitsDeg[i].X;
+				const double maxDeg = (double)JointLimitsDeg[i].Y;
+				if (minDeg < maxDeg)
+					newDeg = FMath::Clamp((float)newDeg, (float)minDeg, (float)maxDeg);
+			}
 
 			qDeg[i] = (float)newDeg;
 		}
 	}
 
+	// Final error computation after loop exit to get accurate final state
+	ComputeChainKinematics(BaseTransform, qDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset,
+		JointPosWorld, JointAxisWorld, EEWorld);
+
+	const Eigen::Vector3d pCur = ToEigen(EEWorld.GetLocation());
+	const Eigen::Vector3d pTgt = ToEigen(TargetEndEffectorWorld.GetLocation());
+	const Eigen::Vector3d dp = (pTgt - pCur);
+	const Eigen::Vector3d drot = RotationErrorAxisAngleRad(EEWorld.GetRotation().GetNormalized(),
+		TargetEndEffectorWorld.GetRotation().GetNormalized());
+
+	posErrCm = dp.norm();
+	rotErrDeg = FMath::RadiansToDegrees((float)drot.norm());
+
 	Out.JointAngles = qDeg;
+	Out.PositionError = (float)posErrCm;
+	Out.RotationError = (float)rotErrDeg;
+
 	if (!Out.bSuccess)
 	{
 		Out.bSuccess = (posErrCm <= PositionToleranceCm) && (rotErrDeg <= RotationToleranceDeg);

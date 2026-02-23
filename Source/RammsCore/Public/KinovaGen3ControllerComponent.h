@@ -342,6 +342,16 @@ public:
 	int32 LastIKIterations = 0;
 	bool  bLastIKSuccess = false;
 
+	/** Actual skeletal mesh error (from previous frame) vs IK solver prediction */
+	float LastActualPosError = 0.0f;
+	float LastActualRotError = 0.0f;
+	bool  bLastIKSolverSuccess = false; // What the IK solver reported (before actual check)
+
+	/** FK model validation (for debugging FK mismatch) */
+	float	LastFKvsActualError = 0.0f;
+	FVector LastFKEndEffectorPos = FVector::ZeroVector;
+	FVector LastActualEndEffectorPos = FVector::ZeroVector;
+
 	/** Cached target transform to detect changes and avoid unnecessary IK solving */
 	FTransform	  LastIKTargetTransform = FTransform::Identity;
 	bool		  bIKTargetInitialized = false;

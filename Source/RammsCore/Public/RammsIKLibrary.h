@@ -86,7 +86,7 @@ public:
 		bool					  bEnableDebugLogging);
 
 	/**
-	 * Proper iterative DLS IK using an FK chain model.
+	 * Proper iterative DLS IK using an FK chain model with constraint projection.
 	 *
 	 * Conventions (match this!):
 	 * - JointLocalTransforms[i] transforms ParentJointFrame -> Joint_i_Frame at q_i = 0 (full rotation+translation).
@@ -98,6 +98,12 @@ public:
 	 *
 	 * JointWeights: higher => prefer NOT to move that joint (1.0 normal, 10.0 moves ~10x less).
 	 * If empty => all 1.0.
+	 *
+	 * Constraint Handling (Tier 1 Projection Methods):
+	 * - bUseGradientProjection: Zero out dq for joints at active constraints (prevents fighting limits)
+	 * - bUseActiveSetMasking: Zero out Jacobian columns for constrained joints (mathematically correct)
+	 * - MaxJointVelocityDegPerSec: Clamp dq to enforce velocity limits (requires IterationTimestepSec)
+	 * - bAutoGenerateNullSpaceBias: If NullSpaceBiasDeg empty, bias toward center of joint ranges
 	 */
 	UFUNCTION(BlueprintCallable, Category = "RAMMS|IK")
 	static FIKSolveResult SolveIK_FKChain(
@@ -117,7 +123,12 @@ public:
 		float					  StepClipDeg,
 		int32					  MaxIterations,
 		float					  PositionToleranceCm,
-		float					  RotationToleranceDeg);
+		float					  RotationToleranceDeg,
+		bool					  bUseGradientProjection = true,
+		bool					  bUseActiveSetMasking = false,
+		float					  MaxJointVelocityDegPerSec = 0.0f,
+		float					  IterationTimestepSec = 0.01f,
+		bool					  bAutoGenerateNullSpaceBias = true);
 
 	/**
 	 * FABRIK (Forward And Backward Reaching Inverse Kinematics) solver with hard joint limits.
