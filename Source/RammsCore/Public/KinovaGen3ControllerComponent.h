@@ -566,6 +566,10 @@ private:
 	TArray<FTransform> CachedJointLocalTransforms;
 	TArray<FVector>	   CachedJointAxesLocal;
 
+	// FK local transforms are calibrated once from runtime physics body positions
+	// to eliminate small offsets between skeleton reference pose and constraint solver
+	bool bFKLocalTransformsCalibrated = false;
+
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);
 
