@@ -2071,13 +2071,26 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Socket RelativeRotation: (%.2f, %.2f, %.2f)"),
 							Socket->RelativeRotation.Pitch, Socket->RelativeRotation.Yaw, Socket->RelativeRotation.Roll);
 
-						// Test: compute what the FK should give us
-						FTransform LastJointTest = SkeletalMeshComponent->GetSocketTransform(LastJointBoneName, RTS_World);
-						FTransform SocketTest = EndEffectorOffset * LastJointTest;
+						// Test: compare FK-computed EE position vs actual socket position
+						// Use the FK model's last joint transform instead of actual skeleton
+						FTransform TestBaseTransform = SkeletalMeshComponent->GetComponentTransform();
+						if (FirstJointParent != NAME_None)
+						{
+							TestBaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+						}
+						TArray<float> TestAngles;
+						TestAngles.SetNum(Joints.Num());
+						for (int32 ti = 0; ti < Joints.Num(); ti++)
+						{
+							TestAngles[ti] = Joints[ti].CurrentAngle;
+						}
+						FTransform FKLastJointTest = URammsIKLibrary::ComputeForwardKinematics(
+							TestBaseTransform, TestAngles, JointLocalTransforms, JointAxesLocal, FTransform::Identity, false);
+						FTransform FKSocketTest = EndEffectorOffset * FKLastJointTest;
 						FTransform ActualSocketTest = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
-						float	   TestError = FVector::Dist(SocketTest.GetLocation(), ActualSocketTest.GetLocation());
+						float	   TestError = FVector::Dist(FKSocketTest.GetLocation(), ActualSocketTest.GetLocation());
 						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Test FK socket: (%.2f, %.2f, %.2f)"),
-							SocketTest.GetLocation().X, SocketTest.GetLocation().Y, SocketTest.GetLocation().Z);
+							FKSocketTest.GetLocation().X, FKSocketTest.GetLocation().Y, FKSocketTest.GetLocation().Z);
 						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Test Actual socket: (%.2f, %.2f, %.2f)"),
 							ActualSocketTest.GetLocation().X, ActualSocketTest.GetLocation().Y, ActualSocketTest.GetLocation().Z);
 						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Test error: %.2f cm"), TestError);
