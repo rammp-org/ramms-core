@@ -1769,7 +1769,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 
 	if (bEnableDebugLogging && GFrameCounter % 60 == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Gen3] *** UpdateInverseKinematics CALLED ***"));
+		UE_LOG(LogTemp, Verbose, TEXT("[Gen3] *** UpdateInverseKinematics CALLED ***"));
 	}
 
 	// Debug: Log joint order once
