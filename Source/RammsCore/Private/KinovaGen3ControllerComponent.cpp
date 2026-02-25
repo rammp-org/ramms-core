@@ -375,23 +375,24 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 			LastIKTargetTransform = TargetEndEffectorTransform;
 		}
 
-		if (!bIKTargetSatisfied)
+		// Detect base movement — if the base is moving, always re-solve to avoid
+		// "bang-bang" jitter from intermittent solve/skip cycles.
+		FVector CurrentBaseLocation = SkeletalMeshComponent->GetComponentTransform().GetLocation();
+		if (Joints.Num() > 0)
+		{
+			FName ParentBone = SkeletalMeshComponent->GetParentBone(Joints[0].BoneName);
+			if (ParentBone != NAME_None)
+			{
+				CurrentBaseLocation = SkeletalMeshComponent->GetSocketTransform(ParentBone, RTS_World).GetLocation();
+			}
+		}
+		bool bBaseMoved = FVector::Dist(CurrentBaseLocation, LastSolveBaseLocation) > 0.01f;
+
+		if (!bIKTargetSatisfied || bBaseMoved)
 		{
 			UpdateInverseKinematics(DeltaTime);
 			bIKTargetSatisfied = bLastIKSuccess;
-		}
-		else if (EndEffectorBoneName != NAME_None)
-		{
-			// Even when IK is satisfied, verify the actual physical arm is still
-			// within tolerance. The base may have moved, or physics may have drifted.
-			FTransform ActualEE = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
-			float	   ActualPosErr = FVector::Dist(ActualEE.GetLocation(), TargetEndEffectorTransform.GetLocation());
-			if (ActualPosErr > IKPositionTolerance)
-			{
-				bIKTargetSatisfied = false;
-				UpdateInverseKinematics(DeltaTime);
-				bIKTargetSatisfied = bLastIKSuccess;
-			}
+			LastSolveBaseLocation = CurrentBaseLocation;
 		}
 	}
 

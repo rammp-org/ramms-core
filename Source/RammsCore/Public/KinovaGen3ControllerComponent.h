@@ -354,6 +354,7 @@ public:
 
 	/** Cached target transform to detect changes and avoid unnecessary IK solving */
 	FTransform	  LastIKTargetTransform = FTransform::Identity;
+	FVector		  LastSolveBaseLocation = FVector::ZeroVector;
 	bool		  bIKTargetInitialized = false;
 	bool		  bIKTargetSatisfied = false;
 	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
