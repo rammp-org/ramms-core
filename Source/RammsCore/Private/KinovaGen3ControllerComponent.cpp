@@ -386,7 +386,8 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 				CurrentBaseLocation = SkeletalMeshComponent->GetSocketTransform(ParentBone, RTS_World).GetLocation();
 			}
 		}
-		bool bBaseMoved = FVector::Dist(CurrentBaseLocation, LastSolveBaseLocation) > 0.01f;
+		const float BaseMoveThreshold = 0.01f;
+		const bool bBaseMoved = FVector::DistSquared(CurrentBaseLocation, LastSolveBaseLocation) > (BaseMoveThreshold * BaseMoveThreshold);
 
 		if (!bIKTargetSatisfied || bBaseMoved)
 		{
