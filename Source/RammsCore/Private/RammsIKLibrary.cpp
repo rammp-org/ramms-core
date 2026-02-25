@@ -3,6 +3,8 @@
 #include "FABRIK.h"
 #include "Math/UnrealMathUtility.h"
 #include "Logging/LogMacros.h"
+#include <vector>
+#include <algorithm>
 #include <Eigen/Dense>
 
 static FVector SafeNormalAxis(const FVector& V)
@@ -223,6 +225,9 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 	double posErrCm = 0.0;
 	double rotErrDeg = 0.0;
 
+	// Pre-allocate constraint mask outside iteration loop to avoid per-iteration heap churn
+	std::vector<bool> isConstrained(N, false);
+
 	for (int32 it = 0; it < MaxIterations; it++)
 	{
 		ComputeChainKinematics(BaseTransform, qDeg, JointLocalTransforms, JointAxesLocal, EndEffectorOffset,
@@ -265,7 +270,7 @@ FIKSolveResult URammsIKLibrary::SolveIK_FKChain(
 		J.setZero();
 
 		// Build active constraint set for active set masking
-		std::vector<bool> isConstrained(N, false);
+		std::fill(isConstrained.begin(), isConstrained.end(), false);
 		if (bUseActiveSetMasking)
 		{
 			for (int32 i = 0; i < N; i++)
