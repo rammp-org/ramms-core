@@ -342,8 +342,19 @@ public:
 	int32 LastIKIterations = 0;
 	bool  bLastIKSuccess = false;
 
+	/** Actual skeletal mesh error (from previous frame) vs IK solver prediction */
+	float LastActualPosError = 0.0f;
+	float LastActualRotError = 0.0f;
+	bool  bLastIKSolverSuccess = false; // What the IK solver reported (before actual check)
+
+	/** FK model validation (for debugging FK mismatch) */
+	float	LastFKvsActualError = 0.0f;
+	FVector LastFKEndEffectorPos = FVector::ZeroVector;
+	FVector LastActualEndEffectorPos = FVector::ZeroVector;
+
 	/** Cached target transform to detect changes and avoid unnecessary IK solving */
 	FTransform	  LastIKTargetTransform = FTransform::Identity;
+	FVector		  LastSolveBaseLocation = FVector::ZeroVector;
 	bool		  bIKTargetInitialized = false;
 	bool		  bIKTargetSatisfied = false;
 	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
@@ -555,6 +566,16 @@ private:
 	FTransform		   CachedEndEffectorOffset = FTransform::Identity;
 	TArray<FTransform> CachedJointLocalTransforms;
 	TArray<FVector>	   CachedJointAxesLocal;
+
+	// FK local transforms are calibrated from runtime physics body positions
+	// to eliminate small offsets between skeleton reference pose and constraint solver
+	bool  bFKLocalTransformsCalibrated = false;
+	int32 FKCalibrationTickCounter = 0;
+
+	/** Smoothing factor for per-tick FK calibration (0-1). Lower = smoother but slower tracking.
+	 *  0.05 is very smooth (~1s convergence at 60fps), 0.2 is responsive (~0.2s). */
+	UPROPERTY(EditAnywhere, Category = "IK", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float CalibrationSmoothingAlpha = 0.1f;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);
