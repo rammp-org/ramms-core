@@ -1999,8 +1999,8 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Socket RelativeRotation: (%.2f, %.2f, %.2f)"),
 							Socket->RelativeRotation.Pitch, Socket->RelativeRotation.Yaw, Socket->RelativeRotation.Roll);
 
-						// Test: compare FK-computed EE position vs actual socket position
-						// Use the FK model's last joint transform instead of actual skeleton
+						// Test: compare FK-computed EE position vs actual socket position (pre-calibration)
+						// Note: uses previous tick's calibrated transforms; post-calibration accuracy shown in FK Model Validation below
 						FTransform TestBaseTransform = SkeletalMeshComponent->GetComponentTransform();
 						if (FirstJointParent != NAME_None)
 						{
@@ -2017,7 +2017,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 						FTransform FKSocketTest = EndEffectorOffset * FKLastJointTest;
 						FTransform ActualSocketTest = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
 						float	   TestError = FVector::Dist(FKSocketTest.GetLocation(), ActualSocketTest.GetLocation());
-						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Test FK socket: (%.2f, %.2f, %.2f)"),
+						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Test FK socket (pre-calib): (%.2f, %.2f, %.2f)"),
 							FKSocketTest.GetLocation().X, FKSocketTest.GetLocation().Y, FKSocketTest.GetLocation().Z);
 						UE_LOG(LogTemp, Log, TEXT("[Gen3]   Test Actual socket: (%.2f, %.2f, %.2f)"),
 							ActualSocketTest.GetLocation().X, ActualSocketTest.GetLocation().Y, ActualSocketTest.GetLocation().Z);
@@ -2146,9 +2146,17 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 					CorrectedLocalPos.X, CorrectedLocalPos.Y, CorrectedLocalPos.Z,
 					Delta.X, Delta.Y, Delta.Z,
 					Joints[i].CurrentAngle);
-			}
 
-			JointLocalTransforms[i].SetLocation(CorrectedLocalPos);
+				// Apply full correction on first calibration
+				JointLocalTransforms[i].SetLocation(CorrectedLocalPos);
+			}
+			else
+			{
+				// Smooth subsequent calibrations with EMA to prevent jitter
+				FVector CurrentPos = JointLocalTransforms[i].GetLocation();
+				FVector SmoothedPos = FMath::Lerp(CurrentPos, CorrectedLocalPos, CalibrationSmoothingAlpha);
+				JointLocalTransforms[i].SetLocation(SmoothedPos);
+			}
 
 			// Advance T: axis from parent frame, then local transform, then rotation
 			FVector AxisWorld = T.TransformVectorNoScale(CachedJointAxesLocal[i]).GetSafeNormal();

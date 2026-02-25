@@ -566,10 +566,15 @@ private:
 	TArray<FTransform> CachedJointLocalTransforms;
 	TArray<FVector>	   CachedJointAxesLocal;
 
-	// FK local transforms are calibrated once from runtime physics body positions
+	// FK local transforms are calibrated from runtime physics body positions
 	// to eliminate small offsets between skeleton reference pose and constraint solver
 	bool  bFKLocalTransformsCalibrated = false;
 	int32 FKCalibrationTickCounter = 0;
+
+	/** Smoothing factor for per-tick FK calibration (0-1). Lower = smoother but slower tracking.
+	 *  0.05 is very smooth (~1s convergence at 60fps), 0.2 is responsive (~0.2s). */
+	UPROPERTY(EditAnywhere, Category = "IK", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float CalibrationSmoothingAlpha = 0.1f;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);
