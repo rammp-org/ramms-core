@@ -568,7 +568,8 @@ private:
 
 	// FK local transforms are calibrated once from runtime physics body positions
 	// to eliminate small offsets between skeleton reference pose and constraint solver
-	bool bFKLocalTransformsCalibrated = false;
+	bool  bFKLocalTransformsCalibrated = false;
+	int32 FKCalibrationTickCounter = 0;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);

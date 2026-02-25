@@ -2105,15 +2105,26 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	}
 
 	// ============================================================================
-	// STEP 5b: One-time FK calibration from runtime physics body positions
+	// STEP 5b: Per-tick FK position calibration from runtime physics body positions
 	// ============================================================================
-	// The skeleton reference pose has small offsets (~5° bone tilts) that the
-	// constraint solver compensates for. This calibration corrects the FK local
-	// transform positions to match where the physics engine actually places the
-	// bodies, eliminating the ~2-3cm accumulated FK error.
-	if (!bFKLocalTransformsCalibrated)
+	// The FK rotation model (axis * local * parent) doesn't perfectly match
+	// the physics constraint model (Frame2^-1 * R * Frame1 * parent).
+	// By recalibrating positions every tick, the FK chain matches physics at
+	// the current pose, giving the IK solver a locally-accurate model.
+	// Deferred by 2 ticks to ensure physics has fully initialized.
+	if (FKCalibrationTickCounter < 2)
+	{
+		FKCalibrationTickCounter++;
+	}
+	else
 	{
 		FTransform T = BaseTransform;
+		bool	   bFirstCalibration = !bFKLocalTransformsCalibrated;
+
+		if (bFirstCalibration)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] === FK CALIBRATION (initial, tick %d) ==="), FKCalibrationTickCounter);
+		}
 
 		for (int32 i = 0; i < Joints.Num(); i++)
 		{
@@ -2125,9 +2136,21 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			//   Want: T_after.Pos = ActualPos
 			//   So:   Local.Pos = T.Rot^{-1} * (ActualPos - T.Pos)
 			FVector CorrectedLocalPos = T.GetRotation().UnrotateVector(ActualPos - T.GetLocation());
+
+			if (bFirstCalibration)
+			{
+				FVector OldLocalPos = JointLocalTransforms[i].GetLocation();
+				FVector Delta = CorrectedLocalPos - OldLocalPos;
+				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Calib: Old=(%.3f,%.3f,%.3f) New=(%.3f,%.3f,%.3f) Delta=(%.3f,%.3f,%.3f) Angle=%.1f"),
+					i, OldLocalPos.X, OldLocalPos.Y, OldLocalPos.Z,
+					CorrectedLocalPos.X, CorrectedLocalPos.Y, CorrectedLocalPos.Z,
+					Delta.X, Delta.Y, Delta.Z,
+					Joints[i].CurrentAngle);
+			}
+
 			JointLocalTransforms[i].SetLocation(CorrectedLocalPos);
 
-			// Advance T: axis from parent frame (before local transform), then local transform, then rotation
+			// Advance T: axis from parent frame, then local transform, then rotation
 			FVector AxisWorld = T.TransformVectorNoScale(CachedJointAxesLocal[i]).GetSafeNormal();
 			T = JointLocalTransforms[i] * T;
 
@@ -2136,11 +2159,11 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		}
 
 		CachedJointLocalTransforms = JointLocalTransforms;
-		bFKLocalTransformsCalibrated = true;
 
-		if (bEnableDebugLogging)
+		if (bFirstCalibration)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Gen3] FK local transforms calibrated from runtime physics body positions"));
+			bFKLocalTransformsCalibrated = true;
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] FK position calibration active (per-tick)"));
 		}
 	}
 
