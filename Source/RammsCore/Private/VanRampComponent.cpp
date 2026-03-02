@@ -122,7 +122,9 @@ void UVanRampComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+#if WITH_EDITOR
 	DrawKeyframeGizmos();
+#endif
 
 	if (RampState == ERampState::Deploying || RampState == ERampState::Retracting)
 	{

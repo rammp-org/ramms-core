@@ -7,6 +7,7 @@
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "DrawDebugHelpers.h"
 #include "RammsIKLibrary.h"
+#include "RammsJointPoseAsset.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "UObject/UnrealType.h"
@@ -119,8 +120,24 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 						Joint.bInvertAxisForIK = ShouldInvertAxisForIK(Constraint, Joint.BoneName, Joint.ControlledAxis);
 					}
 
+					// Detect constraint bone order: if ConstraintBone1 is the child bone,
+					// the constraint frame ordering is "reversed" from skeletal hierarchy.
+					// UE5 Chaos convention: Body1/Frame1 = "child", Body2/Frame2 = "parent".
+					// R_rel = Frame1_world.GetRelativeTransform(Frame2_world)
+					//       = (Body2*F2)^-1 * (Body1*F1)
+					// When CB1=child bone, UE5's convention is ALIGNED → θ_raw = +α, sign = +1.
+					// When CB1=parent bone, UE5's convention is INVERTED → θ_raw = -α, sign = -1.
+					{
+						FName ParentBone = SkeletalMeshComponent->GetParentBone(Joint.BoneName);
+						bool  bCB1IsChild = (Constraint->ConstraintBone1 == Joint.BoneName || (ParentBone != NAME_None && Constraint->ConstraintBone2 == ParentBone));
+						Joint.bConstraintBonesReversed = bCB1IsChild;
+
+						// Angle sign: +1 when UE5 convention is aligned (CB1=child), -1 when inverted
+						Joint.ConstraintAngleSign = bCB1IsChild ? 1.0f : -1.0f;
+					}
+
 					// Get current angular position
-					Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
+					Joint.CurrentAngle = Joint.ConstraintAngleSign * GetConstraintAngle(Constraint, Joint.ControlledAxis);
 					if (!bPreserveJointTargetsOnBeginPlay || ArmControlMode == EArmControlMode::EndEffectorControl)
 					{
 						Joint.TargetAngle = Joint.CurrentAngle;
@@ -145,9 +162,24 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 				}
 			}
 
-			// Initialize constraint drives after joint configuration
-			// InitializeJointConstraints(); // drives must be enabled for SetAngularOrientationTarget to work
-			// NOTE: This is commented out to avoid reconfiguring constraint drives that user has already set up
+			// Initialize constraint drives (stiffness, damping, max force) and cache joint axes
+			// InitializeJointConstraints();
+
+			// Set each joint's drive target to its CURRENT angle so physics doesn't
+			// snap to the asset's default drive target on begin play.
+			for (FRevoluteJointConfig& Joint : Joints)
+			{
+				if (Joint.BoneName == NAME_None)
+					continue;
+				FName				 ConstraintToUse = Joint.ConstraintName != NAME_None ? Joint.ConstraintName : Joint.BoneName;
+				FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+				if (Constraint)
+				{
+					const float InitConstraintAngle = Joint.ConstraintAngleSign * (Joint.CurrentAngle + Joint.AngleOffset);
+					SetConstraintAngle(Constraint, Joint.ControlledAxis, InitConstraintAngle);
+					Joint.LastCommandedConstraintAngle = InitConstraintAngle;
+				}
+			}
 
 			// Initialize null-space bias to zeros if not set
 			if (NullSpaceBias.Num() != Joints.Num())
@@ -190,8 +222,8 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 					// Set smoothed angle so the speed limiter doesn't fight on the first tick
 					Joint.SmoothedAngle = SnapAngle;
 
-					// Command the physics constraint directly
-					const float ConstraintAngle = SnapAngle + Joint.AngleOffset;
+					// Command the physics constraint directly (apply sign for swapped constraints)
+					const float ConstraintAngle = Joint.ConstraintAngleSign * (SnapAngle + Joint.AngleOffset);
 					SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
 				}
 
@@ -228,18 +260,18 @@ void UKinovaGen3ControllerComponent::InitializeJointConstraints()
 		// Configure angular drive - MUST use TwistAndSwing mode for individual axis control
 		Constraint->SetAngularDriveMode(EAngularDriveMode::TwistAndSwing);
 
-		// Enable only the specific axis we're controlling
+		// Enable only the specific axis we're controlling.
+		// Also enable velocity drive so that PositionDamping acts as proper velocity
+		// feedback (damps joint velocity toward 0) rather than fighting the orientation drive.
 		if (Joint.ControlledAxis == EConstraintAxis::Twist)
 		{
-			// Enable twist drive, disable swing drives
 			Constraint->SetOrientationDriveTwistAndSwing(true, false);
-			Constraint->SetAngularVelocityDriveTwistAndSwing(false, false);
+			Constraint->SetAngularVelocityDriveTwistAndSwing(true, false);
 		}
 		else
 		{
-			// Enable swing drive, disable twist drive
 			Constraint->SetOrientationDriveTwistAndSwing(false, true);
-			Constraint->SetAngularVelocityDriveTwistAndSwing(false, false);
+			Constraint->SetAngularVelocityDriveTwistAndSwing(false, true);
 		}
 
 		// Set drive parameters (Spring, Damping, MaxForce)
@@ -386,8 +418,8 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 				CurrentBaseLocation = SkeletalMeshComponent->GetSocketTransform(ParentBone, RTS_World).GetLocation();
 			}
 		}
-		const float BaseMoveThreshold = 0.01f;
-		const bool bBaseMoved = FVector::DistSquared(CurrentBaseLocation, LastSolveBaseLocation) > (BaseMoveThreshold * BaseMoveThreshold);
+		const float BaseMoveThreshold = 0.1f; // cm — avoid re-solving on micro-movements
+		const bool	bBaseMoved = FVector::DistSquared(CurrentBaseLocation, LastSolveBaseLocation) > (BaseMoveThreshold * BaseMoveThreshold);
 
 		if (!bIKTargetSatisfied || bBaseMoved)
 		{
@@ -448,7 +480,7 @@ void UKinovaGen3ControllerComponent::UpdatePositionControl(float DeltaTime)
 		// Read current angle from physics (subtract offsets to get FK angle)
 		// Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis)
 		// 	- Joint.ComputedFrameOffset - Joint.AngleOffset;
-		Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis)
+		Joint.CurrentAngle = Joint.ConstraintAngleSign * GetConstraintAngle(Constraint, Joint.ControlledAxis)
 			- Joint.AngleOffset;
 
 		// Note: In IK mode, TargetAngle is set by IK solver directly
@@ -487,7 +519,7 @@ void UKinovaGen3ControllerComponent::UpdateTorqueControl(float DeltaTime)
 		}
 
 		// Get current angle from physics
-		Joint.CurrentAngle = GetConstraintAngle(Constraint, Joint.ControlledAxis);
+		Joint.CurrentAngle = Joint.ConstraintAngleSign * GetConstraintAngle(Constraint, Joint.ControlledAxis);
 
 		// Calculate error
 		float AngleError = Joint.TargetAngle - Joint.CurrentAngle;
@@ -557,9 +589,17 @@ void UKinovaGen3ControllerComponent::ApplyJointSettings(FRevoluteJointConfig& Jo
 
 	TargetForDrive = Joint.SmoothedAngle;
 
-	// Add offsets when commanding (FK angle -> constraint angle)
-	const float ConstraintAngle = TargetForDrive + Joint.AngleOffset; // (see note below)
-	SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
+	// Add offsets when commanding (FK angle -> constraint angle), apply sign for swapped constraints
+	const float ConstraintAngle = Joint.ConstraintAngleSign * (TargetForDrive + Joint.AngleOffset);
+
+	// Dead-band: only update the constraint drive if the commanded angle actually changed.
+	// This avoids micro-corrections that cascade into end-effector jitter with parent-dominates.
+	const float DriveDeadBand = 0.01f; // degrees
+	if (FMath::Abs(ConstraintAngle - Joint.LastCommandedConstraintAngle) > DriveDeadBand)
+	{
+		SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
+		Joint.LastCommandedConstraintAngle = ConstraintAngle;
+	}
 
 	if (bEnableDebugLogging)
 	{
@@ -667,10 +707,12 @@ void UKinovaGen3ControllerComponent::SetConstraintAngle(FConstraintInstance* Con
 	if (Axis == EConstraintAxis::Twist)
 	{
 		Constraint->SetOrientationDriveTwistAndSwing(true, false);
+		Constraint->SetAngularVelocityDriveTwistAndSwing(true, false);
 	}
 	else // Swing1 or Swing2
 	{
 		Constraint->SetOrientationDriveTwistAndSwing(false, true);
+		Constraint->SetAngularVelocityDriveTwistAndSwing(false, true);
 	}
 
 	// SetAngularOrientationTarget expects a quaternion representing the target orientation
@@ -695,6 +737,7 @@ void UKinovaGen3ControllerComponent::SetConstraintAngle(FConstraintInstance* Con
 	}
 
 	Constraint->SetAngularOrientationTarget(TargetQuat);
+	Constraint->SetAngularVelocityTarget(FVector::ZeroVector);
 }
 
 bool UKinovaGen3ControllerComponent::IsAxisFreeOrLimited(FConstraintInstance* Constraint, EConstraintAxis Axis) const
@@ -1097,8 +1140,32 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 				break;
 		}
 
-		// Initialize current angle
-		NewJoint.CurrentAngle = GetConstraintAngle(Constraint, NewJoint.ControlledAxis);
+		// Detect constraint bone order for auto-detected joints
+		// UE5 Chaos: Body1/Frame1 = "child", Body2/Frame2 = "parent".
+		// When CB1=child bone, UE5 convention is aligned → sign = +1.
+		{
+			FName		   ParentBone = NAME_None;
+			USkeletalMesh* SkelMeshAsset = TempSkeletalMesh ? TempSkeletalMesh->GetSkeletalMeshAsset() : nullptr;
+			if (SkelMeshAsset)
+			{
+				const FReferenceSkeleton& RefSkel = SkelMeshAsset->GetRefSkeleton();
+				int32					  BoneIdx = RefSkel.FindBoneIndex(NewJoint.BoneName);
+				if (BoneIdx != INDEX_NONE)
+				{
+					int32 ParentIdx = RefSkel.GetParentIndex(BoneIdx);
+					if (ParentIdx != INDEX_NONE)
+					{
+						ParentBone = RefSkel.GetBoneName(ParentIdx);
+					}
+				}
+			}
+			bool bCB1IsChild = (Constraint->ConstraintBone1 == NewJoint.BoneName || (ParentBone != NAME_None && Constraint->ConstraintBone2 == ParentBone));
+			NewJoint.bConstraintBonesReversed = bCB1IsChild;
+			NewJoint.ConstraintAngleSign = bCB1IsChild ? 1.0f : -1.0f;
+		}
+
+		// Initialize current angle (apply sign for swapped constraints)
+		NewJoint.CurrentAngle = NewJoint.ConstraintAngleSign * GetConstraintAngle(Constraint, NewJoint.ControlledAxis);
 		NewJoint.TargetAngle = NewJoint.CurrentAngle;
 
 		NewJoints.Add(NewJoint);
@@ -1349,14 +1416,22 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 			TArray<FVector>	   JointAxesLocal;
 			TArray<float>	   CurrentAngles;
 
-			// Get base transform (runtime)
+			// Get base transform (runtime) — use body transform to match FK chain's CRest.Rot convention
 			FTransform BaseTransform = FTransform::Identity;
 			if (Joints[0].BoneName != NAME_None)
 			{
 				FName ParentBoneName = SkeletalMeshComponent->GetParentBone(Joints[0].BoneName);
 				if (ParentBoneName != NAME_None)
 				{
-					BaseTransform = SkeletalMeshComponent->GetSocketTransform(ParentBoneName, RTS_World);
+					FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(ParentBoneName);
+					if (BaseBody)
+					{
+						BaseTransform = BaseBody->GetUnrealWorldTransform();
+					}
+					else
+					{
+						BaseTransform = SkeletalMeshComponent->GetSocketTransform(ParentBoneName, RTS_World);
+					}
 				}
 				else
 				{
@@ -1569,6 +1644,83 @@ void UKinovaGen3ControllerComponent::SetAllJointTargets(const TArray<float>& Tar
 	if (bEnableDebugLogging)
 	{
 		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set %d joint targets"), NumToSet);
+	}
+}
+
+bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseIndex(URammsJointPoseAsset* PoseAsset, int32 PoseIndex)
+{
+	if (!PoseAsset)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseIndex: null PoseAsset"));
+		return false;
+	}
+
+	TArray<float> Angles;
+	if (!PoseAsset->GetPoseByIndex(PoseIndex, Angles))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseIndex: index %d out of range (asset has %d poses)"),
+			PoseIndex, PoseAsset->GetNumPoses());
+		return false;
+	}
+
+	SetAllJointTargets(Angles);
+	return true;
+}
+
+bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName)
+{
+	if (!PoseAsset)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseName: null PoseAsset"));
+		return false;
+	}
+
+	TArray<float> Angles;
+	if (!PoseAsset->GetPoseByName(PoseName, Angles))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseName: pose '%s' not found"), *PoseName);
+		return false;
+	}
+
+	SetAllJointTargets(Angles);
+	return true;
+}
+
+bool UKinovaGen3ControllerComponent::CaptureCurrentPose(URammsJointPoseAsset* PoseAsset, const FString& PoseName, int32 PoseIndex)
+{
+	if (!PoseAsset)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] CaptureCurrentPose: null PoseAsset"));
+		return false;
+	}
+
+	FRammsJointPose NewPose;
+	NewPose.PoseName = PoseName;
+	NewPose.JointAngles.Reserve(Joints.Num());
+	for (const FRevoluteJointConfig& Joint : Joints)
+	{
+		NewPose.JointAngles.Add(Joint.CurrentAngle);
+	}
+
+	if (PoseIndex < 0 || !PoseAsset->Poses.IsValidIndex(PoseIndex))
+	{
+		PoseAsset->Poses.Add(MoveTemp(NewPose));
+	}
+	else
+	{
+		PoseAsset->Poses[PoseIndex] = MoveTemp(NewPose);
+	}
+
+	PoseAsset->MarkPackageDirty();
+	return true;
+}
+
+void UKinovaGen3ControllerComponent::GetCurrentJointAngles(TArray<float>& OutAngles) const
+{
+	OutAngles.Reset(Joints.Num());
+	for (const FRevoluteJointConfig& Joint : Joints)
+	{
+		OutAngles.Add(Joint.CurrentAngle);
 	}
 }
 
@@ -1848,23 +2000,40 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	// ============================================================================
 	// STEP 2 & 3: Compute Joint Local Transforms and Axes from Constraint Frames
 	// ============================================================================
-	// Both local transforms and rotation axes are derived from the SAME source
-	// (the physics constraint Frame1/Frame2) to ensure consistency.
+	// Both local transforms and rotation axes are derived from the physics
+	// constraint Frame1/Frame2, handling the swapped bone ordering (CB1=child,
+	// CB2=parent) found on the Kinova Gen3:
 	//
-	// After the first tick, local transforms are calibrated from the actual
-	// physics body positions and cached — skip recomputation.
+	// For swapped constraints:
+	//   CRest.Rot = (Frame1⁻¹ * Frame2).Rot  (parent body → child body at rest)
+	//   AxisLocal = Frame2.Rot * e            (axis from parent-side frame)
+	//
+	// For normal constraints:
+	//   CRest.Rot = (Frame2⁻¹ * Frame1).Rot
+	//   AxisLocal = Frame1.Rot * e
+	//
+	// BoneRef.Pos is in the parent BONE frame, but FK uses body-frame rotations,
+	// so positions are corrected using a body-to-bone rotation accumulator.
+	// This ensures the FK chain exactly matches physics body transforms at any
+	// joint configuration — no runtime calibration needed.
 
 	TArray<FTransform> JointLocalTransforms;
 	JointLocalTransforms.SetNum(Joints.Num());
 
 	if (bFKLocalTransformsCalibrated)
 	{
-		// Use calibrated transforms from first tick
+		// Use cached transforms computed on first tick
 		JointLocalTransforms = CachedJointLocalTransforms;
 	}
 	else
 	{
 		CachedJointAxesLocal.SetNum(Joints.Num());
+
+		// Body-to-bone rotation accumulator: tracks R_btob = Body^-1 * Bone at
+		// each joint's parent.  BoneRef.Pos is in the parent BONE frame, but the
+		// FK chain uses body-frame rotations (CRest.Rot), so positions must be
+		// expressed in the parent BODY frame.  At the base, body ≈ bone (0.02°).
+		FQuat BodyToBoneAccum = FQuat::Identity;
 
 		for (int32 i = 0; i < Joints.Num(); i++)
 		{
@@ -1878,55 +2047,75 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			{
 				JointLocalTransforms[i] = BoneRef;
 				CachedJointAxesLocal[i] = FVector::XAxisVector;
+				BodyToBoneAccum = BoneRef.GetRotation().Inverse() * BodyToBoneAccum * BoneRef.GetRotation();
 				continue;
 			}
 
 			FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
 			FTransform Frame2 = Constraint->GetRefFrame(EConstraintFrame::Frame2);
 
-			// Constraint-derived rest transform: use constraint rotation (consistent with
-			// Frame1 axis) but bone reference position (accurate skeleton geometry).
-			// Frame2^{-1} * Frame1 gives the correct rotation but its position can be
-			// offset if Frame2 has non-zero translation on the child body.
-			FTransform ConstraintRest = Frame2.Inverse() * Frame1;
-			JointLocalTransforms[i] = FTransform(ConstraintRest.GetRotation(), BoneRef.GetLocation());
+			bool bSwapped = Joints[i].bConstraintBonesReversed;
 
-			// Axis directly from Frame1 (already in parent body's local frame)
-			FVector AxisLocal;
+			// CRest: the rest-pose rotation from parent body to child body.
+			// When CB1=child (bSwapped=true): Body1=child, Frame1 on child, Frame2 on parent
+			//   CRest = Frame1⁻¹ * Frame2 (parent body frame → child body frame)
+			// When CB1=parent (bSwapped=false): Body1=parent, Frame1 on parent, Frame2 on child
+			//   CRest = Frame2⁻¹ * Frame1
+			FTransform ConstraintRest = bSwapped
+				? Frame1.Inverse() * Frame2
+				: Frame2.Inverse() * Frame1;
+
+			// Unit axis in constraint frame (Swing1=Z, Swing2=Y, Twist=X)
+			FVector AxisInFrame;
 			switch (Joints[i].ControlledAxis)
 			{
 				case EConstraintAxis::Swing1:
-					AxisLocal = Frame1.GetUnitAxis(EAxis::Z);
+					AxisInFrame = FVector::ZAxisVector;
 					break;
 				case EConstraintAxis::Swing2:
-					AxisLocal = Frame1.GetUnitAxis(EAxis::Y);
+					AxisInFrame = FVector::YAxisVector;
 					break;
 				case EConstraintAxis::Twist:
 				default:
-					AxisLocal = Frame1.GetUnitAxis(EAxis::X);
+					AxisInFrame = FVector::XAxisVector;
 					break;
 			}
 
-			if (Joints[i].bInvertAxisForIK)
-			{
-				AxisLocal = -AxisLocal;
-			}
-
+			// Axis in parent body frame: from the parent-side constraint frame.
+			// Normal:  Frame1 is on parent → AxisLocal = Frame1.Rot * e
+			// Swapped: Frame2 is on parent → AxisLocal = Frame2.Rot * e
+			FVector AxisLocal = bSwapped
+				? Frame2.GetRotation().RotateVector(AxisInFrame)
+				: Frame1.GetRotation().RotateVector(AxisInFrame);
 			CachedJointAxesLocal[i] = AxisLocal;
+
+			// Position: rotate BoneRef.Pos from parent bone frame to parent body frame
+			// using the accumulated body-to-bone transform.
+			FVector CorrectedPos = BodyToBoneAccum.RotateVector(BoneRef.GetLocation());
+
+			JointLocalTransforms[i] = FTransform(ConstraintRest.GetRotation(), CorrectedPos);
 
 			if (bEnableDebugLogging)
 			{
-				// Log the initial constraint vs bone ref comparison
-				FQuat ConstraintRot = JointLocalTransforms[i].GetRotation();
-				FQuat BoneRefRot = BoneRef.GetRotation();
-				float RotDiff = FMath::RadiansToDegrees((ConstraintRot * BoneRefRot.Inverse()).GetAngle());
-				float ConstraintPosDiff = FVector::Dist(ConstraintRest.GetLocation(), BoneRef.GetLocation());
+				float RotDiff = FMath::RadiansToDegrees(
+					(ConstraintRest.GetRotation() * BoneRef.GetRotation().Inverse()).GetAngle());
 
-				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Constraint vs BoneRef: RotDiff=%.2f° ConstraintPosDiff=%.3fcm BoneRefLoc=(%.2f,%.2f,%.2f)"),
-					i, RotDiff, ConstraintPosDiff, BoneRef.GetLocation().X, BoneRef.GetLocation().Y, BoneRef.GetLocation().Z);
+				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Reversed=%d AngleSign=%.0f CRest_vs_BoneRef=%.2f° AxisLocal=(%.3f,%.3f,%.3f) BoneRefPos=(%.2f,%.2f,%.2f) CorrPos=(%.2f,%.2f,%.2f)"),
+					i, bSwapped ? 1 : 0, Joints[i].ConstraintAngleSign, RotDiff,
+					AxisLocal.X, AxisLocal.Y, AxisLocal.Z,
+					BoneRef.GetLocation().X, BoneRef.GetLocation().Y, BoneRef.GetLocation().Z,
+					CorrectedPos.X, CorrectedPos.Y, CorrectedPos.Z);
 			}
+
+			// Update body-to-bone accumulator for next joint:
+			// R_btob(i) = CRest(i).Rot⁻¹ * R_btob(parent) * BoneRef(i).Rot
+			BodyToBoneAccum = ConstraintRest.GetRotation().Inverse() * BodyToBoneAccum * BoneRef.GetRotation();
 		} // end for loop in STEP 2+3
-	}	  // end else (!bFKLocalTransformsCalibrated)
+
+		// Transforms are derived purely from constraint/skeleton rest data — cache immediately
+		CachedJointLocalTransforms = JointLocalTransforms;
+		bFKLocalTransformsCalibrated = true;
+	} // end else (!bFKLocalTransformsCalibrated)
 
 	TArray<FVector> JointAxesLocal = CachedJointAxesLocal;
 
@@ -2006,7 +2195,15 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 						FTransform TestBaseTransform = SkeletalMeshComponent->GetComponentTransform();
 						if (FirstJointParent != NAME_None)
 						{
-							TestBaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+							FBodyInstance* TestBaseBody = SkeletalMeshComponent->GetBodyInstance(FirstJointParent);
+							if (TestBaseBody)
+							{
+								TestBaseTransform = TestBaseBody->GetUnrealWorldTransform();
+							}
+							else
+							{
+								TestBaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+							}
 						}
 						TArray<float> TestAngles;
 						TestAngles.SetNum(Joints.Num());
@@ -2073,10 +2270,9 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		}
 	}
 
-	// Cache for use by diagnostic functions (local transforms may be updated by calibration below)
+	// Cache for use by diagnostic functions
 	CachedEndEffectorOffset = EndEffectorOffset;
 	CachedJointAxesLocal = JointAxesLocal;
-	// CachedJointLocalTransforms updated after calibration in STEP 5b, or from the loop above
 
 	if (bEnableDebugLogging)
 	{
@@ -2090,10 +2286,21 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	// ============================================================================
 
 	// Get CURRENT base transform (where robot actually is now)
+	// Use BODY transform (not bone/socket transform) because the FK chain tracks
+	// body rotations via CRest.Rot. If there's a body-to-bone rotation offset on
+	// the base bone, using the bone transform would cause accumulated FK rotation error.
 	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
 	if (FirstJointParent != NAME_None)
 	{
-		BaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+		FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(FirstJointParent);
+		if (BaseBody)
+		{
+			BaseTransform = BaseBody->GetUnrealWorldTransform();
+		}
+		else
+		{
+			BaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+		}
 	}
 
 	if (bEnableDebugLogging)
@@ -2107,73 +2314,164 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	}
 
 	// ============================================================================
-	// STEP 5b: Per-tick FK position calibration from runtime physics body positions
+	// STEP 5b: One-time FK chain validation (deferred 2 ticks for physics settle)
 	// ============================================================================
-	// The FK rotation model (axis * local * parent) doesn't perfectly match
-	// the physics constraint model (Frame2^-1 * R * Frame1 * parent).
-	// By recalibrating positions every tick, the FK chain matches physics at
-	// the current pose, giving the IK solver a locally-accurate model.
-	// Deferred by 2 ticks to ensure physics has fully initialized.
-	if (FKCalibrationTickCounter < 2)
+	// Validates the FK chain against actual physics body positions at startup.
+	// No calibration — transforms are derived from constraint/skeleton rest data.
+	if (bEnableDebugLogging && FKCalibrationTickCounter < 3)
 	{
 		FKCalibrationTickCounter++;
-	}
-	else
-	{
-		FTransform T = BaseTransform;
-		bool	   bFirstCalibration = !bFKLocalTransformsCalibrated;
-
-		if (bFirstCalibration)
+		if (FKCalibrationTickCounter == 3)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Gen3] === FK CALIBRATION (initial, tick %d) ==="), FKCalibrationTickCounter);
-		}
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] === FK CHAIN VALIDATION (tick %d) ==="), FKCalibrationTickCounter);
 
-		for (int32 i = 0; i < Joints.Num(); i++)
-		{
-			// Get actual bone world position from physics simulation
-			FVector ActualPos = SkeletalMeshComponent->GetSocketTransform(Joints[i].BoneName, RTS_World).GetLocation();
-
-			// Compute corrected local position in parent's frame:
-			//   FK step: T_after = Local * T  →  T_after.Pos = T.Rot * Local.Pos + T.Pos
-			//   Want: T_after.Pos = ActualPos
-			//   So:   Local.Pos = T.Rot^{-1} * (ActualPos - T.Pos)
-			FVector CorrectedLocalPos = T.GetRotation().UnrotateVector(ActualPos - T.GetLocation());
-
-			if (bFirstCalibration)
+			// DIAGNOSTIC: Compare CRest derivation methods
+			// Method A: from constraint frames (what we use)
+			// Method B: from actual body transforms at runtime
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] --- CRest DERIVATION COMPARISON ---"));
+			for (int32 i = 0; i < Joints.Num(); i++)
 			{
-				FVector OldLocalPos = JointLocalTransforms[i].GetLocation();
-				FVector Delta = CorrectedLocalPos - OldLocalPos;
-				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d Calib: Old=(%.3f,%.3f,%.3f) New=(%.3f,%.3f,%.3f) Delta=(%.3f,%.3f,%.3f) Angle=%.1f"),
-					i, OldLocalPos.X, OldLocalPos.Y, OldLocalPos.Z,
-					CorrectedLocalPos.X, CorrectedLocalPos.Y, CorrectedLocalPos.Z,
-					Delta.X, Delta.Y, Delta.Z,
-					Joints[i].CurrentAngle);
+				FName				 ConstraintToUse = Joints[i].ConstraintName != NAME_None ? Joints[i].ConstraintName : Joints[i].BoneName;
+				FConstraintInstance* C = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+				if (!C)
+					continue;
 
-				// Apply full correction on first calibration
-				JointLocalTransforms[i].SetLocation(CorrectedLocalPos);
+				bool	   bSwapped = Joints[i].bConstraintBonesReversed;
+				FTransform F1 = C->GetRefFrame(EConstraintFrame::Frame1);
+				FTransform F2 = C->GetRefFrame(EConstraintFrame::Frame2);
+
+				// Method A: CRest from constraint frames
+				FTransform CRestATrans = bSwapped
+					? (F1.Inverse() * F2)
+					: (F2.Inverse() * F1);
+				FQuat	   CRestA = CRestATrans.GetRotation();
+
+				// Method B: CRest from actual body transforms
+				FBodyInstance* ChildBody = SkeletalMeshComponent->GetBodyInstance(Joints[i].BoneName);
+				FName		   ParentBoneName = SkeletalMeshComponent->GetParentBone(Joints[i].BoneName);
+				FBodyInstance* ParentBody = (ParentBoneName != NAME_None) ? SkeletalMeshComponent->GetBodyInstance(ParentBoneName) : nullptr;
+
+				FQuat CRestB = FQuat::Identity;
+				FQuat ParentBodyQ = FQuat::Identity;
+				FQuat ChildBodyQ = FQuat::Identity;
+				FQuat ChildBoneQ = FQuat::Identity;
+				if (ChildBody && ParentBody)
+				{
+					ParentBodyQ = ParentBody->GetUnrealWorldTransform().GetRotation();
+					ChildBodyQ = ChildBody->GetUnrealWorldTransform().GetRotation();
+					ChildBoneQ = SkeletalMeshComponent->GetSocketTransform(Joints[i].BoneName, RTS_World).GetRotation();
+					CRestB = ParentBodyQ.Inverse() * ChildBodyQ;
+				}
+
+				float AB_Diff = FMath::RadiansToDegrees((CRestA * CRestB.Inverse()).GetAngle());
+				float BodyBoneDiff = FMath::RadiansToDegrees((ChildBodyQ * ChildBoneQ.Inverse()).GetAngle());
+
+				// Also compute Frame1 and Frame2 in world space via their respective bodies
+				FQuat F1_World = FQuat::Identity;
+				FQuat F2_World = FQuat::Identity;
+				if (bSwapped && ChildBody && ParentBody)
+				{
+					// Swapped: F1 on child body, F2 on parent body
+					F1_World = ChildBodyQ * F1.GetRotation();
+					F2_World = ParentBodyQ * F2.GetRotation();
+				}
+				else if (ParentBody && ChildBody)
+				{
+					// Normal: F1 on parent body, F2 on child body
+					F1_World = ParentBodyQ * F1.GetRotation();
+					F2_World = ChildBodyQ * F2.GetRotation();
+				}
+				float F1F2_WorldDiff = FMath::RadiansToDegrees((F1_World * F2_World.Inverse()).GetAngle());
+
+				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d CRestA=(%.4f,%.4f,%.4f,%.4f) CRestB=(%.4f,%.4f,%.4f,%.4f) A_vs_B=%.2f° BodyVsBone=%.2f° F1F2World=%.2f° CB1=%s CB2=%s"),
+					i,
+					CRestA.X, CRestA.Y, CRestA.Z, CRestA.W,
+					CRestB.X, CRestB.Y, CRestB.Z, CRestB.W,
+					AB_Diff, BodyBoneDiff, F1F2_WorldDiff,
+					*C->ConstraintBone1.ToString(), *C->ConstraintBone2.ToString());
+
+				// Log the actual axis comparison in world space
+				FVector AxisInFrame;
+				switch (Joints[i].ControlledAxis)
+				{
+					case EConstraintAxis::Swing1:
+						AxisInFrame = FVector::ZAxisVector;
+						break;
+					case EConstraintAxis::Swing2:
+						AxisInFrame = FVector::YAxisVector;
+						break;
+					default:
+						AxisInFrame = FVector::XAxisVector;
+						break;
+				}
+				FVector AxisViaF1 = F1.GetRotation().RotateVector(AxisInFrame);
+				FVector AxisViaF2 = F2.GetRotation().RotateVector(AxisInFrame);
+				// Axis in world via parent body
+				FVector AxisF2_World = ParentBody ? ParentBodyQ.RotateVector(AxisViaF2) : FVector::ZeroVector;
+				// Axis in world via child body (Frame1 is on child for swapped)
+				FVector AxisF1_World = ChildBody ? ChildBodyQ.RotateVector(AxisViaF1) : FVector::ZeroVector;
+
+				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d F1local=(%.3f,%.3f,%.3f,%.3f) F2local=(%.3f,%.3f,%.3f,%.3f) AxisF1=(%.3f,%.3f,%.3f) AxisF2=(%.3f,%.3f,%.3f) F1dot=%.4f AxisF1W=(%.3f,%.3f,%.3f) AxisF2W=(%.3f,%.3f,%.3f) WDot=%.4f"),
+					i,
+					F1.GetRotation().X, F1.GetRotation().Y, F1.GetRotation().Z, F1.GetRotation().W,
+					F2.GetRotation().X, F2.GetRotation().Y, F2.GetRotation().Z, F2.GetRotation().W,
+					AxisViaF1.X, AxisViaF1.Y, AxisViaF1.Z,
+					AxisViaF2.X, AxisViaF2.Y, AxisViaF2.Z,
+					FVector::DotProduct(AxisViaF1, AxisViaF2),
+					AxisF1_World.X, AxisF1_World.Y, AxisF1_World.Z,
+					AxisF2_World.X, AxisF2_World.Y, AxisF2_World.Z,
+					FVector::DotProduct(AxisF1_World, AxisF2_World));
 			}
-			else
+
+			// FK chain walk with body rotation comparison
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] --- FK CHAIN WALK vs BODY ---"));
+			FTransform T = BaseTransform;
+			for (int32 i = 0; i < Joints.Num(); i++)
 			{
-				// Smooth subsequent calibrations with EMA to prevent jitter
-				FVector CurrentPos = JointLocalTransforms[i].GetLocation();
-				FVector SmoothedPos = FMath::Lerp(CurrentPos, CorrectedLocalPos, CalibrationSmoothingAlpha);
-				JointLocalTransforms[i].SetLocation(SmoothedPos);
+				FVector AxisW = T.TransformVectorNoScale(JointAxesLocal[i]);
+
+				// FK rotation BEFORE joint angle (after CRest advance)
+				FTransform T_pre = JointLocalTransforms[i] * T;
+				FQuat	   FK_PreAngle = T_pre.GetRotation();
+
+				// FK rotation AFTER joint angle
+				float AngleRad = FMath::DegreesToRadians(Joints[i].CurrentAngle);
+				FQuat R_joint(AxisW, AngleRad);
+				FQuat FK_PostAngle = (R_joint * FK_PreAngle).GetNormalized();
+
+				// Actual body rotation
+				FBodyInstance* JointBody = SkeletalMeshComponent->GetBodyInstance(Joints[i].BoneName);
+				FQuat		   ActBodyQ = JointBody ? JointBody->GetUnrealWorldTransform().GetRotation() : FQuat::Identity;
+				FTransform	   ActualBoneTransform = SkeletalMeshComponent->GetSocketTransform(Joints[i].BoneName, RTS_World);
+				FQuat		   ActBoneQ = ActualBoneTransform.GetRotation();
+
+				float PreVsBody = FMath::RadiansToDegrees((FK_PreAngle * ActBodyQ.Inverse()).GetAngle());
+				float PostVsBody = FMath::RadiansToDegrees((FK_PostAngle * ActBodyQ.Inverse()).GetAngle());
+				float BodyVsBone = FMath::RadiansToDegrees((ActBodyQ * ActBoneQ.Inverse()).GetAngle());
+				float PosErr = FVector::Dist(T_pre.GetLocation(), ActualBoneTransform.GetLocation());
+				float BodyPosErr = JointBody ? FVector::Dist(T_pre.GetLocation(), JointBody->GetUnrealWorldTransform().GetLocation()) : -1.0f;
+
+				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d PreVsBody=%.1f° PostVsBody=%.1f° BodyVsBone=%.1f° BonePosErr=%.2fcm BodyPosErr=%.2fcm Angle=%.1f°"),
+					i, PreVsBody, PostVsBody, BodyVsBone, PosErr, BodyPosErr, Joints[i].CurrentAngle);
+
+				UE_LOG(LogTemp, Warning, TEXT("[Gen3] J%d FKpre=(%.4f,%.4f,%.4f,%.4f) FKpost=(%.4f,%.4f,%.4f,%.4f) Body=(%.4f,%.4f,%.4f,%.4f) Bone=(%.4f,%.4f,%.4f,%.4f)"),
+					i,
+					FK_PreAngle.X, FK_PreAngle.Y, FK_PreAngle.Z, FK_PreAngle.W,
+					FK_PostAngle.X, FK_PostAngle.Y, FK_PostAngle.Z, FK_PostAngle.W,
+					ActBodyQ.X, ActBodyQ.Y, ActBodyQ.Z, ActBodyQ.W,
+					ActBoneQ.X, ActBoneQ.Y, ActBoneQ.Z, ActBoneQ.W);
+
+				// Update T for next joint
+				T = T_pre;
+				T.SetRotation(FK_PostAngle);
 			}
-
-			// Advance T: axis from parent frame, then local transform, then rotation
-			FVector AxisWorld = T.TransformVectorNoScale(CachedJointAxesLocal[i]).GetSafeNormal();
-			T = JointLocalTransforms[i] * T;
-
-			float AngleRad = FMath::DegreesToRadians(Joints[i].CurrentAngle);
-			T.SetRotation((FQuat(AxisWorld, AngleRad) * T.GetRotation()).GetNormalized());
-		}
-
-		CachedJointLocalTransforms = JointLocalTransforms;
-
-		if (bFirstCalibration)
-		{
-			bFKLocalTransformsCalibrated = true;
-			UE_LOG(LogTemp, Warning, TEXT("[Gen3] FK position calibration active (per-tick)"));
+			FTransform FK_EE_Val = EndEffectorOffset * T;
+			FTransform ActualEE_Val = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
+			float	   EEErr = FVector::Dist(FK_EE_Val.GetLocation(), ActualEE_Val.GetLocation());
+			UE_LOG(LogTemp, Warning, TEXT("[Gen3] FK EE=(%.2f,%.2f,%.2f) ActEE=(%.2f,%.2f,%.2f) EEErr=%.2fcm"),
+				FK_EE_Val.GetLocation().X, FK_EE_Val.GetLocation().Y, FK_EE_Val.GetLocation().Z,
+				ActualEE_Val.GetLocation().X, ActualEE_Val.GetLocation().Y, ActualEE_Val.GetLocation().Z,
+				EEErr);
 		}
 	}
 
@@ -2226,9 +2524,6 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		// FTransform BoneCS = SkeletalMeshComponent->GetBoneTransform(BoneIdx); // component space
 		// CurrentBoneTransforms[i] = BoneCS * SkeletalMeshComponent->GetComponentTransform();
 	}
-
-	// Get current end effector transform
-	FTransform CurrentEE = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
 
 	// Compute joint axes in world space from current bone orientations
 	// Axes are stored in parent frame, so use parent bone's current orientation
@@ -2352,11 +2647,12 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			FK_EE.GetLocation().Z - ActualEE.GetLocation().Z);
 		UE_LOG(LogTemp, Warning, TEXT("  Error: %.2f cm"), LastFKvsActualError);
 
-		// Check if BaseTransform matches actual first joint parent
+		// Check if BaseTransform matches actual first joint parent (body transform)
 		FTransform ActualBase = SkeletalMeshComponent->GetComponentTransform();
 		if (FirstJointParent != NAME_None)
 		{
-			ActualBase = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+			FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(FirstJointParent);
+			ActualBase = BaseBody ? BaseBody->GetUnrealWorldTransform() : SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
 		}
 		float BaseError = FVector::Dist(BaseTransform.GetLocation(), ActualBase.GetLocation());
 		UE_LOG(LogTemp, Warning, TEXT("  BaseTransform Error: %.2f cm"), BaseError);
@@ -2402,15 +2698,65 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 				FVector	   ActualPos = ActualJointTransform.GetLocation();
 				float	   JointErr = FVector::Dist(FKPos, ActualPos);
 
-				// Also log rotation difference
+				// Rotation difference (FK body-frame vs bone-frame)
 				FQuat FKRot = T.GetRotation();
 				FQuat ActRot = ActualJointTransform.GetRotation();
 				float RotErr = FMath::RadiansToDegrees((ActRot * FKRot.Inverse()).GetAngle());
 
-				UE_LOG(LogTemp, Warning, TEXT("    J%d: FK=(%.2f,%.2f,%.2f) Act=(%.2f,%.2f,%.2f) PosErr=%.2fcm RotErr=%.1f° Angle=%.1f°"),
-					i, FKPos.X, FKPos.Y, FKPos.Z,
-					ActualPos.X, ActualPos.Y, ActualPos.Z,
-					JointErr, RotErr, Joints[i].CurrentAngle);
+				// Compare FK axis with physics constraint axis
+				FName				 ConstraintToUse = Joints[i].ConstraintName != NAME_None ? Joints[i].ConstraintName : Joints[i].BoneName;
+				FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+				float				 AxisDot = 0.0f;
+				if (Constraint)
+				{
+					// Get constraint Frame1 in world space via parent body.
+					// Always use Frame1 here (matching the FK chain's axis derivation)
+					// so the AxisDot reflects FK self-consistency, not physics truth.
+					FName		   ParentBoneName = SkeletalMeshComponent->GetParentBone(Joints[i].BoneName);
+					FBodyInstance* ParentBody = (ParentBoneName != NAME_None)
+						? SkeletalMeshComponent->GetBodyInstance(ParentBoneName)
+						: nullptr;
+					if (ParentBody)
+					{
+						FTransform ParentBodyWorld = ParentBody->GetUnrealWorldTransform();
+						FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
+						FTransform F1World = Frame1 * ParentBodyWorld;
+						FVector	   PhysicsAxisW;
+						switch (Joints[i].ControlledAxis)
+						{
+							case EConstraintAxis::Swing1:
+								PhysicsAxisW = F1World.GetUnitAxis(EAxis::Z);
+								break;
+							case EConstraintAxis::Swing2:
+								PhysicsAxisW = F1World.GetUnitAxis(EAxis::Y);
+								break;
+							default:
+								PhysicsAxisW = F1World.GetUnitAxis(EAxis::X);
+								break;
+						}
+						AxisDot = FVector::DotProduct(AxisW, PhysicsAxisW);
+					}
+
+					// Compare FK T.Rot with actual body rotation for this joint
+					FBodyInstance* JointBody = SkeletalMeshComponent->GetBodyInstance(Joints[i].BoneName);
+					if (JointBody)
+					{
+						FQuat FKBodyQ = T.GetRotation();
+						FQuat ActBodyQ = JointBody->GetUnrealWorldTransform().GetRotation();
+						float BodyRotDiff = FMath::RadiansToDegrees((ActBodyQ * FKBodyQ.Inverse()).GetAngle());
+						// Also log constraint bone names to verify parent/child assignment
+						UE_LOG(LogTemp, Warning, TEXT("    J%d Body: FKQ=(%.3f,%.3f,%.3f,%.3f) ActQ=(%.3f,%.3f,%.3f,%.3f) Diff=%.1f° CB1=%s CB2=%s"),
+							i,
+							FKBodyQ.X, FKBodyQ.Y, FKBodyQ.Z, FKBodyQ.W,
+							ActBodyQ.X, ActBodyQ.Y, ActBodyQ.Z, ActBodyQ.W,
+							BodyRotDiff,
+							*Constraint->ConstraintBone1.ToString(),
+							*Constraint->ConstraintBone2.ToString());
+					}
+				}
+
+				UE_LOG(LogTemp, Warning, TEXT("    J%d: PosErr=%.2fcm RotErr=%.1f° AxisDot=%.3f Angle=%.1f°"),
+					i, JointErr, RotErr, AxisDot, Joints[i].CurrentAngle);
 			}
 		}
 	}
@@ -2448,9 +2794,14 @@ float UKinovaGen3ControllerComponent::ValidateForwardKinematics()
 		return -1.0f;
 	}
 
-	// Get base transform
+	// Get base transform — use body transform to match FK chain's CRest.Rot convention
 	FName	   FirstJointParent = SkeletalMeshComponent->GetParentBone(Joints[0].BoneName);
-	FTransform BaseTransform = (FirstJointParent != NAME_None) ? SkeletalMeshComponent->GetBoneTransform(FirstJointParent, RTS_World) : SkeletalMeshComponent->GetComponentTransform();
+	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
+	if (FirstJointParent != NAME_None)
+	{
+		FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(FirstJointParent);
+		BaseTransform = BaseBody ? BaseBody->GetUnrealWorldTransform() : SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+	}
 
 	// Read current angles from constraints
 	TArray<float> CurrentAngles;
@@ -2461,7 +2812,7 @@ float UKinovaGen3ControllerComponent::ValidateForwardKinematics()
 		FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintName);
 		if (Constraint)
 		{
-			CurrentAngles[i] = GetConstraintAngle(Constraint, Joints[i].ControlledAxis) - Joints[i].AngleOffset;
+			CurrentAngles[i] = Joints[i].ConstraintAngleSign * GetConstraintAngle(Constraint, Joints[i].ControlledAxis) - Joints[i].AngleOffset;
 		}
 		else
 		{
@@ -2612,9 +2963,14 @@ void UKinovaGen3ControllerComponent::AutoCalibrateFK()
 
 	UE_LOG(LogTemp, Warning, TEXT("=== Auto-Calibrating FK ==="));
 
-	// Get base transform
+	// Get base transform — use body transform to match FK chain's CRest.Rot convention
 	FName	   FirstJointParent = SkeletalMeshComponent->GetParentBone(Joints[0].BoneName);
-	FTransform BaseTransform = (FirstJointParent != NAME_None) ? SkeletalMeshComponent->GetBoneTransform(FirstJointParent, RTS_World) : SkeletalMeshComponent->GetComponentTransform();
+	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
+	if (FirstJointParent != NAME_None)
+	{
+		FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(FirstJointParent);
+		BaseTransform = BaseBody ? BaseBody->GetUnrealWorldTransform() : SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
+	}
 
 	// For each joint, compute what offset would make FK match actual position
 	for (int32 i = 0; i < Joints.Num(); i++)

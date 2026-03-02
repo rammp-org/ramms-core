@@ -7,6 +7,7 @@
 #include "KinovaGen3ControllerComponent.generated.h"
 
 class USkeletalMeshComponent;
+class URammsJointPoseAsset;
 
 /**
  * Control mode for arm joints
@@ -82,6 +83,16 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Computed Frame1 rotation offset (degrees) - automatic offset from constraint Frame1 orientation */
 	float ComputedFrameOffset = 0.0f;
 
+	/** True if ConstraintBone1 corresponds to the child bone (not the skeletal parent).
+	 *  Affects CRest and AxisLocal derivation. */
+	bool bConstraintBonesReversed = false;
+
+	/** Constraint angle sign: +1 if ConstraintBone1=child (UE5 Body1=child convention aligned),
+	 *  -1 if ConstraintBone1=parent (inverted from UE5 convention).
+	 *  UE5 Chaos computes R_rel = Frame1(child).GetRelativeTransform(Frame2(parent)),
+	 *  so θ_raw = +α when Body1 IS the child. */
+	float ConstraintAngleSign = 1.0f;
+
 	/** Target angle in degrees */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	float TargetAngle = 0.0f;
@@ -96,15 +107,27 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Tracks whether SmoothedAngle has been initialized from the current joint angle */
 	bool bSmoothedAngleInitialized = false;
 
-	/** Maximum angular velocity (degrees/sec) */
+	/** Last angle actually sent to the constraint drive (for dead-band filtering) */
+	float LastCommandedConstraintAngle = 0.0f;
+
+	/** Maximum angular velocity (degrees/sec) Note: On the Kinova Gen3 7DoF
+		large actuators (joints 1-4) have a max speed of ~79.64 deg/s, while the
+		smaller actuators (joints 5-7) can reach ~69.91 deg/s. The default value
+		is set to 69.91 to match the small joints, but you may want to adjust
+		this for the larger joints or for different robot models. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
-	float MaxAngularSpeed = 90.0f;
+	float MaxAngularSpeed = 69.91f;
 
 	/** Speed multiplier (0-1) for dynamic speed adjustment */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float SpeedMultiplier = 1.0f;
 
-	/** Maximum torque (N⋅m) */
+	/** Maximum torque (N⋅m) Note: on the Kinova Gen3 7DoF, the large joints
+		(1-4) have a much higher max torque (~39 N⋅m) compared to the smaller
+		joints (5-7) which max out around ~9.0 N⋅m. The default value is set to
+		39.0 N⋅m to match the larger joints, but you may want to adjust this for
+		the smaller joints or for different robot models.
+		*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
 	float MaxTorque = 39.0f; // Kinova Gen3 typical max torque
 
@@ -112,9 +135,11 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|PD Control", meta = (ClampMin = "0.0"))
 	float PositionStrength = 5000000.0f;
 
-	/** Angular position drive damping */
+	/** Angular position drive damping (velocity-dependent resistance; reduces oscillation/jitter).
+	 *  Keep well below PositionStrength to avoid preventing the drive from reaching its target.
+	 *  Typical: 5-20% of PositionStrength. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|PD Control", meta = (ClampMin = "0.0"))
-	float PositionDamping = 0.0f;
+	float PositionDamping = 500000.0f;
 
 	/** Minimum angle limit (degrees) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|Limits")
@@ -127,22 +152,6 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Enable software limits */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|Limits")
 	bool bEnableSoftwareLimits = true;
-
-	FRevoluteJointConfig()
-		: BoneName(NAME_None)
-		, ConstraintName(NAME_None)
-		, TargetAngle(0.0f)
-		, CurrentAngle(0.0f)
-		, MaxAngularSpeed(90.0f)
-		, SpeedMultiplier(1.0f)
-		, MaxTorque(39.0f)
-		, PositionStrength(5000000.0f)
-		, PositionDamping(0.0f)
-		, MinAngleLimit(-180.0f)
-		, MaxAngleLimit(180.0f)
-		, bEnableSoftwareLimits(true)
-	{
-	}
 };
 
 /**
@@ -168,14 +177,6 @@ struct RAMMSCORE_API FEndEffectorState
 	/** Angular velocity (degrees/s) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "End Effector")
 	FVector AngularVelocity = FVector::ZeroVector;
-
-	FEndEffectorState()
-		: Position(FVector::ZeroVector)
-		, Rotation(FRotator::ZeroRotator)
-		, LinearVelocity(FVector::ZeroVector)
-		, AngularVelocity(FVector::ZeroVector)
-	{
-	}
 };
 
 /**
@@ -378,6 +379,39 @@ public:
 	void SetAllJointTargets(const TArray<float>& TargetAngles);
 
 	/**
+	 * Set joint targets from a pose asset by index
+	 * @param PoseAsset - The pose asset containing the target pose
+	 * @param PoseIndex - Index of the pose in the asset
+	 * @return True if the pose was found and applied
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	bool SetJointTargetsFromPoseIndex(URammsJointPoseAsset* PoseAsset, int32 PoseIndex = 0);
+
+	/**
+	 * Set joint targets from a pose asset by name
+	 * @param PoseAsset - The pose asset containing the target pose
+	 * @param PoseName - Name of the pose to apply
+	 * @return True if the pose was found and applied
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	bool SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName);
+
+	/**
+	 * Capture the current joint angles into a pose asset at the given index.
+	 * If PoseIndex == -1, appends a new pose. Editor-only (modifies asset on disk).
+	 * @return True if successfully captured
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3", meta = (DevelopmentOnly))
+	bool CaptureCurrentPose(URammsJointPoseAsset* PoseAsset, const FString& PoseName, int32 PoseIndex = -1);
+
+	/**
+	 * Get the current joint angles as an array of floats (works in packaged builds).
+	 * @param OutAngles - Populated with current joint angles in degrees
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void GetCurrentJointAngles(TArray<float>& OutAngles) const;
+
+	/**
 	 * Set speed multiplier for a specific joint
 	 * @param JointIndex - Index of the joint in the Joints array
 	 * @param SpeedMultiplier - Speed multiplier (0-1)
@@ -567,15 +601,9 @@ private:
 	TArray<FTransform> CachedJointLocalTransforms;
 	TArray<FVector>	   CachedJointAxesLocal;
 
-	// FK local transforms are calibrated from runtime physics body positions
-	// to eliminate small offsets between skeleton reference pose and constraint solver
+	// FK local transforms are derived from constraint/skeleton rest-pose data
 	bool  bFKLocalTransformsCalibrated = false;
 	int32 FKCalibrationTickCounter = 0;
-
-	/** Smoothing factor for per-tick FK calibration (0-1). Lower = smoother but slower tracking.
-	 *  0.05 is very smooth (~1s convergence at 60fps), 0.2 is responsive (~0.2s). */
-	UPROPERTY(EditAnywhere, Category = "IK", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float CalibrationSmoothingAlpha = 0.1f;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);
