@@ -2028,7 +2028,6 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	else
 	{
 		CachedJointAxesLocal.SetNum(Joints.Num());
-		CachedAxisInFrame1.SetNum(Joints.Num());
 
 		// Body-to-bone rotation accumulator: tracks R_btob = Body^-1 * Bone at
 		// each joint's parent.  BoneRef.Pos is in the parent BONE frame, but the
@@ -2048,7 +2047,6 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			{
 				JointLocalTransforms[i] = BoneRef;
 				CachedJointAxesLocal[i] = FVector::XAxisVector;
-				CachedAxisInFrame1[i] = FVector::XAxisVector;
 				BodyToBoneAccum = BoneRef.GetRotation().Inverse() * BodyToBoneAccum * BoneRef.GetRotation();
 				continue;
 			}
@@ -2082,7 +2080,6 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 					AxisInFrame = FVector::XAxisVector;
 					break;
 			}
-			CachedAxisInFrame1[i] = AxisInFrame;
 
 			// Axis in parent body frame: from the parent-side constraint frame.
 			// Normal:  Frame1 is on parent → AxisLocal = Frame1.Rot * e
@@ -2344,9 +2341,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 				FTransform F2 = C->GetRefFrame(EConstraintFrame::Frame2);
 
 				// Method A: CRest from constraint frames
-				FQuat CRestA = bSwapped
-					? (F2.GetRotation() * F1.GetRotation().Inverse())
-					: (F1.GetRotation() * F2.GetRotation().Inverse());
+				FTransform CRestATrans = bSwapped
+					? (F1.Inverse() * F2)
+					: (F2.Inverse() * F1);
+				FQuat	   CRestA = CRestATrans.GetRotation();
 
 				// Method B: CRest from actual body transforms
 				FBodyInstance* ChildBody = SkeletalMeshComponent->GetBodyInstance(Joints[i].BoneName);

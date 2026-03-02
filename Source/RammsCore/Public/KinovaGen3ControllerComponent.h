@@ -601,9 +601,6 @@ private:
 	TArray<FTransform> CachedJointLocalTransforms;
 	TArray<FVector>	   CachedJointAxesLocal;
 
-	// Per-joint axis in component space, cached at initialization for per-tick axis recalibration
-	TArray<FVector> CachedAxisInFrame1; // component-space axis for each joint
-
 	// FK local transforms are derived from constraint/skeleton rest-pose data
 	bool  bFKLocalTransformsCalibrated = false;
 	int32 FKCalibrationTickCounter = 0;
