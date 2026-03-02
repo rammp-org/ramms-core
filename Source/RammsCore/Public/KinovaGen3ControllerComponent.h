@@ -83,7 +83,7 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	float ComputedFrameOffset = 0.0f;
 
 	/** True if ConstraintBone1 corresponds to the child bone (not the skeletal parent).
-	 *  Affects CRest and AxisLocal derivation but NOT the angle sign. */
+	 *  Affects CRest and AxisLocal derivation. */
 	bool bConstraintBonesReversed = false;
 
 	/** Constraint angle sign: +1 if ConstraintBone1=child (UE5 Body1=child convention aligned),
@@ -106,6 +106,9 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Tracks whether SmoothedAngle has been initialized from the current joint angle */
 	bool bSmoothedAngleInitialized = false;
 
+	/** Last angle actually sent to the constraint drive (for dead-band filtering) */
+	float LastCommandedConstraintAngle = 0.0f;
+
 	/** Maximum angular velocity (degrees/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
 	float MaxAngularSpeed = 90.0f;
@@ -122,9 +125,11 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|PD Control", meta = (ClampMin = "0.0"))
 	float PositionStrength = 5000000.0f;
 
-	/** Angular position drive damping */
+	/** Angular position drive damping (velocity-dependent resistance; reduces oscillation/jitter).
+	 *  Keep well below PositionStrength to avoid preventing the drive from reaching its target.
+	 *  Typical: 5-20% of PositionStrength. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|PD Control", meta = (ClampMin = "0.0"))
-	float PositionDamping = 0.0f;
+	float PositionDamping = 500000.0f;
 
 	/** Minimum angle limit (degrees) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|Limits")

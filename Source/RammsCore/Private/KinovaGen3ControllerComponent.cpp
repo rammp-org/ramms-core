@@ -244,18 +244,18 @@ void UKinovaGen3ControllerComponent::InitializeJointConstraints()
 		// Configure angular drive - MUST use TwistAndSwing mode for individual axis control
 		Constraint->SetAngularDriveMode(EAngularDriveMode::TwistAndSwing);
 
-		// Enable only the specific axis we're controlling
+		// Enable only the specific axis we're controlling.
+		// Also enable velocity drive so that PositionDamping acts as proper velocity
+		// feedback (damps joint velocity toward 0) rather than fighting the orientation drive.
 		if (Joint.ControlledAxis == EConstraintAxis::Twist)
 		{
-			// Enable twist drive, disable swing drives
 			Constraint->SetOrientationDriveTwistAndSwing(true, false);
-			Constraint->SetAngularVelocityDriveTwistAndSwing(false, false);
+			Constraint->SetAngularVelocityDriveTwistAndSwing(true, false);
 		}
 		else
 		{
-			// Enable swing drive, disable twist drive
 			Constraint->SetOrientationDriveTwistAndSwing(false, true);
-			Constraint->SetAngularVelocityDriveTwistAndSwing(false, false);
+			Constraint->SetAngularVelocityDriveTwistAndSwing(false, true);
 		}
 
 		// Set drive parameters (Spring, Damping, MaxForce)
@@ -402,7 +402,7 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 				CurrentBaseLocation = SkeletalMeshComponent->GetSocketTransform(ParentBone, RTS_World).GetLocation();
 			}
 		}
-		const float BaseMoveThreshold = 0.01f;
+		const float BaseMoveThreshold = 0.1f; // cm — avoid re-solving on micro-movements
 		const bool	bBaseMoved = FVector::DistSquared(CurrentBaseLocation, LastSolveBaseLocation) > (BaseMoveThreshold * BaseMoveThreshold);
 
 		if (!bIKTargetSatisfied || bBaseMoved)
@@ -575,7 +575,15 @@ void UKinovaGen3ControllerComponent::ApplyJointSettings(FRevoluteJointConfig& Jo
 
 	// Add offsets when commanding (FK angle -> constraint angle), apply sign for swapped constraints
 	const float ConstraintAngle = Joint.ConstraintAngleSign * (TargetForDrive + Joint.AngleOffset);
-	SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
+
+	// Dead-band: only update the constraint drive if the commanded angle actually changed.
+	// This avoids micro-corrections that cascade into end-effector jitter with parent-dominates.
+	const float DriveDeadBand = 0.01f; // degrees
+	if (FMath::Abs(ConstraintAngle - Joint.LastCommandedConstraintAngle) > DriveDeadBand)
+	{
+		SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
+		Joint.LastCommandedConstraintAngle = ConstraintAngle;
+	}
 
 	if (bEnableDebugLogging)
 	{
@@ -683,10 +691,12 @@ void UKinovaGen3ControllerComponent::SetConstraintAngle(FConstraintInstance* Con
 	if (Axis == EConstraintAxis::Twist)
 	{
 		Constraint->SetOrientationDriveTwistAndSwing(true, false);
+		Constraint->SetAngularVelocityDriveTwistAndSwing(true, false);
 	}
 	else // Swing1 or Swing2
 	{
 		Constraint->SetOrientationDriveTwistAndSwing(false, true);
+		Constraint->SetAngularVelocityDriveTwistAndSwing(false, true);
 	}
 
 	// SetAngularOrientationTarget expects a quaternion representing the target orientation
@@ -711,6 +721,7 @@ void UKinovaGen3ControllerComponent::SetConstraintAngle(FConstraintInstance* Con
 	}
 
 	Constraint->SetAngularOrientationTarget(TargetQuat);
+	Constraint->SetAngularVelocityTarget(FVector::ZeroVector);
 }
 
 bool UKinovaGen3ControllerComponent::IsAxisFreeOrLimited(FConstraintInstance* Constraint, EConstraintAxis Axis) const
@@ -1117,8 +1128,22 @@ void UKinovaGen3ControllerComponent::AutoPopulateJoints(bool bOverwriteExisting)
 		// UE5 Chaos: Body1/Frame1 = "child", Body2/Frame2 = "parent".
 		// When CB1=child bone, UE5 convention is aligned → sign = +1.
 		{
-			FName ParentBone = TempSkeletalMesh->GetParentBone(NewJoint.BoneName);
-			bool  bCB1IsChild = (Constraint->ConstraintBone1 == NewJoint.BoneName || (ParentBone != NAME_None && Constraint->ConstraintBone2 == ParentBone));
+			FName		   ParentBone = NAME_None;
+			USkeletalMesh* SkelMeshAsset = TempSkeletalMesh ? TempSkeletalMesh->GetSkeletalMeshAsset() : nullptr;
+			if (SkelMeshAsset)
+			{
+				const FReferenceSkeleton& RefSkel = SkelMeshAsset->GetRefSkeleton();
+				int32					  BoneIdx = RefSkel.FindBoneIndex(NewJoint.BoneName);
+				if (BoneIdx != INDEX_NONE)
+				{
+					int32 ParentIdx = RefSkel.GetParentIndex(BoneIdx);
+					if (ParentIdx != INDEX_NONE)
+					{
+						ParentBone = RefSkel.GetBoneName(ParentIdx);
+					}
+				}
+			}
+			bool bCB1IsChild = (Constraint->ConstraintBone1 == NewJoint.BoneName || (ParentBone != NAME_None && Constraint->ConstraintBone2 == ParentBone));
 			NewJoint.bConstraintBonesReversed = bCB1IsChild;
 			NewJoint.ConstraintAngleSign = bCB1IsChild ? 1.0f : -1.0f;
 		}
@@ -2181,25 +2206,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		if (BaseBody)
 		{
 			BaseTransform = BaseBody->GetUnrealWorldTransform();
-			if (bEnableDebugLogging && !bFKLocalTransformsCalibrated)
-			{
-				FTransform BoneTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
-				FQuat	   BodyQ = BaseTransform.GetRotation();
-				FQuat	   BoneQ = BoneTransform.GetRotation();
-				float	   BodyBoneDiff = FMath::RadiansToDegrees((BoneQ * BodyQ.Inverse()).GetAngle());
-				UE_LOG(LogTemp, Warning, TEXT("[Gen3] BaseTransform: Using BODY transform for '%s'. BodyQ=(%.4f,%.4f,%.4f,%.4f) BoneQ=(%.4f,%.4f,%.4f,%.4f) Diff=%.2f°"),
-					*FirstJointParent.ToString(),
-					BodyQ.X, BodyQ.Y, BodyQ.Z, BodyQ.W,
-					BoneQ.X, BoneQ.Y, BoneQ.Z, BoneQ.W, BodyBoneDiff);
-			}
 		}
 		else
 		{
 			BaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
-			if (bEnableDebugLogging && !bFKLocalTransformsCalibrated)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[Gen3] BaseTransform: GetBodyInstance('%s') returned NULL, using bone transform"), *FirstJointParent.ToString());
-			}
 		}
 	}
 
