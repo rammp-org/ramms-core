@@ -82,6 +82,16 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Computed Frame1 rotation offset (degrees) - automatic offset from constraint Frame1 orientation */
 	float ComputedFrameOffset = 0.0f;
 
+	/** True if ConstraintBone1 corresponds to the child bone (not the skeletal parent).
+	 *  Affects CRest and AxisLocal derivation but NOT the angle sign. */
+	bool bConstraintBonesReversed = false;
+
+	/** Constraint angle sign: +1 if ConstraintBone1=child (UE5 Body1=child convention aligned),
+	 *  -1 if ConstraintBone1=parent (inverted from UE5 convention).
+	 *  UE5 Chaos computes R_rel = Frame1(child).GetRelativeTransform(Frame2(parent)),
+	 *  so θ_raw = +α when Body1 IS the child. */
+	float ConstraintAngleSign = 1.0f;
+
 	/** Target angle in degrees */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint")
 	float TargetAngle = 0.0f;
@@ -567,15 +577,12 @@ private:
 	TArray<FTransform> CachedJointLocalTransforms;
 	TArray<FVector>	   CachedJointAxesLocal;
 
-	// FK local transforms are calibrated from runtime physics body positions
-	// to eliminate small offsets between skeleton reference pose and constraint solver
+	// Per-joint axis in component space, cached at initialization for per-tick axis recalibration
+	TArray<FVector> CachedAxisInFrame1; // component-space axis for each joint
+
+	// FK local transforms are derived from constraint/skeleton rest-pose data
 	bool  bFKLocalTransformsCalibrated = false;
 	int32 FKCalibrationTickCounter = 0;
-
-	/** Smoothing factor for per-tick FK calibration (0-1). Lower = smoother but slower tracking.
-	 *  0.05 is very smooth (~1s convergence at 60fps), 0.2 is responsive (~0.2s). */
-	UPROPERTY(EditAnywhere, Category = "IK", meta = (ClampMin = "0.01", ClampMax = "1.0"))
-	float CalibrationSmoothingAlpha = 0.1f;
 
 	/** Update joint positions using position control */
 	void UpdatePositionControl(float DeltaTime);
