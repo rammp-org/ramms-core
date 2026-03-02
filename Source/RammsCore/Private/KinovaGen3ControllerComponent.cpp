@@ -7,6 +7,7 @@
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "DrawDebugHelpers.h"
 #include "RammsIKLibrary.h"
+#include "RammsJointPoseAsset.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "UObject/UnrealType.h"
@@ -161,9 +162,24 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 				}
 			}
 
-			// Initialize constraint drives after joint configuration
-			// InitializeJointConstraints(); // drives must be enabled for SetAngularOrientationTarget to work
-			// NOTE: This is commented out to avoid reconfiguring constraint drives that user has already set up
+			// Initialize constraint drives (stiffness, damping, max force) and cache joint axes
+			// InitializeJointConstraints();
+
+			// Set each joint's drive target to its CURRENT angle so physics doesn't
+			// snap to the asset's default drive target on begin play.
+			for (FRevoluteJointConfig& Joint : Joints)
+			{
+				if (Joint.BoneName == NAME_None)
+					continue;
+				FName				 ConstraintToUse = Joint.ConstraintName != NAME_None ? Joint.ConstraintName : Joint.BoneName;
+				FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+				if (Constraint)
+				{
+					const float InitConstraintAngle = Joint.ConstraintAngleSign * (Joint.CurrentAngle + Joint.AngleOffset);
+					SetConstraintAngle(Constraint, Joint.ControlledAxis, InitConstraintAngle);
+					Joint.LastCommandedConstraintAngle = InitConstraintAngle;
+				}
+			}
 
 			// Initialize null-space bias to zeros if not set
 			if (NullSpaceBias.Num() != Joints.Num())
@@ -1628,6 +1644,83 @@ void UKinovaGen3ControllerComponent::SetAllJointTargets(const TArray<float>& Tar
 	if (bEnableDebugLogging)
 	{
 		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set %d joint targets"), NumToSet);
+	}
+}
+
+bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseIndex(URammsJointPoseAsset* PoseAsset, int32 PoseIndex)
+{
+	if (!PoseAsset)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseIndex: null PoseAsset"));
+		return false;
+	}
+
+	TArray<float> Angles;
+	if (!PoseAsset->GetPoseByIndex(PoseIndex, Angles))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseIndex: index %d out of range (asset has %d poses)"),
+			PoseIndex, PoseAsset->GetNumPoses());
+		return false;
+	}
+
+	SetAllJointTargets(Angles);
+	return true;
+}
+
+bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName)
+{
+	if (!PoseAsset)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseName: null PoseAsset"));
+		return false;
+	}
+
+	TArray<float> Angles;
+	if (!PoseAsset->GetPoseByName(PoseName, Angles))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetJointTargetsFromPoseName: pose '%s' not found"), *PoseName);
+		return false;
+	}
+
+	SetAllJointTargets(Angles);
+	return true;
+}
+
+bool UKinovaGen3ControllerComponent::CaptureCurrentPose(URammsJointPoseAsset* PoseAsset, const FString& PoseName, int32 PoseIndex)
+{
+	if (!PoseAsset)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] CaptureCurrentPose: null PoseAsset"));
+		return false;
+	}
+
+	FRammsJointPose NewPose;
+	NewPose.PoseName = PoseName;
+	NewPose.JointAngles.Reserve(Joints.Num());
+	for (const FRevoluteJointConfig& Joint : Joints)
+	{
+		NewPose.JointAngles.Add(Joint.CurrentAngle);
+	}
+
+	if (PoseIndex < 0 || !PoseAsset->Poses.IsValidIndex(PoseIndex))
+	{
+		PoseAsset->Poses.Add(MoveTemp(NewPose));
+	}
+	else
+	{
+		PoseAsset->Poses[PoseIndex] = MoveTemp(NewPose);
+	}
+
+	PoseAsset->MarkPackageDirty();
+	return true;
+}
+
+void UKinovaGen3ControllerComponent::GetCurrentJointAngles(TArray<float>& OutAngles) const
+{
+	OutAngles.Reset(Joints.Num());
+	for (const FRevoluteJointConfig& Joint : Joints)
+	{
+		OutAngles.Add(Joint.CurrentAngle);
 	}
 }
 

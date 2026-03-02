@@ -7,6 +7,7 @@
 #include "KinovaGen3ControllerComponent.generated.h"
 
 class USkeletalMeshComponent;
+class URammsJointPoseAsset;
 
 /**
  * Control mode for arm joints
@@ -109,15 +110,24 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Last angle actually sent to the constraint drive (for dead-band filtering) */
 	float LastCommandedConstraintAngle = 0.0f;
 
-	/** Maximum angular velocity (degrees/sec) */
+	/** Maximum angular velocity (degrees/sec) Note: On the Kinova Gen3 7DoF
+		large actuators (joints 1-4) have a max speed of ~79.64 deg/s, while the
+		smaller actuators (joints 5-7) can reach ~69.91 deg/s. The default value
+		is set to 69.91 to match the small joints, but you may want to adjust
+		this for the larger joints or for different robot models. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
-	float MaxAngularSpeed = 90.0f;
+	float MaxAngularSpeed = 69.91f;
 
 	/** Speed multiplier (0-1) for dynamic speed adjustment */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float SpeedMultiplier = 1.0f;
 
-	/** Maximum torque (N⋅m) */
+	/** Maximum torque (N⋅m) Note: on the Kinova Gen3 7DoF, the large joints
+		(1-4) have a much higher max torque (~39 N⋅m) compared to the smaller
+		joints (5-7) which max out around ~9.0 N⋅m. The default value is set to
+		39.0 N⋅m to match the larger joints, but you may want to adjust this for
+		the smaller joints or for different robot models.
+		*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint", meta = (ClampMin = "0.1"))
 	float MaxTorque = 39.0f; // Kinova Gen3 typical max torque
 
@@ -142,22 +152,6 @@ struct RAMMSCORE_API FRevoluteJointConfig
 	/** Enable software limits */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Joint|Limits")
 	bool bEnableSoftwareLimits = true;
-
-	FRevoluteJointConfig()
-		: BoneName(NAME_None)
-		, ConstraintName(NAME_None)
-		, TargetAngle(0.0f)
-		, CurrentAngle(0.0f)
-		, MaxAngularSpeed(90.0f)
-		, SpeedMultiplier(1.0f)
-		, MaxTorque(39.0f)
-		, PositionStrength(5000000.0f)
-		, PositionDamping(0.0f)
-		, MinAngleLimit(-180.0f)
-		, MaxAngleLimit(180.0f)
-		, bEnableSoftwareLimits(true)
-	{
-	}
 };
 
 /**
@@ -183,14 +177,6 @@ struct RAMMSCORE_API FEndEffectorState
 	/** Angular velocity (degrees/s) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "End Effector")
 	FVector AngularVelocity = FVector::ZeroVector;
-
-	FEndEffectorState()
-		: Position(FVector::ZeroVector)
-		, Rotation(FRotator::ZeroRotator)
-		, LinearVelocity(FVector::ZeroVector)
-		, AngularVelocity(FVector::ZeroVector)
-	{
-	}
 };
 
 /**
@@ -391,6 +377,39 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
 	void SetAllJointTargets(const TArray<float>& TargetAngles);
+
+	/**
+	 * Set joint targets from a pose asset by index
+	 * @param PoseAsset - The pose asset containing the target pose
+	 * @param PoseIndex - Index of the pose in the asset
+	 * @return True if the pose was found and applied
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	bool SetJointTargetsFromPoseIndex(URammsJointPoseAsset* PoseAsset, int32 PoseIndex = 0);
+
+	/**
+	 * Set joint targets from a pose asset by name
+	 * @param PoseAsset - The pose asset containing the target pose
+	 * @param PoseName - Name of the pose to apply
+	 * @return True if the pose was found and applied
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	bool SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName);
+
+	/**
+	 * Capture the current joint angles into a pose asset at the given index.
+	 * If PoseIndex == -1, appends a new pose. Editor-only (modifies asset on disk).
+	 * @return True if successfully captured
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3", meta = (DevelopmentOnly))
+	bool CaptureCurrentPose(URammsJointPoseAsset* PoseAsset, const FString& PoseName, int32 PoseIndex = -1);
+
+	/**
+	 * Get the current joint angles as an array of floats (works in packaged builds).
+	 * @param OutAngles - Populated with current joint angles in degrees
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void GetCurrentJointAngles(TArray<float>& OutAngles) const;
 
 	/**
 	 * Set speed multiplier for a specific joint
