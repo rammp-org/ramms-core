@@ -573,7 +573,10 @@ class UnrealRemote:
         else:
             data = None
 
-        logger.debug(f"→ {method} {endpoint} body={data.decode() if data else None}")
+        _debug = logger.isEnabledFor(logging.DEBUG)
+        if _debug:
+            body_preview = data.decode("utf-8")[:500] if data else None
+            logger.debug(f"→ {method} {endpoint} body={body_preview}")
 
         headers = {"Content-Type": "application/json"}
         req = Request(url, data=data, headers=headers, method=method)
@@ -581,7 +584,8 @@ class UnrealRemote:
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 resp_data = resp.read().decode("utf-8")
-                logger.debug(f"← {resp.status} {resp_data[:500] if resp_data else '(empty)'}")
+                if _debug:
+                    logger.debug(f"← {resp.status} {resp_data[:500] if resp_data else '(empty)'}")
                 if resp_data:
                     return json.loads(resp_data)
                 return {}
@@ -591,7 +595,8 @@ class UnrealRemote:
                 body_text = e.read().decode("utf-8")
             except Exception:
                 pass
-            logger.debug(f"← HTTP {e.code}: {body_text[:500]}")
+            if _debug:
+                logger.debug(f"← HTTP {e.code}: {body_text[:500]}")
             raise UnrealRemoteError(
                 f"HTTP {e.code} on {method} {endpoint}: {body_text}"
             ) from e
