@@ -11,7 +11,7 @@
  *
  * Provides actor and component discovery functions callable via:
  *   PUT /remote/object/call on the CDO path:
- *   /Script/RammsCore.Default__URammsCoreBridge
+ *   /Script/RammsCore.Default__RammsCoreBridge
  *
  * These use GEngine->GetWorldContexts() and TActorIterator to find runtime
  * objects without needing a world context, making them accessible from
@@ -45,10 +45,10 @@ public:
 	 * Returns an array of "ComponentName:ClassName" strings.
 	 *
 	 * @param ActorPath  Full object path of the actor
-	 * @param ClassNameFilter  Optional class name substring filter (empty = all)
+	 * @param ClassNameFilter  Class name substring filter (empty string = all components)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
-	static TArray<FString> FindComponents(const FString& ActorPath, const FString& ClassNameFilter);
+	static TArray<FString> FindComponents(const FString& ActorPath, const FString& ClassNameFilter = TEXT(""));
 
 	/**
 	 * Get the full object path for a named component on an actor.

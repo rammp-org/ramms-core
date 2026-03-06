@@ -6,6 +6,16 @@ Supports querying actors/components, getting/setting properties, and calling
 functions — all via dynamic proxy objects that translate attribute access
 and method calls into remote API requests.
 
+Core features (RammsCore plugin only):
+    - Actor and component discovery via URammsCoreBridge
+    - Property read/write on any UObject
+    - Function calls on any UObject
+    - Object description (introspection)
+
+Optional UI features (requires RammsUI plugin):
+    - Widget discovery, notifications, status panel control
+    - Pass ui_bridge="/Script/RammsUI.Default__RammsRemoteBridge" to enable
+
 Usage:
     from unreal_remote import UnrealRemote
 
@@ -16,6 +26,9 @@ Usage:
 
     # Find actors by class
     cameras = ue.find_actors(class_filter="CameraActor")
+
+    # Find components on an actor
+    comps = ue.find_components(actor_path, "Controller")
 
     # Get a proxy for a specific actor by path
     actor = ue.actor("/Game/MyMap.MyMap:PersistentLevel.MyActor_0")
@@ -125,15 +138,20 @@ class UnrealRemote:
     """
 
     def __init__(self, host: str = "127.0.0.1", http_port: int = 30010,
-                 timeout: float = 5.0):
+                 timeout: float = 5.0, ui_bridge: Optional[str] = None):
         self.base_url = f"http://{host}:{http_port}"
         self.timeout = timeout
+        if ui_bridge is not None:
+            self.ramms_ui_bridge = ui_bridge
 
     # Well-known object paths
     EDITOR_ACTOR_SUBSYSTEM = "/Script/UnrealEd.Default__EditorActorSubsystem"
     EDITOR_ASSET_LIBRARY = "/Script/EditorScriptingUtilities.Default__EditorAssetLibrary"
     RAMMS_CORE_BRIDGE = "/Script/RammsCore.Default__RammsCoreBridge"
-    RAMMS_UI_BRIDGE = "/Script/RammsUI.Default__RammsRemoteBridge"
+
+    # Optional: set to the RammsUI bridge CDO path if the RammsUI plugin is installed.
+    # Default is None (UI bridge not available).
+    ramms_ui_bridge: Optional[str] = None
 
     # Backward-compat alias
     RAMMS_REMOTE_BRIDGE = RAMMS_CORE_BRIDGE
@@ -151,8 +169,20 @@ class UnrealRemote:
 
     @property
     def ui_bridge(self) -> RemoteObjectProxy:
-        """Get a proxy for the URammsRemoteBridge (UI-specific) function library CDO."""
-        return RemoteObjectProxy(self, self.RAMMS_UI_BRIDGE)
+        """
+        Get a proxy for the URammsRemoteBridge (UI-specific) function library CDO.
+        Requires the RammsUI plugin to be installed and the ui_bridge path to be set,
+        either via the constructor or by setting ramms_ui_bridge on the instance.
+
+        Raises:
+            ValueError: If no UI bridge path has been configured.
+        """
+        if not self.ramms_ui_bridge:
+            raise ValueError(
+                "No UI bridge configured. Pass ui_bridge='/Script/RammsUI.Default__RammsRemoteBridge' "
+                "to UnrealRemote() or set instance.ramms_ui_bridge."
+            )
+        return RemoteObjectProxy(self, self.ramms_ui_bridge)
 
     def find_actors(self, class_filter: Optional[str] = None,
                     name_filter: Optional[str] = None) -> list[RemoteObjectProxy]:
@@ -182,27 +212,30 @@ class UnrealRemote:
                     self.RAMMS_CORE_BRIDGE,
                     "GetAllActorPaths"
                 )
-            actors = self._parse_path_list(result, name_filter)
-            if actors:
-                return actors
+            return self._parse_path_list(result, name_filter)
         except UnrealRemoteError as e:
             logger.debug(f"RammsCoreBridge actor search failed: {e}")
 
-        # Fallback: EditorActorSubsystem
+        # Fallback: EditorActorSubsystem (only reached if bridge call failed)
         try:
             result = self._call_function(
                 self.EDITOR_ACTOR_SUBSYSTEM,
                 "GetAllLevelActors"
             )
-            return self._parse_actor_list(result, name_filter)
+            actors = self._parse_actor_list(result, name_filter)
+            # Apply class_filter client-side since EditorActorSubsystem doesn't support it
+            if class_filter:
+                actors = [a for a in actors
+                          if class_filter.lower() in a.object_path.lower()]
+            return actors
         except UnrealRemoteError as e:
             logger.warning(f"EditorActorSubsystem call failed: {e}")
             return []
 
     def find_ramms_widgets(self, class_filter: str = "") -> list[RemoteObjectProxy]:
         """
-        Find live URammsBaseWidget instances using the RammsRemoteBridge.
-        Uses TObjectIterator so doesn't need world context.
+        Find live URammsBaseWidget instances using the RammsUI bridge.
+        Requires the RammsUI plugin and a configured ui_bridge path.
 
         Args:
             class_filter: Class name substring (e.g. "StatusPanel", "Toolbar").
@@ -210,16 +243,20 @@ class UnrealRemote:
         Returns:
             List of RemoteObjectProxy for matching widget instances.
         """
+        if not self.ramms_ui_bridge:
+            logger.warning("find_ramms_widgets: No UI bridge configured (RammsUI plugin required)")
+            return []
+
         try:
             if class_filter:
                 result = self._call_function(
-                    self.RAMMS_UI_BRIDGE,
+                    self.ramms_ui_bridge,
                     "FindRammsWidgets",
                     {"ClassNameFilter": class_filter}
                 )
             else:
                 result = self._call_function(
-                    self.RAMMS_UI_BRIDGE,
+                    self.ramms_ui_bridge,
                     "GetAllRammsWidgetPaths"
                 )
             return self._parse_path_list(result)
