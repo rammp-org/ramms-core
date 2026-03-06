@@ -200,11 +200,11 @@ public:
 
 	// Get all angular motor configurations
 	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
-	const TArray<FAngularMotorConfig>& GetAngularMotors() const { return AngularMotors; }
+	TArray<FAngularMotorConfig> GetAngularMotors() const { return AngularMotors; }
 
 	// Get all linear motor configurations
 	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
-	const TArray<FLinearMotorConfig>& GetLinearMotors() const { return LinearMotors; }
+	TArray<FLinearMotorConfig> GetLinearMotors() const { return LinearMotors; }
 
 protected:
 	virtual void BeginPlay() override;
