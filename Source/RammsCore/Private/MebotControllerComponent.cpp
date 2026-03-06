@@ -20,42 +20,42 @@ UMebotControllerComponent::UMebotControllerComponent()
 	// Initialize default motor configurations
 	// Front caster arm - angular motor
 	FAngularMotorConfig FrontCaster;
-	FrontCaster.ConstraintName = FName("front_caster_arm");
+	FrontCaster.ConstraintName = FName("front_caster_swing_arm");
 	FrontCaster.ControlAxis = EMotorAxis::Y;
 	FrontCaster.TargetAngle = 0.0f;
 	AngularMotors.Add(FrontCaster);
 
 	// Rear caster arm - angular motor
 	FAngularMotorConfig RearCaster;
-	RearCaster.ConstraintName = FName("rear_caster_arm");
+	RearCaster.ConstraintName = FName("rear_caster_swing_arm");
 	RearCaster.ControlAxis = EMotorAxis::Y;
 	RearCaster.TargetAngle = 0.0f;
 	AngularMotors.Add(RearCaster);
 
 	// Left motor elevator - angular motor
 	FAngularMotorConfig LeftElevator;
-	LeftElevator.ConstraintName = FName("left_motor_swing_arm");
+	LeftElevator.ConstraintName = FName("motor_swing_arm_l");
 	LeftElevator.ControlAxis = EMotorAxis::Y;
 	LeftElevator.TargetAngle = 0.0f;
 	AngularMotors.Add(LeftElevator);
 
 	// Right motor elevator - angular motor
 	FAngularMotorConfig RightElevator;
-	RightElevator.ConstraintName = FName("right_motor_swing_arm");
+	RightElevator.ConstraintName = FName("motor_swing_arm_r");
 	RightElevator.ControlAxis = EMotorAxis::Y;
 	RightElevator.TargetAngle = 0.0f;
 	AngularMotors.Add(RightElevator);
 
 	// Left motor translator - linear motor
 	FLinearMotorConfig LeftTranslator;
-	LeftTranslator.ConstraintName = FName("left_motor_horizontal_assembly");
+	LeftTranslator.ConstraintName = FName("dw_main_plate_l");
 	LeftTranslator.ControlAxis = EMotorAxis::X;
 	LeftTranslator.TargetPosition = 0.0f;
 	LinearMotors.Add(LeftTranslator);
 
 	// Right motor translator - linear motor
 	FLinearMotorConfig RightTranslator;
-	RightTranslator.ConstraintName = FName("right_motor_horizontal_assembly");
+	RightTranslator.ConstraintName = FName("dw_main_plate_r");
 	RightTranslator.ControlAxis = EMotorAxis::X;
 	RightTranslator.TargetPosition = 0.0f;
 	LinearMotors.Add(RightTranslator);
