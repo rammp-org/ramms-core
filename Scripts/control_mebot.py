@@ -68,9 +68,11 @@ def _find_component(ue: UnrealRemote, actor_path: str, class_hint: str):
 def get_angular_motors(comp) -> list[dict]:
     """Read angular motor configs from the component."""
     try:
-        result = comp.get_property("AngularMotors")
+        result = comp.call("GetAngularMotors")
         if isinstance(result, list):
             return result
+        if isinstance(result, dict):
+            return result.get("ReturnValue", [])
     except UnrealRemoteError:
         pass
     return []
@@ -79,9 +81,11 @@ def get_angular_motors(comp) -> list[dict]:
 def get_linear_motors(comp) -> list[dict]:
     """Read linear motor configs from the component."""
     try:
-        result = comp.get_property("LinearMotors")
+        result = comp.call("GetLinearMotors")
         if isinstance(result, list):
             return result
+        if isinstance(result, dict):
+            return result.get("ReturnValue", [])
     except UnrealRemoteError:
         pass
     return []
