@@ -41,6 +41,15 @@ public:
 	// ── Component Discovery ───────────────────────────────────────
 
 	/**
+	 * Find actors that have a component matching a class name substring.
+	 * Returns an array of "ActorPath|ComponentName:ComponentClassName" strings.
+	 *
+	 * @param ComponentClassFilter  Class name substring filter for components
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
+	static TArray<FString> FindActorsByComponent(const FString& ComponentClassFilter);
+
+	/**
 	 * Get component names and class names for a given actor.
 	 * Returns an array of "ComponentName:ClassName" strings.
 	 *

@@ -198,6 +198,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Mebot Controller|Debug")
 	FString GetMotorDebugInfo() const;
 
+	// Get all angular motor configurations
+	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	TArray<FAngularMotorConfig> GetAngularMotors() const { return AngularMotors; }
+
+	// Get all linear motor configurations
+	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	TArray<FLinearMotorConfig> GetLinearMotors() const { return LinearMotors; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;

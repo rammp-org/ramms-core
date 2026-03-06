@@ -264,6 +264,43 @@ class UnrealRemote:
             logger.warning(f"FindRammsWidgets failed: {e}")
             return []
 
+    def find_actors_by_component(self, component_class_filter: str
+                                ) -> list[dict]:
+        """
+        Find actors that have a component matching a class name substring.
+
+        Returns list of dicts with 'actor_path', 'actor_proxy',
+        'component_name', 'component_class', and 'component_path' keys.
+        Single server-side call — much faster than iterating all actors.
+        """
+        try:
+            result = self._call_function(
+                self.RAMMS_CORE_BRIDGE,
+                "FindActorsByComponent",
+                {"ComponentClassFilter": component_class_filter}
+            )
+            if isinstance(result, dict):
+                result = result.get("ReturnValue", result)
+
+            entries = []
+            if isinstance(result, list):
+                for entry in result:
+                    if isinstance(entry, str) and "|" in entry:
+                        actor_path, comp_info = entry.split("|", 1)
+                        if ":" in comp_info:
+                            comp_name, comp_class = comp_info.split(":", 1)
+                            entries.append({
+                                "actor_path": actor_path,
+                                "actor_proxy": RemoteObjectProxy(self, actor_path),
+                                "component_name": comp_name,
+                                "component_class": comp_class,
+                                "component_path": f"{actor_path}.{comp_name}",
+                            })
+            return entries
+        except UnrealRemoteError as e:
+            logger.debug(f"FindActorsByComponent failed: {e}")
+            return []
+
     def find_components(self, actor_path: str,
                         class_filter: str = "") -> list[dict]:
         """
@@ -302,7 +339,12 @@ class UnrealRemote:
 
     def _get_components_via_describe(self, actor_path: str,
                                      class_filter: str = "") -> list[dict]:
-        """Fallback: get components via describe_object."""
+        """Fallback: get components via describe_object.
+
+        Note: describe_object returns UPROPERTY variable names, which may
+        differ from component instance names. We attempt to read the property
+        value to get the actual object path.
+        """
         try:
             desc = self.describe_object(actor_path)
         except UnrealRemoteError:
@@ -311,15 +353,30 @@ class UnrealRemote:
         components = []
         for prop in desc.get("Properties", []):
             prop_type = prop.get("Type", "")
-            if prop_type.endswith("Component"):
-                comp_name = prop.get("Name", "")
-                if class_filter and class_filter.lower() not in prop_type.lower():
-                    continue
-                components.append({
-                    "name": comp_name,
-                    "class_name": prop_type,
-                    "path": f"{actor_path}.{comp_name}",
-                })
+            if not prop_type.endswith("Component"):
+                continue
+            if class_filter and class_filter.lower() not in prop_type.lower():
+                continue
+
+            prop_name = prop.get("Name", "")
+            # Try to read the property value to get the actual component path
+            comp_path = None
+            try:
+                val = self._get_property(actor_path, prop_name)
+                if isinstance(val, str) and val:
+                    comp_path = val
+            except UnrealRemoteError:
+                pass
+
+            if not comp_path:
+                # Best-effort: use property name (may differ from instance name)
+                comp_path = f"{actor_path}.{prop_name}"
+
+            components.append({
+                "name": prop_name,
+                "class_name": prop_type,
+                "path": comp_path,
+            })
         return components
 
     def _parse_path_list(self, result: Any,
@@ -516,12 +573,19 @@ class UnrealRemote:
         else:
             data = None
 
+        _debug = logger.isEnabledFor(logging.DEBUG)
+        if _debug:
+            body_preview = data.decode("utf-8")[:500] if data else None
+            logger.debug(f"→ {method} {endpoint} body={body_preview}")
+
         headers = {"Content-Type": "application/json"}
         req = Request(url, data=data, headers=headers, method=method)
 
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 resp_data = resp.read().decode("utf-8")
+                if _debug:
+                    logger.debug(f"← {resp.status} {resp_data[:500] if resp_data else '(empty)'}")
                 if resp_data:
                     return json.loads(resp_data)
                 return {}
@@ -531,6 +595,8 @@ class UnrealRemote:
                 body_text = e.read().decode("utf-8")
             except Exception:
                 pass
+            if _debug:
+                logger.debug(f"← HTTP {e.code}: {body_text[:500]}")
             raise UnrealRemoteError(
                 f"HTTP {e.code} on {method} {endpoint}: {body_text}"
             ) from e
