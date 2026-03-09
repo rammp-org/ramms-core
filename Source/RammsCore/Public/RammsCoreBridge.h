@@ -41,20 +41,23 @@ public:
 	// ── Component Discovery ───────────────────────────────────────
 
 	/**
-	 * Find actors that have a component matching a class name substring.
+	 * Find actors that have a component whose class name or instance name
+	 * contains the given substring.
 	 * Returns an array of "ActorPath|ComponentName:ComponentClassName" strings.
 	 *
-	 * @param ComponentClassFilter  Class name substring filter for components
+	 * @param ComponentFilter  Substring matched against both the component
+	 *                         class name and the component instance name
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
-	static TArray<FString> FindActorsByComponent(const FString& ComponentClassFilter);
+	static TArray<FString> FindActorsByComponent(const FString& ComponentFilter);
 
 	/**
 	 * Get component names and class names for a given actor.
 	 * Returns an array of "ComponentName:ClassName" strings.
 	 *
 	 * @param ActorPath  Full object path of the actor
-	 * @param ClassNameFilter  Class name substring filter (empty string = all components)
+	 * @param ClassNameFilter  Substring filter matched against both the component
+	 *                         instance name and the class name (empty string = all components)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
 	static TArray<FString> FindComponents(const FString& ActorPath, const FString& ClassNameFilter = TEXT(""));

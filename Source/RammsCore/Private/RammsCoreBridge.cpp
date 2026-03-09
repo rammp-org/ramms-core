@@ -80,12 +80,12 @@ TArray<FString> URammsCoreBridge::FindActors(const FString& ClassNameFilter)
 
 // ── Component Discovery ────────────────────────────────────────────
 
-TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& ComponentClassFilter)
+TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& ComponentFilter)
 {
 	TArray<FString> Results;
 
 	UWorld* World = GetPlayWorld();
-	if (!World || ComponentClassFilter.IsEmpty())
+	if (!World || ComponentFilter.IsEmpty())
 		return Results;
 
 	for (TActorIterator<AActor> It(World); It; ++It)
@@ -103,7 +103,8 @@ TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& Component
 				continue;
 
 			FString ClassName = Comp->GetClass()->GetName();
-			if (ClassName.Contains(ComponentClassFilter))
+			FString CompName = Comp->GetName();
+			if (ClassName.Contains(ComponentFilter) || CompName.Contains(ComponentFilter))
 			{
 				// Format: "ActorPath|ComponentName:ComponentClassName"
 				Results.Add(FString::Printf(TEXT("%s|%s:%s"),
@@ -139,7 +140,10 @@ TArray<FString> URammsCoreBridge::FindComponents(const FString& ActorPath, const
 			continue;
 
 		FString ClassName = Comp->GetClass()->GetName();
-		if (!ClassNameFilter.IsEmpty() && !ClassName.Contains(ClassNameFilter))
+		FString CompName = Comp->GetName();
+		if (!ClassNameFilter.IsEmpty()
+			&& !ClassName.Contains(ClassNameFilter)
+			&& !CompName.Contains(ClassNameFilter))
 			continue;
 
 		// Format: "ComponentName:ClassName"
