@@ -54,7 +54,8 @@ public:
 	 * Returns an array of "ComponentName:ClassName" strings.
 	 *
 	 * @param ActorPath  Full object path of the actor
-	 * @param ClassNameFilter  Class name substring filter (empty string = all components)
+	 * @param ClassNameFilter  Substring filter matched against both the component
+	 *                         instance name and the class name (empty string = all components)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
 	static TArray<FString> FindComponents(const FString& ActorPath, const FString& ClassNameFilter = TEXT(""));

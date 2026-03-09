@@ -103,7 +103,8 @@ TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& Component
 				continue;
 
 			FString ClassName = Comp->GetClass()->GetName();
-			if (ClassName.Contains(ComponentClassFilter))
+			FString CompName = Comp->GetName();
+			if (ClassName.Contains(ComponentClassFilter) || CompName.Contains(ComponentClassFilter))
 			{
 				// Format: "ActorPath|ComponentName:ComponentClassName"
 				Results.Add(FString::Printf(TEXT("%s|%s:%s"),
@@ -139,7 +140,10 @@ TArray<FString> URammsCoreBridge::FindComponents(const FString& ActorPath, const
 			continue;
 
 		FString ClassName = Comp->GetClass()->GetName();
-		if (!ClassNameFilter.IsEmpty() && !ClassName.Contains(ClassNameFilter))
+		FString CompName = Comp->GetName();
+		if (!ClassNameFilter.IsEmpty()
+			&& !ClassName.Contains(ClassNameFilter)
+			&& !CompName.Contains(ClassNameFilter))
 			continue;
 
 		// Format: "ComponentName:ClassName"

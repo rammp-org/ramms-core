@@ -308,7 +308,8 @@ class UnrealRemote:
 
         Args:
             actor_path: Full object path of the actor.
-            class_filter: Class name substring filter (empty = all).
+            class_filter: Substring filter matched against both the component
+                instance name and the class name (empty = all).
 
         Returns:
             List of dicts with 'name', 'class_name', and 'path' keys.
@@ -355,8 +356,10 @@ class UnrealRemote:
             prop_type = prop.get("Type", "")
             if not prop_type.endswith("Component"):
                 continue
-            if class_filter and class_filter.lower() not in prop_type.lower():
-                continue
+            if class_filter:
+                fl = class_filter.lower()
+                if fl not in prop_type.lower() and fl not in prop_name.lower():
+                    continue
 
             prop_name = prop.get("Name", "")
             # Try to read the property value to get the actual component path
