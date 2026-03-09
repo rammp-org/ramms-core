@@ -179,6 +179,12 @@ struct RAMMSCORE_API FEndEffectorState
 	FVector AngularVelocity = FVector::ZeroVector;
 };
 
+/** Fired when all joints have reached their target angles (within tolerance) in JointControl mode */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnJointTargetsReached);
+
+/** Fired when the end effector has reached its target pose (within tolerance) in EndEffectorControl mode */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPoseTargetReached, float, PositionError, float, RotationError);
+
 /**
  * Controller component for Kinova Gen3 robotic arm
  * Manages joint control, applies forces, tracks forward kinematics
@@ -360,6 +366,38 @@ public:
 	bool		  bIKTargetSatisfied = false;
 	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
 	bool		  bIKSolverTypeInitialized = false;
+
+	// ========== Events ==========
+
+	/** Fired once when all joints reach their target angles (JointControl mode).
+	 *  Re-fires if targets change and are reached again. */
+	UPROPERTY(BlueprintAssignable, Category = "Ramms|Kinova Gen3|Events")
+	FOnJointTargetsReached OnJointTargetsReached;
+
+	/** Fired once when the end effector reaches its target pose (EndEffectorControl mode).
+	 *  Includes the final position and rotation error. Re-fires if target changes and is reached again. */
+	UPROPERTY(BlueprintAssignable, Category = "Ramms|Kinova Gen3|Events")
+	FOnPoseTargetReached OnPoseTargetReached;
+
+	/** Per-joint angle tolerance (degrees) for the OnJointTargetsReached event */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|Events", meta = (ClampMin = "0.01"))
+	float JointTargetReachedTolerance = 1.0f;
+
+	/** Position tolerance (cm) for the OnPoseTargetReached event */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|Events", meta = (ClampMin = "0.01"))
+	float PoseTargetPositionTolerance = 1.0f;
+
+	/** Rotation tolerance (degrees) for the OnPoseTargetReached event */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|Events", meta = (ClampMin = "0.1"))
+	float PoseTargetRotationTolerance = 5.0f;
+
+	/** True while all joints are within tolerance of their targets */
+	UPROPERTY(BlueprintReadOnly, Category = "Arm|State")
+	bool bJointTargetsReached = false;
+
+	/** True while the end effector is within tolerance of its target pose */
+	UPROPERTY(BlueprintReadOnly, Category = "Arm|State")
+	bool bPoseTargetReached = false;
 
 	// ========== Blueprint API ==========
 
