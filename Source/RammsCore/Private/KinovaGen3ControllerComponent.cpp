@@ -404,6 +404,7 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		if (bTargetChanged)
 		{
 			bIKTargetSatisfied = false;
+			bPoseTargetReached = false;
 			LastIKTargetTransform = TargetEndEffectorTransform;
 		}
 
@@ -445,6 +446,51 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 
 	// Update end-effector state
 	UpdateEndEffectorState();
+
+	// ========== Target-reached event checks ==========
+	if (ArmControlMode == EArmControlMode::JointControl)
+	{
+		// Check if all joints are within tolerance of their targets
+		bool bAllReached = true;
+		for (const FRevoluteJointConfig& Joint : Joints)
+		{
+			if (FMath::Abs(FMath::FindDeltaAngleDegrees(Joint.CurrentAngle, Joint.TargetAngle)) > JointTargetReachedTolerance)
+			{
+				bAllReached = false;
+				break;
+			}
+		}
+
+		if (bAllReached && !bJointTargetsReached)
+		{
+			bJointTargetsReached = true;
+			OnJointTargetsReached.Broadcast();
+		}
+		else if (!bAllReached)
+		{
+			bJointTargetsReached = false;
+		}
+	}
+	else if (ArmControlMode == EArmControlMode::EndEffectorControl)
+	{
+		// Check actual EE vs target pose
+		FTransform ActualEE = SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
+		float	   PosErr = FVector::Dist(ActualEE.GetLocation(), TargetEndEffectorTransform.GetLocation());
+		float	   RotErr = FMath::RadiansToDegrees(
+				 ActualEE.GetRotation().AngularDistance(TargetEndEffectorTransform.GetRotation()));
+
+		bool bReached = (PosErr <= PoseTargetPositionTolerance) && (RotErr <= PoseTargetRotationTolerance);
+
+		if (bReached && !bPoseTargetReached)
+		{
+			bPoseTargetReached = true;
+			OnPoseTargetReached.Broadcast(PosErr, RotErr);
+		}
+		else if (!bReached)
+		{
+			bPoseTargetReached = false;
+		}
+	}
 
 	// Debug visualization
 	if (bEnableDebugDisplay || bShowJointFrames)
@@ -1623,6 +1669,7 @@ void UKinovaGen3ControllerComponent::SetJointTarget(int32 JointIndex, float Targ
 	if (Joints.IsValidIndex(JointIndex))
 	{
 		Joints[JointIndex].TargetAngle = TargetAngle;
+		bJointTargetsReached = false;
 
 		if (bEnableDebugLogging)
 		{
@@ -1640,6 +1687,8 @@ void UKinovaGen3ControllerComponent::SetAllJointTargets(const TArray<float>& Tar
 	{
 		Joints[i].TargetAngle = TargetAngles[i];
 	}
+
+	bJointTargetsReached = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1767,6 +1816,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTarget(const FTransform& Targ
 	TargetEndEffectorTransform = TargetTransform;
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetPosition(const FVector& TargetPosition)
@@ -1774,6 +1824,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPosition(const FVector&
 	TargetEndEffectorTransform.SetLocation(TargetPosition);
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetRotation(const FRotator& TargetRotation)
@@ -1781,6 +1832,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRotation(const FRotator
 	TargetEndEffectorTransform.SetRotation(TargetRotation.Quaternion());
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToBase(const FTransform& RelativeTransform)
@@ -1796,6 +1848,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToBase(const FT
 	TargetEndEffectorTransform = RelativeTransform * BaseTransform;
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1820,6 +1873,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToBase(
 	TargetEndEffectorTransform.SetLocation(WorldPosition);
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1842,6 +1896,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToActor(const F
 	TargetEndEffectorTransform = RelativeTransform * ActorTransform;
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1867,6 +1922,7 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToActor
 	TargetEndEffectorTransform.SetLocation(WorldPosition);
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1882,6 +1938,7 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetBy(const FVector& Offs
 	TargetEndEffectorTransform.SetLocation(CurrentPos + Offset);
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
@@ -1903,6 +1960,7 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetByLocal(const FVector&
 	TargetEndEffectorTransform.SetLocation(CurrentPos + WorldOffset);
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
