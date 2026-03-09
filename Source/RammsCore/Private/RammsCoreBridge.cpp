@@ -80,12 +80,12 @@ TArray<FString> URammsCoreBridge::FindActors(const FString& ClassNameFilter)
 
 // ── Component Discovery ────────────────────────────────────────────
 
-TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& ComponentClassFilter)
+TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& ComponentFilter)
 {
 	TArray<FString> Results;
 
 	UWorld* World = GetPlayWorld();
-	if (!World || ComponentClassFilter.IsEmpty())
+	if (!World || ComponentFilter.IsEmpty())
 		return Results;
 
 	for (TActorIterator<AActor> It(World); It; ++It)
@@ -104,7 +104,7 @@ TArray<FString> URammsCoreBridge::FindActorsByComponent(const FString& Component
 
 			FString ClassName = Comp->GetClass()->GetName();
 			FString CompName = Comp->GetName();
-			if (ClassName.Contains(ComponentClassFilter) || CompName.Contains(ComponentClassFilter))
+			if (ClassName.Contains(ComponentFilter) || CompName.Contains(ComponentFilter))
 			{
 				// Format: "ActorPath|ComponentName:ComponentClassName"
 				Results.Add(FString::Printf(TEXT("%s|%s:%s"),

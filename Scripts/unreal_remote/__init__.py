@@ -356,12 +356,12 @@ class UnrealRemote:
             prop_type = prop.get("Type", "")
             if not prop_type.endswith("Component"):
                 continue
+            prop_name = prop.get("Name", "")
             if class_filter:
                 fl = class_filter.lower()
                 if fl not in prop_type.lower() and fl not in prop_name.lower():
                     continue
 
-            prop_name = prop.get("Name", "")
             # Try to read the property value to get the actual component path
             comp_path = None
             try:
