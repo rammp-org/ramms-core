@@ -21,14 +21,14 @@ void URammsSonarSensorComponent::TickComponent(float DeltaTime, ELevelTick TickT
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Rate limiting
+	// Rate limiting — keep only the remainder to avoid bursty catch-up after hitches
 	if (UpdateRateHz > 0.0f)
 	{
 		TimeSinceLastUpdate += DeltaTime;
 		const float UpdateInterval = 1.0f / UpdateRateHz;
 		if (TimeSinceLastUpdate < UpdateInterval)
 			return;
-		TimeSinceLastUpdate -= UpdateInterval;
+		TimeSinceLastUpdate = FMath::Fmod(TimeSinceLastUpdate, UpdateInterval);
 	}
 
 	CurrentData = PerformMeasurement();
@@ -84,11 +84,11 @@ FSonarSensorData URammsSonarSensorComponent::PerformMeasurement() const
 		}
 		else
 		{
-			// Distribute rays in a cone pattern
-			// Use a spiral pattern for even distribution
-			float t = (float)i / (float)(RayCount - 1);			  // 0 to 1
-			float ConeAngle = BeamHalfAngle * FMath::Sqrt(t);	  // Sqrt for area-uniform distribution
-			float AzimuthAngle = t * 2.4f * PI * (float)RayCount; // Golden angle spiral
+			// Distribute rays in a cone pattern using a Vogel/golden-angle spiral
+			static constexpr float GoldenAngle = 2.399963f;				 // radians (PI * (3 - sqrt(5)))
+			float				   t = (float)i / (float)(RayCount - 1); // 0 to 1
+			float				   ConeAngle = BeamHalfAngle * FMath::Sqrt(t);
+			float				   AzimuthAngle = (float)i * GoldenAngle;
 
 			// Build direction in sensor-local space then transform to world
 			float	ConeRad = FMath::DegreesToRadians(ConeAngle);

@@ -49,7 +49,6 @@ class RAMMSCORE_API URammsIMUSensorComponent : public USceneComponent
 public:
 	URammsIMUSensorComponent();
 
-	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	// ========== Configuration ==========
@@ -113,6 +112,9 @@ public:
 	/** Get the latest IMU reading */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Sensors|IMU")
 	FIMUSensorData GetIMUData() const { return CurrentData; }
+
+protected:
+	virtual void BeginPlay() override;
 
 private:
 	// Internal state for velocity/acceleration computation

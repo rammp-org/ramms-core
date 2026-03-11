@@ -29,20 +29,24 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	if (DeltaTime <= 0.0f)
 		return;
 
-	// Rate limiting
+	UWorld* World = GetWorld();
+	if (!World)
+		return;
+
+	// Rate limiting — keep only the remainder to avoid bursty catch-up after hitches
 	if (UpdateRateHz > 0.0f)
 	{
 		TimeSinceLastUpdate += DeltaTime;
 		const float UpdateInterval = 1.0f / UpdateRateHz;
 		if (TimeSinceLastUpdate < UpdateInterval)
 			return;
-		TimeSinceLastUpdate -= UpdateInterval;
+		TimeSinceLastUpdate = FMath::Fmod(TimeSinceLastUpdate, UpdateInterval);
 	}
 
 	const FTransform CurrentTransform = GetComponentTransform();
 	const FQuat		 CurrentRotation = CurrentTransform.GetRotation();
 	const FVector	 CurrentLocation = CurrentTransform.GetLocation();
-	const float		 GameTime = GetWorld()->GetTimeSeconds();
+	const float		 GameTime = World->GetTimeSeconds();
 
 	// Derive velocity from position delta (works for any attachment — bone, socket, etc.)
 	FVector CurrentVelocity = FVector::ZeroVector;
@@ -65,7 +69,7 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	if (bIncludeGravity)
 	{
 		// Add gravity (UE default is -Z at 980 cm/s²)
-		float GravityZ = GetWorld()->GetGravityZ();	 // Negative value
+		float GravityZ = World->GetGravityZ();		 // Negative value
 		WorldAccel -= FVector(0.0f, 0.0f, GravityZ); // Subtract because sensor "feels" upward when stationary
 	}
 
@@ -131,11 +135,11 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	if (bEnableDebugDisplay)
 	{
 		const FVector Loc = CurrentTransform.GetLocation();
-		DrawDebugCoordinateSystem(GetWorld(), Loc, CurrentRotation.Rotator(), 15.0f, false, -1.0f, 0, 1.0f);
+		DrawDebugCoordinateSystem(World, Loc, CurrentRotation.Rotator(), 15.0f, false, -1.0f, 0, 1.0f);
 
 		// Draw acceleration vector (scaled down for visibility)
 		FVector WorldAccelVis = CurrentRotation.RotateVector(Data.LinearAcceleration) * 0.05f;
-		DrawDebugDirectionalArrow(GetWorld(), Loc, Loc + WorldAccelVis, 3.0f, FColor::Red, false, -1.0f, 0, 1.5f);
+		DrawDebugDirectionalArrow(World, Loc, Loc + WorldAccelVis, 3.0f, FColor::Red, false, -1.0f, 0, 1.5f);
 	}
 
 	if (bEnableDebugLogging && GFrameCounter % 60 == 0)

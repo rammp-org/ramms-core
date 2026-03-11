@@ -65,7 +65,6 @@ class RAMMSCORE_API URammsToFSensorComponent : public USceneComponent
 public:
 	URammsToFSensorComponent();
 
-	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	// ========== Configuration ==========
@@ -151,6 +150,9 @@ public:
 	/** Perform a single measurement right now (ignoring update rate) */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors|ToF")
 	FToFSensorData MeasureNow();
+
+protected:
+	virtual void BeginPlay() override;
 
 private:
 	/** Perform the measurement and return the result */

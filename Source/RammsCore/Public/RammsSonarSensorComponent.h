@@ -56,7 +56,6 @@ class RAMMSCORE_API URammsSonarSensorComponent : public USceneComponent
 public:
 	URammsSonarSensorComponent();
 
-	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	// ========== Configuration ==========
@@ -126,6 +125,9 @@ public:
 	/** Perform a single measurement right now (ignoring update rate) */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors|Sonar")
 	FSonarSensorData MeasureNow();
+
+protected:
+	virtual void BeginPlay() override;
 
 private:
 	/** Perform the multi-ray cone trace and return the result */

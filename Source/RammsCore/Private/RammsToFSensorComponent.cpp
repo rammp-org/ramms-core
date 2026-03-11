@@ -21,14 +21,14 @@ void URammsToFSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Rate limiting
+	// Rate limiting — keep only the remainder to avoid bursty catch-up after hitches
 	if (UpdateRateHz > 0.0f)
 	{
 		TimeSinceLastUpdate += DeltaTime;
 		const float UpdateInterval = 1.0f / UpdateRateHz;
 		if (TimeSinceLastUpdate < UpdateInterval)
 			return;
-		TimeSinceLastUpdate -= UpdateInterval;
+		TimeSinceLastUpdate = FMath::Fmod(TimeSinceLastUpdate, UpdateInterval);
 	}
 
 	CurrentData = PerformMeasurement();
