@@ -61,6 +61,47 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Configuration", meta = (ClampMin = "0.0"))
 	float UpdateRateHz = 100.0f;
 
+	/**
+	 * Use physics velocity directly from the nearest primitive component when available.
+	 * Avoids double-differentiating position (which amplifies physics jitter).
+	 * Falls back to position differentiation if no physics primitive is found.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Configuration")
+	bool bUsePhysicsVelocity = true;
+
+	// ========== Filtering ==========
+
+	/**
+	 * Exponential moving average (EMA) smoothing factor for acceleration (0–1).
+	 * 0 = no smoothing (raw output), 1 = maximum smoothing (output never changes).
+	 * Models the bandwidth limit of real IMU accelerometers.
+	 * Typical values: 0.5–0.9 for heavy smoothing, 0.0–0.3 for light smoothing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Filtering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AccelSmoothingFactor = 0.0f;
+
+	/**
+	 * Exponential moving average (EMA) smoothing factor for gyroscope (0–1).
+	 * Same semantics as AccelSmoothingFactor.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Filtering", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GyroSmoothingFactor = 0.0f;
+
+	/**
+	 * Acceleration dead-band threshold (cm/s²). If the magnitude of the
+	 * acceleration (excluding gravity) is below this value, it is zeroed out.
+	 * Models the quiescent behavior of real accelerometers.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Filtering", meta = (ClampMin = "0.0"))
+	float AccelDeadBand = 0.0f;
+
+	/**
+	 * Gyroscope dead-band threshold (degrees/s). If the magnitude of the
+	 * angular velocity is below this value, it is zeroed out.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Filtering", meta = (ClampMin = "0.0"))
+	float GyroDeadBand = 0.0f;
+
 	// ========== Noise ==========
 
 	/** Accelerometer Gaussian noise standard deviation (cm/s² per axis) */
@@ -122,6 +163,15 @@ private:
 	FTransform PreviousTransform = FTransform::Identity;
 	FQuat	   PreviousRotation = FQuat::Identity;
 	bool	   bPreviousStateValid = false;
+
+	// EMA filter state (sensor-local frame, pre-noise)
+	FVector SmoothedAccel = FVector::ZeroVector;
+	FVector SmoothedGyro = FVector::ZeroVector;
+	bool	bSmoothedStateValid = false;
+
+	// Cached physics primitive (resolved in BeginPlay)
+	UPROPERTY()
+	TWeakObjectPtr<UPrimitiveComponent> CachedPhysicsPrimitive;
 
 	// Update rate tracking
 	float TimeSinceLastUpdate = 0.0f;

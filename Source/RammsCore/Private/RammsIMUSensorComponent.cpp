@@ -2,6 +2,7 @@
 
 #include "RammsIMUSensorComponent.h"
 #include "RammsSensorUtils.h"
+#include "Components/PrimitiveComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -19,7 +20,34 @@ void URammsIMUSensorComponent::BeginPlay()
 	PreviousRotation = PreviousTransform.GetRotation();
 	PreviousVelocity = FVector::ZeroVector;
 	bPreviousStateValid = false;
+	bSmoothedStateValid = false;
+	SmoothedAccel = FVector::ZeroVector;
+	SmoothedGyro = FVector::ZeroVector;
 	TimeSinceLastUpdate = 0.0f;
+
+	// Walk up the attachment hierarchy to find the nearest physics-simulating primitive
+	CachedPhysicsPrimitive = nullptr;
+	if (bUsePhysicsVelocity)
+	{
+		for (USceneComponent* Comp = GetAttachParent(); Comp; Comp = Comp->GetAttachParent())
+		{
+			UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp);
+			if (Prim && Prim->IsSimulatingPhysics())
+			{
+				CachedPhysicsPrimitive = Prim;
+				break;
+			}
+		}
+		// Also check the owner's root component
+		if (!CachedPhysicsPrimitive.IsValid() && GetOwner())
+		{
+			UPrimitiveComponent* RootPrim = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent());
+			if (RootPrim && RootPrim->IsSimulatingPhysics())
+			{
+				CachedPhysicsPrimitive = RootPrim;
+			}
+		}
+	}
 }
 
 void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -48,10 +76,19 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	const FVector	 CurrentLocation = CurrentTransform.GetLocation();
 	const float		 GameTime = World->GetTimeSeconds();
 
-	// Derive velocity from position delta (works for any attachment — bone, socket, etc.)
+	// --- Derive world-space velocity ---
 	FVector CurrentVelocity = FVector::ZeroVector;
-	if (bPreviousStateValid)
+	bool	bHasPhysicsVelocity = false;
+
+	if (bUsePhysicsVelocity && CachedPhysicsPrimitive.IsValid())
 	{
+		// Use physics-engine velocity (single differentiation inside the solver, much smoother)
+		CurrentVelocity = CachedPhysicsPrimitive->GetPhysicsLinearVelocity();
+		bHasPhysicsVelocity = true;
+	}
+	else if (bPreviousStateValid)
+	{
+		// Fallback: finite-difference from position
 		CurrentVelocity = (CurrentLocation - PreviousTransform.GetLocation()) / DeltaTime;
 	}
 
@@ -59,49 +96,84 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	Data.Timestamp = GameTime;
 
 	// --- Accelerometer ---
-	// Linear acceleration = dV/dt in world space, then transform to sensor-local
 	FVector WorldAccel = FVector::ZeroVector;
-	if (bPreviousStateValid)
+	if (bHasPhysicsVelocity && bPreviousStateValid)
 	{
+		// Single differentiation of physics velocity
+		WorldAccel = (CurrentVelocity - PreviousVelocity) / DeltaTime;
+	}
+	else if (!bHasPhysicsVelocity && bPreviousStateValid)
+	{
+		// Double differentiation fallback
 		WorldAccel = (CurrentVelocity - PreviousVelocity) / DeltaTime;
 	}
 
-	if (bIncludeGravity)
+	// Apply dead-band before adding gravity (so the threshold is against dynamic acceleration only)
+	const FQuat InvRotation = CurrentRotation.Inverse();
+	FVector		LocalDynamicAccel = InvRotation.RotateVector(WorldAccel);
+	if (AccelDeadBand > 0.0f && LocalDynamicAccel.Size() < AccelDeadBand)
 	{
-		// Add gravity (UE default is -Z at 980 cm/s²)
-		float GravityZ = World->GetGravityZ();		 // Negative value
-		WorldAccel -= FVector(0.0f, 0.0f, GravityZ); // Subtract because sensor "feels" upward when stationary
+		LocalDynamicAccel = FVector::ZeroVector;
 	}
 
-	// Transform to sensor-local frame
-	const FQuat InvRotation = CurrentRotation.Inverse();
-	Data.LinearAcceleration = InvRotation.RotateVector(WorldAccel);
+	// Add gravity in sensor-local frame
+	if (bIncludeGravity)
+	{
+		float	GravityZ = World->GetGravityZ();
+		FVector WorldGravityAccel = FVector(0.0f, 0.0f, -GravityZ); // sensor "feels" upward when stationary
+		LocalDynamicAccel += InvRotation.RotateVector(WorldGravityAccel);
+	}
+
+	// EMA smoothing
+	if (AccelSmoothingFactor > 0.0f && bSmoothedStateValid)
+	{
+		LocalDynamicAccel = FMath::Lerp(LocalDynamicAccel, SmoothedAccel, AccelSmoothingFactor);
+	}
+	SmoothedAccel = LocalDynamicAccel;
+
+	Data.LinearAcceleration = LocalDynamicAccel;
 	Data.LinearAcceleration += AccelBias;
 	Data.LinearAcceleration = RammsSensorUtils::AddVectorNoise(Data.LinearAcceleration, AccelNoiseStdDev);
 
 	// --- Gyroscope ---
-	// Angular velocity from rotation delta
-	if (bPreviousStateValid)
+	FVector LocalAngVel = FVector::ZeroVector;
+	if (bUsePhysicsVelocity && CachedPhysicsPrimitive.IsValid())
 	{
-		// Compute rotation delta: Q_delta = Q_prev^-1 * Q_current
+		// Get angular velocity directly from physics (degrees/s in world space)
+		FVector WorldAngVel = CachedPhysicsPrimitive->GetPhysicsAngularVelocityInDegrees();
+		LocalAngVel = InvRotation.RotateVector(WorldAngVel);
+	}
+	else if (bPreviousStateValid)
+	{
+		// Derive from rotation delta
 		FQuat DeltaQ = PreviousRotation.Inverse() * CurrentRotation;
 		DeltaQ.Normalize();
 
-		// Convert to axis-angle
 		FVector Axis;
 		float	AngleRad;
 		DeltaQ.ToAxisAndAngle(Axis, AngleRad);
 
-		// Wrap angle to [-PI, PI]
 		if (AngleRad > PI)
 			AngleRad -= 2.0f * PI;
 
-		// Angular velocity in world space (degrees/s)
 		FVector WorldAngVel = Axis * FMath::RadiansToDegrees(AngleRad) / DeltaTime;
-
-		// Transform to sensor-local frame
-		Data.AngularVelocity = InvRotation.RotateVector(WorldAngVel);
+		LocalAngVel = InvRotation.RotateVector(WorldAngVel);
 	}
+
+	// Gyro dead-band
+	if (GyroDeadBand > 0.0f && LocalAngVel.Size() < GyroDeadBand)
+	{
+		LocalAngVel = FVector::ZeroVector;
+	}
+
+	// EMA smoothing
+	if (GyroSmoothingFactor > 0.0f && bSmoothedStateValid)
+	{
+		LocalAngVel = FMath::Lerp(LocalAngVel, SmoothedGyro, GyroSmoothingFactor);
+	}
+	SmoothedGyro = LocalAngVel;
+
+	Data.AngularVelocity = LocalAngVel;
 	Data.AngularVelocity += GyroBias;
 	Data.AngularVelocity = RammsSensorUtils::AddVectorNoise(Data.AngularVelocity, GyroNoiseStdDev);
 
@@ -127,6 +199,7 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	PreviousTransform = CurrentTransform;
 	PreviousRotation = CurrentRotation;
 	bPreviousStateValid = true;
+	bSmoothedStateValid = true;
 
 	// Broadcast
 	OnIMUDataUpdated.Broadcast(CurrentData);
