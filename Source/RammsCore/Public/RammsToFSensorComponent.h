@@ -159,7 +159,5 @@ private:
 	/** Trace a single ray and return distance (-1 if no hit) */
 	float TraceRay(const FVector& Start, const FVector& Direction, const FCollisionQueryParams& QueryParams) const;
 
-	float GaussianNoise(float StdDev) const;
-
 	float TimeSinceLastUpdate = 0.0f;
 };

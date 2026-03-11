@@ -131,7 +131,5 @@ private:
 	/** Perform the multi-ray cone trace and return the result */
 	FSonarSensorData PerformMeasurement() const;
 
-	float GaussianNoise(float StdDev) const;
-
 	float TimeSinceLastUpdate = 0.0f;
 };

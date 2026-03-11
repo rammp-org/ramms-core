@@ -115,15 +115,8 @@ public:
 	FIMUSensorData GetIMUData() const { return CurrentData; }
 
 private:
-	/** Generate a Gaussian random value with given standard deviation */
-	float GaussianNoise(float StdDev) const;
-
-	/** Add Gaussian noise to a vector */
-	FVector AddVectorNoise(const FVector& Value, float StdDev) const;
-
 	// Internal state for velocity/acceleration computation
 	FVector	   PreviousVelocity = FVector::ZeroVector;
-	FVector	   PreviousAngularVelocity = FVector::ZeroVector;
 	FTransform PreviousTransform = FTransform::Identity;
 	FQuat	   PreviousRotation = FQuat::Identity;
 	bool	   bPreviousStateValid = false;

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsIMUSensorComponent.h"
+#include "RammsSensorUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -72,7 +73,7 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	const FQuat InvRotation = CurrentRotation.Inverse();
 	Data.LinearAcceleration = InvRotation.RotateVector(WorldAccel);
 	Data.LinearAcceleration += AccelBias;
-	Data.LinearAcceleration = AddVectorNoise(Data.LinearAcceleration, AccelNoiseStdDev);
+	Data.LinearAcceleration = RammsSensorUtils::AddVectorNoise(Data.LinearAcceleration, AccelNoiseStdDev);
 
 	// --- Gyroscope ---
 	// Angular velocity from rotation delta
@@ -98,18 +99,18 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 		Data.AngularVelocity = InvRotation.RotateVector(WorldAngVel);
 	}
 	Data.AngularVelocity += GyroBias;
-	Data.AngularVelocity = AddVectorNoise(Data.AngularVelocity, GyroNoiseStdDev);
+	Data.AngularVelocity = RammsSensorUtils::AddVectorNoise(Data.AngularVelocity, GyroNoiseStdDev);
 
 	// --- Orientation ---
 	Data.Orientation = CurrentRotation;
 	if (OrientationNoiseStdDev > 0.0f)
 	{
 		// Apply small random rotation noise
-		FVector NoiseAxis(GaussianNoise(1.0f), GaussianNoise(1.0f), GaussianNoise(1.0f));
+		FVector NoiseAxis(RammsSensorUtils::GaussianNoise(1.0f), RammsSensorUtils::GaussianNoise(1.0f), RammsSensorUtils::GaussianNoise(1.0f));
 		if (!NoiseAxis.IsNearlyZero())
 		{
 			NoiseAxis.Normalize();
-			float NoiseAngle = GaussianNoise(OrientationNoiseStdDev);
+			float NoiseAngle = RammsSensorUtils::GaussianNoise(OrientationNoiseStdDev);
 			FQuat NoiseQ(NoiseAxis, FMath::DegreesToRadians(NoiseAngle));
 			Data.Orientation = Data.Orientation * NoiseQ;
 			Data.Orientation.Normalize();
@@ -144,26 +145,4 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 			Data.AngularVelocity.X, Data.AngularVelocity.Y, Data.AngularVelocity.Z,
 			Data.Orientation.X, Data.Orientation.Y, Data.Orientation.Z, Data.Orientation.W);
 	}
-}
-
-float URammsIMUSensorComponent::GaussianNoise(float StdDev) const
-{
-	if (StdDev <= 0.0f)
-		return 0.0f;
-	// Box-Muller transform
-	float U1 = FMath::FRand();
-	float U2 = FMath::FRand();
-	if (U1 < SMALL_NUMBER)
-		U1 = SMALL_NUMBER;
-	return StdDev * FMath::Sqrt(-2.0f * FMath::Loge(U1)) * FMath::Cos(2.0f * PI * U2);
-}
-
-FVector URammsIMUSensorComponent::AddVectorNoise(const FVector& Value, float StdDev) const
-{
-	if (StdDev <= 0.0f)
-		return Value;
-	return FVector(
-		Value.X + GaussianNoise(StdDev),
-		Value.Y + GaussianNoise(StdDev),
-		Value.Z + GaussianNoise(StdDev));
 }

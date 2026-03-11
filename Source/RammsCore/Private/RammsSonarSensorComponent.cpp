@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsSonarSensorComponent.h"
+#include "RammsSensorUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -135,24 +136,21 @@ FSonarSensorData URammsSonarSensorComponent::PerformMeasurement() const
 	{
 		Result.Distance = ClosestDist;
 
-		// Add noise
+		// Add noise and clamp to configured range
 		if (DistanceNoiseStdDev > 0.0f)
 		{
-			Result.Distance += GaussianNoise(DistanceNoiseStdDev);
-			Result.Distance = FMath::Max(0.0f, Result.Distance);
+			Result.Distance += RammsSensorUtils::GaussianNoise(DistanceNoiseStdDev);
+			if (Result.Distance < MinRange || Result.Distance > MaxRange)
+			{
+				// Noise pushed outside valid range — treat as no detection
+				Result.bHit = false;
+				Result.Distance = -1.0f;
+				Result.HitLocation = FVector::ZeroVector;
+				Result.HitNormal = FVector::ZeroVector;
+				Result.HitActor = nullptr;
+			}
 		}
 	}
 
 	return Result;
-}
-
-float URammsSonarSensorComponent::GaussianNoise(float StdDev) const
-{
-	if (StdDev <= 0.0f)
-		return 0.0f;
-	float U1 = FMath::FRand();
-	float U2 = FMath::FRand();
-	if (U1 < SMALL_NUMBER)
-		U1 = SMALL_NUMBER;
-	return StdDev * FMath::Sqrt(-2.0f * FMath::Loge(U1)) * FMath::Cos(2.0f * PI * U2);
 }

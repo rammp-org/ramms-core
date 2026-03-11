@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsToFSensorComponent.h"
+#include "RammsSensorUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -149,9 +150,9 @@ FToFSensorData URammsToFSensorComponent::PerformMeasurement() const
 
 			for (int32 Col = 0; Col < Cols; ++Col)
 			{
-				// Map column to horizontal angle: left = +HalfH, right = -HalfH
+				// Map column to horizontal angle: col 0 = left (-HalfH / -Y), col max = right (+HalfH / +Y)
 				float HAngle = (Cols > 1)
-					? FMath::Lerp(HalfH, -HalfH, (float)Col / (float)(Cols - 1))
+					? FMath::Lerp(-HalfH, HalfH, (float)Col / (float)(Cols - 1))
 					: 0.0f;
 
 				// Build ray direction in sensor-local space (+X forward, +Y right, +Z up)
@@ -215,23 +216,15 @@ float URammsToFSensorComponent::TraceRay(const FVector& Start, const FVector& Di
 		{
 			if (DistanceNoiseStdDev > 0.0f)
 			{
-				Dist += GaussianNoise(DistanceNoiseStdDev);
-				Dist = FMath::Max(0.0f, Dist);
+				Dist += RammsSensorUtils::GaussianNoise(DistanceNoiseStdDev);
+				if (Dist < MinRange || Dist > MaxRange)
+				{
+					return -1.0f;
+				}
 			}
 			return Dist;
 		}
 	}
 
 	return -1.0f;
-}
-
-float URammsToFSensorComponent::GaussianNoise(float StdDev) const
-{
-	if (StdDev <= 0.0f)
-		return 0.0f;
-	float U1 = FMath::FRand();
-	float U2 = FMath::FRand();
-	if (U1 < SMALL_NUMBER)
-		U1 = SMALL_NUMBER;
-	return StdDev * FMath::Sqrt(-2.0f * FMath::Loge(U1)) * FMath::Cos(2.0f * PI * U2);
 }
