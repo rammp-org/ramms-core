@@ -240,11 +240,18 @@ private:
 			}
 
 			// Try physics asset for accurate axis/limit info
-			const UPhysicsAsset* PhysAsset = SkelMesh->GetPhysicsAsset();
+			// Check component override first (PhysicsAssetOverride), then skeletal mesh asset
+			const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
+			if (!PhysAsset)
+			{
+				PhysAsset = SkelMesh->GetPhysicsAsset();
+			}
 			int32 PhysJointCount = 0;
 
 			if (PhysAsset)
 			{
+				UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Mesh '%s': Using physics asset '%s'"),
+					*MeshName.ToString(), *PhysAsset->GetName());
 				for (const UPhysicsConstraintTemplate* Template : PhysAsset->ConstraintSetup)
 				{
 					if (!Template)
@@ -254,61 +261,95 @@ private:
 
 					const FConstraintInstance& CI = Template->DefaultInstance;
 
-					// ── Angular (Revolute) ──────────────────────────────
-					auto IsAngularFreeOrLimited = [](EAngularConstraintMotion M) {
-						return M == EAngularConstraintMotion::ACM_Free || M == EAngularConstraintMotion::ACM_Limited;
+					// Get constraint frame in bone-local space (Frame1 = child bone)
+					const FTransform RefFrame = CI.GetRefFrame(EConstraintFrame::Frame1);
+					const FQuat FrameQuat = RefFrame.GetRotation();
+
+					// Constraint axis directions in bone-local space
+					const FVector TwistDir  = FrameQuat.GetAxisX(); // Twist = constraint X
+					const FVector Swing1Dir = FrameQuat.GetAxisZ(); // Swing1 = constraint Z
+					const FVector Swing2Dir = FrameQuat.GetAxisY(); // Swing2 = constraint Y
+
+					// Helper to find nearest cardinal axis
+					auto FindClosestAxis = [](const FVector& Dir, bool& bNeg) -> EAxis::Type {
+						const float AX = FMath::Abs(Dir.X), AY = FMath::Abs(Dir.Y), AZ = FMath::Abs(Dir.Z);
+						if (AX >= AY && AX >= AZ) { bNeg = Dir.X < 0.f; return EAxis::X; }
+						if (AY >= AZ)             { bNeg = Dir.Y < 0.f; return EAxis::Y; }
+						                            bNeg = Dir.Z < 0.f; return EAxis::Z;
 					};
 
-					const bool bTwist = IsAngularFreeOrLimited(CI.GetAngularTwistMotion());
-					const bool bSwing1 = IsAngularFreeOrLimited(CI.GetAngularSwing1Motion());
-					const bool bSwing2 = IsAngularFreeOrLimited(CI.GetAngularSwing2Motion());
+					// Log constraint details
+					auto MotionStr = [](EAngularConstraintMotion M) -> const TCHAR* {
+						return M == EAngularConstraintMotion::ACM_Free ? TEXT("Free") :
+							   M == EAngularConstraintMotion::ACM_Limited ? TEXT("Limited") : TEXT("Locked");
+					};
+
+					// ── Angular (Revolute) ──────────────────────────────
+					auto IsActive = [](EAngularConstraintMotion M) {
+						return M == EAngularConstraintMotion::ACM_Free || M == EAngularConstraintMotion::ACM_Limited;
+					};
+					auto IsLimited = [](EAngularConstraintMotion M) {
+						return M == EAngularConstraintMotion::ACM_Limited;
+					};
+
+					const EAngularConstraintMotion TwistMotion  = CI.GetAngularTwistMotion();
+					const EAngularConstraintMotion Swing1Motion = CI.GetAngularSwing1Motion();
+					const EAngularConstraintMotion Swing2Motion = CI.GetAngularSwing2Motion();
+
+					const bool bTwist  = IsActive(TwistMotion);
+					const bool bSwing1 = IsActive(Swing1Motion);
+					const bool bSwing2 = IsActive(Swing2Motion);
+
+					UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]   Constraint '%s': Bone1='%s' Bone2='%s' Twist=%s Swing1=%s Swing2=%s"),
+						*CI.JointName.ToString(), *CI.ConstraintBone1.ToString(), *CI.ConstraintBone2.ToString(),
+						MotionStr(TwistMotion), MotionStr(Swing1Motion), MotionStr(Swing2Motion));
+					UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]     FrameRot=(%.2f,%.2f,%.2f,%.2f) TwistDir=(%.2f,%.2f,%.2f) Swing1Dir=(%.2f,%.2f,%.2f) Swing2Dir=(%.2f,%.2f,%.2f)"),
+						FrameQuat.X, FrameQuat.Y, FrameQuat.Z, FrameQuat.W,
+						TwistDir.X, TwistDir.Y, TwistDir.Z,
+						Swing1Dir.X, Swing1Dir.Y, Swing1Dir.Z,
+						Swing2Dir.X, Swing2Dir.Y, Swing2Dir.Z);
 
 					if (bTwist || bSwing1 || bSwing2)
 					{
+						// Build candidates
+						struct AngCandidate { EAngularConstraintMotion Motion; FVector Dir; float Limit; const TCHAR* Name; };
+						TArray<AngCandidate, TInlineAllocator<3>> Cands;
+						if (bTwist)  Cands.Add({ TwistMotion,  TwistDir,  CI.GetAngularTwistLimit(),  TEXT("Twist") });
+						if (bSwing1) Cands.Add({ Swing1Motion, Swing1Dir, CI.GetAngularSwing1Limit(), TEXT("Swing1") });
+						if (bSwing2) Cands.Add({ Swing2Motion, Swing2Dir, CI.GetAngularSwing2Limit(), TEXT("Swing2") });
+
+						// Prefer Limited over Free
+						int32 Best = 0;
+						for (int32 i = 1; i < Cands.Num(); ++i)
+						{
+							if (IsLimited(Cands[i].Motion) && !IsLimited(Cands[Best].Motion))
+								Best = i;
+						}
+
 						FKinematicJointConfig Joint;
 						Joint.MeshComponentName = MeshName;
 						Joint.BoneName = CI.ConstraintBone1;
 						Joint.JointName = CI.JointName;
 						Joint.JointType = EKinematicJointType::Revolute;
 
-						if (bTwist)
+						bool bNeg = false;
+						Joint.Axis = FindClosestAxis(Cands[Best].Dir, bNeg);
+						Joint.bInvertDirection = bNeg;
+
+						if (IsLimited(Cands[Best].Motion))
 						{
-							Joint.Axis = EAxis::X;
-							if (CI.GetAngularTwistMotion() == EAngularConstraintMotion::ACM_Limited)
-							{
-								const float L = CI.GetAngularTwistLimit();
-								Joint.MinValue = -L; Joint.MaxValue = L; Joint.bEnforceLimits = true;
-							}
-							else { Joint.MinValue = -180.f; Joint.MaxValue = 180.f; Joint.bEnforceLimits = false; }
-						}
-						else if (bSwing1 && bSwing2)
-						{
-							const float S1 = CI.GetAngularSwing1Limit();
-							const float S2 = CI.GetAngularSwing2Limit();
-							if (S2 > S1) { Joint.Axis = EAxis::Y; Joint.MinValue = -S2; Joint.MaxValue = S2; }
-							else          { Joint.Axis = EAxis::Z; Joint.MinValue = -S1; Joint.MaxValue = S1; }
+							Joint.MinValue = -Cands[Best].Limit;
+							Joint.MaxValue = Cands[Best].Limit;
 							Joint.bEnforceLimits = true;
-						}
-						else if (bSwing1)
-						{
-							Joint.Axis = EAxis::Z;
-							if (CI.GetAngularSwing1Motion() == EAngularConstraintMotion::ACM_Limited)
-							{
-								const float L = CI.GetAngularSwing1Limit();
-								Joint.MinValue = -L; Joint.MaxValue = L; Joint.bEnforceLimits = true;
-							}
-							else { Joint.MinValue = -180.f; Joint.MaxValue = 180.f; Joint.bEnforceLimits = false; }
 						}
 						else
 						{
-							Joint.Axis = EAxis::Y;
-							if (CI.GetAngularSwing2Motion() == EAngularConstraintMotion::ACM_Limited)
-							{
-								const float L = CI.GetAngularSwing2Limit();
-								Joint.MinValue = -L; Joint.MaxValue = L; Joint.bEnforceLimits = true;
-							}
-							else { Joint.MinValue = -180.f; Joint.MaxValue = 180.f; Joint.bEnforceLimits = false; }
+							Joint.MinValue = -180.f; Joint.MaxValue = 180.f; Joint.bEnforceLimits = false;
 						}
+
+						const TCHAR* AxisStr = Joint.Axis == EAxis::X ? TEXT("X") : (Joint.Axis == EAxis::Y ? TEXT("Y") : TEXT("Z"));
+						UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]     → Revolute: Selected=%s Axis=%s Invert=%d Limits=[%.1f, %.1f]"),
+							Cands[Best].Name, AxisStr, Joint.bInvertDirection ? 1 : 0, Joint.MinValue, Joint.MaxValue);
 
 						NewJoints.Add(Joint);
 						++PhysJointCount;
@@ -316,28 +357,39 @@ private:
 					}
 
 					// ── Linear (Prismatic) ──────────────────────────────
-					auto IsLinearFreeOrLimited = [](ELinearConstraintMotion M) {
+					auto IsLinActive = [](ELinearConstraintMotion M) {
 						return M == ELinearConstraintMotion::LCM_Free || M == ELinearConstraintMotion::LCM_Limited;
 					};
+					auto IsLinLimited = [](ELinearConstraintMotion M) {
+						return M == ELinearConstraintMotion::LCM_Limited;
+					};
 
-					const bool bLinX = IsLinearFreeOrLimited(CI.GetLinearXMotion());
-					const bool bLinY = IsLinearFreeOrLimited(CI.GetLinearYMotion());
-					const bool bLinZ = IsLinearFreeOrLimited(CI.GetLinearZMotion());
+					struct LinCandidate { ELinearConstraintMotion Motion; FVector Dir; };
+					TArray<LinCandidate, TInlineAllocator<3>> LinCands;
+					if (IsLinActive(CI.GetLinearXMotion())) LinCands.Add({ CI.GetLinearXMotion(), FrameQuat.GetAxisX() });
+					if (IsLinActive(CI.GetLinearYMotion())) LinCands.Add({ CI.GetLinearYMotion(), FrameQuat.GetAxisY() });
+					if (IsLinActive(CI.GetLinearZMotion())) LinCands.Add({ CI.GetLinearZMotion(), FrameQuat.GetAxisZ() });
 
-					if (bLinX || bLinY || bLinZ)
+					if (LinCands.Num() > 0)
 					{
+						int32 Best = 0;
+						for (int32 i = 1; i < LinCands.Num(); ++i)
+						{
+							if (IsLinLimited(LinCands[i].Motion) && !IsLinLimited(LinCands[Best].Motion))
+								Best = i;
+						}
+
 						FKinematicJointConfig Joint;
 						Joint.MeshComponentName = MeshName;
 						Joint.BoneName = CI.ConstraintBone1;
 						Joint.JointName = CI.JointName;
 						Joint.JointType = EKinematicJointType::Prismatic;
 
+						bool bNeg = false;
+						Joint.Axis = FindClosestAxis(LinCands[Best].Dir, bNeg);
+						Joint.bInvertDirection = bNeg;
+
 						const float LinearLimit = CI.GetLinearLimit();
-
-						if (bLinX)       { Joint.Axis = EAxis::X; }
-						else if (bLinY)  { Joint.Axis = EAxis::Y; }
-						else             { Joint.Axis = EAxis::Z; }
-
 						if (LinearLimit > 0.0f)
 						{
 							Joint.MinValue = -LinearLimit; Joint.MaxValue = LinearLimit; Joint.bEnforceLimits = true;

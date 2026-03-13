@@ -11,97 +11,117 @@
 namespace
 {
 	/**
+	 * Find which cardinal axis (X, Y, Z) most closely aligns with a direction vector.
+	 * Also reports whether the direction is negative along that axis.
+	 */
+	EAxis::Type FindClosestCardinalAxis(const FVector& Dir, bool& bOutNegative)
+	{
+		const float AbsX = FMath::Abs(Dir.X);
+		const float AbsY = FMath::Abs(Dir.Y);
+		const float AbsZ = FMath::Abs(Dir.Z);
+
+		if (AbsX >= AbsY && AbsX >= AbsZ)
+		{
+			bOutNegative = Dir.X < 0.0f;
+			return EAxis::X;
+		}
+		if (AbsY >= AbsZ)
+		{
+			bOutNegative = Dir.Y < 0.0f;
+			return EAxis::Y;
+		}
+		bOutNegative = Dir.Z < 0.0f;
+		return EAxis::Z;
+	}
+
+	/**
 	 * Analyze a physics constraint to determine joint type, axis, and limits.
-	 * Checks angular axes first (revolute), then linear axes (prismatic).
-	 * Returns true if a controllable axis was found.
+	 * Uses the constraint reference frame to correctly map constraint axes to
+	 * bone-local axes, and prefers Limited DOFs over Free ones.
+	 * Returns true if a controllable DOF was found.
 	 */
 	bool AnalyzeConstraint(const FConstraintInstance& CI, FKinematicJointConfig& OutJoint)
 	{
+		// Get constraint frame orientation in bone-local space (Frame1 = child bone we pose)
+		const FTransform RefFrame = CI.GetRefFrame(EConstraintFrame::Frame1);
+		const FQuat FrameQuat = RefFrame.GetRotation();
+
+		// Constraint axis directions in bone-local space:
+		// Twist = constraint X, Swing1 = constraint Z, Swing2 = constraint Y
+		const FVector TwistDir  = FrameQuat.GetAxisX();
+		const FVector Swing1Dir = FrameQuat.GetAxisZ();
+		const FVector Swing2Dir = FrameQuat.GetAxisY();
+
 		// ── Angular (Revolute) ──────────────────────────────────────
-		const EAngularConstraintMotion TwistMotion = CI.GetAngularTwistMotion();
+		const EAngularConstraintMotion TwistMotion  = CI.GetAngularTwistMotion();
 		const EAngularConstraintMotion Swing1Motion = CI.GetAngularSwing1Motion();
 		const EAngularConstraintMotion Swing2Motion = CI.GetAngularSwing2Motion();
 
-		auto IsAngularFreeOrLimited = [](EAngularConstraintMotion M) {
+		auto IsActive = [](EAngularConstraintMotion M) {
 			return M == EAngularConstraintMotion::ACM_Free || M == EAngularConstraintMotion::ACM_Limited;
 		};
+		auto IsLimited = [](EAngularConstraintMotion M) {
+			return M == EAngularConstraintMotion::ACM_Limited;
+		};
 
-		const bool bTwist = IsAngularFreeOrLimited(TwistMotion);
-		const bool bSwing1 = IsAngularFreeOrLimited(Swing1Motion);
-		const bool bSwing2 = IsAngularFreeOrLimited(Swing2Motion);
+		const bool bTwistActive  = IsActive(TwistMotion);
+		const bool bSwing1Active = IsActive(Swing1Motion);
+		const bool bSwing2Active = IsActive(Swing2Motion);
 
-		if (bTwist || bSwing1 || bSwing2)
+		if (bTwistActive || bSwing1Active || bSwing2Active)
 		{
 			OutJoint.JointType = EKinematicJointType::Revolute;
 
-			if (bTwist)
+			// Build candidates: each active angular DOF with its constraint-frame direction
+			struct AngularCandidate
 			{
-				OutJoint.Axis = EAxis::X;
-				if (TwistMotion == EAngularConstraintMotion::ACM_Limited)
+				EAngularConstraintMotion Motion;
+				FVector Direction;
+				float Limit;
+			};
+
+			TArray<AngularCandidate, TInlineAllocator<3>> Candidates;
+			if (bTwistActive)
+			{
+				Candidates.Add({ TwistMotion, TwistDir, CI.GetAngularTwistLimit() });
+			}
+			if (bSwing1Active)
+			{
+				Candidates.Add({ Swing1Motion, Swing1Dir, CI.GetAngularSwing1Limit() });
+			}
+			if (bSwing2Active)
+			{
+				Candidates.Add({ Swing2Motion, Swing2Dir, CI.GetAngularSwing2Limit() });
+			}
+
+			// Prefer Limited over Free (Limited = intentionally configured DOF)
+			int32 BestIdx = 0;
+			for (int32 i = 1; i < Candidates.Num(); ++i)
+			{
+				if (IsLimited(Candidates[i].Motion) && !IsLimited(Candidates[BestIdx].Motion))
 				{
-					const float Limit = CI.GetAngularTwistLimit();
-					OutJoint.MinValue = -Limit;
-					OutJoint.MaxValue = Limit;
-					OutJoint.bEnforceLimits = true;
-				}
-				else
-				{
-					OutJoint.MinValue = -180.0f;
-					OutJoint.MaxValue = 180.0f;
-					OutJoint.bEnforceLimits = false;
+					BestIdx = i;
 				}
 			}
-			else if (bSwing1 && bSwing2)
+
+			const AngularCandidate& Best = Candidates[BestIdx];
+
+			// Map constraint axis direction to nearest bone-local cardinal axis
+			bool bNegative = false;
+			OutJoint.Axis = FindClosestCardinalAxis(Best.Direction, bNegative);
+			OutJoint.bInvertDirection = bNegative;
+
+			if (IsLimited(Best.Motion))
 			{
-				const float S1Limit = CI.GetAngularSwing1Limit();
-				const float S2Limit = CI.GetAngularSwing2Limit();
-				if (S2Limit > S1Limit)
-				{
-					OutJoint.Axis = EAxis::Y;
-					OutJoint.MinValue = -S2Limit;
-					OutJoint.MaxValue = S2Limit;
-				}
-				else
-				{
-					OutJoint.Axis = EAxis::Z;
-					OutJoint.MinValue = -S1Limit;
-					OutJoint.MaxValue = S1Limit;
-				}
+				OutJoint.MinValue = -Best.Limit;
+				OutJoint.MaxValue = Best.Limit;
 				OutJoint.bEnforceLimits = true;
-			}
-			else if (bSwing1)
-			{
-				OutJoint.Axis = EAxis::Z;
-				if (Swing1Motion == EAngularConstraintMotion::ACM_Limited)
-				{
-					const float Limit = CI.GetAngularSwing1Limit();
-					OutJoint.MinValue = -Limit;
-					OutJoint.MaxValue = Limit;
-					OutJoint.bEnforceLimits = true;
-				}
-				else
-				{
-					OutJoint.MinValue = -180.0f;
-					OutJoint.MaxValue = 180.0f;
-					OutJoint.bEnforceLimits = false;
-				}
 			}
 			else
 			{
-				OutJoint.Axis = EAxis::Y;
-				if (Swing2Motion == EAngularConstraintMotion::ACM_Limited)
-				{
-					const float Limit = CI.GetAngularSwing2Limit();
-					OutJoint.MinValue = -Limit;
-					OutJoint.MaxValue = Limit;
-					OutJoint.bEnforceLimits = true;
-				}
-				else
-				{
-					OutJoint.MinValue = -180.0f;
-					OutJoint.MaxValue = 180.0f;
-					OutJoint.bEnforceLimits = false;
-				}
+				OutJoint.MinValue = -180.0f;
+				OutJoint.MaxValue = 180.0f;
+				OutJoint.bEnforceLimits = false;
 			}
 
 			return true;
@@ -112,36 +132,56 @@ namespace
 		const ELinearConstraintMotion LinYMotion = CI.GetLinearYMotion();
 		const ELinearConstraintMotion LinZMotion = CI.GetLinearZMotion();
 
-		auto IsLinearFreeOrLimited = [](ELinearConstraintMotion M) {
+		auto IsLinActive = [](ELinearConstraintMotion M) {
 			return M == ELinearConstraintMotion::LCM_Free || M == ELinearConstraintMotion::LCM_Limited;
 		};
+		auto IsLinLimited = [](ELinearConstraintMotion M) {
+			return M == ELinearConstraintMotion::LCM_Limited;
+		};
 
-		const bool bLinX = IsLinearFreeOrLimited(LinXMotion);
-		const bool bLinY = IsLinearFreeOrLimited(LinYMotion);
-		const bool bLinZ = IsLinearFreeOrLimited(LinZMotion);
+		struct LinearCandidate
+		{
+			ELinearConstraintMotion Motion;
+			FVector Direction;
+		};
 
-		if (!bLinX && !bLinY && !bLinZ)
+		TArray<LinearCandidate, TInlineAllocator<3>> LinCandidates;
+		// Linear X/Y/Z in constraint frame map to constraint X/Y/Z axes
+		if (IsLinActive(LinXMotion))
+		{
+			LinCandidates.Add({ LinXMotion, FrameQuat.GetAxisX() });
+		}
+		if (IsLinActive(LinYMotion))
+		{
+			LinCandidates.Add({ LinYMotion, FrameQuat.GetAxisY() });
+		}
+		if (IsLinActive(LinZMotion))
+		{
+			LinCandidates.Add({ LinZMotion, FrameQuat.GetAxisZ() });
+		}
+
+		if (LinCandidates.Num() == 0)
 		{
 			return false; // everything locked
 		}
 
+		// Prefer Limited over Free
+		int32 BestLinIdx = 0;
+		for (int32 i = 1; i < LinCandidates.Num(); ++i)
+		{
+			if (IsLinLimited(LinCandidates[i].Motion) && !IsLinLimited(LinCandidates[BestLinIdx].Motion))
+			{
+				BestLinIdx = i;
+			}
+		}
+
 		OutJoint.JointType = EKinematicJointType::Prismatic;
+
+		bool bNegative = false;
+		OutJoint.Axis = FindClosestCardinalAxis(LinCandidates[BestLinIdx].Direction, bNegative);
+		OutJoint.bInvertDirection = bNegative;
+
 		const float LinearLimit = CI.GetLinearLimit();
-
-		// Pick the first free/limited linear axis
-		if (bLinX)
-		{
-			OutJoint.Axis = EAxis::X;
-		}
-		else if (bLinY)
-		{
-			OutJoint.Axis = EAxis::Y;
-		}
-		else
-		{
-			OutJoint.Axis = EAxis::Z;
-		}
-
 		if (LinearLimit > 0.0f)
 		{
 			OutJoint.MinValue = -LinearLimit;
@@ -238,6 +278,21 @@ void URammsSkeletalPoseComponent::BeginPlay()
 			for (auto& Pair : PoseableMeshes)
 			{
 				UE_LOG(LogTemp, Log, TEXT("  Mesh: '%s'"), *Pair.Key.ToString());
+			}
+
+			// Log every joint's full configuration
+			for (int32 i = 0; i < Joints.Num(); ++i)
+			{
+				const FKinematicJointConfig& J = Joints[i];
+				const TCHAR* TypeStr = J.JointType == EKinematicJointType::Revolute ? TEXT("Revolute") : TEXT("Prismatic");
+				const TCHAR* AxisStr = J.Axis == EAxis::X ? TEXT("X") : (J.Axis == EAxis::Y ? TEXT("Y") : TEXT("Z"));
+				UPoseableMeshComponent* Mesh = ResolveMeshForJoint(J);
+				UE_LOG(LogTemp, Log, TEXT("  Joint[%d] '%s': Bone='%s' Mesh='%s' Type=%s Axis=%s Invert=%d Limits=[%.1f, %.1f] Resolved=%s"),
+					i, *J.GetEffectiveName().ToString(),
+					*J.BoneName.ToString(), *J.MeshComponentName.ToString(),
+					TypeStr, AxisStr, J.bInvertDirection ? 1 : 0,
+					J.MinValue, J.MaxValue,
+					Mesh ? *Mesh->GetFName().ToString() : TEXT("NULL"));
 			}
 		}
 
@@ -480,7 +535,38 @@ void URammsSkeletalPoseComponent::AutoPopulateFromSkeleton()
 		}
 
 		// Try physics asset first for accurate axis/limit detection
-		const int32 PhysJoints = BuildJointsFromPhysicsAsset(SkelMesh, MeshName, Joints);
+		// Check component override (PhysicsAssetOverride) first, then skeletal mesh asset
+		const UPhysicsAsset* PhysAsset = Mesh->GetPhysicsAsset();
+		if (!PhysAsset)
+		{
+			PhysAsset = SkelMesh->GetPhysicsAsset();
+		}
+
+		int32 PhysJoints = 0;
+		if (PhysAsset)
+		{
+			for (const UPhysicsConstraintTemplate* Template : PhysAsset->ConstraintSetup)
+			{
+				if (!Template)
+				{
+					continue;
+				}
+
+				const FConstraintInstance& CI = Template->DefaultInstance;
+
+				FKinematicJointConfig Joint;
+				if (!AnalyzeConstraint(CI, Joint))
+				{
+					continue;
+				}
+
+				Joint.MeshComponentName = MeshName;
+				Joint.BoneName = CI.ConstraintBone1;
+				Joint.JointName = CI.JointName;
+				Joints.Add(Joint);
+				++PhysJoints;
+			}
+		}
 
 		if (PhysJoints > 0)
 		{
