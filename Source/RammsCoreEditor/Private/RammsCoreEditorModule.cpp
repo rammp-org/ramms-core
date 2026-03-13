@@ -250,8 +250,8 @@ private:
 
 			if (PhysAsset)
 			{
-				UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Mesh '%s': Using physics asset '%s'"),
-					*MeshName.ToString(), *PhysAsset->GetName());
+				const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
+
 				for (const UPhysicsConstraintTemplate* Template : PhysAsset->ConstraintSetup)
 				{
 					if (!Template)
@@ -261,14 +261,36 @@ private:
 
 					const FConstraintInstance& CI = Template->DefaultInstance;
 
-					// Get constraint frame in bone-local space (Frame1 = child bone)
-					const FTransform RefFrame = CI.GetRefFrame(EConstraintFrame::Frame1);
+					// Determine which constraint bone is the skeletal child
+					FName				   ChildBone = CI.ConstraintBone1;
+					EConstraintFrame::Type ChildFrame = EConstraintFrame::Frame1;
+					{
+						const int32 Bone1Idx = RefSkeleton.FindBoneIndex(CI.ConstraintBone1);
+						const int32 Bone2Idx = RefSkeleton.FindBoneIndex(CI.ConstraintBone2);
+
+						if (Bone1Idx != INDEX_NONE && Bone2Idx != INDEX_NONE)
+						{
+							// Walk up from Bone2 to see if Bone1 is ancestor → Bone2 is child
+							for (int32 Idx = RefSkeleton.GetParentIndex(Bone2Idx); Idx != INDEX_NONE; Idx = RefSkeleton.GetParentIndex(Idx))
+							{
+								if (Idx == Bone1Idx)
+								{
+									ChildBone = CI.ConstraintBone2;
+									ChildFrame = EConstraintFrame::Frame2;
+									break;
+								}
+							}
+						}
+					}
+
+					// Get constraint frame in child bone's local space
+					const FTransform RefFrame = CI.GetRefFrame(ChildFrame);
 					const FQuat		 FrameQuat = RefFrame.GetRotation();
 
 					// Constraint axis directions in bone-local space
-					const FVector TwistDir = FrameQuat.GetAxisX();	// Twist = constraint X
-					const FVector Swing1Dir = FrameQuat.GetAxisZ(); // Swing1 = constraint Z
-					const FVector Swing2Dir = FrameQuat.GetAxisY(); // Swing2 = constraint Y
+					const FVector TwistDir = FrameQuat.GetAxisX();
+					const FVector Swing1Dir = FrameQuat.GetAxisZ();
+					const FVector Swing2Dir = FrameQuat.GetAxisY();
 
 					// Helper to find nearest cardinal axis
 					auto FindClosestAxis = [](const FVector& Dir, bool& bNeg) -> EAxis::Type {
@@ -287,12 +309,6 @@ private:
 						return EAxis::Z;
 					};
 
-					// Log constraint details
-					auto MotionStr = [](EAngularConstraintMotion M) -> const TCHAR* {
-						return M == EAngularConstraintMotion::ACM_Free ? TEXT("Free") : M == EAngularConstraintMotion::ACM_Limited ? TEXT("Limited")
-																																   : TEXT("Locked");
-					};
-
 					// ── Angular (Revolute) ──────────────────────────────
 					auto IsActive = [](EAngularConstraintMotion M) {
 						return M == EAngularConstraintMotion::ACM_Free || M == EAngularConstraintMotion::ACM_Limited;
@@ -309,32 +325,21 @@ private:
 					const bool bSwing1 = IsActive(Swing1Motion);
 					const bool bSwing2 = IsActive(Swing2Motion);
 
-					UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]   Constraint '%s': Bone1='%s' Bone2='%s' Twist=%s Swing1=%s Swing2=%s"),
-						*CI.JointName.ToString(), *CI.ConstraintBone1.ToString(), *CI.ConstraintBone2.ToString(),
-						MotionStr(TwistMotion), MotionStr(Swing1Motion), MotionStr(Swing2Motion));
-					UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]     FrameRot=(%.2f,%.2f,%.2f,%.2f) TwistDir=(%.2f,%.2f,%.2f) Swing1Dir=(%.2f,%.2f,%.2f) Swing2Dir=(%.2f,%.2f,%.2f)"),
-						FrameQuat.X, FrameQuat.Y, FrameQuat.Z, FrameQuat.W,
-						TwistDir.X, TwistDir.Y, TwistDir.Z,
-						Swing1Dir.X, Swing1Dir.Y, Swing1Dir.Z,
-						Swing2Dir.X, Swing2Dir.Y, Swing2Dir.Z);
-
 					if (bTwist || bSwing1 || bSwing2)
 					{
-						// Build candidates
 						struct AngCandidate
 						{
 							EAngularConstraintMotion Motion;
 							FVector					 Dir;
 							float					 Limit;
-							const TCHAR*			 Name;
 						};
 						TArray<AngCandidate, TInlineAllocator<3>> Cands;
 						if (bTwist)
-							Cands.Add({ TwistMotion, TwistDir, CI.GetAngularTwistLimit(), TEXT("Twist") });
+							Cands.Add({ TwistMotion, TwistDir, CI.GetAngularTwistLimit() });
 						if (bSwing1)
-							Cands.Add({ Swing1Motion, Swing1Dir, CI.GetAngularSwing1Limit(), TEXT("Swing1") });
+							Cands.Add({ Swing1Motion, Swing1Dir, CI.GetAngularSwing1Limit() });
 						if (bSwing2)
-							Cands.Add({ Swing2Motion, Swing2Dir, CI.GetAngularSwing2Limit(), TEXT("Swing2") });
+							Cands.Add({ Swing2Motion, Swing2Dir, CI.GetAngularSwing2Limit() });
 
 						// Prefer Limited over Free
 						int32 Best = 0;
@@ -346,7 +351,7 @@ private:
 
 						FKinematicJointConfig Joint;
 						Joint.MeshComponentName = MeshName;
-						Joint.BoneName = CI.ConstraintBone1;
+						Joint.BoneName = ChildBone;
 						Joint.JointName = CI.JointName;
 						Joint.JointType = EKinematicJointType::Revolute;
 
@@ -366,10 +371,6 @@ private:
 							Joint.MaxValue = 180.f;
 							Joint.bEnforceLimits = false;
 						}
-
-						const TCHAR* AxisStr = Joint.Axis == EAxis::X ? TEXT("X") : (Joint.Axis == EAxis::Y ? TEXT("Y") : TEXT("Z"));
-						UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor]     → Revolute: Selected=%s Axis=%s Invert=%d Limits=[%.1f, %.1f]"),
-							Cands[Best].Name, AxisStr, Joint.bInvertDirection ? 1 : 0, Joint.MinValue, Joint.MaxValue);
 
 						NewJoints.Add(Joint);
 						++PhysJointCount;
@@ -408,7 +409,7 @@ private:
 
 						FKinematicJointConfig Joint;
 						Joint.MeshComponentName = MeshName;
-						Joint.BoneName = CI.ConstraintBone1;
+						Joint.BoneName = ChildBone;
 						Joint.JointName = CI.JointName;
 						Joint.JointType = EKinematicJointType::Prismatic;
 
@@ -435,8 +436,8 @@ private:
 					}
 				}
 
-				UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Mesh '%s': %d joints from physics asset"),
-					*MeshName.ToString(), PhysJointCount);
+				UE_LOG(LogTemp, Log, TEXT("[RammsCoreEditor] Mesh '%s': %d joints from physics asset '%s'"),
+					*MeshName.ToString(), PhysJointCount, *PhysAsset->GetName());
 			}
 
 			if (PhysJointCount == 0)

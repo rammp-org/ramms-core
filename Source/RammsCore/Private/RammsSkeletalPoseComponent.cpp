@@ -35,15 +35,60 @@ namespace
 	}
 
 	/**
+	 * Determine which constraint bone is the skeletal child (further from root).
+	 * Returns the child bone name and the corresponding constraint frame.
+	 * Falls back to ConstraintBone1/Frame1 if relationship can't be determined.
+	 */
+	void FindChildBoneAndFrame(const FConstraintInstance& CI, const FReferenceSkeleton& RefSkeleton,
+		FName& OutChildBone, EConstraintFrame::Type& OutChildFrame)
+	{
+		OutChildBone = CI.ConstraintBone1;
+		OutChildFrame = EConstraintFrame::Frame1;
+
+		const int32 Bone1Idx = RefSkeleton.FindBoneIndex(CI.ConstraintBone1);
+		const int32 Bone2Idx = RefSkeleton.FindBoneIndex(CI.ConstraintBone2);
+
+		if (Bone1Idx == INDEX_NONE || Bone2Idx == INDEX_NONE)
+		{
+			return; // can't determine, keep default
+		}
+
+		// Walk up from Bone1 to see if Bone2 is an ancestor → Bone1 is child
+		for (int32 Idx = RefSkeleton.GetParentIndex(Bone1Idx); Idx != INDEX_NONE; Idx = RefSkeleton.GetParentIndex(Idx))
+		{
+			if (Idx == Bone2Idx)
+			{
+				OutChildBone = CI.ConstraintBone1;
+				OutChildFrame = EConstraintFrame::Frame1;
+				return;
+			}
+		}
+
+		// Walk up from Bone2 to see if Bone1 is an ancestor → Bone2 is child
+		for (int32 Idx = RefSkeleton.GetParentIndex(Bone2Idx); Idx != INDEX_NONE; Idx = RefSkeleton.GetParentIndex(Idx))
+		{
+			if (Idx == Bone1Idx)
+			{
+				OutChildBone = CI.ConstraintBone2;
+				OutChildFrame = EConstraintFrame::Frame2;
+				return;
+			}
+		}
+
+		// No ancestor relationship found, keep default
+	}
+
+	/**
 	 * Analyze a physics constraint to determine joint type, axis, and limits.
-	 * Uses the constraint reference frame to correctly map constraint axes to
-	 * bone-local axes, and prefers Limited DOFs over Free ones.
+	 * Uses the specified constraint reference frame to correctly map constraint
+	 * axes to bone-local axes, and prefers Limited DOFs over Free ones.
 	 * Returns true if a controllable DOF was found.
 	 */
-	bool AnalyzeConstraint(const FConstraintInstance& CI, FKinematicJointConfig& OutJoint)
+	bool AnalyzeConstraint(const FConstraintInstance& CI, EConstraintFrame::Type ChildFrame,
+		FKinematicJointConfig& OutJoint)
 	{
-		// Get constraint frame orientation in bone-local space (Frame1 = child bone we pose)
-		const FTransform RefFrame = CI.GetRefFrame(EConstraintFrame::Frame1);
+		// Get constraint frame orientation in bone-local space for the child bone
+		const FTransform RefFrame = CI.GetRefFrame(ChildFrame);
 		const FQuat		 FrameQuat = RefFrame.GetRotation();
 
 		// Constraint axis directions in bone-local space:
@@ -196,50 +241,6 @@ namespace
 		}
 
 		return true;
-	}
-
-	/**
-	 * Build joint configs from a skeletal mesh's physics asset constraints.
-	 * Returns the number of joints created. Joints are appended to OutJoints.
-	 */
-	int32 BuildJointsFromPhysicsAsset(const USkeletalMesh* SkelMesh, FName MeshComponentName,
-		TArray<FKinematicJointConfig>& OutJoints)
-	{
-		if (!SkelMesh)
-		{
-			return 0;
-		}
-
-		const UPhysicsAsset* PhysAsset = SkelMesh->GetPhysicsAsset();
-		if (!PhysAsset)
-		{
-			return 0;
-		}
-
-		int32 Count = 0;
-		for (const UPhysicsConstraintTemplate* Template : PhysAsset->ConstraintSetup)
-		{
-			if (!Template)
-			{
-				continue;
-			}
-
-			const FConstraintInstance& CI = Template->DefaultInstance;
-
-			FKinematicJointConfig Joint;
-			if (!AnalyzeConstraint(CI, Joint))
-			{
-				continue; // fully locked
-			}
-
-			Joint.MeshComponentName = MeshComponentName;
-			Joint.BoneName = CI.ConstraintBone1;
-			Joint.JointName = CI.JointName;
-			OutJoints.Add(Joint);
-			++Count;
-		}
-
-		return Count;
 	}
 } // anonymous namespace
 
@@ -545,6 +546,8 @@ void URammsSkeletalPoseComponent::AutoPopulateFromSkeleton()
 		int32 PhysJoints = 0;
 		if (PhysAsset)
 		{
+			const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
+
 			for (const UPhysicsConstraintTemplate* Template : PhysAsset->ConstraintSetup)
 			{
 				if (!Template)
@@ -554,14 +557,19 @@ void URammsSkeletalPoseComponent::AutoPopulateFromSkeleton()
 
 				const FConstraintInstance& CI = Template->DefaultInstance;
 
+				// Determine which constraint bone is the child (the one we pose)
+				FName				   ChildBone;
+				EConstraintFrame::Type ChildFrame;
+				FindChildBoneAndFrame(CI, RefSkeleton, ChildBone, ChildFrame);
+
 				FKinematicJointConfig Joint;
-				if (!AnalyzeConstraint(CI, Joint))
+				if (!AnalyzeConstraint(CI, ChildFrame, Joint))
 				{
 					continue;
 				}
 
 				Joint.MeshComponentName = MeshName;
-				Joint.BoneName = CI.ConstraintBone1;
+				Joint.BoneName = ChildBone;
 				Joint.JointName = CI.JointName;
 				Joints.Add(Joint);
 				++PhysJoints;
@@ -681,7 +689,36 @@ void URammsSkeletalPoseComponent::RebuildNameMap()
 	for (int32 i = 0; i < Joints.Num(); ++i)
 	{
 		const FName Name = Joints[i].GetEffectiveName();
-		if (!Name.IsNone())
+		if (Name.IsNone())
+		{
+			continue;
+		}
+
+		if (const int32* Existing = JointNameMap.Find(Name))
+		{
+			// Duplicate name — qualify with MeshComponentName to disambiguate
+			const FName QualifiedName = *FString::Printf(TEXT("%s::%s"),
+				*Joints[i].MeshComponentName.ToString(), *Name.ToString());
+			JointNameMap.Add(QualifiedName, i);
+
+			// Also qualify the earlier entry if it hasn't been already
+			const FKinematicJointConfig& Earlier = Joints[*Existing];
+			const FName					 EarlierQualified = *FString::Printf(TEXT("%s::%s"),
+								 *Earlier.MeshComponentName.ToString(), *Name.ToString());
+			if (!JointNameMap.Contains(EarlierQualified))
+			{
+				JointNameMap.Add(EarlierQualified, *Existing);
+			}
+
+			if (bDebugLog)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("RebuildNameMap: Duplicate joint name '%s' at indices %d and %d. "
+											  "Use qualified names '%s' and '%s' for by-name access."),
+					*Name.ToString(), *Existing, i,
+					*EarlierQualified.ToString(), *QualifiedName.ToString());
+			}
+		}
+		else
 		{
 			JointNameMap.Add(Name, i);
 		}
