@@ -1,19 +1,27 @@
 """
-Diagnostic phase 4: try AnimPose, asset export, and call_method.
-    exec(open("C:/Users/waemf/data/Ramms/Plugins/RammsCore/Content/Python/urdf/_diagnose.py").read())
+Diagnostic: try AnimPose, asset export, and call_method on the selected PhysicsAsset.
+
+Development-only script — not part of the public API.
+
+Run in UE Editor Python console:
+    from urdf._diagnose import run; run()
 """
 import unreal
 
-selected = unreal.EditorUtilityLibrary.get_selected_assets()
-pa = None
-for a in selected:
-    if isinstance(a, unreal.PhysicsAsset):
-        pa = a
-        break
 
-if pa is None:
-    unreal.log_error("No PhysicsAsset selected")
-else:
+def run():
+    """Run diagnostics on the selected PhysicsAsset."""
+    selected = unreal.EditorUtilityLibrary.get_selected_assets()
+    pa = None
+    for a in selected:
+        if isinstance(a, unreal.PhysicsAsset):
+            pa = a
+            break
+
+    if pa is None:
+        unreal.log_error("No PhysicsAsset selected")
+        return
+
     name = pa.get_name()
     mesh_path = pa.get_path_name().split(".")[0].replace("_PhysicsAsset", "")
     skel_mesh = unreal.load_asset(mesh_path)
@@ -26,7 +34,6 @@ else:
             unreal.log(f"AnimPose type: {type(anim_pose).__name__}")
             ap_attrs = sorted([a for a in dir(anim_pose) if not a.startswith("_")])
             unreal.log(f"AnimPose dir(): {ap_attrs}")
-            # Try getting bone names from AnimPose
             for m in ["get_bone_names", "get_bone_name", "get_num_bones",
                        "get_bone_pose", "num_bones", "bone_names"]:
                 try:
@@ -45,10 +52,10 @@ else:
             unreal.log(f"AnimPose failed: {e}")
 
     # --- Try Exporter ---
-    for cls in ["Exporter", "AssetExportTask", "AssetToolsHelpers", "AssetTools"]:
-        if hasattr(unreal, cls):
-            unreal.log(f"Found: unreal.{cls}")
-            attrs = sorted([a for a in dir(getattr(unreal, cls)) if not a.startswith("_")])
+    for cls_name in ["Exporter", "AssetExportTask", "AssetToolsHelpers", "AssetTools"]:
+        if hasattr(unreal, cls_name):
+            unreal.log(f"Found: unreal.{cls_name}")
+            attrs = sorted([a for a in dir(getattr(unreal, cls_name)) if not a.startswith("_")])
             unreal.log(f"  dir(): {attrs[:20]}")
 
     # --- Try to export to T3D via AssetExportTask ---
@@ -70,7 +77,7 @@ else:
             for line in content[:2000].split("\n"):
                 unreal.log(f"  {line}")
         else:
-            unreal.log(f"Export failed or file not created")
+            unreal.log("Export failed or file not created")
     except Exception as e:
         unreal.log(f"Export task failed: {e}")
 

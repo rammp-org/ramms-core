@@ -18,7 +18,6 @@ Run from the UE Editor Python console:
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -32,8 +31,8 @@ except ImportError:
 
 from urdf.urdf_parser import URDFRobot, URDFJoint, URDFLink, URDFJointLimit
 from urdf.urdf_utils import (
-    m_to_cm, rad_to_deg, urdf_pos_to_ue, urdf_axis_to_ue,
-    urdf_rpy_to_ue_deg, urdf_inertia_to_ue,
+    m_to_cm, rad_to_deg, urdf_pos_to_ue,
+    urdf_inertia_to_ue,
 )
 from urdf.name_mapping import NameMapping
 
@@ -331,7 +330,14 @@ class URDFImporter:
                 self._apply_joint_dynamics(profile, joint, stats)
 
     def _apply_joint_limits(self, profile, joint: URDFJoint, stats: dict):
-        """Apply URDF joint limits to a UE constraint profile."""
+        """Apply URDF joint limits to a UE constraint profile.
+
+        Maps URDF joint axis to the appropriate UE constraint DOF:
+        - Axis (1,0,0) or (-1,0,0) → twist
+        - Axis (0,1,0) or (0,-1,0) → swing1
+        - Axis (0,0,1) or (0,0,-1) → swing2
+        For non-cardinal axes, defaults to twist with a warning.
+        """
         if joint.limit is None:
             return
 
@@ -340,23 +346,25 @@ class URDFImporter:
                 lower_deg = rad_to_deg(joint.limit.lower)
                 upper_deg = rad_to_deg(joint.limit.upper)
 
+                # Determine which angular DOF from the URDF axis
+                angular_dof = self._axis_to_angular_dof(joint)
+
                 if joint.joint_type == "continuous":
-                    # No limits — set motion type to Free
-                    profile.set_editor_property("angular_twist_motion", unreal.AngularConstraintMotion.ACM_FREE)
+                    profile.set_editor_property(f"angular_{angular_dof}_motion",
+                                                unreal.AngularConstraintMotion.ACM_FREE)
                 else:
-                    # Calculate symmetric swing/twist limits from asymmetric URDF limits
                     range_deg = upper_deg - lower_deg
                     half_range = range_deg / 2.0
 
-                    # Determine which angular DOF this joint uses based on axis
-                    # For simplicity, apply to twist (most common for revolute)
-                    profile.set_editor_property("angular_twist_motion", unreal.AngularConstraintMotion.ACM_LIMITED)
-                    profile.set_editor_property("twist_limit_angle", abs(half_range))
+                    profile.set_editor_property(f"angular_{angular_dof}_motion",
+                                                unreal.AngularConstraintMotion.ACM_LIMITED)
+                    limit_prop = ("twist_limit_angle" if angular_dof == "twist"
+                                  else f"{angular_dof}_limit_angle")
+                    profile.set_editor_property(limit_prop, abs(half_range))
 
-                    self.log(f"  Joint limit: {joint.name} → twist ±{abs(half_range):.1f}° "
+                    self.log(f"  Joint limit: {joint.name} → {angular_dof} ±{abs(half_range):.1f}° "
                              f"(URDF: [{lower_deg:.1f}°, {upper_deg:.1f}°])")
 
-                # Velocity limit (URDF velocity is rad/s)
                 if joint.limit.velocity > 0:
                     vel_deg = rad_to_deg(joint.limit.velocity)
                     self.log(f"  Velocity limit: {joint.name} → {vel_deg:.1f} deg/s")
@@ -368,15 +376,39 @@ class URDFImporter:
                 upper_cm = m_to_cm(joint.limit.upper)
                 range_cm = upper_cm - lower_cm
 
-                profile.set_editor_property("linear_x_motion", unreal.LinearConstraintMotion.LCM_LIMITED)
+                linear_dof = self._axis_to_linear_dof(joint)
+                profile.set_editor_property(f"linear_{linear_dof}_motion",
+                                            unreal.LinearConstraintMotion.LCM_LIMITED)
                 profile.set_editor_property("linear_limit_size", range_cm / 2.0)
 
-                self.log(f"  Prismatic limit: {joint.name} → ±{range_cm / 2.0:.2f} cm "
+                self.log(f"  Prismatic limit: {joint.name} → linear_{linear_dof} ±{range_cm / 2.0:.2f} cm "
                          f"(URDF: [{lower_cm:.2f}, {upper_cm:.2f}] cm)")
                 stats["limits"] += 1
 
         except Exception as e:
             self.warn(f"  Could not apply limits for joint '{joint.name}': {e}")
+
+    def _axis_to_angular_dof(self, joint: URDFJoint) -> str:
+        """Map a URDF joint axis to a UE angular DOF name."""
+        ax = joint.axis if joint.axis else (0, 0, 1)
+        abs_ax = (abs(ax[0]), abs(ax[1]), abs(ax[2]))
+        dominant = max(range(3), key=lambda i: abs_ax[i])
+        if abs_ax[dominant] < 0.9:
+            self.warn(f"  Joint '{joint.name}' axis {ax} is not cardinal — "
+                      "defaulting to twist DOF")
+            return "twist"
+        return ("twist", "swing1", "swing2")[dominant]
+
+    def _axis_to_linear_dof(self, joint: URDFJoint) -> str:
+        """Map a URDF joint axis to a UE linear DOF name (x, y, or z)."""
+        ax = joint.axis if joint.axis else (0, 0, 1)
+        abs_ax = (abs(ax[0]), abs(ax[1]), abs(ax[2]))
+        dominant = max(range(3), key=lambda i: abs_ax[i])
+        if abs_ax[dominant] < 0.9:
+            self.warn(f"  Joint '{joint.name}' axis {ax} is not cardinal — "
+                      "defaulting to linear_x DOF")
+            return "x"
+        return ("x", "y", "z")[dominant]
 
     def _apply_joint_dynamics(self, profile, joint: URDFJoint, stats: dict):
         """Apply URDF joint dynamics (damping, friction) to a UE constraint."""
@@ -423,7 +455,7 @@ class URDFImporter:
                     continue
 
                 origin_ue = urdf_pos_to_ue(geom_item.origin.xyz)
-                rot_ue = urdf_rpy_to_ue_deg(geom_item.origin.rpy)
+                has_rotation = any(abs(v) > 1e-6 for v in geom_item.origin.rpy)
 
                 if geom.box:
                     sx = m_to_cm(geom.box.size[0]) / 2.0
@@ -435,6 +467,9 @@ class URDFImporter:
                         box_elem.set_editor_property("y", sy * 2)
                         box_elem.set_editor_property("z", sz * 2)
                         box_elem.set_editor_property("center", unreal.Vector(*origin_ue))
+                        if has_rotation:
+                            self.warn(f"  Box rotation ignored for '{link.name}' — "
+                                      "UE KBoxElem does not support orientation offsets")
                         boxes = list(body.get_editor_property("agg_geom").get_editor_property("box_elems"))
                         boxes.append(box_elem)
                         body.get_editor_property("agg_geom").set_editor_property("box_elems", boxes)
@@ -466,6 +501,9 @@ class URDFImporter:
                         sphyl_elem.set_editor_property("radius", radius_cm)
                         sphyl_elem.set_editor_property("length", length_cm)
                         sphyl_elem.set_editor_property("center", unreal.Vector(*origin_ue))
+                        if has_rotation:
+                            self.warn(f"  Capsule rotation ignored for '{link.name}' — "
+                                      "UE KSphylElem does not support orientation offsets")
                         sphyls = list(body.get_editor_property("agg_geom").get_editor_property("sphyl_elems"))
                         sphyls.append(sphyl_elem)
                         body.get_editor_property("agg_geom").set_editor_property("sphyl_elems", sphyls)

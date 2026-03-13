@@ -84,7 +84,9 @@ class URDFExporter:
             robot_name: Name for the <robot> element
             include_collision: Include collision geometry
             include_inertia: Include inertial properties
-            mapping_file: Optional JSON with bone→link name overrides
+            mapping_file: Optional JSON with URDF link→UE bone name overrides.
+                Expects {"links": {"urdf_link": "ue_bone", ...}} or a flat
+                {"urdf_link": "ue_bone", ...} mapping.
             skeletal_mesh_path: Optional UE content path to the skeletal mesh.
                 If None, auto-detected from the physics asset's preview mesh.
 
@@ -116,14 +118,16 @@ class URDFExporter:
             bone_world_transforms = self._get_bone_world_transforms(
                 ref_pose, bone_names)
 
-        # Load optional name mapping (bone -> URDF link name)
+        # Load optional name mapping (URDF link -> UE bone)
         bone_to_link = {}
         if mapping_file:
             try:
                 import json
                 with open(mapping_file, "r") as f:
                     data = json.load(f)
-                bone_to_link = {v: k for k, v in data.get("links", {}).items()}
+                # Support both {"links": {...}} and flat {"link": "bone"} formats
+                links = data.get("links", {}) if "links" in data else data
+                bone_to_link = {v: k for k, v in links.items()}
             except Exception as e:
                 self.warn(f"Could not load mapping file: {e}")
 
@@ -424,23 +428,6 @@ class URDFExporter:
     # Conversion helpers
     # ===================================================================
 
-    def _bone_world_rpy(self, bone_quat_ue):
-        """Compute the URDF collision RPY for a bone's world rotation.
-
-        When bone_quat_ue is None or identity, returns None (no RPY needed).
-        """
-        if bone_quat_ue is None:
-            return None
-        # Check for identity quaternion (w=+/-1, xyz~0)
-        if abs(abs(bone_quat_ue[0]) - 1.0) < 1e-6:
-            return None
-        rpy = ue_quat_to_urdf_rpy(bone_quat_ue)
-        eps = 1e-10
-        rpy = tuple(0.0 if abs(v) < eps else v for v in rpy)
-        if all(abs(v) < eps for v in rpy):
-            return None
-        return rpy
-
     def _apply_bone_rotation_to_collision(self, center_ue, shape_rpy, bone_quat_ue):
         """Rotate a collision shape's center and RPY into world frame.
 
@@ -578,8 +565,6 @@ class URDFExporter:
                 length = cm_to_m(e2)
                 axis_idx = idx2
                 is_cylinder = True
-
-        origin_pos = ue_pos_to_urdf(center_ue)
 
         if is_cylinder:
             # URDF cylinder is along Z; rotate if UE axis differs

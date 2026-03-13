@@ -3,7 +3,7 @@ Tests for the URDF parser and utility modules.
 These run standalone (no UE editor required).
 
 Usage:
-    cd C:/Users/waemf/data/Ramms/py
+    cd Plugins/RammsCore/Content/Python
     python -m pytest urdf/test_urdf.py -v
     # or simply:
     python urdf/test_urdf.py
@@ -310,7 +310,7 @@ def test_normalized_match():
 
 
 def test_override_file():
-    """Test JSON override loading."""
+    """Test JSON override loading (nested format)."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         import json
         json.dump({
@@ -327,6 +327,30 @@ def test_override_file():
         )
         assert mapping.get_bone("urdf_name") == "ue_bone"
         assert mapping.joint_to_constraint.get("urdf_joint") == "ue_constraint"
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_override_file_flat():
+    """Test JSON override loading (flat format)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        import json
+        json.dump({"urdf_name": "ue_bone", "other_link": "other_bone"}, f)
+        tmp_path = f.name
+
+    try:
+        mapping = NameMapping.from_file(tmp_path)
+        assert mapping.get_bone("urdf_name") == "ue_bone"
+        assert mapping.get_bone("other_link") == "other_bone"
+        assert mapping.get_link("ue_bone") == "urdf_name"
+
+        # Also test via auto_match
+        mapping2 = NameMapping.auto_match(
+            ["urdf_name", "extra"],
+            ["ue_bone", "extra"],
+            override_file=tmp_path,
+        )
+        assert mapping2.get_bone("urdf_name") == "ue_bone"
     finally:
         os.unlink(tmp_path)
 

@@ -1,12 +1,13 @@
 """
 Diagnostic: probe AnimPose bone reference transforms.
 
+Development-only script — not part of the public API.
+
 Run in UE Editor Python console:
-    exec(open("C:/Users/waemf/data/Ramms/Plugins/RammsCore/Content/Python/urdf/_probe_animpose.py").read())
+    from urdf._probe_animpose import run; run()
 
 Probes both gen3_6dof (simple serial chain) and mebot (complex w/ cycles).
-Now that we know AnimPoseSpaces.LOCAL and .WORLD work, this prints
-local + world transforms for all bones and compares with constraint Pos2.
+Prints local + world transforms for all bones and compares with constraint Pos2.
 """
 
 import unreal
@@ -131,9 +132,13 @@ def _probe_asset(info):
     print(f"\n=== {info['label']} probe complete ===")
 
 
-for asset_info in ASSETS:
-    _probe_asset(asset_info)
+def run():
+    """Run probes on all configured assets."""
+    for asset_info in ASSETS:
+        _probe_asset(asset_info)
+    print("\n=== All probes complete ===")
 
-print("\n=== All probes complete ===")
+
+run()
 
 

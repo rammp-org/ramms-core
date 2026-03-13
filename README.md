@@ -365,13 +365,13 @@ This helps ensure that consistent code formatting is applied.
  You can also call the exporter directly with an asset path:
 
  ```python
- from urdf.urdf_exporter import URDFExporter
+ from urdf.urdf_exporter import export_urdf
 
- exporter = URDFExporter(
+ export_urdf(
      physics_asset_path="/Game/Robots/Arm/gen3_6dof_PhysicsAsset",
+     output_path="C:/output/kinova_gen3.urdf",
      robot_name="kinova_gen3",
  )
- exporter.export("C:/output/kinova_gen3.urdf")
  ```
 
  **What the exporter does:**
@@ -414,13 +414,16 @@ This helps ensure that consistent code formatting is applied.
  The tooling automatically matches URDF link names to UE bone names using
  case-insensitive comparison with underscore/prefix stripping and fuzzy
  matching. For cases where auto-matching isn't sufficient, provide a JSON
- override file:
+ override file. Both flat and nested formats are supported:
+
+ ```json
+ { "base_link": "root_bone", "link_1": "shoulder_bone" }
+ ```
 
  ```json
  {
-   "base_link": "root_bone",
-   "link_1": "shoulder_bone",
-   "link_2": "upper_arm_bone"
+   "links": { "base_link": "root_bone", "link_1": "shoulder_bone" },
+   "joints": { "joint_1": "shoulder_constraint" }
  }
  ```
 

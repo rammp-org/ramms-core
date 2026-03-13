@@ -56,20 +56,36 @@ class NameMapping:
     def from_file(cls, filepath: str) -> "NameMapping":
         """Load an explicit mapping from a JSON file.
 
-        JSON format:
-        {
-            "links": { "urdf_link_name": "ue_bone_name", ... },
-            "joints": { "urdf_joint_name": "ue_constraint_name", ... }  // optional
-        }
+        Supports two formats:
+
+        Nested (with optional joints):
+            {
+                "links": { "urdf_link_name": "ue_bone_name", ... },
+                "joints": { "urdf_joint_name": "ue_constraint_name", ... }
+            }
+
+        Flat (link→bone only):
+            { "urdf_link_name": "ue_bone_name", ... }
+
+        A flat dict (all string values, no "links" key) is treated as a
+        link→bone mapping.
         """
         with open(filepath, "r") as f:
             data = json.load(f)
 
         mapping = cls()
-        for urdf_name, bone_name in data.get("links", {}).items():
+        # Detect flat format: no "links" key and all values are strings
+        if "links" not in data and all(isinstance(v, str) for v in data.values()):
+            links = data
+            joints = {}
+        else:
+            links = data.get("links", {})
+            joints = data.get("joints", {})
+
+        for urdf_name, bone_name in links.items():
             mapping.link_to_bone[urdf_name] = bone_name
             mapping.bone_to_link[bone_name] = urdf_name
-        for joint_name, constraint_name in data.get("joints", {}).items():
+        for joint_name, constraint_name in joints.items():
             mapping.joint_to_constraint[joint_name] = constraint_name
         return mapping
 
@@ -85,10 +101,10 @@ class NameMapping:
         Automatically match URDF link names to UE bone names.
 
         Match priority:
-        1. Exact match (case-insensitive)
-        2. Normalized match (strip common prefixes/suffixes, underscores)
-        3. Fuzzy match (SequenceMatcher ratio above threshold)
-        4. Overrides from JSON file (highest priority, applied last)
+        1. Overrides from JSON file (highest priority, applied first)
+        2. Exact match (case-insensitive)
+        3. Normalized match (strip common prefixes/suffixes, underscores)
+        4. Fuzzy match (SequenceMatcher ratio above threshold)
         """
         mapping = cls()
 
@@ -99,8 +115,12 @@ class NameMapping:
             try:
                 with open(override_file, "r") as f:
                     data = json.load(f)
-                overrides_link = data.get("links", {})
-                overrides_joint = data.get("joints", {})
+                # Support flat {"link": "bone"} and nested {"links": {...}}
+                if "links" not in data and all(isinstance(v, str) for v in data.values()):
+                    overrides_link = data
+                else:
+                    overrides_link = data.get("links", {})
+                    overrides_joint = data.get("joints", {})
             except (FileNotFoundError, json.JSONDecodeError) as e:
                 print(f"Warning: Could not load override file '{override_file}': {e}")
 
