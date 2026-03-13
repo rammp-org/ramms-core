@@ -130,6 +130,33 @@ def quat_conjugate(q: Tuple[float, float, float, float]) -> Tuple[float, float, 
     return (q[0], -q[1], -q[2], -q[3])
 
 
+def quat_from_vectors(
+    a: Tuple[float, float, float],
+    b: Tuple[float, float, float],
+) -> Tuple[float, float, float, float]:
+    """Compute the shortest-arc unit quaternion rotating unit vector *a* to *b*.
+
+    Handles the near-parallel (identity) and near-anti-parallel (180°) cases.
+    """
+    dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    if dot > 0.999999:
+        return (1.0, 0.0, 0.0, 0.0)
+    if dot < -0.999999:
+        # Anti-parallel: pick an arbitrary perpendicular axis
+        if abs(a[0]) < 0.9:
+            perp = (0.0, a[2], -a[1])   # a × (1,0,0)
+        else:
+            perp = (-a[2], 0.0, a[0])   # a × (0,1,0)
+        mag = math.sqrt(perp[0]**2 + perp[1]**2 + perp[2]**2)
+        return (0.0, perp[0]/mag, perp[1]/mag, perp[2]/mag)
+    cross = (a[1]*b[2] - a[2]*b[1],
+             a[2]*b[0] - a[0]*b[2],
+             a[0]*b[1] - a[1]*b[0])
+    w = 1.0 + dot
+    mag = math.sqrt(w*w + cross[0]**2 + cross[1]**2 + cross[2]**2)
+    return (w/mag, cross[0]/mag, cross[1]/mag, cross[2]/mag)
+
+
 def quat_multiply(
     q1: Tuple[float, float, float, float],
     q2: Tuple[float, float, float, float],
@@ -325,3 +352,26 @@ def fmt_vec3(v: Tuple[float, ...], precision: int = 8) -> str:
 
 def fmt_float(f: float, precision: int = 8) -> str:
     return f"{f:.{precision}g}"
+
+
+def snap_near_cardinal(
+    axis: Tuple[float, float, float],
+    threshold: float = 0.995,
+) -> Tuple[float, float, float]:
+    """Snap an axis to the nearest cardinal direction if within *threshold*.
+
+    Threshold 0.995 ≈ 5.7°.  Returns the original axis if no cardinal
+    direction is close enough.
+    """
+    cardinals = (
+        (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+        (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, -1.0),
+    )
+    best_dot = 0.0
+    best = axis
+    for c in cardinals:
+        dot = axis[0]*c[0] + axis[1]*c[1] + axis[2]*c[2]
+        if dot > best_dot:
+            best_dot = dot
+            best = c
+    return best if best_dot > threshold else axis

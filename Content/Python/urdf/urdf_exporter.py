@@ -37,9 +37,9 @@ from urdf.urdf_utils import (
     cm_to_m, deg_to_rad, ue_pos_to_urdf, ue_axis_to_urdf,
     ue_deg_to_urdf_rpy, ue_inertia_to_urdf,
     rotation_matrix_to_rpy,
-    quat_conjugate, quat_multiply, quat_rotate_vector,
+    quat_conjugate, quat_from_vectors, quat_multiply, quat_rotate_vector,
     quat_to_rotation_matrix, ue_quat_to_urdf_quat, ue_quat_to_urdf_rpy,
-    rpy_to_quat,
+    rpy_to_quat, snap_near_cardinal,
     fmt_vec3, fmt_float,
 )
 from urdf.t3d_physics_parser import (
@@ -130,6 +130,22 @@ class URDFExporter:
         # Build URDF
         robot = URDFRobot(name=robot_name)
 
+        # Separate tree joints from loop-closure joints FIRST so we can
+        # detect flipped bones before building link collision geometry.
+        tree_constraints, loop_constraints = self._build_tree(
+            pa_data.constraints, bone_to_link)
+
+        # Detect bones whose local X axis is misaligned with the direction
+        # to their child joint.  Some skeletons alternate bone orientations
+        # (180° Z flip) or have perpendicular axes, causing collision shapes
+        # to extend toward the parent or sideways.  We compute a correction
+        # quaternion that re-maps bone X to point toward the child.
+        collision_corrections = self._compute_collision_corrections(
+            tree_constraints, bone_world_transforms)
+        if collision_corrections:
+            self.log(f"Correcting {len(collision_corrections)} misaligned bone(s): "
+                     f"{', '.join(sorted(collision_corrections))}")
+
         # Build links from body setups
         for body in pa_data.body_setups:
             link_name = bone_to_link.get(body.bone_name, body.bone_name)
@@ -142,15 +158,12 @@ class URDFExporter:
                 bone_quat = None
                 if body.bone_name in bone_world_transforms:
                     bone_quat = bone_world_transforms[body.bone_name][1]
+                    if body.bone_name in collision_corrections:
+                        bone_quat = collision_corrections[body.bone_name]
                 link.collisions = self._body_to_collisions(
                     body, link_name, bone_world_quat=bone_quat)
 
             robot.links.append(link)
-
-        # Separate tree joints from loop-closure joints.
-        # URDF requires a strict tree: each link has at most one parent.
-        tree_constraints, loop_constraints = self._build_tree(
-            pa_data.constraints, bone_to_link)
 
         for ct in tree_constraints:
             joint = self._constraint_to_joint(
@@ -340,6 +353,72 @@ class URDFExporter:
             self.warn(f"Expected 1 root link, found {len(roots)}: {roots}")
 
         return tree, loops
+
+    def _compute_collision_corrections(
+        self,
+        tree_constraints: List[T3DConstraint],
+        bone_world_transforms: Dict[str, Tuple],
+    ) -> Dict[str, Tuple]:
+        """Compute corrected quaternions for bones whose X axis is misaligned.
+
+        Some skeletons use alternating bone orientations (180° Z-flip) or
+        have bone X perpendicular to the chain direction.  This causes T3D
+        collision centres (positive along bone X) to extend away from the
+        child joint.
+
+        For each misaligned bone, returns a corrected world quaternion where
+        bone X is rotated toward the child joint direction.
+
+        Returns {bone_name: corrected_quat_ue (w, x, y, z)}.
+        """
+        if not bone_world_transforms:
+            return {}
+
+        bone_children: Dict[str, List[str]] = {}
+        for ct in tree_constraints:
+            parent_bone = ct.constraint_bone2
+            child_bone = ct.constraint_bone1
+            bone_children.setdefault(parent_bone, []).append(child_bone)
+
+        corrections: Dict[str, Tuple] = {}
+        for bone_name, children in bone_children.items():
+            if bone_name not in bone_world_transforms:
+                continue
+            bone_pos, bone_quat = bone_world_transforms[bone_name]
+            bone_x = quat_rotate_vector(bone_quat, (1.0, 0.0, 0.0))
+
+            # Average direction from this bone to its children
+            avg_dir = [0.0, 0.0, 0.0]
+            n = 0
+            for child_name in children:
+                if child_name not in bone_world_transforms:
+                    continue
+                child_pos = bone_world_transforms[child_name][0]
+                avg_dir[0] += child_pos[0] - bone_pos[0]
+                avg_dir[1] += child_pos[1] - bone_pos[1]
+                avg_dir[2] += child_pos[2] - bone_pos[2]
+                n += 1
+            if n == 0:
+                continue
+
+            mag = math.sqrt(avg_dir[0]**2 + avg_dir[1]**2 + avg_dir[2]**2)
+            if mag < 1e-6:
+                continue
+            child_dir = (avg_dir[0] / mag, avg_dir[1] / mag, avg_dir[2] / mag)
+
+            dot = (bone_x[0] * child_dir[0]
+                   + bone_x[1] * child_dir[1]
+                   + bone_x[2] * child_dir[2])
+            if dot > 0.5:
+                # Bone X roughly points toward child — no correction needed
+                continue
+
+            # Compute world-frame correction that maps bone_x → child_dir
+            correction = quat_from_vectors(bone_x, child_dir)
+            corrected_quat = quat_multiply(correction, bone_quat)
+            corrections[bone_name] = corrected_quat
+
+        return corrections
 
     # ===================================================================
     # Conversion helpers
@@ -665,6 +744,11 @@ class URDFExporter:
             ax = (ax[0]/mag, ax[1]/mag, ax[2]/mag)
         else:
             ax = (0.0, 0.0, 1.0)
+
+        # Snap near-cardinal bone-local axes to clean up UE editor artifacts.
+        # Constraint frames are usually axis-aligned with the bone but can
+        # have small numerical offsets (~5°) from auto-frame computation.
+        ax = snap_near_cardinal(ax)
 
         # Rotate from bone-local to world frame (for world-aligned links)
         if child_bone_world_quat is not None:

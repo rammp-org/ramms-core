@@ -25,9 +25,9 @@ from urdf.urdf_utils import (
     urdf_pos_to_ue, ue_pos_to_urdf,
     urdf_axis_to_ue, urdf_inertia_to_ue, ue_inertia_to_urdf,
     classify_ue_constraint, rotation_matrix_to_rpy,
-    quat_conjugate, quat_multiply, quat_rotate_vector,
+    quat_conjugate, quat_from_vectors, quat_multiply, quat_rotate_vector,
     quat_to_rotation_matrix, ue_quat_to_urdf_quat, ue_quat_to_urdf_rpy,
-    rpy_to_quat,
+    rpy_to_quat, snap_near_cardinal,
 )
 from urdf.name_mapping import NameMapping
 
@@ -512,6 +512,100 @@ def test_bone_rotation_collision():
     assert abs(urdf_pos[0]) < 1e-8
     assert abs(urdf_pos[1] - (-0.1)) < 1e-8
     assert abs(urdf_pos[2]) < 1e-8
+
+
+def test_quat_from_vectors():
+    """quat_from_vectors should rotate one unit vector to another."""
+    s = math.sqrt(2) / 2
+
+    # Identity case (parallel)
+    q = quat_from_vectors((1, 0, 0), (1, 0, 0))
+    assert abs(q[0] - 1) < 1e-6 and abs(q[1]) < 1e-6
+
+    # 90° case: X → Z
+    q = quat_from_vectors((1, 0, 0), (0, 0, 1))
+    result = quat_rotate_vector(q, (1, 0, 0))
+    assert abs(result[0]) < 1e-6 and abs(result[2] - 1) < 1e-6
+
+    # 180° case: X → -X
+    q = quat_from_vectors((1, 0, 0), (-1, 0, 0))
+    result = quat_rotate_vector(q, (1, 0, 0))
+    assert abs(result[0] + 1) < 1e-6
+
+    # Perpendicular: (-1,0,0) → (0,0,1) (base_link case)
+    q = quat_from_vectors((-1, 0, 0), (0, 0, 1))
+    result = quat_rotate_vector(q, (-1, 0, 0))
+    assert abs(result[2] - 1) < 1e-6, f"Expected (0,0,1), got {result}"
+
+
+def test_collision_correction_flipped():
+    """180° flipped bone (link_2): collision should be redirected toward child."""
+    s = math.sqrt(2) / 2
+    bone_quat = (-s, 0, -s, 0)  # bone X → world -Z
+    bone_pos = (0.0, 1.175, 49.52)
+    child_pos = (0.0, 2.45, 70.56)
+    center = (12.84, 0, -0.86)
+
+    # Original world offset goes downward (wrong)
+    original = quat_rotate_vector(bone_quat, center)
+    assert original[2] < 0
+
+    # Compute correction via quat_from_vectors
+    bone_x = quat_rotate_vector(bone_quat, (1, 0, 0))
+    child_dir_raw = tuple(c - p for c, p in zip(child_pos, bone_pos))
+    mag = math.sqrt(sum(v**2 for v in child_dir_raw))
+    child_dir = tuple(v / mag for v in child_dir_raw)
+    correction = quat_from_vectors(bone_x, child_dir)
+    corrected_q = quat_multiply(correction, bone_quat)
+    corrected = quat_rotate_vector(corrected_q, center)
+
+    # Corrected goes upward, between bone and child
+    assert corrected[2] > 0
+    coll_z = bone_pos[2] + corrected[2]
+    assert bone_pos[2] < coll_z < child_pos[2], \
+        f"Z={coll_z:.1f} not in [{bone_pos[2]}, {child_pos[2]}]"
+
+
+def test_collision_correction_perpendicular():
+    """Perpendicular bone (base_link): collision redirected toward child."""
+    s = math.sqrt(2) / 2
+    bone_quat = (0, 0, s, -s)  # bone X → world (-1, 0, 0)
+    bone_pos = (0.0, 0.0, 0.0)
+    child_pos = (0.0, 0.0, 15.88)
+    center = (8.54, -0.008, -0.02)
+
+    # Original: goes sideways along -X (wrong)
+    original = quat_rotate_vector(bone_quat, center)
+    assert abs(original[0]) > 8  # large X offset
+
+    # Corrected: should go upward
+    bone_x = quat_rotate_vector(bone_quat, (1, 0, 0))
+    child_dir_raw = tuple(c - p for c, p in zip(child_pos, bone_pos))
+    mag = math.sqrt(sum(v**2 for v in child_dir_raw))
+    child_dir = tuple(v / mag for v in child_dir_raw)
+    correction = quat_from_vectors(bone_x, child_dir)
+    corrected_q = quat_multiply(correction, bone_quat)
+    corrected = quat_rotate_vector(corrected_q, center)
+
+    # Z should now be the dominant component
+    assert corrected[2] > 8, f"Expected Z>8, got {corrected[2]:.2f}"
+    assert abs(corrected[0]) < 1, f"Expected small X, got {corrected[0]:.2f}"
+
+
+def test_snap_near_cardinal():
+    """Near-cardinal axis snapping for constraint frame cleanup."""
+    # Close to (1, 0, 0) → should snap
+    assert snap_near_cardinal((0.998, 0.0, -0.063)) == (1.0, 0.0, 0.0)
+
+    # Close to (0, 0, -1) → should snap
+    assert snap_near_cardinal((0.01, 0.0, -0.9999)) == (0.0, 0.0, -1.0)
+
+    # Far enough from any cardinal → should NOT snap
+    result = snap_near_cardinal((0.9, 0.0, 0.436))
+    assert result == (0.9, 0.0, 0.436)
+
+    # Exact cardinal → identity
+    assert snap_near_cardinal((0.0, 1.0, 0.0)) == (0.0, 1.0, 0.0)
 
 
 # ===================================================================
