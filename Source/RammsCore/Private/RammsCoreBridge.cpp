@@ -123,7 +123,7 @@ TArray<FString> URammsCoreBridge::FindComponents(const FString& ActorPath, const
 	TArray<FString> Results;
 
 	UObject* Obj = StaticFindObject(AActor::StaticClass(), nullptr, *ActorPath);
-	AActor* Actor = Cast<AActor>(Obj);
+	AActor*	 Actor = Cast<AActor>(Obj);
 	if (!Actor)
 	{
 		// Try FindObject with ANY_PACKAGE
@@ -157,7 +157,7 @@ TArray<FString> URammsCoreBridge::FindComponents(const FString& ActorPath, const
 FString URammsCoreBridge::GetComponentPath(const FString& ActorPath, const FString& ComponentName)
 {
 	UObject* Obj = StaticFindObject(AActor::StaticClass(), nullptr, *ActorPath);
-	AActor* Actor = Cast<AActor>(Obj);
+	AActor*	 Actor = Cast<AActor>(Obj);
 	if (!Actor)
 	{
 		Actor = FindObject<AActor>(nullptr, *ActorPath);

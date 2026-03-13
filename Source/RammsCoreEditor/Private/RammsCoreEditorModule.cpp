@@ -225,7 +225,7 @@ private:
 		TArray<FKinematicJointConfig> NewJoints;
 		for (auto& Pair : PoseableMeshes)
 		{
-			const FName MeshName = Pair.Key;
+			const FName				MeshName = Pair.Key;
 			UPoseableMeshComponent* Mesh = Pair.Value;
 
 			if (!Mesh || !Mesh->GetSkinnedAsset())
@@ -263,25 +263,34 @@ private:
 
 					// Get constraint frame in bone-local space (Frame1 = child bone)
 					const FTransform RefFrame = CI.GetRefFrame(EConstraintFrame::Frame1);
-					const FQuat FrameQuat = RefFrame.GetRotation();
+					const FQuat		 FrameQuat = RefFrame.GetRotation();
 
 					// Constraint axis directions in bone-local space
-					const FVector TwistDir  = FrameQuat.GetAxisX(); // Twist = constraint X
+					const FVector TwistDir = FrameQuat.GetAxisX();	// Twist = constraint X
 					const FVector Swing1Dir = FrameQuat.GetAxisZ(); // Swing1 = constraint Z
 					const FVector Swing2Dir = FrameQuat.GetAxisY(); // Swing2 = constraint Y
 
 					// Helper to find nearest cardinal axis
 					auto FindClosestAxis = [](const FVector& Dir, bool& bNeg) -> EAxis::Type {
 						const float AX = FMath::Abs(Dir.X), AY = FMath::Abs(Dir.Y), AZ = FMath::Abs(Dir.Z);
-						if (AX >= AY && AX >= AZ) { bNeg = Dir.X < 0.f; return EAxis::X; }
-						if (AY >= AZ)             { bNeg = Dir.Y < 0.f; return EAxis::Y; }
-						                            bNeg = Dir.Z < 0.f; return EAxis::Z;
+						if (AX >= AY && AX >= AZ)
+						{
+							bNeg = Dir.X < 0.f;
+							return EAxis::X;
+						}
+						if (AY >= AZ)
+						{
+							bNeg = Dir.Y < 0.f;
+							return EAxis::Y;
+						}
+						bNeg = Dir.Z < 0.f;
+						return EAxis::Z;
 					};
 
 					// Log constraint details
 					auto MotionStr = [](EAngularConstraintMotion M) -> const TCHAR* {
-						return M == EAngularConstraintMotion::ACM_Free ? TEXT("Free") :
-							   M == EAngularConstraintMotion::ACM_Limited ? TEXT("Limited") : TEXT("Locked");
+						return M == EAngularConstraintMotion::ACM_Free ? TEXT("Free") : M == EAngularConstraintMotion::ACM_Limited ? TEXT("Limited")
+																																   : TEXT("Locked");
 					};
 
 					// ── Angular (Revolute) ──────────────────────────────
@@ -292,11 +301,11 @@ private:
 						return M == EAngularConstraintMotion::ACM_Limited;
 					};
 
-					const EAngularConstraintMotion TwistMotion  = CI.GetAngularTwistMotion();
+					const EAngularConstraintMotion TwistMotion = CI.GetAngularTwistMotion();
 					const EAngularConstraintMotion Swing1Motion = CI.GetAngularSwing1Motion();
 					const EAngularConstraintMotion Swing2Motion = CI.GetAngularSwing2Motion();
 
-					const bool bTwist  = IsActive(TwistMotion);
+					const bool bTwist = IsActive(TwistMotion);
 					const bool bSwing1 = IsActive(Swing1Motion);
 					const bool bSwing2 = IsActive(Swing2Motion);
 
@@ -312,11 +321,20 @@ private:
 					if (bTwist || bSwing1 || bSwing2)
 					{
 						// Build candidates
-						struct AngCandidate { EAngularConstraintMotion Motion; FVector Dir; float Limit; const TCHAR* Name; };
+						struct AngCandidate
+						{
+							EAngularConstraintMotion Motion;
+							FVector					 Dir;
+							float					 Limit;
+							const TCHAR*			 Name;
+						};
 						TArray<AngCandidate, TInlineAllocator<3>> Cands;
-						if (bTwist)  Cands.Add({ TwistMotion,  TwistDir,  CI.GetAngularTwistLimit(),  TEXT("Twist") });
-						if (bSwing1) Cands.Add({ Swing1Motion, Swing1Dir, CI.GetAngularSwing1Limit(), TEXT("Swing1") });
-						if (bSwing2) Cands.Add({ Swing2Motion, Swing2Dir, CI.GetAngularSwing2Limit(), TEXT("Swing2") });
+						if (bTwist)
+							Cands.Add({ TwistMotion, TwistDir, CI.GetAngularTwistLimit(), TEXT("Twist") });
+						if (bSwing1)
+							Cands.Add({ Swing1Motion, Swing1Dir, CI.GetAngularSwing1Limit(), TEXT("Swing1") });
+						if (bSwing2)
+							Cands.Add({ Swing2Motion, Swing2Dir, CI.GetAngularSwing2Limit(), TEXT("Swing2") });
 
 						// Prefer Limited over Free
 						int32 Best = 0;
@@ -344,7 +362,9 @@ private:
 						}
 						else
 						{
-							Joint.MinValue = -180.f; Joint.MaxValue = 180.f; Joint.bEnforceLimits = false;
+							Joint.MinValue = -180.f;
+							Joint.MaxValue = 180.f;
+							Joint.bEnforceLimits = false;
 						}
 
 						const TCHAR* AxisStr = Joint.Axis == EAxis::X ? TEXT("X") : (Joint.Axis == EAxis::Y ? TEXT("Y") : TEXT("Z"));
@@ -364,11 +384,18 @@ private:
 						return M == ELinearConstraintMotion::LCM_Limited;
 					};
 
-					struct LinCandidate { ELinearConstraintMotion Motion; FVector Dir; };
+					struct LinCandidate
+					{
+						ELinearConstraintMotion Motion;
+						FVector					Dir;
+					};
 					TArray<LinCandidate, TInlineAllocator<3>> LinCands;
-					if (IsLinActive(CI.GetLinearXMotion())) LinCands.Add({ CI.GetLinearXMotion(), FrameQuat.GetAxisX() });
-					if (IsLinActive(CI.GetLinearYMotion())) LinCands.Add({ CI.GetLinearYMotion(), FrameQuat.GetAxisY() });
-					if (IsLinActive(CI.GetLinearZMotion())) LinCands.Add({ CI.GetLinearZMotion(), FrameQuat.GetAxisZ() });
+					if (IsLinActive(CI.GetLinearXMotion()))
+						LinCands.Add({ CI.GetLinearXMotion(), FrameQuat.GetAxisX() });
+					if (IsLinActive(CI.GetLinearYMotion()))
+						LinCands.Add({ CI.GetLinearYMotion(), FrameQuat.GetAxisY() });
+					if (IsLinActive(CI.GetLinearZMotion()))
+						LinCands.Add({ CI.GetLinearZMotion(), FrameQuat.GetAxisZ() });
 
 					if (LinCands.Num() > 0)
 					{
@@ -392,11 +419,15 @@ private:
 						const float LinearLimit = CI.GetLinearLimit();
 						if (LinearLimit > 0.0f)
 						{
-							Joint.MinValue = -LinearLimit; Joint.MaxValue = LinearLimit; Joint.bEnforceLimits = true;
+							Joint.MinValue = -LinearLimit;
+							Joint.MaxValue = LinearLimit;
+							Joint.bEnforceLimits = true;
 						}
 						else
 						{
-							Joint.MinValue = -100.f; Joint.MaxValue = 100.f; Joint.bEnforceLimits = false;
+							Joint.MinValue = -100.f;
+							Joint.MaxValue = 100.f;
+							Joint.bEnforceLimits = false;
 						}
 
 						NewJoints.Add(Joint);
@@ -412,7 +443,7 @@ private:
 			{
 				// Fallback: one revolute joint per non-root bone
 				const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
-				const int32 NumBones = RefSkeleton.GetNum();
+				const int32				  NumBones = RefSkeleton.GetNum();
 
 				for (int32 i = 1; i < NumBones; ++i)
 				{

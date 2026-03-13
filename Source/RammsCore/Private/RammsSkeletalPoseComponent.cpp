@@ -44,16 +44,16 @@ namespace
 	{
 		// Get constraint frame orientation in bone-local space (Frame1 = child bone we pose)
 		const FTransform RefFrame = CI.GetRefFrame(EConstraintFrame::Frame1);
-		const FQuat FrameQuat = RefFrame.GetRotation();
+		const FQuat		 FrameQuat = RefFrame.GetRotation();
 
 		// Constraint axis directions in bone-local space:
 		// Twist = constraint X, Swing1 = constraint Z, Swing2 = constraint Y
-		const FVector TwistDir  = FrameQuat.GetAxisX();
+		const FVector TwistDir = FrameQuat.GetAxisX();
 		const FVector Swing1Dir = FrameQuat.GetAxisZ();
 		const FVector Swing2Dir = FrameQuat.GetAxisY();
 
 		// ── Angular (Revolute) ──────────────────────────────────────
-		const EAngularConstraintMotion TwistMotion  = CI.GetAngularTwistMotion();
+		const EAngularConstraintMotion TwistMotion = CI.GetAngularTwistMotion();
 		const EAngularConstraintMotion Swing1Motion = CI.GetAngularSwing1Motion();
 		const EAngularConstraintMotion Swing2Motion = CI.GetAngularSwing2Motion();
 
@@ -64,7 +64,7 @@ namespace
 			return M == EAngularConstraintMotion::ACM_Limited;
 		};
 
-		const bool bTwistActive  = IsActive(TwistMotion);
+		const bool bTwistActive = IsActive(TwistMotion);
 		const bool bSwing1Active = IsActive(Swing1Motion);
 		const bool bSwing2Active = IsActive(Swing2Motion);
 
@@ -76,8 +76,8 @@ namespace
 			struct AngularCandidate
 			{
 				EAngularConstraintMotion Motion;
-				FVector Direction;
-				float Limit;
+				FVector					 Direction;
+				float					 Limit;
 			};
 
 			TArray<AngularCandidate, TInlineAllocator<3>> Candidates;
@@ -142,7 +142,7 @@ namespace
 		struct LinearCandidate
 		{
 			ELinearConstraintMotion Motion;
-			FVector Direction;
+			FVector					Direction;
 		};
 
 		TArray<LinearCandidate, TInlineAllocator<3>> LinCandidates;
@@ -284,9 +284,9 @@ void URammsSkeletalPoseComponent::BeginPlay()
 			for (int32 i = 0; i < Joints.Num(); ++i)
 			{
 				const FKinematicJointConfig& J = Joints[i];
-				const TCHAR* TypeStr = J.JointType == EKinematicJointType::Revolute ? TEXT("Revolute") : TEXT("Prismatic");
-				const TCHAR* AxisStr = J.Axis == EAxis::X ? TEXT("X") : (J.Axis == EAxis::Y ? TEXT("Y") : TEXT("Z"));
-				UPoseableMeshComponent* Mesh = ResolveMeshForJoint(J);
+				const TCHAR*				 TypeStr = J.JointType == EKinematicJointType::Revolute ? TEXT("Revolute") : TEXT("Prismatic");
+				const TCHAR*				 AxisStr = J.Axis == EAxis::X ? TEXT("X") : (J.Axis == EAxis::Y ? TEXT("Y") : TEXT("Z"));
+				UPoseableMeshComponent*		 Mesh = ResolveMeshForJoint(J);
 				UE_LOG(LogTemp, Log, TEXT("  Joint[%d] '%s': Bone='%s' Mesh='%s' Type=%s Axis=%s Invert=%d Limits=[%.1f, %.1f] Resolved=%s"),
 					i, *J.GetEffectiveName().ToString(),
 					*J.BoneName.ToString(), *J.MeshComponentName.ToString(),
@@ -302,7 +302,7 @@ void URammsSkeletalPoseComponent::BeginPlay()
 			if (!Joint.MeshComponentName.IsNone() && !PoseableMeshes.Contains(Joint.MeshComponentName))
 			{
 				UE_LOG(LogTemp, Warning, TEXT("RammsSkeletalPoseComponent on %s: Joint '%s' references mesh '%s' "
-					"which was not found. Will fall back to default mesh '%s'."),
+											  "which was not found. Will fall back to default mesh '%s'."),
 					*Owner->GetName(), *Joint.GetEffectiveName().ToString(),
 					*Joint.MeshComponentName.ToString(), *DefaultMeshName.ToString());
 				break; // only warn once
@@ -520,7 +520,7 @@ void URammsSkeletalPoseComponent::AutoPopulateFromSkeleton()
 
 	for (auto& Pair : PoseableMeshes)
 	{
-		const FName MeshName = Pair.Key;
+		const FName				MeshName = Pair.Key;
 		UPoseableMeshComponent* Mesh = Pair.Value;
 
 		if (!Mesh || !Mesh->GetSkinnedAsset())
@@ -580,7 +580,7 @@ void URammsSkeletalPoseComponent::AutoPopulateFromSkeleton()
 		{
 			// Fallback: create one revolute joint per non-root bone
 			const FReferenceSkeleton& RefSkeleton = SkelMesh->GetRefSkeleton();
-			const int32 NumBones = RefSkeleton.GetNum();
+			const int32				  NumBones = RefSkeleton.GetNum();
 
 			for (int32 i = 1; i < NumBones; ++i)
 			{
@@ -730,23 +730,24 @@ void URammsSkeletalPoseComponent::ApplyJointToBone(const FKinematicJointConfig& 
 	{
 		// Read the bind pose rotation (just restored by Reset above)
 		const FQuat BindQuat = Mesh->GetBoneRotationByName(
-			Joint.BoneName, EBoneSpaces::ComponentSpace).Quaternion();
+									   Joint.BoneName, EBoneSpaces::ComponentSpace)
+								   .Quaternion();
 
 		// Build the delta rotation around the specified axis in bone-local frame
 		FRotator DeltaRotation = FRotator::ZeroRotator;
 		switch (Joint.Axis)
 		{
-		case EAxis::X:
-			DeltaRotation.Roll = FinalValue;
-			break;
-		case EAxis::Y:
-			DeltaRotation.Pitch = FinalValue;
-			break;
-		case EAxis::Z:
-			DeltaRotation.Yaw = FinalValue;
-			break;
-		default:
-			break;
+			case EAxis::X:
+				DeltaRotation.Roll = FinalValue;
+				break;
+			case EAxis::Y:
+				DeltaRotation.Pitch = FinalValue;
+				break;
+			case EAxis::Z:
+				DeltaRotation.Yaw = FinalValue;
+				break;
+			default:
+				break;
 		}
 
 		// Compose: bind pose * delta → applies delta in the bone's local frame
@@ -760,23 +761,24 @@ void URammsSkeletalPoseComponent::ApplyJointToBone(const FKinematicJointConfig& 
 		const FVector BindLocation = Mesh->GetBoneLocationByName(
 			Joint.BoneName, EBoneSpaces::ComponentSpace);
 		const FQuat BindQuat = Mesh->GetBoneRotationByName(
-			Joint.BoneName, EBoneSpaces::ComponentSpace).Quaternion();
+									   Joint.BoneName, EBoneSpaces::ComponentSpace)
+								   .Quaternion();
 
 		// Build delta in bone-local frame
 		FVector LocalDelta = FVector::ZeroVector;
 		switch (Joint.Axis)
 		{
-		case EAxis::X:
-			LocalDelta.X = FinalValue;
-			break;
-		case EAxis::Y:
-			LocalDelta.Y = FinalValue;
-			break;
-		case EAxis::Z:
-			LocalDelta.Z = FinalValue;
-			break;
-		default:
-			break;
+			case EAxis::X:
+				LocalDelta.X = FinalValue;
+				break;
+			case EAxis::Y:
+				LocalDelta.Y = FinalValue;
+				break;
+			case EAxis::Z:
+				LocalDelta.Z = FinalValue;
+				break;
+			default:
+				break;
 		}
 
 		// Rotate delta into component space, then add to bind location
