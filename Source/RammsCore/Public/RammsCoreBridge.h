@@ -6,6 +6,8 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "RammsCoreBridge.generated.h"
 
+class URammsSkeletalPoseComponent;
+
 /**
  * Static function library for Remote Control API integration (core/non-UI).
  *
@@ -68,6 +70,29 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
 	static FString GetComponentPath(const FString& ActorPath, const FString& ComponentName);
+
+	// ── Skeletal Pose Helpers ─────────────────────────────────────
+
+	/**
+	 * Find actors that have a URammsSkeletalPoseComponent.
+	 * Returns "ActorPath|ComponentName" for each match.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
+	static TArray<FString> FindSkeletalPoseActors();
+
+	/**
+	 * Set joint targets on the first URammsSkeletalPoseComponent found on the
+	 * specified actor.  Returns false if actor or component not found.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
+	static bool SetSkeletalPoseJointTargets(const FString& ActorPath, const TArray<float>& JointValues);
+
+	/**
+	 * Get current joint values from the first URammsSkeletalPoseComponent
+	 * on the specified actor.  Returns empty array if not found.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
+	static TArray<float> GetSkeletalPoseJointValues(const FString& ActorPath);
 
 	// ── World Utility ─────────────────────────────────────────────
 

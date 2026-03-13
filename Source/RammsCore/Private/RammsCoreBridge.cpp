@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsCoreBridge.h"
+#include "RammsSkeletalPoseComponent.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "EngineUtils.h"
@@ -122,7 +123,7 @@ TArray<FString> URammsCoreBridge::FindComponents(const FString& ActorPath, const
 	TArray<FString> Results;
 
 	UObject* Obj = StaticFindObject(AActor::StaticClass(), nullptr, *ActorPath);
-	AActor* Actor = Cast<AActor>(Obj);
+	AActor*	 Actor = Cast<AActor>(Obj);
 	if (!Actor)
 	{
 		// Try FindObject with ANY_PACKAGE
@@ -156,7 +157,7 @@ TArray<FString> URammsCoreBridge::FindComponents(const FString& ActorPath, const
 FString URammsCoreBridge::GetComponentPath(const FString& ActorPath, const FString& ComponentName)
 {
 	UObject* Obj = StaticFindObject(AActor::StaticClass(), nullptr, *ActorPath);
-	AActor* Actor = Cast<AActor>(Obj);
+	AActor*	 Actor = Cast<AActor>(Obj);
 	if (!Actor)
 	{
 		Actor = FindObject<AActor>(nullptr, *ActorPath);
@@ -176,4 +177,67 @@ FString URammsCoreBridge::GetComponentPath(const FString& ActorPath, const FStri
 	}
 
 	return FString();
+}
+
+// ── Skeletal Pose Helpers ──────────────────────────────────────────
+
+static AActor* FindActorByPath(const FString& ActorPath)
+{
+	AActor* Actor = Cast<AActor>(StaticFindObject(AActor::StaticClass(), nullptr, *ActorPath));
+	if (!Actor)
+	{
+		Actor = FindObject<AActor>(nullptr, *ActorPath);
+	}
+	return Actor;
+}
+
+TArray<FString> URammsCoreBridge::FindSkeletalPoseActors()
+{
+	TArray<FString> Results;
+
+	UWorld* World = GetPlayWorld();
+	if (!World)
+		return Results;
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!IsValid(Actor))
+			continue;
+
+		URammsSkeletalPoseComponent* PoseComp = Actor->FindComponentByClass<URammsSkeletalPoseComponent>();
+		if (PoseComp)
+		{
+			Results.Add(FString::Printf(TEXT("%s|%s"), *Actor->GetPathName(), *PoseComp->GetName()));
+		}
+	}
+
+	return Results;
+}
+
+bool URammsCoreBridge::SetSkeletalPoseJointTargets(const FString& ActorPath, const TArray<float>& JointValues)
+{
+	AActor* Actor = FindActorByPath(ActorPath);
+	if (!Actor)
+		return false;
+
+	URammsSkeletalPoseComponent* PoseComp = Actor->FindComponentByClass<URammsSkeletalPoseComponent>();
+	if (!PoseComp)
+		return false;
+
+	PoseComp->SetAllJointTargets(JointValues);
+	return true;
+}
+
+TArray<float> URammsCoreBridge::GetSkeletalPoseJointValues(const FString& ActorPath)
+{
+	AActor* Actor = FindActorByPath(ActorPath);
+	if (!Actor)
+		return TArray<float>();
+
+	URammsSkeletalPoseComponent* PoseComp = Actor->FindComponentByClass<URammsSkeletalPoseComponent>();
+	if (!PoseComp)
+		return TArray<float>();
+
+	return PoseComp->GetAllJointValues();
 }
