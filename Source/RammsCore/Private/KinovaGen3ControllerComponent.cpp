@@ -1679,21 +1679,22 @@ void UKinovaGen3ControllerComponent::SetJointTarget(int32 JointIndex, float Targ
 	}
 }
 
-void UKinovaGen3ControllerComponent::SetAllJointTargets(const TArray<float>& TargetAngles)
+void UKinovaGen3ControllerComponent::SetAllJointTargets(const TArray<double>& TargetAngles)
 {
 	int32 NumToSet = FMath::Min(TargetAngles.Num(), Joints.Num());
 
+	if (TargetAngles.Num() != Joints.Num())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SetAllJointTargets: received %d values but have %d joints"),
+			TargetAngles.Num(), Joints.Num());
+	}
+
 	for (int32 i = 0; i < NumToSet; ++i)
 	{
-		Joints[i].TargetAngle = TargetAngles[i];
+		Joints[i].TargetAngle = static_cast<float>(TargetAngles[i]);
 	}
 
 	bJointTargetsReached = false;
-
-	if (bEnableDebugLogging)
-	{
-		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set %d joint targets"), NumToSet);
-	}
 }
 
 bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseIndex(URammsJointPoseAsset* PoseAsset, int32 PoseIndex)
@@ -1712,7 +1713,13 @@ bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseIndex(URammsJointPos
 		return false;
 	}
 
-	SetAllJointTargets(Angles);
+	TArray<double> AnglesD;
+	AnglesD.Reserve(Angles.Num());
+	for (float A : Angles)
+	{
+		AnglesD.Add(static_cast<double>(A));
+	}
+	SetAllJointTargets(AnglesD);
 	return true;
 }
 
@@ -1731,7 +1738,13 @@ bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseName(URammsJointPose
 		return false;
 	}
 
-	SetAllJointTargets(Angles);
+	TArray<double> AnglesD;
+	AnglesD.Reserve(Angles.Num());
+	for (float A : Angles)
+	{
+		AnglesD.Add(static_cast<double>(A));
+	}
+	SetAllJointTargets(AnglesD);
 	return true;
 }
 
