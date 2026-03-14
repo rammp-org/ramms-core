@@ -222,8 +222,7 @@ class URDFImporter:
             try:
                 skeleton = skel_mesh.get_editor_property("skeleton")
                 if skeleton:
-                    ref_skeleton = skeleton.get_editor_property("reference_skeleton")
-                    # Use the mesh directly
+                    # Use the mesh directly to enumerate bones
                     num_bones = unreal.SkeletalMeshLibrary.get_num_bones(skel_mesh)
                     for i in range(num_bones):
                         name = unreal.SkeletalMeshLibrary.get_bone_name(skel_mesh, i)
@@ -287,7 +286,6 @@ class URDFImporter:
                     # Different UE versions expose mass differently
                     self.log(f"  Mass override for '{bone_name}': trying alternative method")
                     try:
-                        phys_type = body.get_editor_property("phys_material")
                         body.set_editor_property("mass_in_kg", link.inertial.mass)
                         stats["masses"] += 1
                     except Exception:

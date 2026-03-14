@@ -287,6 +287,12 @@ def classify_ue_constraint(twist_motion: str, swing1_motion: str, swing2_motion:
 
     Returns (urdf_joint_type, active_axes) where active_axes lists the
     non-locked DOF names (e.g. ["swing1"], ["twist", "swing2"]).
+
+    When multiple angular or linear DOFs are unlocked, the constraint
+    is mapped to a single-axis URDF type (revolute/prismatic) using
+    the first active axis.  The full list of active axes is still
+    returned so callers can detect multi-DOF constraints.  Constraints
+    with 6 DOFs return "floating".
     """
     angular_limited = []
     angular_free = []
@@ -327,13 +333,14 @@ def classify_ue_constraint(twist_motion: str, swing1_motion: str, swing2_motion:
     if len(all_linear) == 1 and not all_angular:
         return ("prismatic", all_linear)
 
-    # Multiple angular DOFs only
+    # Multiple angular DOFs only — URDF revolute/continuous is single-axis,
+    # so we pick the first (most constrained) axis and document the DOF loss.
     if all_angular and not all_linear:
         if angular_limited:
             return ("revolute", all_angular)
         return ("continuous", all_angular)
 
-    # Multiple linear DOFs only
+    # Multiple linear DOFs only — pick first axis
     if all_linear and not all_angular:
         return ("prismatic", all_linear)
 

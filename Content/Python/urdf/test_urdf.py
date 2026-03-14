@@ -658,6 +658,58 @@ def test_snap_near_cardinal():
     assert snap_near_cardinal((0.0, 1.0, 0.0)) == (0.0, 1.0, 0.0)
 
 
+def test_build_tree_cycle_detection():
+    """_build_tree should detect real graph cycles (A→B→C→A), not just duplicate children."""
+    from urdf.t3d_physics_parser import T3DConstraint
+
+    # Build three constraints forming a cycle: A→B, B→C, C→A
+    ct_ab = T3DConstraint(name="ct_ab", constraint_bone1="B", constraint_bone2="A")
+    ct_bc = T3DConstraint(name="ct_bc", constraint_bone1="C", constraint_bone2="B")
+    ct_ca = T3DConstraint(name="ct_ca", constraint_bone1="A", constraint_bone2="C")
+
+    # Minimal mock of unreal to allow importing the exporter
+    import types
+    mock_unreal = types.ModuleType("unreal")
+    sys.modules["unreal"] = mock_unreal
+    try:
+        from urdf.urdf_exporter import URDFExporter
+        exporter = URDFExporter(verbose=False)
+        identity_map = {"A": "A", "B": "B", "C": "C"}
+        tree, loops = exporter._build_tree([ct_ab, ct_bc, ct_ca], identity_map)
+    finally:
+        del sys.modules["unreal"]
+
+    # Two edges should be tree, one should be detected as loop-closure
+    assert len(tree) == 2, f"Expected 2 tree edges, got {len(tree)}"
+    assert len(loops) == 1, f"Expected 1 loop edge, got {len(loops)}"
+
+
+def test_estimate_inertia_box():
+    """Inertia estimation for a box collision shape."""
+    from urdf.t3d_physics_parser import T3DBodySetup, T3DBoxElem, T3DVector
+
+    box = T3DBoxElem(center=T3DVector(), x=20.0, y=10.0, z=5.0)
+    body = T3DBodySetup(bone_name="test", boxes=[box], mass=2.0)
+
+    import types
+    mock_unreal = types.ModuleType("unreal")
+    sys.modules["unreal"] = mock_unreal
+    try:
+        from urdf.urdf_exporter import URDFExporter
+        exporter = URDFExporter(verbose=False)
+        inertia = exporter._estimate_inertia(body)
+    finally:
+        del sys.modules["unreal"]
+
+    # x=20cm→0.2m, y=10cm→0.1m, z=5cm→0.05m, m=2
+    assert abs(inertia.ixx - 2.0/12.0 * (0.1**2 + 0.05**2)) < 1e-9
+    assert abs(inertia.iyy - 2.0/12.0 * (0.2**2 + 0.05**2)) < 1e-9
+    assert abs(inertia.izz - 2.0/12.0 * (0.2**2 + 0.1**2)) < 1e-9
+    assert inertia.ixy == 0.0
+    assert inertia.ixz == 0.0
+    assert inertia.iyz == 0.0
+
+
 # ===================================================================
 # Main
 # ===================================================================

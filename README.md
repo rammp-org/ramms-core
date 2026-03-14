@@ -458,11 +458,13 @@ This helps ensure that consistent code formatting is applied.
 ### Running Tests
 
  The test suite can be run outside of Unreal Engine (no `unreal` module
- required):
+ required).  [pytest](https://docs.pytest.org/) is needed (`pip install pytest`):
 
  ```console
  cd Plugins/RammsCore/Content/Python
  python -m pytest urdf/test_urdf.py -v
+ # or without pytest:
+ python urdf/test_urdf.py
  ```
 
  ---

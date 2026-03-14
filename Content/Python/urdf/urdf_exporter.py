@@ -156,7 +156,8 @@ class URDFExporter:
             link = URDFLink(name=link_name)
 
             if include_inertia and body.mass > 0:
-                link.inertial = URDFInertial(mass=body.mass)
+                inertia = self._estimate_inertia(body)
+                link.inertial = URDFInertial(mass=body.mass, inertia=inertia)
 
             if include_collision:
                 bone_quat = None
@@ -330,22 +331,50 @@ class URDFExporter:
         joint.  Physics assets often include "UserConstraint" entries that
         form closed kinematic loops (e.g. 4-bar linkages).
 
+        Uses DFS-based cycle detection: an edge is a loop-closure if the
+        child already has a parent (duplicate child) OR if adding it would
+        create a cycle (ancestor check).  After tree construction, a BFS
+        from the root verifies full connectivity and warns about any
+        disconnected subtrees.
+
         Returns (tree_constraints, loop_constraints).
         """
+        # Pass 1: assign each child at most one parent, detect duplicates
         assigned_children: Dict[str, T3DConstraint] = {}
+        children_of: Dict[str, List[str]] = {}
         tree: List[T3DConstraint] = []
         loops: List[T3DConstraint] = []
 
         for ct in constraints:
             child = bone_to_link.get(ct.constraint_bone1, ct.constraint_bone1)
+            parent = bone_to_link.get(ct.constraint_bone2, ct.constraint_bone2)
             if child in assigned_children:
+                loops.append(ct)
+                continue
+
+            # Check if adding parent→child would create a cycle
+            # (walk from parent toward root; if we hit child, it's a cycle)
+            is_cycle = False
+            node = parent
+            visited = set()
+            while node in assigned_children and node not in visited:
+                visited.add(node)
+                ancestor_ct = assigned_children[node]
+                node = bone_to_link.get(
+                    ancestor_ct.constraint_bone2,
+                    ancestor_ct.constraint_bone2)
+                if node == child:
+                    is_cycle = True
+                    break
+
+            if is_cycle:
                 loops.append(ct)
             else:
                 assigned_children[child] = ct
+                children_of.setdefault(parent, []).append(child)
                 tree.append(ct)
 
-        # Verify the tree is connected by BFS from root.
-        # The root is any link that never appears as a child.
+        # Pass 2: BFS from root to verify connectivity
         link_names = set()
         for ct in tree:
             link_names.add(bone_to_link.get(ct.constraint_bone1, ct.constraint_bone1))
@@ -355,6 +384,20 @@ class URDFExporter:
         roots = link_names - child_set
         if len(roots) != 1:
             self.warn(f"Expected 1 root link, found {len(roots)}: {roots}")
+
+        if roots:
+            visited = set()
+            queue = list(roots)
+            while queue:
+                node = queue.pop(0)
+                if node in visited:
+                    continue
+                visited.add(node)
+                queue.extend(children_of.get(node, []))
+            unreachable = link_names - visited
+            if unreachable:
+                self.warn(f"Disconnected links (not reachable from root): "
+                          f"{unreachable}")
 
         return tree, loops
 
@@ -479,6 +522,69 @@ class URDFExporter:
     # ===================================================================
     # Conversion helpers
     # ===================================================================
+
+    def _estimate_inertia(self, body: T3DBodySetup) -> URDFInertia:
+        """Estimate an approximate inertia tensor from collision geometry.
+
+        Uses standard solid-body formulas (uniform density) for the first
+        collision shape found:
+        - Box:      Ixx = m/12*(y²+z²), Iyy = m/12*(x²+z²), Izz = m/12*(x²+y²)
+        - Sphere:   Ixx = Iyy = Izz = 2/5*m*r²
+        - Cylinder:  Ixx = Iyy = m/12*(3r²+h²), Izz = m/2*r²
+
+        Dimensions are converted from cm to metres.  Off-diagonal terms are
+        zero (shape assumed aligned with body-local axes).
+        """
+        m = body.mass
+        if m <= 0:
+            return URDFInertia()
+
+        # Try boxes first
+        if body.boxes:
+            b = body.boxes[0]
+            x, y, z = cm_to_m(b.x), cm_to_m(b.y), cm_to_m(b.z)
+            return URDFInertia(
+                ixx=m / 12.0 * (y*y + z*z),
+                iyy=m / 12.0 * (x*x + z*z),
+                izz=m / 12.0 * (x*x + y*y))
+
+        # Spheres
+        if body.spheres:
+            r = cm_to_m(body.spheres[0].radius)
+            val = 0.4 * m * r * r
+            return URDFInertia(ixx=val, iyy=val, izz=val)
+
+        # Capsules (approximate as solid cylinder)
+        if body.capsules:
+            cap = body.capsules[0]
+            r, h = cm_to_m(cap.radius), cm_to_m(cap.length)
+            izz = 0.5 * m * r * r
+            ixx = m / 12.0 * (3.0 * r * r + h * h)
+            return URDFInertia(ixx=ixx, iyy=ixx, izz=izz)
+
+        # Convex hulls: use bounding-box approximation
+        if body.convex_elems:
+            c = body.convex_elems[0]
+            if c.vertices:
+                xs = [v.x for v in c.vertices]
+                ys = [v.y for v in c.vertices]
+                zs = [v.z for v in c.vertices]
+                x = cm_to_m(max(xs) - min(xs))
+                y = cm_to_m(max(ys) - min(ys))
+                z = cm_to_m(max(zs) - min(zs))
+            else:
+                x = cm_to_m(c.elem_box_max.x - c.elem_box_min.x)
+                y = cm_to_m(c.elem_box_max.y - c.elem_box_min.y)
+                z = cm_to_m(c.elem_box_max.z - c.elem_box_min.z)
+            if x > 0 and y > 0 and z > 0:
+                return URDFInertia(
+                    ixx=m / 12.0 * (y*y + z*z),
+                    iyy=m / 12.0 * (x*x + z*z),
+                    izz=m / 12.0 * (x*x + y*y))
+
+        # No geometry — return small non-zero inertia to avoid consumer errors
+        default_val = m * 1e-4
+        return URDFInertia(ixx=default_val, iyy=default_val, izz=default_val)
 
     def _apply_bone_rotation_to_collision(self, center_ue, shape_rpy, bone_quat_ue):
         """Rotate a collision shape's center and RPY into world frame.
