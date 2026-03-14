@@ -616,6 +616,32 @@ def test_collision_correction_perpendicular():
     assert abs(corrected[0]) < 1, f"Expected small X, got {corrected[0]:.2f}"
 
 
+def test_collision_correction_leaf_bone():
+    """Leaf bone (link_6): collision corrected via parent→self direction."""
+    # link_6 has identity bone quat but should extend upward along Z
+    bone_quat = (1.0, 0.0, 0.0, 0.0)  # identity
+    bone_pos = (0.0, 2.49, 112.83)
+    parent_pos = (0.0, 2.47, 101.99)   # link_5
+    center = (2.97, -1.87, 0.01)       # bone-local collision center
+
+    # Without correction: center extends along X (horizontal), wrong
+    original = quat_rotate_vector(bone_quat, center)
+    assert abs(original[0]) > 2.5  # large X offset
+
+    # With leaf bone correction: direction from parent to self
+    bone_x = quat_rotate_vector(bone_quat, (1.0, 0.0, 0.0))
+    direction = tuple(b - p for b, p in zip(bone_pos, parent_pos))
+    mag = math.sqrt(sum(v**2 for v in direction))
+    target_dir = tuple(v / mag for v in direction)
+    correction = quat_from_vectors(bone_x, target_dir)
+    corrected_q = quat_multiply(correction, bone_quat)
+    corrected = quat_rotate_vector(corrected_q, center)
+
+    # After correction, Z should be dominant (collision extends upward)
+    assert corrected[2] > 2.5, f"Expected Z>2.5, got {corrected[2]:.2f}"
+    assert abs(corrected[0]) < 1, f"Expected small X, got {corrected[0]:.2f}"
+
+
 def test_snap_near_cardinal():
     """Near-cardinal axis snapping for constraint frame cleanup."""
     # Close to (1, 0, 0) → should snap

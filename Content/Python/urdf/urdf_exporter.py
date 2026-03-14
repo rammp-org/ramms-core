@@ -371,7 +371,9 @@ class URDFExporter:
         child joint.
 
         For each misaligned bone, returns a corrected world quaternion where
-        bone X is rotated toward the child joint direction.
+        bone X is rotated toward the child joint direction.  Leaf bones
+        (no children in the tree) are corrected using the parent→self
+        direction so their collisions extend along the incoming chain.
 
         Returns {bone_name: corrected_quat_ue (w, x, y, z)}.
         """
@@ -379,19 +381,24 @@ class URDFExporter:
             return {}
 
         bone_children: Dict[str, List[str]] = {}
+        bone_parent: Dict[str, str] = {}
+        bone_constraint: Dict[str, T3DConstraint] = {}
         for ct in tree_constraints:
             parent_bone = ct.constraint_bone2
             child_bone = ct.constraint_bone1
             bone_children.setdefault(parent_bone, []).append(child_bone)
+            bone_parent[child_bone] = parent_bone
+            bone_constraint[child_bone] = ct
 
         corrections: Dict[str, Tuple] = {}
+
+        # --- Non-leaf bones: correct toward average child direction ---
         for bone_name, children in bone_children.items():
             if bone_name not in bone_world_transforms:
                 continue
             bone_pos, bone_quat = bone_world_transforms[bone_name]
             bone_x = quat_rotate_vector(bone_quat, (1.0, 0.0, 0.0))
 
-            # Average direction from this bone to its children
             avg_dir = [0.0, 0.0, 0.0]
             n = 0
             for child_name in children:
@@ -414,11 +421,56 @@ class URDFExporter:
                    + bone_x[1] * child_dir[1]
                    + bone_x[2] * child_dir[2])
             if dot > 0.5:
-                # Bone X roughly points toward child — no correction needed
                 continue
 
-            # Compute world-frame correction that maps bone_x → child_dir
             correction = quat_from_vectors(bone_x, child_dir)
+            corrected_quat = quat_multiply(correction, bone_quat)
+            corrections[bone_name] = corrected_quat
+
+        # --- Leaf bones: correct toward parent→self direction ---
+        # Only for non-fixed joints (leaf bones on fixed joints, like wheels,
+        # have intentional bone orientations that shouldn't be corrected).
+        from urdf.urdf_utils import classify_ue_constraint
+        all_bones = set(bone_children.keys()) | set(bone_parent.keys())
+        leaf_bones = all_bones - set(bone_children.keys())
+        for bone_name in leaf_bones:
+            if bone_name not in bone_world_transforms:
+                continue
+            if bone_name not in bone_parent:
+                continue
+
+            # Check joint type — skip fixed joints
+            ct = bone_constraint.get(bone_name)
+            if ct is not None:
+                jtype, _ = classify_ue_constraint(
+                    ct.twist_motion, ct.swing1_motion, ct.swing2_motion,
+                    ct.linear_x_motion, ct.linear_y_motion, ct.linear_z_motion)
+                if jtype == "fixed":
+                    continue
+
+            parent_name = bone_parent[bone_name]
+            if parent_name not in bone_world_transforms:
+                continue
+
+            bone_pos, bone_quat = bone_world_transforms[bone_name]
+            parent_pos = bone_world_transforms[parent_name][0]
+
+            direction = (bone_pos[0] - parent_pos[0],
+                         bone_pos[1] - parent_pos[1],
+                         bone_pos[2] - parent_pos[2])
+            mag = math.sqrt(direction[0]**2 + direction[1]**2 + direction[2]**2)
+            if mag < 1e-6:
+                continue
+            target_dir = (direction[0] / mag, direction[1] / mag, direction[2] / mag)
+
+            bone_x = quat_rotate_vector(bone_quat, (1.0, 0.0, 0.0))
+            dot = (bone_x[0] * target_dir[0]
+                   + bone_x[1] * target_dir[1]
+                   + bone_x[2] * target_dir[2])
+            if dot > 0.5:
+                continue
+
+            correction = quat_from_vectors(bone_x, target_dir)
             corrected_quat = quat_multiply(correction, bone_quat)
             corrections[bone_name] = corrected_quat
 
@@ -660,12 +712,15 @@ class URDFExporter:
                     lower=-half_m, upper=half_m,
                     effort=100.0, velocity=1.0)
 
-        # Joint axis in world frame (rotated from child bone's constraint frame)
-        if joint_type in ("revolute", "continuous"):
-            child_quat = None
-            if bone_world_transforms and ct.constraint_bone1 in bone_world_transforms:
-                child_quat = bone_world_transforms[ct.constraint_bone1][1]
-            joint.axis = self._constraint_axis_child(ct, active_axes, child_quat)
+        # Joint axis in world frame.  With default identity constraint frames,
+        # child-side and parent-side can give DIFFERENT world axes because
+        # bones have different orientations.  We compute from both sides and
+        # disambiguate using the chain direction (matching the C++ reference
+        # in KinovaGen3ControllerComponent which uses constraint frames +
+        # bone ordering to get the correct axis).
+        if joint_type in ("revolute", "continuous", "prismatic"):
+            joint.axis = self._constraint_axis(
+                ct, active_axes, bone_world_transforms)
 
         # Dynamics (damping from drive settings)
         damping = 0.0
@@ -701,45 +756,114 @@ class URDFExporter:
         rpy = tuple(0.0 if abs(v) < eps else v for v in rpy)
         return rpy
 
-    def _constraint_axis_child(self, ct: T3DConstraint,
-                               active_axes: List[str],
-                               child_bone_world_quat=None) -> Tuple[float, float, float]:
-        """Compute the URDF joint axis from the child-side constraint frame.
+    def _constraint_axis(self, ct: T3DConstraint,
+                            active_axes: List[str],
+                            bone_world_transforms=None) -> Tuple[float, float, float]:
+        """Compute the URDF joint axis, disambiguating child vs parent frame.
 
-        PriAxis1/SecAxis1 define the constraint axes in the child bone's local
-        frame.  With world-aligned link frames, the axis is rotated from bone-
-        local to UE world space before converting to URDF coordinates.
+        With default identity constraint frames, both sides encode the joint
+        axis as the bone's local X/Y/Z, which map to DIFFERENT world
+        directions.  We compute the axis from both sides, and if they agree
+        we use it directly.  If they disagree, we use the chain direction
+        (parent→child) to pick the correct one:
+
+        - twist / linear_x: axis should be parallel to the chain direction
+        - swing / other linear: axis should be perpendicular to the chain
+
+        This matches the C++ reference in KinovaGen3ControllerComponent,
+        which uses constraint frames + bone ordering to resolve the axis.
         """
-        p = (ct.pri_axis1.x, ct.pri_axis1.y, ct.pri_axis1.z)
-        s = (ct.sec_axis1.x, ct.sec_axis1.y, ct.sec_axis1.z)
+        # Determine local-frame axis direction from DOF type
+        # (same mapping for both Frame1/child and Frame2/parent)
+        p1 = (ct.pri_axis1.x, ct.pri_axis1.y, ct.pri_axis1.z)
+        s1 = (ct.sec_axis1.x, ct.sec_axis1.y, ct.sec_axis1.z)
+        p2 = (ct.pri_axis2.x, ct.pri_axis2.y, ct.pri_axis2.z)
+        s2 = (ct.sec_axis2.x, ct.sec_axis2.y, ct.sec_axis2.z)
 
-        if "twist" in active_axes:
-            ax = p  # X of constraint frame
-        elif "swing2" in active_axes:
-            ax = s  # Y of constraint frame
-        else:
-            # swing1 = Z of constraint frame = PriAxis1 x SecAxis1
-            ax = (p[1]*s[2] - p[2]*s[1],
-                  p[2]*s[0] - p[0]*s[2],
-                  p[0]*s[1] - p[1]*s[0])
+        is_twist_or_x = "twist" in active_axes or "x" in active_axes
+        is_swing2_or_y = "swing2" in active_axes or "y" in active_axes
+
+        def _pick_axis(p, s):
+            if is_twist_or_x:
+                return p  # X of constraint frame
+            elif is_swing2_or_y:
+                return s  # Y of constraint frame
+            else:
+                # Z = pri × sec
+                return (p[1]*s[2] - p[2]*s[1],
+                        p[2]*s[0] - p[0]*s[2],
+                        p[0]*s[1] - p[1]*s[0])
+
+        ax_child_local = _pick_axis(p1, s1)
+        ax_parent_local = _pick_axis(p2, s2)
 
         # Normalize
-        mag = math.sqrt(ax[0]**2 + ax[1]**2 + ax[2]**2)
-        if mag > 1e-6:
-            ax = (ax[0]/mag, ax[1]/mag, ax[2]/mag)
+        def _normalize(v):
+            m = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+            return (v[0]/m, v[1]/m, v[2]/m) if m > 1e-6 else (0.0, 0.0, 1.0)
+
+        ax_child_local = snap_near_cardinal(_normalize(ax_child_local))
+        ax_parent_local = snap_near_cardinal(_normalize(ax_parent_local))
+
+        # Rotate to world frame using bone quaternions
+        child_quat = None
+        parent_quat = None
+        child_pos = None
+        parent_pos = None
+        if bone_world_transforms:
+            if ct.constraint_bone1 in bone_world_transforms:
+                child_pos, child_quat = bone_world_transforms[ct.constraint_bone1]
+            if ct.constraint_bone2 in bone_world_transforms:
+                parent_pos, parent_quat = bone_world_transforms[ct.constraint_bone2]
+
+        if child_quat is not None:
+            ax_child_world = snap_near_cardinal(
+                quat_rotate_vector(child_quat, ax_child_local))
         else:
-            ax = (0.0, 0.0, 1.0)
+            ax_child_world = ax_child_local
 
-        # Snap near-cardinal bone-local axes to clean up UE editor artifacts.
-        # Constraint frames are usually axis-aligned with the bone but can
-        # have small numerical offsets (~5°) from auto-frame computation.
-        ax = snap_near_cardinal(ax)
+        if parent_quat is not None:
+            ax_parent_world = snap_near_cardinal(
+                quat_rotate_vector(parent_quat, ax_parent_local))
+        else:
+            ax_parent_world = ax_parent_local
 
-        # Rotate from bone-local to world frame (for world-aligned links)
-        if child_bone_world_quat is not None:
-            ax = quat_rotate_vector(child_bone_world_quat, ax)
+        # Check agreement (parallel or anti-parallel)
+        dot_cp = (ax_child_world[0] * ax_parent_world[0]
+                  + ax_child_world[1] * ax_parent_world[1]
+                  + ax_child_world[2] * ax_parent_world[2])
 
-        return ue_axis_to_urdf(ax)
+        if abs(dot_cp) > 0.9:
+            # Both sides agree — use child-side (arbitrary choice)
+            return ue_axis_to_urdf(ax_child_world)
+
+        # Disagree — disambiguate using chain direction
+        if child_pos is not None and parent_pos is not None:
+            chain = (child_pos[0] - parent_pos[0],
+                     child_pos[1] - parent_pos[1],
+                     child_pos[2] - parent_pos[2])
+            chain_mag = math.sqrt(chain[0]**2 + chain[1]**2 + chain[2]**2)
+            if chain_mag > 1e-6:
+                chain_dir = (chain[0]/chain_mag, chain[1]/chain_mag, chain[2]/chain_mag)
+
+                child_dot = abs(ax_child_world[0]*chain_dir[0]
+                                + ax_child_world[1]*chain_dir[1]
+                                + ax_child_world[2]*chain_dir[2])
+                parent_dot = abs(ax_parent_world[0]*chain_dir[0]
+                                 + ax_parent_world[1]*chain_dir[1]
+                                 + ax_parent_world[2]*chain_dir[2])
+
+                if is_twist_or_x:
+                    # Twist / linear_x: axis should be parallel to chain
+                    best = ax_child_world if child_dot >= parent_dot else ax_parent_world
+                else:
+                    # Swing / other: axis should be perpendicular to chain
+                    best = ax_child_world if child_dot <= parent_dot else ax_parent_world
+
+                return ue_axis_to_urdf(best)
+
+        # Fallback: prefer child-side
+        return ue_axis_to_urdf(ax_child_world)
 
 
 # ===================================================================
