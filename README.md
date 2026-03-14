@@ -37,6 +37,14 @@
     - [CCD (Cyclic Coordinate Descent)](#ccd-cyclic-coordinate-descent)
   - [Blueprint API (`URammsIKLibrary`)](#blueprint-api-urammsiklibrary)
     - [`FIKSolveResult`](#fiksolveresult)
+  - [URDF Export / Import](#urdf-export--import)
+    - [Quick Start (URDF)](#quick-start-urdf)
+    - [Exporting a Physics Asset to URDF](#exporting-a-physics-asset-to-urdf)
+    - [Importing a URDF into a Physics Asset](#importing-a-urdf-into-a-physics-asset)
+    - [Name Mapping](#name-mapping)
+    - [Coordinate System Conventions](#coordinate-system-conventions)
+    - [Module Reference](#module-reference)
+    - [Running Tests](#running-tests)
   - [Dependencies](#dependencies)
 
 <!-- markdown-toc end -->
@@ -302,6 +310,162 @@ This helps ensure that consistent code formatting is applied.
  | `PositionError` | `float` | Final position error (cm) |
  | `RotationError` | `float` | Final rotation error (degrees) |
  | `IterationsUsed` | `int32` | Iterations consumed |
+
+ ---
+
+## URDF Export / Import
+
+ The plugin includes Python scripts for converting between Unreal Engine
+ Physics Assets and [URDF](http://wiki.ros.org/urdf) (Unified Robot
+ Description Format) files. This enables interoperability with ROS, MoveIt,
+ PyBullet, MuJoCo, and other robotics tools.
+
+ The scripts run inside the **UE Editor Python console** and require no
+ external dependencies beyond the Python standard library.
+
+### Quick Start (URDF)
+
+ 1. Enable the **Python Editor Script Plugin** in
+    **Edit > Plugins > Scripting**.
+ 2. Open the **Output Log** (**Window > Developer Tools > Output Log**) and
+    switch the input dropdown from *Cmd* to *Python*.
+ 3. Select a **PhysicsAsset** in the Content Browser.
+ 4. Run:
+
+ ```python
+ from urdf.urdf_editor_utils import export_selected_to_urdf
+ export_selected_to_urdf()
+ ```
+
+ The URDF file is written to `<ProjectDir>/urdf/<asset_name>.urdf`.
+
+### Exporting a Physics Asset to URDF
+
+ `export_selected_to_urdf()` exports the currently selected Physics Asset.
+ It automatically resolves the associated skeletal mesh and uses the
+ skeleton's reference pose for bone transforms.
+
+ ```python
+ from urdf.urdf_editor_utils import export_selected_to_urdf
+
+ # Defaults — auto-names from the asset, writes to <Project>/urdf/
+ export_selected_to_urdf()
+
+ # Full options
+ export_selected_to_urdf(
+     robot_name="my_robot",             # <robot name="...">
+     output_dir="C:/output",            # output directory
+     include_collision=True,            # include <collision> geometry
+     include_inertia=True,              # include <inertial> properties
+     mapping_file="C:/map.json",        # optional bone↔link name overrides
+     skeletal_mesh_path="/Game/MyMesh", # explicit skeletal mesh (auto-detected if omitted)
+ )
+ ```
+
+ You can also call the exporter directly with an asset path:
+
+ ```python
+ from urdf.urdf_exporter import export_urdf
+
+ export_urdf(
+     physics_asset_path="/Game/Robots/Arm/gen3_6dof_PhysicsAsset",
+     output_path="C:/output/kinova_gen3.urdf",
+     robot_name="kinova_gen3",
+ )
+ ```
+
+ **What the exporter does:**
+
+ - Exports the T3D representation of the Physics Asset to extract body
+   setups (collision shapes, mass) and constraint templates (joint types,
+   limits, axes).
+ - Reads bone world transforms from the skeleton reference pose.
+ - Builds a kinematic tree from constraint parent/child relationships,
+   detecting and excluding loop-closure constraints (URDF requires a tree).
+ - Converts collision geometry (boxes, spheres, capsules, convex hulls →
+   cylinders) into URDF `<collision>` elements.
+ - Outputs joint types: `revolute`, `prismatic`, `fixed`, or `continuous`
+   based on constraint settings and limits.
+ - Applies automatic corrections for misaligned bone orientations and
+   snaps near-cardinal joint axes to clean values.
+
+### Importing a URDF into a Physics Asset
+
+ `import_urdf_to_selected()` applies URDF data to the currently selected
+ Physics Asset.
+
+ ```python
+ from urdf.urdf_editor_utils import import_urdf_to_selected
+
+ # Physics-only: apply mass, inertia, and joint limits
+ import_urdf_to_selected("C:/path/to/robot.urdf")
+
+ # Full import: also create collision bodies from URDF geometry
+ import_urdf_to_selected("C:/path/to/robot.urdf", mode="full")
+ ```
+
+ | Mode | What it configures |
+ |---|---|
+ | `physics_only` | Mass, inertia tensors, joint limits, drive parameters |
+ | `full` | Everything above + collision shapes from URDF geometry |
+
+### Name Mapping
+
+ The tooling automatically matches URDF link names to UE bone names using
+ case-insensitive comparison with underscore/prefix stripping and fuzzy
+ matching. For cases where auto-matching isn't sufficient, provide a JSON
+ override file. Both flat and nested formats are supported:
+
+ ```json
+ { "base_link": "root_bone", "link_1": "shoulder_bone" }
+ ```
+
+ ```json
+ {
+   "links": { "base_link": "root_bone", "link_1": "shoulder_bone" },
+   "joints": { "joint_1": "shoulder_constraint" }
+ }
+ ```
+
+ Pass it via the `mapping_file` parameter on export or import.
+
+### Coordinate System Conventions
+
+ | | URDF | Unreal Engine |
+ |---|---|---|
+ | **Units** | meters, radians, kg | centimeters, degrees, kg |
+ | **Handedness** | Right-handed, Z-up | Left-handed, Z-up |
+ | **Y axis** | Points left | Points right (negated) |
+
+ All conversions are handled automatically. The Y axis is negated when
+ transforming positions, quaternions, and joint axes between the two
+ coordinate systems.
+
+### Module Reference
+
+ All scripts live in `Content/Python/urdf/` within the plugin directory.
+
+ | Module | Description |
+ |---|---|
+ | `urdf_editor_utils.py` | One-click export/import entry points for the UE Editor |
+ | `urdf_exporter.py` | Core export logic (Physics Asset → URDF) |
+ | `urdf_importer.py` | Core import logic (URDF → Physics Asset) |
+ | `urdf_parser.py` | Pure-Python URDF XML parser and writer |
+ | `t3d_physics_parser.py` | Parser for UE T3D Physics Asset export format |
+ | `urdf_utils.py` | Unit conversions and coordinate transforms |
+ | `name_mapping.py` | Bone ↔ URDF link name matching and JSON overrides |
+
+### Running Tests
+
+ The test suite can be run outside of Unreal Engine (no `unreal` module
+ required).  [pytest](https://docs.pytest.org/) is needed (`pip install pytest`):
+
+ ```console
+ cd Plugins/RammsCore/Content/Python
+ python -m pytest urdf/test_urdf.py -v
+ # or without pytest:
+ python urdf/test_urdf.py
+ ```
 
  ---
 
