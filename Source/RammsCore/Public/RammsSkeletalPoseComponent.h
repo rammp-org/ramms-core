@@ -139,9 +139,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Skeletal Pose")
 	void SetJointTargetByName(FName JointName, float Value);
 
-	/** Set all joint targets at once (array must match Joints array length). */
+	/**
+	 * Set all joint targets at once (array must match Joints array length).
+	 *
+	 * Uses TArray<double> instead of TArray<float> to work around a
+	 * UE Remote Control API deserialization bug where TArray<float>
+	 * values get doubled with a zero prepended.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Skeletal Pose")
-	void SetAllJointTargets(const TArray<float>& Values);
+	void SetAllJointTargets(const TArray<double>& Values);
 
 	/** Set joint targets from a pose asset by index. Returns false if index is invalid. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Skeletal Pose")

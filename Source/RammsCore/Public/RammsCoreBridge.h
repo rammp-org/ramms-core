@@ -83,9 +83,11 @@ public:
 	/**
 	 * Set joint targets on the first URammsSkeletalPoseComponent found on the
 	 * specified actor.  Returns false if actor or component not found.
+	 *
+	 * Uses TArray<double> to work around UE Remote Control TArray<float> bug.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Remote")
-	static bool SetSkeletalPoseJointTargets(const FString& ActorPath, const TArray<float>& JointValues);
+	static bool SetSkeletalPoseJointTargets(const FString& ActorPath, const TArray<double>& JointValues);
 
 	/**
 	 * Get current joint values from the first URammsSkeletalPoseComponent

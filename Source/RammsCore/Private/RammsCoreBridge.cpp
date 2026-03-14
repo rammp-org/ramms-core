@@ -215,7 +215,7 @@ TArray<FString> URammsCoreBridge::FindSkeletalPoseActors()
 	return Results;
 }
 
-bool URammsCoreBridge::SetSkeletalPoseJointTargets(const FString& ActorPath, const TArray<float>& JointValues)
+bool URammsCoreBridge::SetSkeletalPoseJointTargets(const FString& ActorPath, const TArray<double>& JointValues)
 {
 	AActor* Actor = FindActorByPath(ActorPath);
 	if (!Actor)

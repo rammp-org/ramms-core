@@ -410,11 +410,16 @@ public:
 	void SetJointTarget(int32 JointIndex, float TargetAngle);
 
 	/**
-	 * Set target angles for all joints
+	 * Set target angles for all joints.
+	 *
+	 * Uses TArray<double> instead of TArray<float> to work around a
+	 * UE Remote Control API deserialization bug where TArray<float>
+	 * values get doubled with a zero prepended on certain components.
+	 *
 	 * @param TargetAngles - Array of target angles in degrees (must match joint count)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	void SetAllJointTargets(const TArray<float>& TargetAngles);
+	void SetAllJointTargets(const TArray<double>& TargetAngles);
 
 	/**
 	 * Set joint targets from a pose asset by index

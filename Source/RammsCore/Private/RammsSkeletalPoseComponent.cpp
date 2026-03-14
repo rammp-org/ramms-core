@@ -376,12 +376,12 @@ void URammsSkeletalPoseComponent::SetJointTargetByName(FName JointName, float Va
 	}
 }
 
-void URammsSkeletalPoseComponent::SetAllJointTargets(const TArray<float>& Values)
+void URammsSkeletalPoseComponent::SetAllJointTargets(const TArray<double>& Values)
 {
 	const int32 Count = FMath::Min(Values.Num(), Joints.Num());
 	for (int32 i = 0; i < Count; ++i)
 	{
-		Joints[i].TargetValue = Values[i];
+		Joints[i].TargetValue = static_cast<float>(Values[i]);
 	}
 
 	if (bDebugLog && Values.Num() != Joints.Num())
@@ -405,7 +405,13 @@ bool URammsSkeletalPoseComponent::SetJointTargetsFromPoseIndex(
 		return false;
 	}
 
-	SetAllJointTargets(Angles);
+	TArray<double> AnglesD;
+	AnglesD.Reserve(Angles.Num());
+	for (float A : Angles)
+	{
+		AnglesD.Add(static_cast<double>(A));
+	}
+	SetAllJointTargets(AnglesD);
 	return true;
 }
 
@@ -423,7 +429,13 @@ bool URammsSkeletalPoseComponent::SetJointTargetsFromPoseName(
 		return false;
 	}
 
-	SetAllJointTargets(Angles);
+	TArray<double> AnglesD;
+	AnglesD.Reserve(Angles.Num());
+	for (float A : Angles)
+	{
+		AnglesD.Add(static_cast<double>(A));
+	}
+	SetAllJointTargets(AnglesD);
 	return true;
 }
 
