@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "RammsSensorRayTracer.h"
 #include "RammsToFSensorComponent.generated.h"
 
 /** Operating mode for the ToF sensor */
@@ -56,6 +57,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnToFDataUpdated, const FToFSensorD
  * Supports single-point mode (like VL53L0X) and grid mode (like VL53L5CX with 8×8 zones).
  * Fires along the component's local +X axis. Grid zones are distributed across the
  * configured field of view.
+ *
+ * When bUseGPURayTracing is enabled and the system supports it, rays are traced on the
+ * GPU via a compute shader with inline ray tracing (TraceRayInline). This path uses
+ * RT cores when available and falls back to software ray tracing otherwise.
+ * If GPU tracing is unavailable, the component automatically falls back to CPU LineTrace.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsToFSensorComponent : public USceneComponent
@@ -101,13 +107,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration", meta = (ClampMin = "0.0"))
 	float UpdateRateHz = 15.0f;
 
-	/** Collision channel to trace against */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration")
+	/** Collision channel to trace against.
+	 *  CPU path only — the GPU ray tracing path traces against the full TLAS
+	 *  and does not filter by collision channel. Greyed out when GPU tracing
+	 *  is enabled; set bUseGPURayTracing=false to use channel filtering. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration",
+		meta = (EditCondition = "!bUseGPURayTracing"))
 	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
 
-	/** Whether to ignore the owning actor in traces */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration")
+	/** Whether to ignore the owning actor in traces.
+	 *  CPU path only — the GPU ray tracing path cannot exclude specific actors.
+	 *  Greyed out when GPU tracing is enabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration",
+		meta = (EditCondition = "!bUseGPURayTracing"))
 	bool bIgnoreOwner = true;
+
+	/** Use GPU ray tracing (compute shader with TraceRayInline) when available.
+	 *  Falls back to CPU LineTrace if the system does not support ray tracing.
+	 *  Note: The GPU path does not honor TraceChannel or bIgnoreOwner — it traces
+	 *  against the full scene TLAS. Use CPU fallback if collision filtering is required. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration")
+	bool bUseGPURayTracing = true;
 
 	// ========== Noise ==========
 
@@ -117,7 +137,7 @@ public:
 
 	// ========== Debug ==========
 
-	/** Draw debug rays and hit points */
+	/** Draw debug rays and hit points at runtime */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Debug")
 	bool bEnableDebugDisplay = false;
 
@@ -125,11 +145,45 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Debug")
 	bool bEnableDebugLogging = false;
 
+	// ========== Shape Visualization ==========
+
+	/** Draw the sensor frustum/line shape during gameplay */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Visualization")
+	bool bDrawShapeInGame = false;
+
+	/** Draw the sensor frustum/line shape in the editor viewport */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Visualization")
+	bool bDrawShapeInEditor = true;
+
+	/** Color of the sensor shape outline */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor"))
+	FColor ShapeColor = FColor::Cyan;
+
+	/** Thickness of shape outline lines */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor", ClampMin = "0.1"))
+	float ShapeLineThickness = 0.5f;
+
+	/** Draw filled translucent planes on the frustum */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor"))
+	bool bDrawShapePlanes = true;
+
+	/** Color (with alpha) for the filled frustum planes */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor"))
+	FLinearColor ShapePlaneColor = FLinearColor(0.0f, 1.0f, 1.0f, 0.05f);
+
 	// ========== State ==========
 
 	/** Most recent sensor reading */
 	UPROPERTY(BlueprintReadOnly, Category = "ToF|State")
 	FToFSensorData CurrentData;
+
+	/** Whether the GPU path is currently active */
+	UPROPERTY(BlueprintReadOnly, Category = "ToF|State")
+	bool bGPUPathActive = false;
 
 	// ========== Events ==========
 
@@ -147,7 +201,8 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Sensors|ToF")
 	float GetDistanceAt(int32 Row, int32 Column) const;
 
-	/** Perform a single measurement right now (ignoring update rate) */
+	/** Perform a single measurement right now (ignoring update rate).
+	 *  Note: Always uses CPU path for immediate results. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors|ToF")
 	FToFSensorData MeasureNow();
 
@@ -155,11 +210,31 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
-	/** Perform the measurement and return the result */
-	FToFSensorData PerformMeasurement() const;
+	// ---- Shape visualization ----
+	void DrawSensorShape();
 
-	/** Trace a single ray and return distance (-1 if no hit) */
-	float TraceRay(const FVector& Start, const FVector& Direction, const FCollisionQueryParams& QueryParams) const;
+	// ---- CPU path (original implementation) ----
+	FToFSensorData PerformCPUMeasurement() const;
+	float		   TraceRay(const FVector& Start, const FVector& Direction, const FCollisionQueryParams& QueryParams) const;
+
+	// ---- GPU path ----
+	/** Build the array of ray inputs from current sensor configuration */
+	TArray<FSensorRayInput> BuildRayInputs() const;
+
+	/** Submit rays to the GPU ray tracer */
+	void SubmitGPUMeasurement();
+
+	/** Harvest completed GPU results and build sensor data */
+	bool HarvestGPUResults();
+
+	/** Pending GPU trace request */
+	FRammsSensorTraceRequest PendingGPURequest;
+
+	/** Cached copy of submitted rays (world space) for debug drawing */
+	TArray<FSensorRayInput> PendingGPURays;
+
+	/** Cached GPU availability (checked once at BeginPlay) */
+	bool bGPUAvailable = false;
 
 	float TimeSinceLastUpdate = 0.0f;
 };

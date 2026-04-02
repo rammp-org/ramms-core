@@ -20,7 +20,11 @@ public class RammsCore : ModuleRules
 		
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				// ... add other private include paths required here ...
+				// Access Renderer Private headers for FViewInfo / FRayTracingScene.
+				// Needed to get RDG-tracked TLAS SRV for proper RDG dependency ordering
+				// in the GPU sensor ray trace pipeline.
+				System.IO.Path.Combine(EngineDirectory, "Source", "Runtime", "Renderer", "Private"),
+				System.IO.Path.Combine(EngineDirectory, "Source", "Runtime", "Renderer", "Internal"),
 			}
 			);
 			
@@ -43,6 +47,11 @@ public class RammsCore : ModuleRules
 				"SlateCore",
 				"PhysicsCore",
 				"AnimationCore",
+				"RHI",
+				"RHICore",
+				"RenderCore",
+				"Renderer",
+				"Projects",
 				// ... add private dependencies that you statically link with here ...	
                 "Eigen",
 			}

@@ -1,0 +1,121 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+//
+// RammsSensorTrace.usf — Compute shader for GPU-accelerated sensor ray tracing.
+// Uses TraceRayInline (DXR inline) to trace rays against the scene TLAS.
+// Each thread processes one ray from InputRays and writes results to OutputRays.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+
+// Input ray data — one per sensor beam / grid zone
+struct FSensorRayInput
+{
+	float3 Origin;
+	float  MaxDistance;
+	float3 Direction;
+	float  MinDistance;
+};
+
+// Output result — one per ray
+struct FSensorRayOutput
+{
+	float  HitDistance; // -1 if no hit
+	float3 HitNormal;  // Approximate world-space normal from ray direction/front-face (zero if no hit)
+	uint   bHit;       // 1 if hit, 0 if miss
+	float3 _Padding;   // Pad to 32 bytes for alignment
+};
+
+// Shader parameters bound from C++
+StructuredBuffer<FSensorRayInput>    InputRays;
+RWStructuredBuffer<FSensorRayOutput> OutputRays;
+uint NumRays;
+
+RaytracingAccelerationStructure TLAS;
+
+// Diagnostic flag — set by C++ via uniform
+uint DebugMode; // 0 = normal, 1 = diagnostics on first 2 rays
+
+[numthreads(64, 1, 1)]
+void SensorTraceCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint RayIndex = DispatchThreadId.x;
+	if (RayIndex >= NumRays)
+		return;
+
+	FSensorRayInput Ray = InputRays[RayIndex];
+	FSensorRayOutput Result = (FSensorRayOutput)0;
+
+	// --- Diagnostic: Ray[0] = TLAS test, Ray[1] = input readback ---
+	if (DebugMode != 0)
+	{
+		if (RayIndex == 0)
+		{
+			// Test TLAS: straight down from sensor origin, 1km range, NO flags
+			RayDesc TestRay;
+			TestRay.Origin    = Ray.Origin;
+			TestRay.Direction = float3(0, 0, -1);
+			TestRay.TMin      = 0.0f;
+			TestRay.TMax      = 100000.0f;
+
+			// Use RAY_FLAG_NONE so we can count Proceed() iterations
+			RayQuery<RAY_FLAG_NONE> TestQ;
+			TestQ.TraceRayInline(TLAS, RAY_FLAG_NONE, 0xFF, TestRay);
+			
+			int ProceedCount = 0;
+			while (TestQ.Proceed())
+			{
+				// Accept any candidate (opaque or non-opaque)
+				if (TestQ.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+					TestQ.CommitNonOpaqueTriangleHit();
+				ProceedCount++;
+			}
+
+			uint Status = TestQ.CommittedStatus(); // 0=nothing, 1=triangle
+			// Encode: HitDistance = CommittedRayT (or -999 if miss)
+			// bHit = 42 (marker) + ProceedCount * 100 + Status
+			// HitNormal = origin (echo)
+			Result.HitDistance = (Status == COMMITTED_TRIANGLE_HIT) ? TestQ.CommittedRayT() : -999.0f;
+			Result.bHit       = 42 + ProceedCount * 100 + Status;
+			Result.HitNormal  = TestRay.Origin;
+			OutputRays[RayIndex] = Result;
+			return;
+		}
+		if (RayIndex == 1)
+		{
+			// Echo input data back: verify struct layout is correct
+			Result.HitDistance = Ray.MaxDistance;
+			Result.bHit       = asuint(Ray.MinDistance);
+			Result.HitNormal  = Ray.Direction;
+			Result._Padding   = Ray.Origin;
+			OutputRays[RayIndex] = Result;
+			return;
+		}
+	}
+
+	// --- Normal ray tracing ---
+	RayDesc RayDescriptor;
+	RayDescriptor.Origin    = Ray.Origin;
+	RayDescriptor.Direction = normalize(Ray.Direction);
+	RayDescriptor.TMin      = Ray.MinDistance;
+	RayDescriptor.TMax      = Ray.MaxDistance;
+
+	Result.HitDistance = -1.0f;
+
+	RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> Query;
+	Query.TraceRayInline(TLAS, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 0xFF, RayDescriptor);
+	while (Query.Proceed()) { }
+
+	if (Query.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+	{
+		float HitT = Query.CommittedRayT();
+		float3 WorldRayDir = RayDescriptor.Direction;
+		bool bFrontFace = Query.CommittedTriangleFrontFace();
+		float3 ApproxNormal = bFrontFace ? -WorldRayDir : WorldRayDir;
+
+		Result.HitDistance = HitT;
+		Result.HitNormal  = ApproxNormal;
+		Result.bHit       = 1;
+	}
+
+	OutputRays[RayIndex] = Result;
+}
