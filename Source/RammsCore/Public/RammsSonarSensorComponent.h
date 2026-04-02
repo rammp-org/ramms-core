@@ -27,7 +27,10 @@ struct RAMMSCORE_API FSonarSensorData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar")
 	FVector HitLocation = FVector::ZeroVector;
 
-	/** Surface normal at the hit point */
+	/** Surface normal at the hit point.
+	 *  CPU path: true geometric normal from the collision system.
+	 *  GPU path: approximate normal derived from the ray/triangle front-face
+	 *  direction — not a true mesh normal. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar")
 	FVector HitNormal = FVector::ZeroVector;
 

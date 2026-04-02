@@ -10,9 +10,17 @@
 void FRammsCoreModule::StartupModule()
 {
 	// Register shader source directory so .usf files can be included via /RammsCore/...
-	FString PluginShaderDir = FPaths::Combine(
-		IPluginManager::Get().FindPlugin(TEXT("RammsCore"))->GetBaseDir(),
-		TEXT("Shaders"));
+	FString				PluginShaderDir;
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("RammsCore"));
+	if (Plugin.IsValid())
+	{
+		PluginShaderDir = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Shaders"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RammsCore: Plugin not found via IPluginManager, using fallback path"));
+		PluginShaderDir = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("RammsCore"), TEXT("Shaders"));
+	}
 	FPaths::CollapseRelativeDirectories(PluginShaderDir);
 
 	if (FPaths::DirectoryExists(PluginShaderDir))

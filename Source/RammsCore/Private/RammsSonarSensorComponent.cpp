@@ -63,8 +63,7 @@ void URammsSonarSensorComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		else if ((GFrameCounter - PendingGPURequest.SubmitFrame) > FRammsSensorRayTracer::MaxReadbackWaitFrames)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[Sonar] GPU readback timed out after %d frames"), FRammsSensorRayTracer::MaxReadbackWaitFrames);
-			PendingGPURequest.bPending = false;
-			PendingGPURequest.Readback.Reset();
+			PendingGPURequest.Reset();
 		}
 		else
 		{
@@ -176,9 +175,7 @@ bool URammsSonarSensorComponent::HarvestGPUResults()
 
 	TArray<FSensorRayOutput> Results = FRammsSensorRayTracer::HarvestResults(PendingGPURequest);
 
-	UWorld*			 World = GetWorld();
-	const FTransform SensorTransform = GetComponentTransform();
-	const FVector	 Origin = SensorTransform.GetLocation();
+	UWorld* World = GetWorld();
 
 	FSonarSensorData Data;
 	Data.Timestamp = World ? World->GetTimeSeconds() : 0.0f;
@@ -188,7 +185,8 @@ bool URammsSonarSensorComponent::HarvestGPUResults()
 
 	float ClosestDist = MaxRange + 1.0f;
 
-	// Use the cached world-space rays from submit time
+	// Use the cached world-space rays from submit time for correct hit locations
+	// even if the sensor has moved since submission (1–2 frame latency)
 	const TArray<FSensorRayInput>& Rays = PendingGPURays;
 
 	for (int32 i = 0; i < Results.Num(); ++i)
@@ -201,8 +199,9 @@ bool URammsSonarSensorComponent::HarvestGPUResults()
 				ClosestDist = Dist;
 				Data.bHit = true;
 
+				FVector RayOrigin = FVector(Rays[i].Origin);
 				FVector RayDir = FVector(Rays[i].Direction);
-				Data.HitLocation = Origin + RayDir * Dist;
+				Data.HitLocation = RayOrigin + RayDir * Dist;
 				Data.HitNormal = FVector(Results[i].HitNormal);
 			}
 		}

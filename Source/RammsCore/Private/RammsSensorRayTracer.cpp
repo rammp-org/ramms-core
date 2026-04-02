@@ -15,9 +15,15 @@
 
 #if RHI_RAYTRACING
 	#include "FXRenderingUtils.h"
-	// Private Renderer headers — needed to access FScene::RayTracingScene and FViewInfo
-	// for RDG-tracked TLAS buffer SRV (proper RDG dependency ordering).
-	#include "ScenePrivate.h"
+	// Private Renderer headers needed for FScene::RayTracingScene and FViewInfo.
+	// These types are not exposed through public UE APIs as of 5.7. If a future
+	// engine version provides TLAS access via UE::FXRenderingUtils::RayTracing
+	// or FSceneViewExtensionBase, prefer that over private includes.
+	#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
+		#include "ScenePrivate.h"
+	#else
+		#error "GPU sensor ray tracing requires UE 5.7+ for TLAS access via PostTLASBuild."
+	#endif
 #endif
 
 // Console variable for easy toggling
@@ -38,6 +44,20 @@ static TAutoConsoleVariable<int32> CVarRammsSensorDebugMode(
 		TEXT("When enabled, rays 0-1 are replaced with TLAS probes and input echoes.\n")
 			TEXT("Only use for debugging — corrupts the first 2 ray results."),
 	ECVF_Default);
+
+// ============================================================================
+// Internal submission type (transferred from game thread to render thread)
+// ============================================================================
+
+struct FPendingRayTraceSubmission
+{
+	TArray<FSensorRayInput>			  Rays;
+	TSharedPtr<FRHIGPUBufferReadback> Readback;
+	uint64							  SubmitFrame = 0;
+	/** Scene this submission targets — used to match against the correct view's TLAS.
+	 *  nullptr means "dispatch against any scene with a populated TLAS". */
+	FSceneInterface* TargetScene = nullptr;
+};
 
 // ============================================================================
 // RDG pass parameter structs (for dependency tracking only)
@@ -90,22 +110,28 @@ public:
 			return;
 		}
 
-		// Take all pending submissions and dispatch against the first available TLAS.
-		// Guard with frame counter to avoid dispatching the same submission twice
-		// (PostTLASBuild fires once per view per viewport per frame).
-		TArray<FPendingRayTraceSubmission> Submissions;
+		// Take only submissions targeting this view's scene (or null = any scene).
+		// Unmatched submissions remain queued for the correct scene's PostTLASBuild callback.
+		TArray<FPendingRayTraceSubmission> Matched;
 		{
 			FScopeLock Lock(&SubmissionLock);
-			if (PendingSubmissions.Num() == 0)
+			for (int32 i = PendingSubmissions.Num() - 1; i >= 0; --i)
 			{
-				return;
+				if (PendingSubmissions[i].TargetScene == nullptr || PendingSubmissions[i].TargetScene == ViewScene)
+				{
+					Matched.Add(MoveTemp(PendingSubmissions[i]));
+					PendingSubmissions.RemoveAtSwap(i);
+				}
 			}
-			Submissions = MoveTemp(PendingSubmissions);
-			PendingSubmissions.Reset();
 		}
 
-		// Dispatch each batch of sensor rays against this view's TLAS
-		for (FPendingRayTraceSubmission& Submission : Submissions)
+		if (Matched.Num() == 0)
+		{
+			return;
+		}
+
+		// Dispatch each matched batch of sensor rays against this view's TLAS
+		for (FPendingRayTraceSubmission& Submission : Matched)
 		{
 			DispatchSensorTrace(GraphBuilder, InView, *ViewScene, Submission);
 		}
@@ -312,59 +338,74 @@ FRammsSensorTraceRequest FRammsSensorRayTracer::SubmitTraces(const TArray<FSenso
 	return Request;
 }
 
-bool FRammsSensorRayTracer::IsRequestReady(const FRammsSensorTraceRequest& Request)
+bool FRammsSensorRayTracer::IsRequestReady(FRammsSensorTraceRequest& Request)
 {
-	if (!Request.bPending || !Request.Readback.IsValid())
+	if (!Request.bPending)
 	{
 		return false;
 	}
 
-	return Request.Readback->IsReady();
+	// Phase 2: harvest render command has been enqueued — check the atomic flag
+	if (Request.bHarvestEnqueued)
+	{
+		return Request.HarvestReady && Request.HarvestReady->load(std::memory_order_acquire);
+	}
+
+	// Phase 1: check if the GPU readback is complete
+	if (!Request.Readback.IsValid() || !Request.Readback->IsReady())
+	{
+		return false;
+	}
+
+	// GPU readback is done — enqueue an async render command to copy results
+	// to CPU memory. This avoids FlushRenderingCommands() and its full
+	// pipeline stall, which scales poorly with multiple sensors per frame.
+	const int32	 NumRays = Request.NumRays;
+	const uint32 CopySize = NumRays * sizeof(FSensorRayOutput);
+
+	Request.HarvestedData = MakeShared<TArray<FSensorRayOutput>>();
+	Request.HarvestedData->SetNumUninitialized(NumRays);
+	Request.HarvestReady = MakeShared<std::atomic<bool>>(false);
+
+	TSharedPtr<FRHIGPUBufferReadback>	 ReadbackPtr = Request.Readback;
+	TSharedPtr<TArray<FSensorRayOutput>> ResultsPtr = Request.HarvestedData;
+	TSharedPtr<std::atomic<bool>>		 ReadyFlag = Request.HarvestReady;
+
+	ENQUEUE_RENDER_COMMAND(HarvestSensorReadback)
+	(
+		[ReadbackPtr, ResultsPtr, CopySize, ReadyFlag](FRHICommandListImmediate& RHICmdList) {
+			const void* SrcData = ReadbackPtr->Lock(CopySize);
+			if (SrcData)
+			{
+				FMemory::Memcpy(ResultsPtr->GetData(), SrcData, CopySize);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("RammsSensorRayTracer: Failed to lock readback buffer"));
+				ResultsPtr->Reset();
+			}
+			ReadbackPtr->Unlock();
+
+			// Signal completion — the acquire in IsRequestReady ensures the
+			// game thread sees all writes to ResultsPtr before this flag.
+			ReadyFlag->store(true, std::memory_order_release);
+		});
+
+	Request.bHarvestEnqueued = true;
+	return false; // will be ready on the next poll (typically next frame)
 }
 
 TArray<FSensorRayOutput> FRammsSensorRayTracer::HarvestResults(FRammsSensorTraceRequest& Request)
 {
 	TArray<FSensorRayOutput> Results;
 
-	if (!Request.bPending || !Request.Readback.IsValid() || !Request.Readback->IsReady())
+	if (!Request.bPending || !Request.HarvestedData.IsValid())
 	{
-		Request.bPending = false;
+		Request.Reset();
 		return Results;
 	}
 
-	const int32	 NumRays = Request.NumRays;
-	const uint32 CopySize = NumRays * sizeof(FSensorRayOutput);
-
-	// Lock/Unlock must execute on the render thread in UE 5.7.
-	// Use a shared buffer so the lambda keeps it alive, then flush to synchronize.
-	TSharedPtr<TArray<FSensorRayOutput>> SharedResults = MakeShared<TArray<FSensorRayOutput>>();
-	SharedResults->SetNumUninitialized(NumRays);
-
-	TSharedPtr<FRHIGPUBufferReadback> ReadbackPtr = Request.Readback;
-
-	ENQUEUE_RENDER_COMMAND(HarvestSensorReadback)
-	(
-		[ReadbackPtr, SharedResults, CopySize](FRHICommandListImmediate& RHICmdList) {
-			const void* SrcData = ReadbackPtr->Lock(CopySize);
-			if (SrcData)
-			{
-				FMemory::Memcpy(SharedResults->GetData(), SrcData, CopySize);
-			}
-			else
-			{
-				UE_LOG(LogTemp, Warning, TEXT("RammsSensorRayTracer: Failed to lock readback buffer"));
-				SharedResults->Reset();
-			}
-			ReadbackPtr->Unlock();
-		});
-
-	// Block until the render command completes — only called when IsReady() is true,
-	// so the lock is immediate and this won't stall meaningfully.
-	FlushRenderingCommands();
-
-	Results = MoveTemp(*SharedResults);
-	Request.bPending = false;
-	Request.Readback.Reset();
+	Results = MoveTemp(*Request.HarvestedData);
 
 	// Diagnostic: log raw first 2 elements (only when shader debug mode is active)
 	if (CVarRammsSensorDebugMode.GetValueOnGameThread() > 0 && Results.Num() >= 2)
@@ -383,5 +424,17 @@ TArray<FSensorRayOutput> FRammsSensorRayTracer::HarvestResults(FRammsSensorTrace
 		}
 	}
 
+	Request.Reset();
 	return Results;
+}
+
+void FRammsSensorTraceRequest::Reset()
+{
+	NumRays = 0;
+	SubmitFrame = 0;
+	bPending = false;
+	bHarvestEnqueued = false;
+	Readback.Reset();
+	HarvestedData.Reset();
+	HarvestReady.Reset();
 }

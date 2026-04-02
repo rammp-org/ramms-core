@@ -67,8 +67,7 @@ void URammsToFSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 		{
 			// Timeout — discard pending request
 			UE_LOG(LogTemp, Warning, TEXT("[ToF] GPU readback timed out after %d frames"), FRammsSensorRayTracer::MaxReadbackWaitFrames);
-			PendingGPURequest.bPending = false;
-			PendingGPURequest.Readback.Reset();
+			PendingGPURequest.Reset();
 		}
 		else
 		{

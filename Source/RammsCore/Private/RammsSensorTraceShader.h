@@ -1,35 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+//
+// Private header — not part of the public API.
+// Consumers should include RammsSensorTypes.h for the POD ray structs,
+// or RammsSensorRayTracer.h for the full GPU trace API.
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "RammsSensorTypes.h"
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
-#include "RHIGPUReadback.h"
-
-/**
- * Input data for a single sensor ray (matches HLSL FSensorRayInput).
- * Must be kept in sync with RammsSensorTrace.usf.
- */
-struct FSensorRayInput
-{
-	FVector3f Origin;
-	float	  MaxDistance;
-	FVector3f Direction;
-	float	  MinDistance;
-};
-
-/**
- * Output data for a single sensor ray (matches HLSL FSensorRayOutput).
- * Must be kept in sync with RammsSensorTrace.usf.
- */
-struct FSensorRayOutput
-{
-	float	  HitDistance; // -1 if no hit
-	FVector3f HitNormal;
-	uint32	  bHit; // 1 if hit, 0 if miss
-	FVector3f _Padding;
-};
 
 /**
  * Compute shader for GPU-accelerated sensor ray tracing via TraceRayInline.

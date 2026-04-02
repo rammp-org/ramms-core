@@ -221,6 +221,8 @@ This helps ensure that consistent code formatting is applied.
  - `Distance` — Closest obstacle distance (cm, -1 if none)
  - `bHit` — Whether any obstacle was detected
  - `HitLocation` / `HitNormal` — World-space impact point and surface normal
+   (CPU path returns true geometric normal; GPU path returns an approximate
+   normal derived from the ray/triangle front-face direction)
  - `HitActor` — The actor hit (CPU path only; null on GPU path)
 
  **Blueprint API:**
@@ -298,7 +300,8 @@ This helps ensure that consistent code formatting is applied.
  | File | Description |
  |---|---|
  | `Shaders/Private/RammsSensorTrace.usf` | HLSL compute shader (64 threads/group) with TraceRayInline |
- | `Public/RammsSensorTraceShader.h` | C++ shader class + `FSensorRayInput`/`FSensorRayOutput` structs |
+ | `Public/RammsSensorTypes.h` | `FSensorRayInput`/`FSensorRayOutput` POD structs with compile-time layout validation |
+ | `Private/RammsSensorTraceShader.h` | C++ compute shader class (`FRammsSensorTraceCS`) — private, not part of public API |
  | `Public/RammsSensorRayTracer.h` | Public API: `SubmitTraces`, `IsRequestReady`, `HarvestResults` |
  | `Private/RammsSensorRayTracer.cpp` | Scene View Extension, RDG dispatch, TLAS coordinate transform, readback |
 
@@ -389,8 +392,10 @@ This helps ensure that consistent code formatting is applied.
  in **green**, hit points as **red** dots, and miss rays in **yellow**
  (dark yellow for ToF).
 
- > **Note:** Shape visualization only draws in editor mode. The sensing
- > pipeline (GPU/CPU traces, logging) only runs in game worlds.
+ > **Note:** Shape visualization draws in the editor viewport when
+ > `bDrawShapeInEditor` is enabled, and during gameplay when
+ > `bDrawShapeInGame` is enabled. The sensing pipeline (GPU/CPU traces,
+ > logging) only runs in game worlds.
 
  ---
 
