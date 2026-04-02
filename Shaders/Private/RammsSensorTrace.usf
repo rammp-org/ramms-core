@@ -20,7 +20,7 @@ struct FSensorRayInput
 struct FSensorRayOutput
 {
 	float  HitDistance; // -1 if no hit
-	float3 HitNormal;  // World-space surface normal (zero if no hit)
+	float3 HitNormal;  // Approximate world-space normal from ray direction/front-face (zero if no hit)
 	uint   bHit;       // 1 if hit, 0 if miss
 	float3 _Padding;   // Pad to 32 bytes for alignment
 };
