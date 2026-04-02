@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "RammsSensorRayTracer.h"
 #include "RammsSonarSensorComponent.generated.h"
 
 /**
@@ -30,7 +31,8 @@ struct RAMMSCORE_API FSonarSensorData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar")
 	FVector HitNormal = FVector::ZeroVector;
 
-	/** The actor that was hit (may be null) */
+	/** The actor that was hit (may be null).
+	 *  Note: Not available when using GPU ray tracing path. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar")
 	AActor* HitActor = nullptr;
 
@@ -47,6 +49,15 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSonarDataUpdated, const FSonarSen
  * Uses a cone-shaped beam (approximated with multiple ray casts) to detect
  * the nearest obstacle within range. Inherits from USceneComponent so it
  * has a transform — the sensor fires along its local +X axis.
+ *
+ * When bUseGPURayTracing is enabled and the system supports it, rays are traced on the
+ * GPU via a compute shader with inline ray tracing (TraceRayInline). This path uses
+ * RT cores when available and falls back to software ray tracing otherwise.
+ * If GPU tracing is unavailable, the component automatically falls back to CPU LineTrace.
+ *
+ * Note: The GPU path cannot resolve HitActor (always null). If you need the hit actor,
+ * disable GPU ray tracing or use the OnSonarDataUpdated delegate and perform a
+ * supplementary CPU trace.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsSonarSensorComponent : public USceneComponent
@@ -88,6 +99,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Configuration")
 	bool bIgnoreOwner = true;
 
+	/** Use GPU ray tracing (compute shader with TraceRayInline) when available.
+	 *  Falls back to CPU LineTrace if the system does not support ray tracing.
+	 *  Note: GPU path cannot resolve HitActor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Configuration")
+	bool bUseGPURayTracing = true;
+
 	// ========== Noise ==========
 
 	/** Distance measurement Gaussian noise standard deviation (cm) */
@@ -96,7 +113,7 @@ public:
 
 	// ========== Debug ==========
 
-	/** Draw debug rays and hit points */
+	/** Draw debug rays and hit points at runtime */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Debug")
 	bool bEnableDebugDisplay = false;
 
@@ -104,11 +121,45 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Debug")
 	bool bEnableDebugLogging = false;
 
+	// ========== Shape Visualization ==========
+
+	/** Draw the sensor cone shape during gameplay */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Visualization")
+	bool bDrawShapeInGame = false;
+
+	/** Draw the sensor cone shape in the editor viewport */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Visualization")
+	bool bDrawShapeInEditor = true;
+
+	/** Color of the sensor cone outline */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor"))
+	FColor ShapeColor = FColor(255, 165, 0); // Orange
+
+	/** Thickness of cone outline lines */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor", ClampMin = "0.1"))
+	float ShapeLineThickness = 0.5f;
+
+	/** Draw filled translucent planes on the cone surface */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor"))
+	bool bDrawShapePlanes = true;
+
+	/** Color (with alpha) for the filled cone surface */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sonar|Visualization",
+		meta = (EditCondition = "bDrawShapeInGame || bDrawShapeInEditor"))
+	FLinearColor ShapePlaneColor = FLinearColor(1.0f, 0.65f, 0.0f, 0.05f);
+
 	// ========== State ==========
 
 	/** Most recent sensor reading */
 	UPROPERTY(BlueprintReadOnly, Category = "Sonar|State")
 	FSonarSensorData CurrentData;
+
+	/** Whether the GPU path is currently active */
+	UPROPERTY(BlueprintReadOnly, Category = "Sonar|State")
+	bool bGPUPathActive = false;
 
 	// ========== Events ==========
 
@@ -122,7 +173,8 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Sensors|Sonar")
 	FSonarSensorData GetSonarData() const { return CurrentData; }
 
-	/** Perform a single measurement right now (ignoring update rate) */
+	/** Perform a single measurement right now (ignoring update rate).
+	 *  Note: Always uses CPU path for immediate results. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors|Sonar")
 	FSonarSensorData MeasureNow();
 
@@ -130,8 +182,20 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
-	/** Perform the multi-ray cone trace and return the result */
-	FSonarSensorData PerformMeasurement() const;
+	// ---- Shape visualization ----
+	void DrawSensorShape();
+
+	// ---- CPU path (original implementation) ----
+	FSonarSensorData PerformCPUMeasurement() const;
+
+	// ---- GPU path ----
+	TArray<FSensorRayInput> BuildRayInputs() const;
+	void					SubmitGPUMeasurement();
+	bool					HarvestGPUResults();
+
+	FRammsSensorTraceRequest PendingGPURequest;
+	TArray<FSensorRayInput>	 PendingGPURays;
+	bool					 bGPUAvailable = false;
 
 	float TimeSinceLastUpdate = 0.0f;
 };

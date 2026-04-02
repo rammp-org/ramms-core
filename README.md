@@ -23,10 +23,22 @@
     - [Mobility](#mobility)
     - [Manipulation](#manipulation)
     - [Environment](#environment)
+    - [Sensors](#sensors)
   - [Kinova Gen3 Robotic Arm Controller](#kinova-gen3-robotic-arm-controller)
     - [Arm Configuration](#arm-configuration)
     - [Control Modes](#control-modes)
     - [Joint Configuration (`FRevoluteJointConfig`)](#joint-configuration-frevolutejointconfig)
+  - [Sensor Components](#sensor-components)
+    - [Time-of-Flight Sensor (`URammsToFSensorComponent`)](#time-of-flight-sensor-urammstfsensorcomponent)
+    - [Sonar Sensor (`URammsSonarSensorComponent`)](#sonar-sensor-urammssonarsensorcomponent)
+    - [IMU Sensor (`URammsIMUSensorComponent`)](#imu-sensor-urammsimusensorcomponent)
+  - [GPU Ray Tracing System](#gpu-ray-tracing-system)
+    - [Architecture](#architecture)
+    - [Project Setup](#project-setup)
+    - [Console Variables](#console-variables)
+    - [Performance Profiling](#performance-profiling)
+    - [CPU Fallback](#cpu-fallback)
+  - [Sensor Visualization](#sensor-visualization)
   - [IK Solver System](#ik-solver-system)
     - [Shared Infrastructure](#shared-infrastructure)
       - [FK Pipeline (`ComputeChainKinematics`)](#fk-pipeline-computechainkinematics)
@@ -100,6 +112,14 @@ This helps ensure that consistent code formatting is applied.
  | `UVanRampComponent` | Accessible van ramp with animation control |
  | `UVanDoorComponent` | Accessible door interaction simulation |
 
+### Sensors
+
+ | Component | Description |
+ |---|---|
+ | `URammsToFSensorComponent` | Time-of-Flight distance sensor (single-point or NxM grid) with GPU ray tracing |
+ | `URammsSonarSensorComponent` | Sonar / RADAR cone-beam distance sensor with GPU ray tracing |
+ | `URammsIMUSensorComponent` | Inertial measurement unit (accelerometer, gyroscope, orientation) |
+
  ---
 
 ## Kinova Gen3 Robotic Arm Controller
@@ -142,6 +162,235 @@ This helps ensure that consistent code formatting is applied.
  | `MaxTorque` | `39.0` | Maximum torque (N·m) for torque-controlled joints |
  | `PositionStrength` | `5000000.0` | PD position gain for position-controlled joints |
  | `PositionDamping` | `0.0` | PD damping gain |
+
+ ---
+
+## Sensor Components
+
+### Time-of-Flight Sensor (`URammsToFSensorComponent`)
+
+ Simulated Time-of-Flight distance sensor modeled after devices like the
+ VL53L0X (single point) and VL53L5CX (8×8 zone grid). The sensor fires
+ along its local **+X axis** and reports distance readings in centimeters.
+
+ | Property | Default | Description |
+ |---|---|---|
+ | `SensorMode` | `SinglePoint` | `SinglePoint` or `Grid` (NxM zones) |
+ | `MaxRange` | `400.0` cm | Maximum detection range |
+ | `MinRange` | `1.0` cm | Minimum detection range |
+ | `HorizontalFOV` | `45.0°` | Horizontal field of view (Grid mode) |
+ | `VerticalFOV` | `45.0°` | Vertical field of view (Grid mode) |
+ | `GridRows` | `8` | Number of grid rows (Grid mode) |
+ | `GridColumns` | `8` | Number of grid columns (Grid mode) |
+ | `UpdateRateHz` | `15.0` | Measurement rate (0 = every tick) |
+ | `TraceChannel` | `Visibility` | Collision channel to trace against |
+ | `bIgnoreOwner` | `true` | Ignore owning actor in traces |
+ | `bUseGPURayTracing` | `true` | Use GPU compute shader when available |
+ | `DistanceNoiseStdDev` | `0.0` cm | Gaussian noise standard deviation |
+
+ **Output (`FToFSensorData`):**
+ - `Distances` — `TArray<float>` of distance readings (row-major, -1 = no
+   detection)
+ - `NumRows` / `NumColumns` — Grid dimensions (1×1 for single point)
+ - `bAnyHit` / `MinDistance` — Aggregate hit information
+ - `Timestamp` — Seconds since game start
+
+ **Blueprint API:**
+ - `GetToFData()` — Latest measurement
+ - `GetDistanceAt(Row, Column)` — Single cell distance
+ - `MeasureNow()` — Immediate synchronous measurement (CPU path)
+ - `OnToFDataUpdated` — Delegate fired each measurement cycle
+
+### Sonar Sensor (`URammsSonarSensorComponent`)
+
+ Simulated sonar / RADAR distance sensor with a cone-shaped beam
+ approximated by multiple rays distributed in a golden-angle spiral. Fires
+ along **+X** and reports the distance to the nearest obstacle.
+
+ | Property | Default | Description |
+ |---|---|---|
+ | `MaxRange` | `400.0` cm | Maximum detection range |
+ | `MinRange` | `2.0` cm | Minimum detection range |
+ | `BeamHalfAngle` | `15.0°` | Half-angle of cone (total width = 2×) |
+ | `NumRays` | `7` | Number of rays approximating the cone |
+ | `UpdateRateHz` | `40.0` | Measurement rate |
+ | `bUseGPURayTracing` | `true` | Use GPU compute shader when available |
+ | `DistanceNoiseStdDev` | `0.0` cm | Gaussian noise standard deviation |
+
+ **Output (`FSonarSensorData`):**
+ - `Distance` — Closest obstacle distance (cm, -1 if none)
+ - `bHit` — Whether any obstacle was detected
+ - `HitLocation` / `HitNormal` — World-space impact point and surface normal
+ - `HitActor` — The actor hit (CPU path only; null on GPU path)
+
+ **Blueprint API:**
+ - `GetSonarData()` — Latest measurement
+ - `MeasureNow()` — Immediate synchronous measurement (CPU path)
+ - `OnSonarDataUpdated` — Delegate fired each measurement cycle
+
+ > **Note:** The GPU ray tracing path cannot resolve `HitActor`. If you
+ > need actor identification, disable `bUseGPURayTracing` or perform a
+ > supplementary CPU trace from the `OnSonarDataUpdated` delegate.
+
+### IMU Sensor (`URammsIMUSensorComponent`)
+
+ Simulated inertial measurement unit measuring linear acceleration,
+ angular velocity, and orientation. Attaches to any bone or socket and uses
+ the component's world transform as the sensor frame.
+
+ | Property | Default | Description |
+ |---|---|---|
+ | `bIncludeGravity` | `true` | Include gravitational acceleration in output |
+ | `UpdateRateHz` | `100.0` | Measurement rate |
+ | `bUsePhysicsVelocity` | `true` | Use physics velocity (avoids double-differentiation jitter) |
+ | `AccelSmoothingFactor` | `0.0` | EMA filter for accelerometer (0 = none, 1 = max) |
+ | `GyroSmoothingFactor` | `0.0` | EMA filter for gyroscope |
+ | `AccelDeadBand` | `0.0` cm/s² | Accelerometer dead-band threshold |
+ | `GyroDeadBand` | `0.0` °/s | Gyroscope dead-band threshold |
+ | `AccelNoiseStdDev` | `0.0` cm/s² | Accelerometer Gaussian noise |
+ | `GyroNoiseStdDev` | `0.0` °/s | Gyroscope Gaussian noise |
+ | `OrientationNoiseStdDev` | `0.0°` | Orientation Gaussian noise |
+ | `AccelBias` | `(0,0,0)` | Constant accelerometer bias (sensor-local, cm/s²) |
+ | `GyroBias` | `(0,0,0)` | Constant gyroscope bias (sensor-local, °/s) |
+
+ **Output (`FIMUSensorData`):**
+ - `LinearAcceleration` — Sensor-local frame (cm/s²)
+ - `AngularVelocity` — Sensor-local frame (°/s)
+ - `Orientation` — World-space quaternion
+ - `Timestamp` — Seconds since game start
+
+ **Blueprint API:**
+ - `GetIMUData()` — Latest measurement
+ - `OnIMUDataUpdated` — Delegate fired each measurement cycle
+
+ ---
+
+## GPU Ray Tracing System
+
+ The ToF and Sonar sensors can optionally use GPU-accelerated ray tracing
+ via a compute shader with DXR inline ray tracing (`TraceRayInline`). This
+ uses hardware RT cores when available and falls back to software ray
+ tracing otherwise, enabling massively parallel sensor simulation without
+ depending on specific GPU hardware.
+
+### Architecture
+
+ ```
+ Sensor Component (Game Thread)
+   │  BuildRayInputs()         ← Generate rays from sensor config
+   │  SubmitGPUMeasurement()   ← Queue rays for GPU dispatch
+   ▼
+ FRammsSensorRayTracer (Public API)
+   │  SubmitTraces()           ← Create readback, add to view extension
+   ▼
+ FRammsSensorViewExtension (Render Thread)
+   │  PostTLASBuild_RenderThread()  ← Called after TLAS is built each frame
+   │  DispatchSensorTrace()         ← Transform rays to TLAS space, dispatch
+   ▼
+ RammsSensorTrace.usf (GPU Compute Shader)
+   │  TraceRayInline(TLAS, ...)     ← DXR inline ray query per thread
+   ▼
+ GPU Readback → HarvestGPUResults() → Sensor Data + Debug Visualization
+ ```
+
+ **Key files:**
+
+ | File | Description |
+ |---|---|
+ | `Shaders/Private/RammsSensorTrace.usf` | HLSL compute shader (64 threads/group) with TraceRayInline |
+ | `Public/RammsSensorTraceShader.h` | C++ shader class + `FSensorRayInput`/`FSensorRayOutput` structs |
+ | `Public/RammsSensorRayTracer.h` | Public API: `SubmitTraces`, `IsRequestReady`, `HarvestResults` |
+ | `Private/RammsSensorRayTracer.cpp` | Scene View Extension, RDG dispatch, TLAS coordinate transform, readback |
+
+ **TLAS coordinate space:** UE 5.7 builds the TLAS in camera-relative
+ coordinates (offset by `PreViewTranslation ≈ -CameraPosition`). The
+ system automatically transforms ray origins from world space to TLAS
+ space before dispatch. Directions are unaffected.
+
+### Project Setup
+
+ GPU sensor ray tracing requires:
+
+ 1. **DirectX 12** with ray tracing support enabled:
+    ```ini
+    ; DefaultEngine.ini [/Script/WindowsTargetPlatform.WindowsTargetSettings]
+    DefaultGraphicsRHI=DefaultGraphicsRHI_DX12
+    ```
+
+ 2. **Ray tracing enabled** in project settings:
+    ```ini
+    ; DefaultEngine.ini [/Script/Engine.RendererSettings]
+    r.RayTracing=True
+    ```
+
+ 3. **Lumen Hardware Ray Tracing** to populate the TLAS:
+    ```ini
+    ; DefaultEngine.ini [/Script/Engine.RendererSettings]
+    r.Lumen.HardwareRayTracing=True
+    ```
+
+ > **⚠ Important:** Do **not** use `r.RayTracing.ForceAllRayTracingEffects=1`
+ > as it breaks `DrawDebugMesh` rendering (used for sensor shape
+ > visualization). Lumen Hardware Ray Tracing naturally populates the TLAS
+ > without this side effect.
+
+### Console Variables
+
+ | CVar | Default | Description |
+ |---|---|---|
+ | `r.Ramms.SensorGPUTrace` | `1` | Enable/disable GPU ray tracing for sensors (0 = off) |
+ | `r.Ramms.SensorDebugMode` | `0` | Shader diagnostic mode — replaces rays 0–1 with TLAS probes and input echoes. Only for debugging; corrupts the first 2 results. |
+
+### Performance Profiling
+
+ The GPU dispatch pass is named `RammsSensorTraceDispatch` and appears
+ automatically in Unreal's built-in profiling tools:
+
+ - **`stat gpu`** — Per-pass GPU timings in the viewport
+ - **GPU Visualizer** (`Ctrl+Shift+,`) — Detailed GPU timeline
+
+ Typical cost is negligible for small ray counts (64–256 rays). For
+ large-scale simulations, increase `NumRays` or `GridRows`/`GridColumns`
+ while monitoring the GPU timeline.
+
+### CPU Fallback
+
+ If the GPU path is unavailable (no DX12, no RT support, or
+ `r.Ramms.SensorGPUTrace=0`), sensors automatically fall back to CPU
+ `LineTraceSingleByChannel`. The CPU path supports `TraceChannel` and
+ `bIgnoreOwner` filtering. The `MeasureNow()` Blueprint function always
+ uses the CPU path for immediate synchronous results.
+
+ ---
+
+## Sensor Visualization
+
+ Both ToF and Sonar sensors support shape visualization in the editor
+ viewport and during gameplay, following the same pattern as the
+ CameraCapture plugin's `IntrinsicSceneCaptureComponent2D`.
+
+ - **ToF (Grid mode)** draws a frustum defined by `HorizontalFOV ×
+   VerticalFOV` with near/far planes at `MinRange`/`MaxRange`
+ - **ToF (SinglePoint mode)** draws a line along +X with a crosshair at
+   `MinRange`
+ - **Sonar** draws a cone with circular cross-sections at near and far
+   distances
+
+ | Property | Default (ToF) | Default (Sonar) | Description |
+ |---|---|---|---|
+ | `bDrawShapeInEditor` | `true` | `true` | Show shape in editor viewport |
+ | `bDrawShapeInGame` | `false` | `false` | Show shape during gameplay |
+ | `ShapeColor` | Cyan | Orange | Outline color |
+ | `ShapeLineThickness` | `0.5` | `0.5` | Line width |
+ | `bDrawShapePlanes` | `true` | `true` | Draw filled translucent planes |
+ | `ShapePlaneColor` | Cyan (5% alpha) | Orange (5% alpha) | Fill color |
+
+ When `bEnableDebugDisplay` is enabled during gameplay, hit rays are drawn
+ in **green**, hit points as **red** dots, and miss rays in **yellow**
+ (dark yellow for ToF).
+
+ > **Note:** Shape visualization only draws in editor mode. The sensing
+ > pipeline (GPU/CPU traces, logging) only runs in game worlds.
 
  ---
 
@@ -474,4 +723,8 @@ This helps ensure that consistent code formatting is applied.
  - **Eigen** — Matrix operations for DLS and rotation error computation.
    Included as a third-party dependency.
  - **PhysicsCore / Chaos** — Physics constraint reading and actuation.
- 
+ - **RHI / RHICore / RenderCore / Renderer** — GPU ray tracing infrastructure
+   (inline RT compute shader dispatch, RDG graph, TLAS access). Only used
+   when `bUseGPURayTracing` is enabled on sensor components.
+ - **Projects** — Plugin shader directory registration.
+

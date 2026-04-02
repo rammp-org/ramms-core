@@ -1,18 +1,33 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsCore.h"
+#include "Interfaces/IPluginManager.h"
+#include "Misc/Paths.h"
+#include "ShaderCore.h"
 
 #define LOCTEXT_NAMESPACE "FRammsCoreModule"
 
 void FRammsCoreModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	// Register shader source directory so .usf files can be included via /RammsCore/...
+	FString PluginShaderDir = FPaths::Combine(
+		IPluginManager::Get().FindPlugin(TEXT("RammsCore"))->GetBaseDir(),
+		TEXT("Shaders"));
+	FPaths::CollapseRelativeDirectories(PluginShaderDir);
+
+	if (FPaths::DirectoryExists(PluginShaderDir))
+	{
+		AddShaderSourceDirectoryMapping(TEXT("/RammsCore"), PluginShaderDir);
+		UE_LOG(LogTemp, Log, TEXT("RammsCore: Registered shader source directory: %s"), *PluginShaderDir);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RammsCore: Shader directory not found at: %s"), *PluginShaderDir);
+	}
 }
 
 void FRammsCoreModule::ShutdownModule()
 {
-	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-	// we call this function before unloading the module.
 }
 
 #undef LOCTEXT_NAMESPACE
