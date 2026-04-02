@@ -360,9 +360,15 @@ This helps ensure that consistent code formatting is applied.
 
  If the GPU path is unavailable (no DX12, no RT support, or
  `r.Ramms.SensorGPUTrace=0`), sensors automatically fall back to CPU
- `LineTraceSingleByChannel`. The CPU path supports `TraceChannel` and
- `bIgnoreOwner` filtering. The `MeasureNow()` Blueprint function always
+ `LineTraceSingleByChannel`. The `MeasureNow()` Blueprint function always
  uses the CPU path for immediate synchronous results.
+
+ > **⚠ Collision filtering differences:** The GPU ray tracing path traces
+ > against the full scene TLAS and **does not honor** `TraceChannel` or
+ > `bIgnoreOwner`. These properties are greyed out in the editor when
+ > `bUseGPURayTracing` is enabled. If per-channel or per-actor filtering
+ > is required, disable GPU tracing on that sensor to use the CPU path.
+ > The GPU path also cannot resolve `HitActor` (always `nullptr`).
 
  ---
 

@@ -107,16 +107,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration", meta = (ClampMin = "0.0"))
 	float UpdateRateHz = 15.0f;
 
-	/** Collision channel to trace against */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration")
+	/** Collision channel to trace against.
+	 *  CPU path only — the GPU ray tracing path traces against the full TLAS
+	 *  and does not filter by collision channel. Greyed out when GPU tracing
+	 *  is enabled; set bUseGPURayTracing=false to use channel filtering. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration",
+		meta = (EditCondition = "!bUseGPURayTracing"))
 	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
 
-	/** Whether to ignore the owning actor in traces */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration")
+	/** Whether to ignore the owning actor in traces.
+	 *  CPU path only — the GPU ray tracing path cannot exclude specific actors.
+	 *  Greyed out when GPU tracing is enabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration",
+		meta = (EditCondition = "!bUseGPURayTracing"))
 	bool bIgnoreOwner = true;
 
 	/** Use GPU ray tracing (compute shader with TraceRayInline) when available.
-	 *  Falls back to CPU LineTrace if the system does not support ray tracing. */
+	 *  Falls back to CPU LineTrace if the system does not support ray tracing.
+	 *  Note: The GPU path does not honor TraceChannel or bIgnoreOwner — it traces
+	 *  against the full scene TLAS. Use CPU fallback if collision filtering is required. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ToF|Configuration")
 	bool bUseGPURayTracing = true;
 
