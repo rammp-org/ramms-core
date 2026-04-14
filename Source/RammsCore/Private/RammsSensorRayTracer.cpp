@@ -13,7 +13,18 @@
 #include "SceneViewExtension.h"
 #include "DataDrivenShaderPlatformInfo.h"
 
-#if RHI_RAYTRACING
+// GPU sensor ray tracing requires the Renderer's TLAS access APIs
+// (FRayTracingScene::GetLayerView, FXRenderingUtils::HasRayTracingScene,
+// ScenePrivate.h). These are only exported on desktop platforms (DX12/Vulkan).
+// Mobile platforms (Android/iOS) may define RHI_RAYTRACING=1 for Vulkan RT
+// extensions but lack the linker symbols, so we exclude them explicitly.
+#if RHI_RAYTRACING && !PLATFORM_ANDROID && !PLATFORM_IOS
+	#define RAMMS_GPU_SENSOR_RAYTRACING 1
+#else
+	#define RAMMS_GPU_SENSOR_RAYTRACING 0
+#endif
+
+#if RAMMS_GPU_SENSOR_RAYTRACING
 	#include "FXRenderingUtils.h"
 	// Private Renderer headers needed for FScene::RayTracingScene and FViewInfo.
 	// These types are not exposed through public UE APIs as of 5.7. If a future
@@ -100,7 +111,7 @@ public:
 
 	virtual void PostTLASBuild_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView) override
 	{
-#if RHI_RAYTRACING
+#if RAMMS_GPU_SENSOR_RAYTRACING
 		FSceneInterface* ViewScene = InView.Family ? InView.Family->Scene : nullptr;
 		bool			 bHasScene = ViewScene && UE::FXRenderingUtils::RayTracing::HasRayTracingScene(*ViewScene);
 
@@ -135,7 +146,7 @@ public:
 		{
 			DispatchSensorTrace(GraphBuilder, InView, *ViewScene, Submission);
 		}
-#endif // RHI_RAYTRACING
+#endif // RAMMS_GPU_SENSOR_RAYTRACING
 	}
 
 	// ---- Public interface (called from game thread) ----
@@ -150,7 +161,7 @@ private:
 	mutable FCriticalSection		   SubmissionLock;
 	TArray<FPendingRayTraceSubmission> PendingSubmissions;
 
-#if RHI_RAYTRACING
+#if RAMMS_GPU_SENSOR_RAYTRACING
 	void DispatchSensorTrace(
 		FRDGBuilder&				GraphBuilder,
 		const FSceneView&			InView,
@@ -256,7 +267,7 @@ private:
 				ReadbackShared->EnqueueCopy(RHICmdList, OutputBuffer->GetRHI(), NumBytes);
 			});
 	}
-#endif // RHI_RAYTRACING
+#endif // RAMMS_GPU_SENSOR_RAYTRACING
 };
 
 // ============================================================================
@@ -283,6 +294,9 @@ void FRammsSensorRayTracer::EnsureViewExtension()
 
 bool FRammsSensorRayTracer::IsAvailable()
 {
+#if !RAMMS_GPU_SENSOR_RAYTRACING
+	return false;
+#else
 	if (CVarRammsSensorGPUTrace.GetValueOnGameThread() <= 0)
 	{
 		return false;
@@ -299,6 +313,7 @@ bool FRammsSensorRayTracer::IsAvailable()
 	}
 
 	return true;
+#endif
 }
 
 FRammsSensorTraceRequest FRammsSensorRayTracer::SubmitTraces(const TArray<FSensorRayInput>& Rays, FSceneInterface* Scene)
