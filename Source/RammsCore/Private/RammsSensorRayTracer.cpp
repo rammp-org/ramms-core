@@ -14,7 +14,7 @@
 #include "DataDrivenShaderPlatformInfo.h"
 
 // GPU sensor ray tracing requires the Renderer's TLAS access APIs
-// (FRayTracingScene::GetLayerView, FXRenderingUtils::HasRayTracingScene,
+// (FRayTracingScene::GetLayerView, UE::FXRenderingUtils::RayTracing::HasRayTracingScene,
 // ScenePrivate.h). These are only exported on desktop platforms (DX12/Vulkan).
 // Mobile platforms (Android/iOS) may define RHI_RAYTRACING=1 for Vulkan RT
 // extensions but lack the linker symbols, so we exclude them explicitly.
