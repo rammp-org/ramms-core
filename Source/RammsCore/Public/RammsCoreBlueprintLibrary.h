@@ -22,19 +22,40 @@ public:
 #endif
 	};
 
-	// Allow the blueprint to determine whether we are running with the editor or not
-	UFUNCTION(BlueprintPure, BlueprintCallable, Category = "RammsCoreFunctionLibrary")
-	static bool IsPIE()
+	// Allow the blueprint to determine whether the current world is running as PIE
+	UFUNCTION(BlueprintPure, BlueprintCallable, Category = "RammsCoreFunctionLibrary", meta = (WorldContext = "WorldContextObject"))
+	static bool IsPIE(const UObject* WorldContextObject)
 	{
-		return IsWithEditor();
+#if WITH_EDITOR
+		if (WorldContextObject != nullptr)
+		{
+			if (const UWorld* World = WorldContextObject->GetWorld())
+			{
+				return World->WorldType == EWorldType::PIE;
+			}
+		}
+#endif
+		return false;
 	};
 
 	// Allow the blueprint to determine whether we are running outside of the
 	// editor (e.g. in a packaged build or standalone) or not
-	UFUNCTION(BlueprintPure, BlueprintCallable, Category = "RammsCoreFunctionLibrary")
-	static bool IsOutsideEditor()
+	UFUNCTION(BlueprintPure, BlueprintCallable, Category = "RammsCoreFunctionLibrary", meta = (WorldContext = "WorldContextObject"))
+	static bool IsOutsideEditor(const UObject* WorldContextObject)
 	{
-		return !IsPIE();
+#if !WITH_EDITOR
+		return true;
+#else
+		if (WorldContextObject != nullptr)
+		{
+			if (const UWorld* World = WorldContextObject->GetWorld())
+			{
+				return World->WorldType == EWorldType::Game;
+			}
+		}
+
+		return false;
+#endif
 	};
 
 	// Allow the blueprint to determine whether we are running in a packaged
