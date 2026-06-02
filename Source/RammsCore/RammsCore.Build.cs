@@ -33,6 +33,13 @@ public class RammsCore : ModuleRules
 			new string[]
 			{
 				"Core",
+				"CoreUObject",
+				"Engine",
+				"MassActors",
+				"MassCommon",
+				"MassEntity",
+				"MassSpawner",
+				"ZoneGraph",
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
@@ -47,6 +54,8 @@ public class RammsCore : ModuleRules
 				"SlateCore",
 				"PhysicsCore",
 				"AnimationCore",
+				"MassLOD",
+				"MassRepresentation",
 				"RHI",
 				"RHICore",
 				"RenderCore",

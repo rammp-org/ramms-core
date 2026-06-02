@@ -767,6 +767,11 @@ void URammsSkeletalPoseComponent::ApplyJointToBone(const FKinematicJointConfig& 
 		return;
 	}
 
+	if (Joint.BoneName.IsNone() || Mesh->GetBoneIndex(Joint.BoneName) == INDEX_NONE)
+	{
+		return;
+	}
+
 	// Reset to bind pose first so we have a clean baseline each frame.
 	// Without this, component-space transforms can accumulate incorrectly,
 	// especially for bones on child poseable meshes in hierarchies.

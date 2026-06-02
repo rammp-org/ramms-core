@@ -165,6 +165,7 @@ void UGripperControllerComponent::FindConstraints()
 	}
 
 	// Find constraints for both fingers
+	Finger1Motor.CachedConstraint = nullptr;
 	Finger1Motor.CachedConstraint = CachedGripperMesh->FindConstraintInstance(Finger1Motor.ConstraintName);
 	if (!Finger1Motor.CachedConstraint && bEnableDebugLog)
 	{
@@ -172,6 +173,7 @@ void UGripperControllerComponent::FindConstraints()
 			*Finger1Motor.ConstraintName.ToString());
 	}
 
+	Finger2Motor.CachedConstraint = nullptr;
 	Finger2Motor.CachedConstraint = CachedGripperMesh->FindConstraintInstance(Finger2Motor.ConstraintName);
 	if (!Finger2Motor.CachedConstraint && bEnableDebugLog)
 	{
@@ -232,10 +234,34 @@ USkeletalMeshComponent* UGripperControllerComponent::GetOwnerSkeletalMesh()
 	return FoundMesh;
 }
 
+FConstraintInstance* UGripperControllerComponent::ResolveConstraint(FAngularMotorConfig& Motor)
+{
+	if (Motor.ConstraintName.IsNone())
+	{
+		Motor.CachedConstraint = nullptr;
+		return nullptr;
+	}
+
+	if (!IsValid(CachedGripperMesh)
+		|| (GripperMeshName != NAME_None && CachedGripperMesh->GetFName() != GripperMeshName))
+	{
+		CachedGripperMesh = GetOwnerSkeletalMesh();
+	}
+
+	if (!CachedGripperMesh)
+	{
+		Motor.CachedConstraint = nullptr;
+		return nullptr;
+	}
+
+	Motor.CachedConstraint = CachedGripperMesh->FindConstraintInstance(Motor.ConstraintName);
+	return Motor.CachedConstraint;
+}
+
 void UGripperControllerComponent::UpdateMotors(float DeltaTime)
 {
 	// Update finger 1
-	if (Finger1Motor.bEnabled && Finger1Motor.CachedConstraint)
+	if (Finger1Motor.bEnabled && ResolveConstraint(Finger1Motor))
 	{
 		float EffectiveSpeed = Finger1Motor.MaxSpeed * Finger1Motor.SpeedMultiplier;
 		float MaxDelta = EffectiveSpeed * DeltaTime;
@@ -254,7 +280,7 @@ void UGripperControllerComponent::UpdateMotors(float DeltaTime)
 	}
 
 	// Update finger 2
-	if (Finger2Motor.bEnabled && Finger2Motor.CachedConstraint)
+	if (Finger2Motor.bEnabled && ResolveConstraint(Finger2Motor))
 	{
 		float EffectiveSpeed = Finger2Motor.MaxSpeed * Finger2Motor.SpeedMultiplier;
 		float MaxDelta = EffectiveSpeed * DeltaTime;
@@ -275,18 +301,19 @@ void UGripperControllerComponent::UpdateMotors(float DeltaTime)
 
 void UGripperControllerComponent::ApplyMotorSettings(FAngularMotorConfig& Motor)
 {
-	if (!Motor.CachedConstraint)
+	FConstraintInstance* Constraint = ResolveConstraint(Motor);
+	if (!Constraint)
 	{
 		return;
 	}
 
 	// Enable/disable angular drive
-	Motor.CachedConstraint->SetOrientationDriveTwistAndSwing(Motor.bEnabled, Motor.bEnabled);
+	Constraint->SetOrientationDriveTwistAndSwing(Motor.bEnabled, Motor.bEnabled);
 
 	if (Motor.bEnabled)
 	{
 		// Set motor strength and damping
-		Motor.CachedConstraint->SetAngularDriveParams(Motor.MotorStrength, Motor.MotorDamping, 0.0f);
+		Constraint->SetAngularDriveParams(Motor.MotorStrength, Motor.MotorDamping, 0.0f);
 
 		// Apply direction inversion if needed
 		float EffectiveAngle = Motor.bInvertDirection ? -Motor.CurrentAngle : Motor.CurrentAngle;
@@ -306,7 +333,7 @@ void UGripperControllerComponent::ApplyMotorSettings(FAngularMotorConfig& Motor)
 				break;
 		}
 
-		Motor.CachedConstraint->SetAngularOrientationTarget(TargetQuat);
+		Constraint->SetAngularOrientationTarget(TargetQuat);
 
 		if (bEnableDebugLog)
 		{
@@ -315,13 +342,13 @@ void UGripperControllerComponent::ApplyMotorSettings(FAngularMotorConfig& Motor)
 			switch (Motor.ControlAxis)
 			{
 				case EMotorAxis::X:
-					ActualAngle = Motor.CachedConstraint->GetCurrentSwing1();
+					ActualAngle = Constraint->GetCurrentSwing1();
 					break;
 				case EMotorAxis::Y:
-					ActualAngle = Motor.CachedConstraint->GetCurrentSwing2();
+					ActualAngle = Constraint->GetCurrentSwing2();
 					break;
 				case EMotorAxis::Z:
-					ActualAngle = Motor.CachedConstraint->GetCurrentTwist();
+					ActualAngle = Constraint->GetCurrentTwist();
 					break;
 			}
 

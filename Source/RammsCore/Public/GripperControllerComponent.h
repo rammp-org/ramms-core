@@ -81,6 +81,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Gripper Controller")
 	void SetMotorSpeedMultiplier(float SpeedMultiplier);
 
+	UFUNCTION(BlueprintPure, Category = "Gripper Controller")
+	FAngularMotorConfig GetFinger1MotorConfig() const { return Finger1Motor; }
+
+	UFUNCTION(BlueprintPure, Category = "Gripper Controller")
+	FAngularMotorConfig GetFinger2MotorConfig() const { return Finger2Motor; }
+
+	UFUNCTION(BlueprintPure, Category = "Gripper Controller")
+	FName GetGripperSkeletalMeshComponentName() const { return GripperMeshName; }
+
+	UFUNCTION(BlueprintPure, Category = "Gripper Controller")
+	float GetOpenAngle() const { return OpenAngle; }
+
+	UFUNCTION(BlueprintPure, Category = "Gripper Controller")
+	float GetClosedAngle() const { return ClosedAngle; }
+
 	// Events
 	UPROPERTY(BlueprintAssignable, Category = "Gripper Controller|Events")
 	FOnGripperOpened OnGripperOpened;
@@ -141,6 +156,8 @@ private:
 
 	// Find and cache skeletal mesh and constraints
 	void FindConstraints();
+
+	FConstraintInstance* ResolveConstraint(FAngularMotorConfig& Motor);
 
 	// Get skeletal mesh from owner
 	USkeletalMeshComponent* GetOwnerSkeletalMesh();
