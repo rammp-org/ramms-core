@@ -47,6 +47,7 @@ public class RammsCore : ModuleRules
 				"SlateCore",
 				"PhysicsCore",
 				"AnimationCore",
+				"InputCore",
 				"RHI",
 				"RHICore",
 				"RenderCore",

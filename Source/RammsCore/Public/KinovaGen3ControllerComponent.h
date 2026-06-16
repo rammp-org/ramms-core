@@ -349,6 +349,12 @@ public:
 	int32 LastIKIterations = 0;
 	bool  bLastIKSuccess = false;
 
+	/** Monotonically increments every time UpdateInverseKinematics actually runs a solve.
+	 *  Lets external tooling (e.g. teleop diagnostics) tell "solver idle / latched satisfied"
+	 *  apart from "solver active but arm not tracking". */
+	UPROPERTY(BlueprintReadOnly, Category = "Arm|State")
+	int32 IKSolveCount = 0;
+
 	/** Actual skeletal mesh error (from previous frame) vs IK solver prediction */
 	float LastActualPosError = 0.0f;
 	float LastActualRotError = 0.0f;
@@ -434,10 +440,13 @@ public:
 	 * Set joint targets from a pose asset by name
 	 * @param PoseAsset - The pose asset containing the target pose
 	 * @param PoseName - Name of the pose to apply
+	 * @param bSnapToTargets - If true, snap the joints straight to the pose (bypassing the
+	 *        speed-limited drive ramp) and immediately fire OnJointTargetsReached, instead of
+	 *        driving toward it over time.
 	 * @return True if the pose was found and applied
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
-	bool SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName);
+	bool SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName, bool bSnapToTargets = false);
 
 	/**
 	 * Capture the current joint angles into a pose asset at the given index.
@@ -492,6 +501,13 @@ public:
 	FEndEffectorState GetEndEffectorState() const
 	{
 		return EndEffectorState;
+	}
+
+	/** Get the current end-effector target transform used by IK control (world space) */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
+	FTransform GetEndEffectorTargetTransform() const
+	{
+		return TargetEndEffectorTransform;
 	}
 
 	/**
@@ -556,6 +572,41 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
 	void MoveEndEffectorTargetByLocal(const FVector& LocalOffset);
+
+	/**
+	 * Rotate the end-effector target by a world-space delta rotation
+	 * @param DeltaRotation - World-space delta rotation in degrees
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void RotateEndEffectorTargetBy(const FRotator& DeltaRotation);
+
+	/**
+	 * Rotate the end-effector target in its local frame
+	 * @param LocalDeltaRotation - Local-frame delta rotation in degrees
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void RotateEndEffectorTargetByLocal(const FRotator& LocalDeltaRotation);
+
+	/**
+	 * Snap the current IK target to the live end-effector pose.
+	 * Useful before starting teleoperation so incremental commands begin from the current arm state.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void SnapEndEffectorTargetToCurrentPose();
+
+	/**
+	 * Apply normalized teleoperation input to the end-effector target.
+	 * LinearInput is X/Y/Z in the chosen frame, AngularInput is Pitch/Yaw/Roll.
+	 * Inputs are expected in the range [-1, 1].
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void ApplyEndEffectorTeleopInput(
+		const FVector&	LinearInput,
+		const FRotator& AngularInput,
+		float			DeltaTimeSeconds,
+		bool			bInputIsLocalFrame = true,
+		float			LinearSpeedCmPerSecond = 20.0f,
+		float			AngularSpeedDegPerSecond = 45.0f);
 
 	/**
 	 * Set control mode for all joints
@@ -665,6 +716,10 @@ private:
 
 	/** Apply settings to a revolute joint */
 	void ApplyJointSettings(FRevoluteJointConfig& Joint, float DeltaTime);
+
+	/** Snap all joints directly to their current TargetAngle (bypass the speed-limited ramp),
+	 *  command the constraint drives, wake the bodies, and broadcast OnJointTargetsReached. */
+	void SnapJointsToCurrentTargets();
 
 	/** Update end-effector state from forward kinematics */
 	void UpdateEndEffectorState();

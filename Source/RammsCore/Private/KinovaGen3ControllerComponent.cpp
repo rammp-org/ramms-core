@@ -492,6 +492,20 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		}
 	}
 
+	// Keep the arm's bodies awake while it still needs to move toward its target.
+	// Chaos auto-sleeps low-velocity bodies after ~1-2s; once asleep, constraint-drive
+	// target changes no longer move them, so the arm freezes short of the goal even
+	// though IK keeps solving (active solver, small solver error, large actual error).
+	// Waking each tick while off-target lets the drive keep pulling; when the arm is
+	// genuinely at its target it's allowed to sleep and hold position normally.
+	const bool bArmAtTarget = (ArmControlMode == EArmControlMode::EndEffectorControl)
+		? bPoseTargetReached
+		: bJointTargetsReached;
+	if (!bArmAtTarget)
+	{
+		SkeletalMeshComponent->WakeAllRigidBodies();
+	}
+
 	// Debug visualization
 	if (bEnableDebugDisplay || bShowJointFrames)
 	{
@@ -1723,7 +1737,7 @@ bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseIndex(URammsJointPos
 	return true;
 }
 
-bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName)
+bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseName(URammsJointPoseAsset* PoseAsset, const FString& PoseName, bool bSnapToTargets)
 {
 	if (!PoseAsset)
 	{
@@ -1745,7 +1759,76 @@ bool UKinovaGen3ControllerComponent::SetJointTargetsFromPoseName(URammsJointPose
 		AnglesD.Add(static_cast<double>(A));
 	}
 	SetAllJointTargets(AnglesD);
+
+	if (bSnapToTargets)
+	{
+		SnapJointsToCurrentTargets();
+	}
+
 	return true;
+}
+
+void UKinovaGen3ControllerComponent::SnapJointsToCurrentTargets()
+{
+	if (!SkeletalMeshComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] SnapJointsToCurrentTargets: No skeletal mesh component; cannot snap"));
+		return;
+	}
+
+	for (FRevoluteJointConfig& Joint : Joints)
+	{
+		if (Joint.BoneName == NAME_None)
+		{
+			continue;
+		}
+
+		FName				 ConstraintToUse = Joint.ConstraintName != NAME_None ? Joint.ConstraintName : Joint.BoneName;
+		FConstraintInstance* Constraint = SkeletalMeshComponent->FindConstraintInstance(ConstraintToUse);
+		if (!Constraint)
+		{
+			continue;
+		}
+
+		// Clamp to software limits if enabled
+		float SnapAngle = Joint.TargetAngle;
+		if (Joint.bEnableSoftwareLimits)
+		{
+			SnapAngle = ClampToLimits(Joint, SnapAngle);
+		}
+
+		// Seed the speed limiter and reported angle so we don't ramp toward the target.
+		Joint.SmoothedAngle = SnapAngle;
+		Joint.bSmoothedAngleInitialized = true;
+		Joint.CurrentAngle = SnapAngle;
+
+		// Command the constraint drive directly (apply offset + sign as the per-tick path does).
+		const float ConstraintAngle = Joint.ConstraintAngleSign * (SnapAngle + Joint.AngleOffset);
+		SetConstraintAngle(Constraint, Joint.ControlledAxis, ConstraintAngle);
+		Joint.LastCommandedConstraintAngle = ConstraintAngle;
+	}
+
+	// Wake the bodies so the snapped drive targets take effect even if the arm had gone to sleep.
+	SkeletalMeshComponent->WakeAllRigidBodies();
+
+	// Refresh the cached end-effector state so anything that reads GetEndEffectorState() right
+	// after the snap gets a real pose instead of the stale default (e.g. (0,0,0) before the
+	// first tick). NOTE: this reflects the pose at snap time; the fully-settled pose is what the
+	// tick-fired OnJointTargetsReached will report once physics has stepped.
+	UpdateEndEffectorState();
+
+	// Do NOT broadcast OnJointTargetsReached here. Even though the drive targets are set, the
+	// bodies have not stepped yet and EndEffectorState is still stale (e.g. (0,0,0) if no tick
+	// has run). Leave bJointTargetsReached = false so the tick's reached-detection fires the
+	// event once the snapped pose has physically settled — by then UpdateEndEffectorState() has
+	// run and GetEndEffectorState() returns the correct pose. The snap bypasses the speed ramp,
+	// so that happens within a frame or two rather than over the full drive time.
+	bJointTargetsReached = false;
+
+	if (bEnableDebugLogging)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Snapped %d joints to their targets; OnJointTargetsReached will fire from the tick once settled"), Joints.Num());
+	}
 }
 
 bool UKinovaGen3ControllerComponent::CaptureCurrentPose(URammsJointPoseAsset* PoseAsset, const FString& PoseName, int32 PoseIndex)
@@ -1985,10 +2068,125 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetByLocal(const FVector&
 	}
 }
 
+void UKinovaGen3ControllerComponent::RotateEndEffectorTargetBy(const FRotator& DeltaRotation)
+{
+	const FQuat WorldDelta = DeltaRotation.Quaternion();
+	const FQuat UpdatedRotation = (WorldDelta * TargetEndEffectorTransform.GetRotation()).GetNormalized();
+	TargetEndEffectorTransform.SetRotation(UpdatedRotation);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
+
+	if (bEnableDebugLogging)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Rotated IK target by world delta (Pitch=%.2f Yaw=%.2f Roll=%.2f)"),
+			DeltaRotation.Pitch, DeltaRotation.Yaw, DeltaRotation.Roll);
+	}
+}
+
+void UKinovaGen3ControllerComponent::RotateEndEffectorTargetByLocal(const FRotator& LocalDeltaRotation)
+{
+	const FQuat LocalDelta = LocalDeltaRotation.Quaternion();
+	const FQuat UpdatedRotation = (TargetEndEffectorTransform.GetRotation() * LocalDelta).GetNormalized();
+	TargetEndEffectorTransform.SetRotation(UpdatedRotation);
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
+
+	if (bEnableDebugLogging)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Rotated IK target by local delta (Pitch=%.2f Yaw=%.2f Roll=%.2f)"),
+			LocalDeltaRotation.Pitch, LocalDeltaRotation.Yaw, LocalDeltaRotation.Roll);
+	}
+}
+
+void UKinovaGen3ControllerComponent::SnapEndEffectorTargetToCurrentPose()
+{
+	if (!SkeletalMeshComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot snap IK target: No skeletal mesh component"));
+		return;
+	}
+
+	if (EndEffectorBoneName == NAME_None)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[KinovaGen3] Cannot snap IK target: EndEffectorBoneName is None"));
+		return;
+	}
+
+	SetEndEffectorTarget(SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World));
+}
+
+void UKinovaGen3ControllerComponent::ApplyEndEffectorTeleopInput(
+	const FVector&	LinearInput,
+	const FRotator& AngularInput,
+	float			DeltaTimeSeconds,
+	bool			bInputIsLocalFrame,
+	float			LinearSpeedCmPerSecond,
+	float			AngularSpeedDegPerSecond)
+{
+	if (DeltaTimeSeconds <= SMALL_NUMBER)
+	{
+		return;
+	}
+
+	ArmControlMode = EArmControlMode::EndEffectorControl;
+
+	const FVector ClampedLinearInput(
+		FMath::Clamp(LinearInput.X, -1.0f, 1.0f),
+		FMath::Clamp(LinearInput.Y, -1.0f, 1.0f),
+		FMath::Clamp(LinearInput.Z, -1.0f, 1.0f));
+	const FRotator ClampedAngularInput(
+		FMath::Clamp(AngularInput.Pitch, -1.0f, 1.0f),
+		FMath::Clamp(AngularInput.Yaw, -1.0f, 1.0f),
+		FMath::Clamp(AngularInput.Roll, -1.0f, 1.0f));
+
+	const FVector  LinearDelta = ClampedLinearInput * FMath::Max(0.0f, LinearSpeedCmPerSecond) * DeltaTimeSeconds;
+	const FRotator AngularDelta(
+		ClampedAngularInput.Pitch * FMath::Max(0.0f, AngularSpeedDegPerSecond) * DeltaTimeSeconds,
+		ClampedAngularInput.Yaw * FMath::Max(0.0f, AngularSpeedDegPerSecond) * DeltaTimeSeconds,
+		ClampedAngularInput.Roll * FMath::Max(0.0f, AngularSpeedDegPerSecond) * DeltaTimeSeconds);
+
+	const bool bHasLinearInput = !LinearDelta.IsNearlyZero();
+	const bool bHasAngularInput = !AngularDelta.IsNearlyZero();
+	if (!bHasLinearInput && !bHasAngularInput)
+	{
+		return;
+	}
+
+	if (bHasLinearInput)
+	{
+		if (bInputIsLocalFrame)
+		{
+			MoveEndEffectorTargetByLocal(LinearDelta);
+		}
+		else
+		{
+			MoveEndEffectorTargetBy(LinearDelta);
+		}
+	}
+
+	if (bHasAngularInput)
+	{
+		if (bInputIsLocalFrame)
+		{
+			RotateEndEffectorTargetByLocal(AngularDelta);
+		}
+		else
+		{
+			RotateEndEffectorTargetBy(AngularDelta);
+		}
+	}
+}
+
 void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 {
 	if (!SkeletalMeshComponent || Joints.Num() == 0)
 		return;
+
+	// Count every solve that actually executes so external diagnostics can detect
+	// whether the satisfied-latch in TickComponent has stopped re-solving.
+	++IKSolveCount;
 
 	if (bEnableDebugLogging && GFrameCounter % 60 == 0)
 	{

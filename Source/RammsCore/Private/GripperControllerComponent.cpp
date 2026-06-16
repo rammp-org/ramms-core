@@ -56,6 +56,53 @@ void UGripperControllerComponent::BeginPlay()
 	}
 }
 
+namespace
+{
+	/** Physical constraint angle (degrees) for a finger motor's controlled axis. */
+	float GetMotorActualAngleDeg(const FAngularMotorConfig& Motor)
+	{
+		FConstraintInstance* Constraint = Motor.CachedConstraint;
+		if (!Constraint)
+		{
+			return Motor.CurrentAngle;
+		}
+
+		float AngleRad = 0.0f;
+		switch (Motor.ControlAxis)
+		{
+			case EMotorAxis::X:
+				AngleRad = Constraint->GetCurrentSwing1();
+				break;
+			case EMotorAxis::Y:
+				AngleRad = Constraint->GetCurrentSwing2();
+				break;
+			case EMotorAxis::Z:
+			default:
+				AngleRad = Constraint->GetCurrentTwist();
+				break;
+		}
+		return FMath::RadiansToDegrees(AngleRad);
+	}
+
+	/** True while a finger still needs to move: software setpoint mid-interpolation, or the
+	 *  physical joint not yet within tolerance of its (direction-corrected) target. */
+	bool FingerNeedsMotion(const FAngularMotorConfig& Motor, float AngleTolerance)
+	{
+		if (!Motor.bEnabled)
+		{
+			return false;
+		}
+
+		if (FMath::Abs(FMath::FindDeltaAngleDegrees(Motor.CurrentAngle, Motor.TargetAngle)) > KINDA_SMALL_NUMBER)
+		{
+			return true; // software ramp still in progress
+		}
+
+		const float TargetEffective = Motor.bInvertDirection ? -Motor.TargetAngle : Motor.TargetAngle;
+		return FMath::Abs(FMath::FindDeltaAngleDegrees(GetMotorActualAngleDeg(Motor), TargetEffective)) > AngleTolerance;
+	}
+} // namespace
+
 void UGripperControllerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -63,6 +110,17 @@ void UGripperControllerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	UpdateMotors(DeltaTime);
 	UpdateGripperState();
 	HandleStateChange();
+
+	// Same Chaos auto-sleep issue as the arm: idle finger bodies fall asleep and then ignore
+	// the motor drive target, so an Open()/Close() issued while at rest changes state but the
+	// fingers don't physically move until something else (e.g. arm motion) wakes them. Keep the
+	// gripper bodies awake while either finger still needs to move (and while grasping, where the
+	// drive must keep holding force against the object).
+	if (IsValid(CachedGripperMesh)
+		&& (FingerNeedsMotion(Finger1Motor, AngleTolerance) || FingerNeedsMotion(Finger2Motor, AngleTolerance)))
+	{
+		CachedGripperMesh->WakeAllRigidBodies();
+	}
 }
 
 void UGripperControllerComponent::Open()
