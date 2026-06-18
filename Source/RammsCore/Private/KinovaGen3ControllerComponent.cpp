@@ -83,6 +83,9 @@ void UKinovaGen3ControllerComponent::BeginPlay()
 		{
 			UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Found skeletal mesh component: %s"), *SkeletalMeshComponent->GetName());
 
+			// CCD on the arm bodies: fast IK motion must not tunnel through thin shelf geometry.
+			SkeletalMeshComponent->SetAllUseCCD(true);
+
 			// Initialize current angles from current constraint positions
 			for (FRevoluteJointConfig& Joint : Joints)
 			{
@@ -490,6 +493,20 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		{
 			bPoseTargetReached = false;
 		}
+	}
+
+	// Keep the arm's bodies awake while it still needs to move toward its target.
+	// Chaos auto-sleeps low-velocity bodies after ~1-2s; once asleep, constraint-drive
+	// target changes no longer move them, so the arm freezes short of the goal even
+	// though IK keeps solving (active solver, small solver error, large actual error).
+	// Waking each tick while off-target lets the drive keep pulling; when the arm is
+	// genuinely at its target it's allowed to sleep and hold position normally.
+	const bool bArmAtTarget = (ArmControlMode == EArmControlMode::EndEffectorControl)
+		? bPoseTargetReached
+		: bJointTargetsReached;
+	if (!bArmAtTarget && SkeletalMeshComponent)
+	{
+		SkeletalMeshComponent->WakeAllRigidBodies();
 	}
 
 	// Debug visualization

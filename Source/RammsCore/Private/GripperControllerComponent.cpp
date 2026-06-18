@@ -61,6 +61,16 @@ void UGripperControllerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	UpdateMotors(DeltaTime);
+
+	// keep the pads parallel: drive each finger's distal joint opposite the knuckle
+	if (bEnablePadMimic)
+	{
+		if (MimicConstraint1Cached)
+			DriveMimicJoint(MimicConstraint1Cached, MimicMultiplier * Finger1Motor.CurrentAngle + MimicOffset, bMimic1Invert);
+		if (MimicConstraint2Cached)
+			DriveMimicJoint(MimicConstraint2Cached, MimicMultiplier * Finger2Motor.CurrentAngle + MimicOffset, bMimic2Invert);
+	}
+
 	UpdateGripperState();
 	HandleStateChange();
 }
@@ -164,6 +174,10 @@ void UGripperControllerComponent::FindConstraints()
 		return;
 	}
 
+	// CCD on the gripper bodies: keeps grasped items from tunneling out during fast shakes,
+	// and keeps the pads from tunneling through thin shelf geometry.
+	CachedGripperMesh->SetAllUseCCD(true);
+
 	// Find constraints for both fingers
 	Finger1Motor.CachedConstraint = CachedGripperMesh->FindConstraintInstance(Finger1Motor.ConstraintName);
 	if (!Finger1Motor.CachedConstraint && bEnableDebugLog)
@@ -178,6 +192,10 @@ void UGripperControllerComponent::FindConstraints()
 		UE_LOG(LogTemp, Warning, TEXT("GripperController: Finger2 constraint '%s' not found"),
 			*Finger2Motor.ConstraintName.ToString());
 	}
+
+	// cache the parallel-jaw mimic joints
+	MimicConstraint1Cached = CachedGripperMesh->FindConstraintInstance(MimicConstraint1);
+	MimicConstraint2Cached = CachedGripperMesh->FindConstraintInstance(MimicConstraint2);
 
 	if (bEnableDebugLog)
 	{
@@ -286,7 +304,7 @@ void UGripperControllerComponent::ApplyMotorSettings(FAngularMotorConfig& Motor)
 	if (Motor.bEnabled)
 	{
 		// Set motor strength and damping
-		Motor.CachedConstraint->SetAngularDriveParams(Motor.MotorStrength, Motor.MotorDamping, 0.0f);
+		Motor.CachedConstraint->SetAngularDriveParams(Motor.MotorStrength, Motor.MotorDamping, MotorForceLimit);
 
 		// Apply direction inversion if needed
 		float EffectiveAngle = Motor.bInvertDirection ? -Motor.CurrentAngle : Motor.CurrentAngle;
@@ -329,6 +347,26 @@ void UGripperControllerComponent::ApplyMotorSettings(FAngularMotorConfig& Motor)
 				*Motor.ConstraintName.ToString(), Motor.TargetAngle, Motor.CurrentAngle, ActualAngle, Motor.bInvertDirection);
 		}
 	}
+}
+
+void UGripperControllerComponent::DriveMimicJoint(FConstraintInstance* Constraint, float AngleDeg, bool bInvert)
+{
+	if (!Constraint)
+	{
+		return;
+	}
+	Constraint->SetOrientationDriveTwistAndSwing(true, true);
+	Constraint->SetAngularDriveParams(Finger1Motor.MotorStrength, Finger1Motor.MotorDamping, MimicForceLimit);
+
+	const float A = bInvert ? -AngleDeg : AngleDeg;
+	FQuat Q = FQuat::Identity;
+	switch (MimicAxis)
+	{
+		case EMotorAxis::X: Q = FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(A)); break;
+		case EMotorAxis::Y: Q = FQuat(FVector(0, 1, 0), FMath::DegreesToRadians(A)); break;
+		case EMotorAxis::Z: Q = FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(A)); break;
+	}
+	Constraint->SetAngularOrientationTarget(Q);
 }
 
 void UGripperControllerComponent::UpdateGripperState()

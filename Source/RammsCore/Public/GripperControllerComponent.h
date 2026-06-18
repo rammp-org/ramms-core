@@ -8,6 +8,7 @@
 #include "GripperControllerComponent.generated.h"
 
 class USkeletalMeshComponent;
+struct FConstraintInstance;
 
 UENUM(BlueprintType)
 enum class EGripperState : uint8
@@ -81,6 +82,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Gripper Controller")
 	void SetMotorSpeedMultiplier(float SpeedMultiplier);
 
+	// Grip-force cap (Chaos angular-drive force limit). Safe to call at runtime.
+	UFUNCTION(BlueprintCallable, Category = "Gripper Controller")
+	void SetMotorForceLimit(float NewLimit) { MotorForceLimit = FMath::Max(0.0f, NewLimit); }
+
+	UFUNCTION(BlueprintPure, Category = "Gripper Controller")
+	float GetMotorForceLimit() const { return MotorForceLimit; }
+
 	// Events
 	UPROPERTY(BlueprintAssignable, Category = "Gripper Controller|Events")
 	FOnGripperOpened OnGripperOpened;
@@ -101,6 +109,21 @@ protected:
 	// Motor configuration for finger 2
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Motors")
 	FAngularMotorConfig Finger2Motor;
+
+	// Force cap on the KNUCKLE (close) drives only — this is the grip/squeeze force.
+	// 0 = unlimited (the original behavior: unbounded force that crushed/ejected items).
+	// Default is high (≈ unlimited = firm, fully controlled fingers); TUNE THIS DOWN to make
+	// the grip gentler. Plain component float -> safe to set at runtime (the per-finger
+	// struct must NOT be round-tripped through set_editor_property; that clobbers its raw
+	// CachedConstraint pointer and crashes).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Motors", meta = (ClampMin = "0.0"))
+	float MotorForceLimit = 500000.0f;
+
+	// Force cap on the fingertip MIMIC drive (keeps the pad parallel). This is pose-keeping,
+	// NOT grip force, so it must stay strong — 0 = unlimited. Capping it low makes the
+	// fingertip go limp ("seaweed"); leave at 0 unless you have a specific reason.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Motors", meta = (ClampMin = "0.0"))
+	float MimicForceLimit = 0.0f;
 
 	// Target angle when gripper is fully open (degrees)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Configuration")
@@ -126,6 +149,33 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Debug")
 	bool bEnableDebugLog;
 
+	// --- Parallel-jaw pad mimic: drive a distal finger joint so the pad stays parallel
+	//     as the knuckle closes (replicates the real parallelogram linkage) ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	bool bEnablePadMimic = true;
+
+	// distal joint (child bone name) on each finger that orients the pad
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	FName MimicConstraint1 = FName("end_r");
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	FName MimicConstraint2 = FName("end_l");
+
+	// hinge axis of the mimic joint
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	EMotorAxis MimicAxis = EMotorAxis::Z;
+
+	// pad joint angle = Multiplier * knuckle angle + Offset (deg). -1 keeps the pad parallel.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	float MimicMultiplier = -1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	float MimicOffset = 0.0f;
+
+	// per-finger direction flip (mirror the left finger if needed)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	bool bMimic1Invert = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Pad Mimic")
+	bool bMimic2Invert = false;
+
 private:
 	// Current state of the gripper
 	UPROPERTY()
@@ -138,6 +188,11 @@ private:
 	// Cached skeletal mesh component
 	UPROPERTY()
 	USkeletalMeshComponent* CachedGripperMesh;
+
+	// cached mimic joints + driver
+	FConstraintInstance* MimicConstraint1Cached = nullptr;
+	FConstraintInstance* MimicConstraint2Cached = nullptr;
+	void DriveMimicJoint(FConstraintInstance* Constraint, float AngleDeg, bool bInvert);
 
 	// Find and cache skeletal mesh and constraints
 	void FindConstraints();
