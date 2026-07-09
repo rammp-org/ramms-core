@@ -73,6 +73,53 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Motion", meta = (ClampMin = "0.01"))
 	float SlowSpeedMultiplier = 0.25f;
 
+	// Per-axis sign flips — tweak live in the editor to fix any inverted direction without a rebuild.
+	// Mapping (end-effector frame): forward = X, strafe = Y, up = Z; yaw/pitch/roll are the matching
+	// FRotator components. Kept parallel to URammsMjArmTeleopComponent so both teleop paths behave the same.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Axis Signs")
+	float ForwardSign = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Axis Signs")
+	float StrafeSign = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Axis Signs")
+	float UpSign = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Axis Signs")
+	float YawSign = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Axis Signs")
+	float PitchSign = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Axis Signs")
+	float RollSign = 1.0f;
+
+	// --- Keyboard bindings (configurable). Defaults match URammsMjArmTeleopComponent so the arm and the
+	// base can be driven at the same time (they deliberately avoid WASD). Each action is a +/- key pair. ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey ForwardKey = EKeys::I;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey BackwardKey = EKeys::K;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey StrafeLeftKey = EKeys::J;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey StrafeRightKey = EKeys::L;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey UpKey = EKeys::U;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey DownKey = EKeys::O;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey RollLeftKey = EKeys::M;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey RollRightKey = EKeys::Period;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey YawLeftKey = EKeys::Left;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey YawRightKey = EKeys::Right;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey PitchUpKey = EKeys::Up;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey PitchDownKey = EKeys::Down;
+
+	/** Re-sync the IK target to the current end-effector pose (e.g. after the arm drifts). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Keys")
+	FKey ResyncTargetKey = EKeys::R;
+
 	/** Enable right-mouse drag pitch / yaw control */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Mouse")
 	bool bEnableMouseRotation = true;
@@ -93,21 +140,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Mouse", meta = (ClampMin = "0.001"))
 	float MousePitchDegreesPerPixel = 0.2f;
 
-	/** Draw the current teleop target and related debug helpers every tick */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Debug")
-	bool bEnableDebugDisplay = true;
+	/** Exponential low-pass factor for raw mouse delta (0.01-1). 1 = no smoothing; smaller =
+	 *  smoother but more lag. Removes per-pixel sensor noise that otherwise shakes the IK target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Mouse", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float MouseSmoothingAlpha = 0.35f;
 
-	/** Draw the full target orientation frame */
+	/** Draw the current teleop target and related debug helpers every tick. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Debug")
-	bool bDrawTargetFrame = true;
+	bool bEnableDebugDisplay = false;
 
-	/** Draw a line from the live end effector to the current teleop target */
+	/** Draw the full target orientation frame. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Debug")
-	bool bDrawTargetErrorLine = true;
+	bool bDrawTargetFrame = false;
 
-	/** Draw the live end effector alongside the teleop target */
+	/** Draw a line from the live end effector to the current teleop target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Debug")
-	bool bDrawCurrentEndEffector = true;
+	bool bDrawTargetErrorLine = false;
+
+	/** Draw the live end effector alongside the teleop target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Debug")
+	bool bDrawCurrentEndEffector = false;
 
 	/** Radius of the target debug sphere */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Debug", meta = (ClampMin = "0.1"))
@@ -133,13 +185,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Gripper")
 	bool bEnableGripperTeleop = true;
 
-	/** Key that opens the gripper */
+	/** Key that opens the gripper (bracket keys match URammsMjArmTeleopComponent; frees O for Down). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Gripper")
-	FKey OpenGripperKey = EKeys::O;
+	FKey OpenGripperKey = EKeys::LeftBracket;
 
 	/** Key that closes the gripper */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Gripper")
-	FKey CloseGripperKey = EKeys::P;
+	FKey CloseGripperKey = EKeys::RightBracket;
 
 	/** Optional key that toggles between open and closed */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Gripper")
@@ -253,4 +305,8 @@ private:
 
 	/** Diagnostic-only cache: last IK solve count we observed, to detect a stalled solver in DrawDebugVisualization (const). */
 	mutable int32 LastObservedIKSolveCount = -1;
+
+	/** Persistent low-pass state for mouse delta smoothing. */
+	float SmoothedMouseDeltaX = 0.0f;
+	float SmoothedMouseDeltaY = 0.0f;
 };

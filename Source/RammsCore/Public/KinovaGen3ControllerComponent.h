@@ -261,6 +261,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Target Change", meta = (ClampMin = "0.0"))
 	float IKTargetChangeRotThreshold = 0.1f;
 
+	/** Smoothing speed (VInterp/QInterp rate) applied to the IK target before solving. Higher =
+	 *  snappier, lower = smoother/more lag. 0 disables target smoothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Smoothing", meta = (ClampMin = "0.0"))
+	float TargetSmoothingSpeed = 25.0f;
+
+	/** If the open-loop IK seed diverges from the measured joint angle by more than this many
+	 *  degrees (e.g. the arm is physically blocked), that joint's seed is pulled back to reality.
+	 *  0 disables the resync guard. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Smoothing", meta = (ClampMin = "0.0"))
+	float IKSeedResyncDivergenceDeg = 15.0f;
+
 	/** IK iterations per frame (DLS performs multiple iterations internally) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "1", ClampMax = "500", EditCondition = "IKSolverType == EIKSolverType::DLS"))
 	int32 MaxIKIterations = 300;
@@ -372,6 +383,15 @@ public:
 	bool		  bIKTargetSatisfied = false;
 	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
 	bool		  bIKSolverTypeInitialized = false;
+
+	/** Open-loop IK seed: last commanded joint solution, used as the solver seed instead of the
+	 *  noisy measured angle to keep physics drive ripple out of the IK feedback loop. */
+	TArray<float> IKSeedAngles;
+	bool		  bIKSeedInitialized = false;
+
+	/** Solver-facing target, slewed toward TargetEndEffectorTransform for smooth IK tracking. */
+	FTransform SmoothedIKTarget = FTransform::Identity;
+	bool	   bSmoothedIKTargetInitialized = false;
 
 	// ========== Events ==========
 

@@ -378,12 +378,32 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 			LastIKSolverType = IKSolverType;
 			bIKTargetInitialized = false;
 			bIKTargetSatisfied = false;
+			bIKSeedInitialized = false;
+			bSmoothedIKTargetInitialized = false;
 		}
 
 		// Keep target in sync with actor if provided
 		if (TargetActor && TargetActor->IsValidLowLevel())
 		{
 			TargetEndEffectorTransform = TargetActor->GetActorTransform();
+		}
+
+		// Slew the solver-facing target toward the raw desired target so IK tracks a smooth goal
+		// instead of snapping to noisy per-tick input.
+		if (!bSmoothedIKTargetInitialized)
+		{
+			SmoothedIKTarget = TargetEndEffectorTransform;
+			bSmoothedIKTargetInitialized = true;
+		}
+		if (TargetSmoothingSpeed > 0.0f)
+		{
+			const FVector SmLoc = FMath::VInterpTo(SmoothedIKTarget.GetLocation(), TargetEndEffectorTransform.GetLocation(), DeltaTime, TargetSmoothingSpeed);
+			const FQuat	  SmRot = FMath::QInterpTo(SmoothedIKTarget.GetRotation(), TargetEndEffectorTransform.GetRotation(), DeltaTime, TargetSmoothingSpeed);
+			SmoothedIKTarget = FTransform(SmRot, SmLoc);
+		}
+		else
+		{
+			SmoothedIKTarget = TargetEndEffectorTransform;
 		}
 
 		// Only solve IK while we are moving toward a target or the target has changed
@@ -422,10 +442,15 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		const float BaseMoveThreshold = 0.1f; // cm — avoid re-solving on micro-movements
 		const bool	bBaseMoved = FVector::DistSquared(CurrentBaseLocation, LastSolveBaseLocation) > (BaseMoveThreshold * BaseMoveThreshold);
 
-		if (!bIKTargetSatisfied || bBaseMoved)
+		// Keep solving while the smoothed target is still catching up to the raw target.
+		const float SmToRawPos = FVector::Dist(SmoothedIKTarget.GetLocation(), TargetEndEffectorTransform.GetLocation());
+		const float SmToRawRot = FMath::RadiansToDegrees(SmoothedIKTarget.GetRotation().AngularDistance(TargetEndEffectorTransform.GetRotation()));
+		const bool	bSmoothingCatchingUp = (SmToRawPos > IKTargetChangePosThreshold) || (SmToRawRot > IKTargetChangeRotThreshold);
+
+		if (!bIKTargetSatisfied || bBaseMoved || bSmoothingCatchingUp)
 		{
 			UpdateInverseKinematics(DeltaTime);
-			bIKTargetSatisfied = bLastIKSuccess;
+			bIKTargetSatisfied = bLastIKSuccess && !bSmoothingCatchingUp;
 			LastSolveBaseLocation = CurrentBaseLocation;
 		}
 	}
@@ -2115,6 +2140,10 @@ void UKinovaGen3ControllerComponent::SnapEndEffectorTargetToCurrentPose()
 	}
 
 	SetEndEffectorTarget(SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World));
+
+	// Force the IK seed and smoothed target to resync to this freshly snapped pose.
+	bIKSeedInitialized = false;
+	bSmoothedIKTargetInitialized = false;
 }
 
 void UKinovaGen3ControllerComponent::ApplyEndEffectorTeleopInput(
@@ -2761,6 +2790,31 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		JointLimits[i] = FVector2D(Joints[i].MinAngleLimit, Joints[i].MaxAngleLimit);
 	}
 
+	// Open-loop IK seed: use the last COMMANDED joint solution as the solver seed instead of the
+	// measured angle (CurrentAngles). Measured angles carry physics drive ripple; feeding them back
+	// makes the DLS solution wander every tick -> high-frequency jitter. Resync per-joint to the
+	// measured value on first solve, and pull any joint whose seed has diverged too far (arm blocked).
+	if (IKSeedAngles.Num() != Joints.Num() || !bIKSeedInitialized)
+	{
+		IKSeedAngles.SetNum(Joints.Num());
+		for (int32 i = 0; i < Joints.Num(); i++)
+		{
+			IKSeedAngles[i] = CurrentAngles[i];
+		}
+		bIKSeedInitialized = true;
+	}
+	else if (IKSeedResyncDivergenceDeg > 0.0f)
+	{
+		for (int32 i = 0; i < Joints.Num(); i++)
+		{
+			if (FMath::Abs(FMath::FindDeltaAngleDegrees(IKSeedAngles[i], CurrentAngles[i])) > IKSeedResyncDivergenceDeg)
+			{
+				IKSeedAngles[i] = CurrentAngles[i];
+			}
+		}
+	}
+	TArray<float> SeedAngles = IKSeedAngles;
+
 	// NOTE: CurrentAngles are the IK TARGET angles, not the actual constraint angles
 	// The actual skeletal mesh may lag behind due to PD controller dynamics
 	// FK validation below uses ActualAngles read from constraints
@@ -2818,6 +2872,11 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 
 	const float StepClipDeg = FMath::RadiansToDegrees(IKStepClip);
 
+	// Solve against the smoothed target when target smoothing is enabled (see TickComponent slew).
+	const FTransform SolveTarget = (TargetSmoothingSpeed > 0.0f && bSmoothedIKTargetInitialized)
+		? SmoothedIKTarget
+		: TargetEndEffectorTransform;
+
 	FIKSolveResult IKResult;
 
 	if (IKSolverType == EIKSolverType::FABRIK)
@@ -2825,12 +2884,12 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		// Use FABRIK solver with hard joint limits
 		IKResult = URammsIKLibrary::SolveIK_FABRIK(
 			BaseTransform,
-			CurrentAngles,
+			SeedAngles,
 			JointLocalTransformsForSolver,
 			JointAxesLocalForSolver,
 			JointLimits,
 			EndEffectorOffsetForSolver,
-			TargetEndEffectorTransform,
+			SolveTarget,
 			TaskSpaceMask,
 			FABRIKMaxIterations,
 			FABRIKPositionTolerance,
@@ -2845,12 +2904,12 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	{
 		IKResult = URammsIKLibrary::SolveIK_CCD(
 			BaseTransform,
-			CurrentAngles,
+			SeedAngles,
 			JointLocalTransformsForSolver,
 			JointAxesLocalForSolver,
 			JointLimits,
 			EndEffectorOffsetForSolver,
-			TargetEndEffectorTransform,
+			SolveTarget,
 			TaskSpaceMask,
 			CCDMaxIterations,
 			IKPositionTolerance,
@@ -2864,11 +2923,11 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 		// Use DLS solver (original)
 		IKResult = URammsIKLibrary::SolveIK_FKChain(
 			BaseTransform,
-			CurrentAngles,
+			SeedAngles,
 			JointLocalTransforms,
 			JointAxesLocal,
 			EndEffectorOffset,
-			TargetEndEffectorTransform,
+			SolveTarget,
 			JointLimits,
 			TaskSpaceMask,
 			JointWeights,
@@ -2885,6 +2944,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	for (int32 i = 0; i < FMath::Min(IKResult.JointAngles.Num(), Joints.Num()); i++)
 	{
 		Joints[i].TargetAngle = IKResult.JointAngles[i];
+		IKSeedAngles[i] = IKResult.JointAngles[i]; // advance the open-loop seed
 	}
 
 	LastIKPositionError = IKResult.PositionError;
