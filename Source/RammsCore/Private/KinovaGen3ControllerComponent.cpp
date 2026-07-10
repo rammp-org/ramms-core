@@ -2815,9 +2815,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	}
 	TArray<float> SeedAngles = IKSeedAngles;
 
-	// NOTE: CurrentAngles are the IK TARGET angles, not the actual constraint angles
-	// The actual skeletal mesh may lag behind due to PD controller dynamics
-	// FK validation below uses ActualAngles read from constraints
+	// NOTE: CurrentAngles are the MEASURED constraint angles (populated from Joints[i].CurrentAngle),
+	// not IK target angles. The DLS solver is seeded from SeedAngles (the open-loop commanded solution
+	// built above), NOT from these — CurrentAngles are used only for the seed resync/divergence check
+	// and for the FK validation below, which reads actual angles from the constraints.
 
 	// ============================================================================
 	// STEP 7: Solve IK Using Bone Transforms (bypasses FK coordinate frame issues)

@@ -318,9 +318,15 @@ void UGripperControllerComponent::UpdateMotors(float DeltaTime)
 	const bool	bClosing1 = FMath::Abs(Finger1Motor.TargetAngle - ClosedAngle) <= FMath::Abs(Finger1Motor.TargetAngle - OpenAngle);
 	const bool	bClosing2 = FMath::Abs(Finger2Motor.TargetAngle - ClosedAngle) <= FMath::Abs(Finger2Motor.TargetAngle - OpenAngle);
 
+	// Only sync when BOTH fingers can actually move. If one motor is disabled or missing its
+	// constraint, AdvanceMotor early-outs for it (its physical angle never advances), so it would
+	// register as the "slowest" finger and wrongly clamp the enabled finger from closing/opening.
+	const bool bBothMotorsDrivable =
+		Finger1Motor.bEnabled && Finger1Motor.CachedConstraint && Finger2Motor.bEnabled && Finger2Motor.CachedConstraint;
+
 	bool  bSync = false;
 	float SyncMaxCommand = 0.0f;
-	if (bSyncFingersWhileClosing && bClosing1 && bClosing2 && !FMath::IsNearlyZero(CloseDir))
+	if (bSyncFingersWhileClosing && bBothMotorsDrivable && bClosing1 && bClosing2 && !FMath::IsNearlyZero(CloseDir))
 	{
 		// Physical angles expressed in each finger's own command frame (closing is +CloseDir).
 		const float Actual1 = (Finger1Motor.bInvertDirection ? -1.0f : 1.0f) * GetMotorActualAngleDeg(Finger1Motor);
