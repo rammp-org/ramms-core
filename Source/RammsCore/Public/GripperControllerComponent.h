@@ -81,6 +81,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Gripper Controller")
 	void SetMotorSpeedMultiplier(float SpeedMultiplier);
 
+	// Set drive params for both finger motors. MaxForce 0 = unlimited; a finite value caps the
+	// squeeze force so the grasp is compliant (won't ram through the object or break the joints).
+	// Useful for live tuning of grip strength.
+	UFUNCTION(BlueprintCallable, Category = "Gripper Controller")
+	void SetFingerDriveParams(float Strength, float Damping, float MaxForce);
+
 	// Events
 	UPROPERTY(BlueprintAssignable, Category = "Gripper Controller|Events")
 	FOnGripperOpened OnGripperOpened;
@@ -122,6 +128,48 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Configuration")
 	bool bAutoFindSkeletalMesh;
 
+	// Stop driving a finger closed once it stalls against an object, instead of commanding it
+	// all the way to ClosedAngle (which slowly drives the pads through the object). When a finger
+	// can't keep up with the commanded angle, the command is held a small lead past the physical
+	// angle so the drive keeps a bounded squeeze (pair with a finite Motor MaxForce).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp")
+	bool bStallAwareClosing = true;
+
+	// How far (degrees) the commanded angle may lead the physical finger angle before it's
+	// treated as stalled and clamped. Larger = firmer squeeze; smaller = gentler.
+	// Only applied while closing — opening is always free so the gripper can release.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp", meta = (ClampMin = "0.0"))
+	float StallLeadDegrees = 4.0f;
+
+	// Finger speed (deg/s) used when opening/releasing. Opening doesn't contact anything, so it
+	// runs fast and at full drive force regardless of the (gentle) closing speed / force cap.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp", meta = (ClampMin = "0.0"))
+	float OpenSpeed = 90.0f;
+
+	// Keep the two fingers synchronized while closing: neither finger's commanded angle may lead
+	// the SLOWER finger's physical angle by more than FingerSyncLeadDegrees. This keeps contact
+	// centered so the first pad to touch can't shove the object toward the other pad.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp")
+	bool bSyncFingersWhileClosing = true;
+
+	// Max lead (degrees) one finger's command may run ahead of the slower finger while closing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp", meta = (ClampMin = "0.0"))
+	float FingerSyncLeadDegrees = 3.0f;
+
+	// Closing drive force cap used to hold the grasp. 0 = use each finger's own MaxForce. A single
+	// explicit knob for grip firmness once the fingers stall on the object.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp", meta = (ClampMin = "0.0"))
+	float GripHoldForce = 0.0f;
+
+	// Gentle final-approach speed (deg/s) used within FinalApproachBandDegrees of ClosedAngle so the
+	// pads seat softly on the object instead of slamming. 0 = disabled (use full closing speed).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp", meta = (ClampMin = "0.0"))
+	float FinalApproachSpeed = 0.0f;
+
+	// Angular band (degrees) before ClosedAngle within which FinalApproachSpeed applies.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Grasp", meta = (ClampMin = "0.0"))
+	float FinalApproachBandDegrees = 10.0f;
+
 	// Enable debug logging
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gripper Controller|Debug")
 	bool bEnableDebugLog;
@@ -148,8 +196,12 @@ private:
 	// Update motor states
 	void UpdateMotors(float DeltaTime);
 
-	// Apply motor settings to constraint
-	void ApplyMotorSettings(FAngularMotorConfig& Motor);
+	// Ramp one finger toward its target (stall-aware when closing) and push to the constraint
+	void AdvanceMotor(FAngularMotorConfig& Motor, float DeltaTime, bool bApplySyncClamp = false, float SyncMaxCommand = 0.0f);
+
+	// Apply motor settings to constraint. ForceLimitOverride < 0 uses Motor.MaxForce;
+	// >= 0 overrides it (e.g. 0 = unlimited force when opening).
+	void ApplyMotorSettings(FAngularMotorConfig& Motor, float ForceLimitOverride = -1.0f);
 
 	// Update gripper state based on current angles
 	void UpdateGripperState();

@@ -442,23 +442,32 @@ void URammsEndEffectorTeleopComponent::ApplyKeyboardMouseTeleop(float DeltaTime)
 		SpeedScale *= SlowSpeedMultiplier;
 	}
 
+	// Semantic inputs (intent) via configurable key pairs, matching URammsMjArmTeleopComponent. A valid
+	// FKey that isn't pressed reads 0, and an unset (None) key never contributes.
+	auto Axis = [PlayerController](const FKey& Pos, const FKey& Neg) {
+		const float p = (Pos.IsValid() && PlayerController->IsInputKeyDown(Pos)) ? 1.f : 0.f;
+		const float n = (Neg.IsValid() && PlayerController->IsInputKeyDown(Neg)) ? 1.f : 0.f;
+		return p - n;
+	};
+	const float Fwd = Axis(ForwardKey, BackwardKey);		  // forward / back
+	const float Strafe = Axis(StrafeRightKey, StrafeLeftKey); // right / left
+	const float Up = Axis(UpKey, DownKey);					  // up / down
+	const float Yaw = Axis(YawRightKey, YawLeftKey);
+	const float Pitch = Axis(PitchUpKey, PitchDownKey);
+	const float Roll = Axis(RollRightKey, RollLeftKey);
+
+	// End-effector frame: forward = X, strafe = Y, up = Z. Per-axis signs flip any inverted direction.
 	FVector LinearInput = FVector::ZeroVector;
-	LinearInput.X += PlayerController->IsInputKeyDown(EKeys::W) ? 1.0f : 0.0f;
-	LinearInput.X -= PlayerController->IsInputKeyDown(EKeys::S) ? 1.0f : 0.0f;
-	LinearInput.Y += PlayerController->IsInputKeyDown(EKeys::D) ? 1.0f : 0.0f;
-	LinearInput.Y -= PlayerController->IsInputKeyDown(EKeys::A) ? 1.0f : 0.0f;
-	LinearInput.Z += PlayerController->IsInputKeyDown(EKeys::E) ? 1.0f : 0.0f;
-	LinearInput.Z -= PlayerController->IsInputKeyDown(EKeys::Q) ? 1.0f : 0.0f;
+	LinearInput.X = Fwd * ForwardSign;
+	LinearInput.Y = Strafe * StrafeSign;
+	LinearInput.Z = Up * UpSign;
 
 	FRotator AngularInput = FRotator::ZeroRotator;
-	AngularInput.Pitch += PlayerController->IsInputKeyDown(EKeys::Up) ? 1.0f : 0.0f;
-	AngularInput.Pitch -= PlayerController->IsInputKeyDown(EKeys::Down) ? 1.0f : 0.0f;
-	AngularInput.Yaw += PlayerController->IsInputKeyDown(EKeys::Right) ? 1.0f : 0.0f;
-	AngularInput.Yaw -= PlayerController->IsInputKeyDown(EKeys::Left) ? 1.0f : 0.0f;
-	AngularInput.Roll += PlayerController->IsInputKeyDown(EKeys::C) ? 1.0f : 0.0f;
-	AngularInput.Roll -= PlayerController->IsInputKeyDown(EKeys::Z) ? 1.0f : 0.0f;
+	AngularInput.Pitch = Pitch * PitchSign;
+	AngularInput.Yaw = Yaw * YawSign;
+	AngularInput.Roll = Roll * RollSign;
 
-	if (PlayerController->WasInputKeyJustPressed(EKeys::R))
+	if (ResyncTargetKey.IsValid() && PlayerController->WasInputKeyJustPressed(ResyncTargetKey))
 	{
 		SyncTargetToCurrentPose();
 	}
@@ -497,6 +506,8 @@ void URammsEndEffectorTeleopComponent::ApplyKeyboardMouseTeleop(float DeltaTime)
 
 	if (FMath::IsNearlyZero(MouseDeltaX) && FMath::IsNearlyZero(MouseDeltaY))
 	{
+		SmoothedMouseDeltaX = 0.0f;
+		SmoothedMouseDeltaY = 0.0f;
 		return;
 	}
 
@@ -505,10 +516,17 @@ void URammsEndEffectorTeleopComponent::ApplyKeyboardMouseTeleop(float DeltaTime)
 		Controller->ArmControlMode = EArmControlMode::EndEffectorControl;
 	}
 
-	const float	   PitchSign = bInvertMouseY ? 1.0f : -1.0f;
+	// Low-pass the raw mouse delta to strip per-pixel sensor noise before it drives the target.
+	const float MouseAlpha = FMath::Clamp(MouseSmoothingAlpha, 0.01f, 1.0f);
+	SmoothedMouseDeltaX = FMath::Lerp(SmoothedMouseDeltaX, MouseDeltaX, MouseAlpha);
+	SmoothedMouseDeltaY = FMath::Lerp(SmoothedMouseDeltaY, MouseDeltaY, MouseAlpha);
+	MouseDeltaX = SmoothedMouseDeltaX;
+	MouseDeltaY = SmoothedMouseDeltaY;
+
+	const float	   MousePitchDir = bInvertMouseY ? 1.0f : -1.0f;
 	const FRotator MouseRotationDelta(
-		PitchSign * MouseDeltaY * MousePitchDegreesPerPixel * SpeedScale,
-		MouseDeltaX * MouseYawDegreesPerPixel * SpeedScale,
+		MousePitchDir * PitchSign * MouseDeltaY * MousePitchDegreesPerPixel * SpeedScale,
+		YawSign * MouseDeltaX * MouseYawDegreesPerPixel * SpeedScale,
 		0.0f);
 	if (bInputInLocalFrame)
 	{

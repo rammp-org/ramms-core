@@ -62,6 +62,13 @@ struct FAngularMotorConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "0.0"))
 	float MotorDamping;
 
+	// Max drive force/torque the motor can apply (UE drive units). 0 = unlimited.
+	// For grasping, a finite cap makes the squeeze compliant: the finger pushes toward its
+	// target with at most this force instead of integrating unbounded torque against a blocked
+	// object (which rams the fingers through the object and violates the finger joint constraints).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "0.0"))
+	float MaxForce;
+
 	// Cached constraint reference
 	FConstraintInstance* CachedConstraint;
 
@@ -76,6 +83,7 @@ struct FAngularMotorConfig
 		, SpeedMultiplier(1.0f)
 		, MotorStrength(100000.0f)
 		, MotorDamping(10000.0f)
+		, MaxForce(0.0f)
 		, CachedConstraint(nullptr)
 	{
 	}
