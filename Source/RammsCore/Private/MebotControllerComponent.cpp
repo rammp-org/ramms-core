@@ -101,6 +101,7 @@ void UMebotControllerComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 void UMebotControllerComponent::SetAngularMotorTarget(FName MotorName, float TargetAngle)
 {
+	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
 		if (Motor.ConstraintName == MotorName)
@@ -121,6 +122,7 @@ void UMebotControllerComponent::SetAngularMotorTarget(FName MotorName, float Tar
 
 void UMebotControllerComponent::SetLinearMotorTarget(FName MotorName, float TargetPosition)
 {
+	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
 		if (Motor.ConstraintName == MotorName)
@@ -217,6 +219,7 @@ void UMebotControllerComponent::SetLinearMotorSpeedMultiplier(FName MotorName, f
 
 void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEnabled)
 {
+	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
 		if (Motor.ConstraintName == MotorName)
@@ -230,6 +233,7 @@ void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEn
 
 void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEnabled)
 {
+	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
 		if (Motor.ConstraintName == MotorName)
@@ -245,20 +249,30 @@ float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) co
 {
 	for (const FAngularMotorConfig& Motor : AngularMotors)
 	{
-		if (Motor.ConstraintName == MotorName && Motor.CachedConstraint)
+		if (Motor.ConstraintName == MotorName)
 		{
+			// Const getter callable from Blueprint at any point in the frame: resolve from
+			// the mesh's CURRENT physics state instead of trusting the tick-time cache,
+			// which dangles after a physics state recreation until the next refresh.
+			FConstraintInstance* Constraint = IsValid(CachedSkeletalMesh)
+				? CachedSkeletalMesh->FindConstraintInstance(Motor.ConstraintName)
+				: nullptr;
+			if (Constraint == nullptr)
+			{
+				return 0.0f;
+			}
 			// Get current angular state from constraint
 			float CurrentAngle = 0.0f;
 			switch (Motor.ControlAxis)
 			{
 				case EMotorAxis::X:
-					CurrentAngle = Motor.CachedConstraint->GetCurrentSwing1();
+					CurrentAngle = Constraint->GetCurrentSwing1();
 					break;
 				case EMotorAxis::Y:
-					CurrentAngle = Motor.CachedConstraint->GetCurrentSwing2();
+					CurrentAngle = Constraint->GetCurrentSwing2();
 					break;
 				case EMotorAxis::Z:
-					CurrentAngle = Motor.CachedConstraint->GetCurrentTwist();
+					CurrentAngle = Constraint->GetCurrentTwist();
 					break;
 			}
 			return CurrentAngle;
@@ -343,7 +357,8 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 
 void UMebotControllerComponent::RefreshConstraintCache()
 {
-	if (!IsValid(CachedSkeletalMesh))
+	// Mirror FindConstraints(): only auto-acquire the mesh when configured to.
+	if (!IsValid(CachedSkeletalMesh) && bAutoFindSkeletalMesh)
 	{
 		CachedSkeletalMesh = GetOwnerSkeletalMesh();
 	}

@@ -232,7 +232,8 @@ void UGripperControllerComponent::SetFingerDriveParams(float Strength, float Dam
 
 void UGripperControllerComponent::RefreshConstraintCache()
 {
-	if (!IsValid(CachedGripperMesh))
+	// Mirror FindConstraints(): only auto-acquire the mesh when configured to.
+	if (!IsValid(CachedGripperMesh) && (bAutoFindSkeletalMesh || GripperMeshName != NAME_None))
 	{
 		CachedGripperMesh = GetOwnerSkeletalMesh();
 	}
