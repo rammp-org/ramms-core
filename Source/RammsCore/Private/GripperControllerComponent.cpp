@@ -107,6 +107,8 @@ void UGripperControllerComponent::TickComponent(float DeltaTime, ELevelTick Tick
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	RefreshConstraintCache();
+
 	UpdateMotors(DeltaTime);
 	UpdateGripperState();
 	HandleStateChange();
@@ -207,6 +209,9 @@ void UGripperControllerComponent::SetMotorSpeedMultiplier(float SpeedMultiplier)
 
 void UGripperControllerComponent::SetFingerDriveParams(float Strength, float Damping, float MaxForce)
 {
+	RefreshConstraintCache(); // applies immediately below — never through a stale pointer
+
+
 	Finger1Motor.MotorStrength = FMath::Max(0.0f, Strength);
 	Finger1Motor.MotorDamping = FMath::Max(0.0f, Damping);
 	Finger1Motor.MaxForce = FMath::Max(0.0f, MaxForce);
@@ -223,6 +228,20 @@ void UGripperControllerComponent::SetFingerDriveParams(float Strength, float Dam
 		UE_LOG(LogTemp, Log, TEXT("GripperController: drive params set strength=%.0f damping=%.0f maxforce=%.0f"),
 			Finger1Motor.MotorStrength, Finger1Motor.MotorDamping, Finger1Motor.MaxForce);
 	}
+}
+
+void UGripperControllerComponent::RefreshConstraintCache()
+{
+	if (!IsValid(CachedGripperMesh))
+	{
+		CachedGripperMesh = GetOwnerSkeletalMesh();
+	}
+	// FindConstraintInstance returns the instance owned by the CURRENT physics state (null
+	// while physics is torn down mid-reregistration); downstream null-checks then skip the
+	// frame instead of driving a freed constraint.
+	USkeletalMeshComponent* Mesh = IsValid(CachedGripperMesh) ? CachedGripperMesh : nullptr;
+	Finger1Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Finger1Motor.ConstraintName) : nullptr;
+	Finger2Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Finger2Motor.ConstraintName) : nullptr;
 }
 
 void UGripperControllerComponent::FindConstraints()

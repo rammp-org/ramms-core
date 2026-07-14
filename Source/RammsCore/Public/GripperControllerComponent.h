@@ -190,6 +190,12 @@ private:
 	// Find and cache skeletal mesh and constraints
 	void FindConstraints();
 
+	// Re-resolve the cached FConstraintInstance pointers from the mesh. They point into the
+	// mesh's constraint array, which is freed and rebuilt whenever its physics state is
+	// recreated (component re-registration from details-panel edits, LOD/mesh changes) —
+	// a once-at-BeginPlay cache dangles after that and crashes on the next constraint call.
+	void RefreshConstraintCache();
+
 	// Get skeletal mesh from owner
 	USkeletalMeshComponent* GetOwnerSkeletalMesh();
 

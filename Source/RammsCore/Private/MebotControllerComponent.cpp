@@ -92,6 +92,8 @@ void UMebotControllerComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	RefreshConstraintCache();
+
 	UpdateAngularMotors(DeltaTime);
 	UpdateLinearMotors(DeltaTime);
 	DrawDebugVisualization();
@@ -337,6 +339,26 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 	}
 
 	return Info;
+}
+
+void UMebotControllerComponent::RefreshConstraintCache()
+{
+	if (!IsValid(CachedSkeletalMesh))
+	{
+		CachedSkeletalMesh = GetOwnerSkeletalMesh();
+	}
+	// FindConstraintInstance returns the instance owned by the CURRENT physics state (null
+	// while physics is torn down mid-reregistration); motor updates already null-check and
+	// skip the frame instead of driving a freed constraint.
+	USkeletalMeshComponent* Mesh = IsValid(CachedSkeletalMesh) ? CachedSkeletalMesh : nullptr;
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+	}
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+	}
 }
 
 void UMebotControllerComponent::FindConstraints()
