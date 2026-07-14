@@ -254,6 +254,13 @@ private:
 	// Find and cache skeletal mesh and constraints
 	void FindConstraints();
 
+	// Re-resolve every motor's CachedConstraint from the mesh. The pointers reference the
+	// mesh's constraint array, which is freed and rebuilt whenever its physics state is
+	// recreated (component re-registration from details-panel edits, LOD/mesh changes) —
+	// a once-at-BeginPlay cache dangles after that and crashes on the next constraint call.
+	// Quiet counterpart of FindConstraints (no per-frame warning spam).
+	void RefreshConstraintCache();
+
 	// Get skeletal mesh from owner
 	USkeletalMeshComponent* GetOwnerSkeletalMesh();
 
