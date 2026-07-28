@@ -601,7 +601,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
 	FTransform GetEndEffectorTargetTransform() const
 	{
-		if (TargetFrame == EEndEffectorTargetFrame::Base && TargetActor == nullptr)
+		// Base-frame derivation needs a resolved mesh: GetArmBaseTransform()
+		// returns Identity without one, which would return the base-frame pose
+		// as if it were world space. Fall back to the cached world target.
+		if (TargetFrame == EEndEffectorTargetFrame::Base && TargetActor == nullptr && SkeletalMeshComponent != nullptr)
 		{
 			return TargetEndEffectorBaseFrame * GetArmBaseTransform();
 		}

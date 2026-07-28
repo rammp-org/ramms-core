@@ -396,7 +396,7 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 
 		// Keep target in sync with actor if provided (world semantics — the actor
 		// already defines the target's motion, base frame does not apply).
-		if (TargetActor && TargetActor->IsValidLowLevel())
+		if (IsValid(TargetActor))
 		{
 			TargetEndEffectorTransform = TargetActor->GetActorTransform();
 		}
@@ -411,7 +411,7 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		// instead of snapping to noisy per-tick input. With a base-frame target the smoothing
 		// runs in the BASE frame: base motion is tracked rigidly (no lag while driving), only
 		// target/operator input is smoothed.
-		const bool bSmoothInBaseFrame = (TargetFrame == EEndEffectorTargetFrame::Base) && !(TargetActor && TargetActor->IsValidLowLevel());
+		const bool bSmoothInBaseFrame = (TargetFrame == EEndEffectorTargetFrame::Base) && !(IsValid(TargetActor));
 		if (!bSmoothedIKTargetInitialized)
 		{
 			SmoothedIKTarget = TargetEndEffectorTransform;
@@ -552,7 +552,7 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		{
 			bPoseTargetReached = true;
 			OnPoseTargetReached.Broadcast(PosErr, RotErr);
-			if (TargetActor && TargetActor->IsValidLowLevel())
+			if (IsValid(TargetActor))
 			{
 				OnTargetActorPoseReached.Broadcast(TargetActor, PosErr, RotErr);
 			}
@@ -1702,7 +1702,7 @@ void UKinovaGen3ControllerComponent::DebugDraw()
 
 		if (ArmControlMode == EArmControlMode::EndEffectorControl)
 		{
-			if (TargetActor && TargetActor->IsValidLowLevel())
+			if (IsValid(TargetActor))
 			{
 				DebugText += FString::Printf(TEXT("IK Target: Tracking '%s'\n"), *TargetActor->GetName());
 			}
@@ -3044,7 +3044,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	// cancellation requirement entirely). World / TargetActor targets still solve
 	// in world space, where chasing a fixed world pose from a moving base is the
 	// intended behavior.
-	const bool bSolveInBaseFrame = (TargetFrame == EEndEffectorTargetFrame::Base) && !(TargetActor && TargetActor->IsValidLowLevel());
+	const bool bSolveInBaseFrame = (TargetFrame == EEndEffectorTargetFrame::Base) && !(IsValid(TargetActor));
 	const bool bUseSmoothedTarget = (TargetSmoothingSpeed > 0.0f && bSmoothedIKTargetInitialized);
 	const FTransform SolveBase = bSolveInBaseFrame ? FTransform::Identity : BaseTransform;
 	const FTransform SolveTarget = bSolveInBaseFrame
