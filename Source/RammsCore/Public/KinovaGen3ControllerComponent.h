@@ -31,6 +31,22 @@ enum class EArmControlMode : uint8
 };
 
 /**
+ * Reference frame the IK target is tracked in. Decides what happens when the
+ * arm's base moves (arm mounted on a driving vehicle / MeBot):
+ *  - World: the target is a fixed world pose (a door handle, a shelf). The
+ *    arm continuously compensates for base motion to keep reaching it.
+ *  - Base: the target rides the arm's mount — it keeps the same pose relative
+ *    to the base as the vehicle drives (natural for teleoperation from the
+ *    operator's on-robot perspective).
+ */
+UENUM(BlueprintType)
+enum class EEndEffectorTargetFrame : uint8
+{
+	World UMETA(DisplayName = "World (fixed in space)"),
+	Base  UMETA(DisplayName = "Arm Base (rides the moving base)")
+};
+
+/**
  * IK solver selection
  */
 UENUM(BlueprintType)
@@ -185,6 +201,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnJointTargetsReached);
 /** Fired when the end effector has reached its target pose (within tolerance) in EndEffectorControl mode */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPoseTargetReached, float, PositionError, float, RotationError);
 
+/** Fired when the end effector reaches the pose of the assigned TargetActor (EndEffectorControl mode with TargetActor set) */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTargetActorPoseReached, AActor*, ReachedActor, float, PositionError, float, RotationError);
+
 /**
  * Controller component for Kinova Gen3 robotic arm
  * Manages joint control, applies forces, tracks forward kinematics
@@ -233,9 +252,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Target")
 	AActor* TargetActor = nullptr;
 
-	/** Target end effector transform (world space) - used when ArmControlMode is EndEffectorControl and TargetActor is null */
+	/** Target end effector transform (world space) - used when ArmControlMode is EndEffectorControl and TargetActor is null.
+	 *  With TargetFrame == Base this is DERIVED each tick from TargetEndEffectorBaseFrame and the live base pose. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Target")
 	FTransform TargetEndEffectorTransform;
+
+	/** Frame the IK target is tracked in (see EEndEffectorTargetFrame). Switch via
+	 *  SetEndEffectorTargetFrame to preserve the current world pose across the change. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Arm|Control|End Effector|Target")
+	EEndEffectorTargetFrame TargetFrame = EEndEffectorTargetFrame::World;
+
+	/** Canonical target when TargetFrame == Base: pose relative to the arm's base
+	 *  (first joint's parent body — see GetArmBaseTransform). Kept in sync by every
+	 *  target setter/nudge; the world-space target is re-derived from it each tick. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Arm|Control|End Effector|Target")
+	FTransform TargetEndEffectorBaseFrame;
 
 	/** IK solver technique */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver")
@@ -271,6 +302,18 @@ public:
 	 *  0 disables the resync guard. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Smoothing", meta = (ClampMin = "0.0"))
 	float IKSeedResyncDivergenceDeg = 15.0f;
+
+	/**
+	 * Max speed (deg/s) at which the COMMANDED IK solution may travel, per joint.
+	 * Each solve's output is clamped against the previously commanded solution, so
+	 * solver reconfigurations (redundant-arm null-space slides, local-minimum hops)
+	 * become slow bounded motion instead of near-instant full-arm swings — swinging
+	 * the arm's inertia at full drive stiffness kicks large reaction torques into
+	 * the vehicle chassis (measured: a 2.5 mm EE nudge commanding a 45° joint-1
+	 * sweep spun the stationary MeBot chassis at 575 deg/s). 0 = unlimited.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver", meta = (ClampMin = "0.0"))
+	float MaxIKSolutionSpeedDegPerSecond = 45.0f;
 
 	/** IK iterations per frame (DLS performs multiple iterations internally) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "1", ClampMax = "500", EditCondition = "IKSolverType == EIKSolverType::DLS"))
@@ -378,19 +421,41 @@ public:
 
 	/** Cached target transform to detect changes and avoid unnecessary IK solving */
 	FTransform	  LastIKTargetTransform = FTransform::Identity;
-	FVector		  LastSolveBaseLocation = FVector::ZeroVector;
+	/** Full base transform at the last solve — both translation AND rotation of the
+	 *  base must trigger re-solves (a vehicle yawing in place sweeps the arm without
+	 *  moving the base location). */
+	FTransform	  LastSolveBaseTransform = FTransform::Identity;
 	bool		  bIKTargetInitialized = false;
 	bool		  bIKTargetSatisfied = false;
 	EIKSolverType LastIKSolverType = EIKSolverType::DLS;
 	bool		  bIKSolverTypeInitialized = false;
+
+	/** Commit a new world-space target in the ACTIVE frame: updates the world target,
+	 *  mirrors it into the base frame when TargetFrame == Base, and resets the
+	 *  solved/reached latches. Absolute world-pose mutators funnel through here. */
+	void CommitWorldTarget(const FTransform& NewWorldTarget);
+
+	/** Commit a new base-frame target directly, refreshing the derived world target.
+	 *  Relative nudges in Base mode MUST use this instead of round-tripping through
+	 *  world space: re-anchoring last tick's derived world pose against this tick's
+	 *  base pose leaks one tick of base motion into the target per nudge — a steady
+	 *  drift while driving that walks the target off (and into the chassis). */
+	void CommitBaseFrameTarget(const FTransform& NewBaseFrameTarget);
+
+	/** TargetActor observed last tick — swap detection resets the reached latch. */
+	TWeakObjectPtr<AActor> LastObservedTargetActor;
 
 	/** Open-loop IK seed: last commanded joint solution, used as the solver seed instead of the
 	 *  noisy measured angle to keep physics drive ripple out of the IK feedback loop. */
 	TArray<float> IKSeedAngles;
 	bool		  bIKSeedInitialized = false;
 
-	/** Solver-facing target, slewed toward TargetEndEffectorTransform for smooth IK tracking. */
+	/** Solver-facing target, slewed toward TargetEndEffectorTransform for smooth IK tracking.
+	 *  With TargetFrame == Base the smoothing runs in the BASE frame (SmoothedIKTargetBase)
+	 *  and this world transform is re-derived from the live base pose each tick — base
+	 *  motion is tracked rigidly, only operator/target input is smoothed. */
 	FTransform SmoothedIKTarget = FTransform::Identity;
+	FTransform SmoothedIKTargetBase = FTransform::Identity;
 	bool	   bSmoothedIKTargetInitialized = false;
 
 	// ========== Events ==========
@@ -404,6 +469,12 @@ public:
 	 *  Includes the final position and rotation error. Re-fires if target changes and is reached again. */
 	UPROPERTY(BlueprintAssignable, Category = "Ramms|Kinova Gen3|Events")
 	FOnPoseTargetReached OnPoseTargetReached;
+
+	/** Fired once when the end effector reaches the assigned TargetActor's pose (EndEffectorControl
+	 *  mode, TargetActor set). Same tolerances/latch as OnPoseTargetReached; additionally carries
+	 *  the actor. Re-fires when the actor moves beyond tolerance (or is swapped) and is reached again. */
+	UPROPERTY(BlueprintAssignable, Category = "Ramms|Kinova Gen3|Events")
+	FOnTargetActorPoseReached OnTargetActorPoseReached;
 
 	/** Per-joint angle tolerance (degrees) for the OnJointTargetsReached event */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|Events", meta = (ClampMin = "0.01"))
@@ -523,15 +594,56 @@ public:
 		return EndEffectorState;
 	}
 
-	/** Get the current end-effector target transform used by IK control (world space) */
+	/** Get the current end-effector target transform used by IK control (world space).
+	 *  For base-frame targets this derives from the LIVE base pose rather than the
+	 *  cached tick value, so callers that tick before this component (teleop debug
+	 *  draw, follow-camera rigs) don't trail the moving vehicle by a frame. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
 	FTransform GetEndEffectorTargetTransform() const
 	{
+		// Base-frame derivation needs a resolved mesh: GetArmBaseTransform()
+		// returns Identity without one, which would return the base-frame pose
+		// as if it were world space. Fall back to the cached world target.
+		if (TargetFrame == EEndEffectorTargetFrame::Base && TargetActor == nullptr && SkeletalMeshComponent != nullptr)
+		{
+			return TargetEndEffectorBaseFrame * GetArmBaseTransform();
+		}
 		return TargetEndEffectorTransform;
 	}
 
+	/** Live end-effector pose read straight from the skeletal mesh socket. The cached
+	 *  EndEffectorState is one tick stale for components that tick before this one
+	 *  (e.g. the teleop component) — use this for lag-free debug/display reads. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
+	FTransform GetLiveEndEffectorTransform() const;
+
 	/**
-	 * Set target end effector transform (world space) for IK control
+	 * The arm's base transform (world space): the first joint's parent body if it
+	 * exists, else that bone's socket, else the skeletal mesh component transform.
+	 * This is the frame Base-mode targets and the base-relative setters use, and
+	 * matches the frame the IK solver anchors its FK chain to.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
+	FTransform GetArmBaseTransform() const;
+
+	/**
+	 * Switch the frame the IK target is tracked in. The current world-space target
+	 * pose is preserved across the switch (only future base motion behaves
+	 * differently). See EEndEffectorTargetFrame for semantics on a moving base.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
+	void SetEndEffectorTargetFrame(EEndEffectorTargetFrame NewFrame);
+
+	UFUNCTION(BlueprintPure, Category = "Ramms|Kinova Gen3")
+	EEndEffectorTargetFrame GetEndEffectorTargetFrame() const
+	{
+		return TargetFrame;
+	}
+
+	/**
+	 * Set target end effector transform (world space) for IK control.
+	 * Switches TargetFrame to World: the target is a fixed world pose the arm
+	 * keeps reaching for even while the base drives (door handles, shelves).
 	 * @param TargetTransform - Desired end effector transform in world space
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
@@ -552,14 +664,18 @@ public:
 	void SetEndEffectorTargetRotation(const FRotator& TargetRotation);
 
 	/**
-	 * Set target end effector transform relative to the arm base (skeletal mesh component)
+	 * Set target end effector transform relative to the arm base (GetArmBaseTransform).
+	 * Switches TargetFrame to Base: the target CONTINUOUSLY TRACKS the base — as the
+	 * vehicle drives, the end effector holds this pose relative to the mount.
 	 * @param RelativeTransform - Target transform relative to arm base
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")
 	void SetEndEffectorTargetRelativeToBase(const FTransform& RelativeTransform);
 
 	/**
-	 * Set target end effector position relative to the arm base (skeletal mesh component)
+	 * Set target end effector position relative to the arm base (GetArmBaseTransform),
+	 * preserving the current base-relative target rotation. Switches TargetFrame to
+	 * Base — the target continuously tracks the moving base.
 	 * @param RelativePosition - Target position relative to arm base
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Kinova Gen3")

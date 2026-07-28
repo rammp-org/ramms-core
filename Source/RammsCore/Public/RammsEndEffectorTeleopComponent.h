@@ -57,6 +57,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Motion")
 	bool bInputInLocalFrame = true;
 
+	/**
+	 * Track the teleop target in the arm-base frame so it rides the vehicle: while
+	 * the MeBot/RAMMP base drives, the end effector holds its commanded pose
+	 * relative to the mount instead of being left behind at a fixed world point.
+	 * Disable for world-anchored teleop (e.g. holding a pose against a door while
+	 * repositioning the base). Applied to the Kinova controller's TargetFrame
+	 * whenever teleop drives it; programmatic SetEndEffectorTarget* calls on the
+	 * controller can still override the frame afterwards.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Motion")
+	bool bTargetRidesBase = true;
+
 	/** Base translation speed used for keyboard / remote teleop input */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|Motion", meta = (ClampMin = "0.1"))
 	float LinearSpeedCmPerSecond = 20.0f;
