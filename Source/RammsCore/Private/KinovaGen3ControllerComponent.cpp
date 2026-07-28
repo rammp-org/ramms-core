@@ -382,32 +382,71 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 			bSmoothedIKTargetInitialized = false;
 		}
 
-		// Keep target in sync with actor if provided
+		const FTransform BaseNow = GetArmBaseTransform();
+
+		// Assigning/swapping/clearing the TargetActor is a new command: reset the
+		// solved/reached latches so the reached events re-arm for the new goal.
+		if (TargetActor != LastObservedTargetActor.Get())
+		{
+			LastObservedTargetActor = TargetActor;
+			bIKTargetSatisfied = false;
+			bPoseTargetReached = false;
+			bSmoothedIKTargetInitialized = false;
+		}
+
+		// Keep target in sync with actor if provided (world semantics — the actor
+		// already defines the target's motion, base frame does not apply).
 		if (TargetActor && TargetActor->IsValidLowLevel())
 		{
 			TargetEndEffectorTransform = TargetActor->GetActorTransform();
 		}
+		else if (TargetFrame == EEndEffectorTargetFrame::Base)
+		{
+			// Base-frame target: re-derive the world target from the live base pose
+			// every tick so it rides the moving vehicle.
+			TargetEndEffectorTransform = TargetEndEffectorBaseFrame * BaseNow;
+		}
 
 		// Slew the solver-facing target toward the raw desired target so IK tracks a smooth goal
-		// instead of snapping to noisy per-tick input.
+		// instead of snapping to noisy per-tick input. With a base-frame target the smoothing
+		// runs in the BASE frame: base motion is tracked rigidly (no lag while driving), only
+		// target/operator input is smoothed.
+		const bool bSmoothInBaseFrame = (TargetFrame == EEndEffectorTargetFrame::Base) && !(TargetActor && TargetActor->IsValidLowLevel());
 		if (!bSmoothedIKTargetInitialized)
 		{
 			SmoothedIKTarget = TargetEndEffectorTransform;
+			SmoothedIKTargetBase = TargetEndEffectorBaseFrame;
 			bSmoothedIKTargetInitialized = true;
 		}
 		if (TargetSmoothingSpeed > 0.0f)
 		{
-			const FVector SmLoc = FMath::VInterpTo(SmoothedIKTarget.GetLocation(), TargetEndEffectorTransform.GetLocation(), DeltaTime, TargetSmoothingSpeed);
-			const FQuat	  SmRot = FMath::QInterpTo(SmoothedIKTarget.GetRotation(), TargetEndEffectorTransform.GetRotation(), DeltaTime, TargetSmoothingSpeed);
-			SmoothedIKTarget = FTransform(SmRot, SmLoc);
+			if (bSmoothInBaseFrame)
+			{
+				const FVector SmLoc = FMath::VInterpTo(SmoothedIKTargetBase.GetLocation(), TargetEndEffectorBaseFrame.GetLocation(), DeltaTime, TargetSmoothingSpeed);
+				const FQuat	  SmRot = FMath::QInterpTo(SmoothedIKTargetBase.GetRotation(), TargetEndEffectorBaseFrame.GetRotation(), DeltaTime, TargetSmoothingSpeed);
+				SmoothedIKTargetBase = FTransform(SmRot, SmLoc);
+				SmoothedIKTarget = SmoothedIKTargetBase * BaseNow;
+			}
+			else
+			{
+				const FVector SmLoc = FMath::VInterpTo(SmoothedIKTarget.GetLocation(), TargetEndEffectorTransform.GetLocation(), DeltaTime, TargetSmoothingSpeed);
+				const FQuat	  SmRot = FMath::QInterpTo(SmoothedIKTarget.GetRotation(), TargetEndEffectorTransform.GetRotation(), DeltaTime, TargetSmoothingSpeed);
+				SmoothedIKTarget = FTransform(SmRot, SmLoc);
+			}
 		}
 		else
 		{
 			SmoothedIKTarget = TargetEndEffectorTransform;
+			SmoothedIKTargetBase = TargetEndEffectorBaseFrame;
 		}
 
-		// Only solve IK while we are moving toward a target or the target has changed
-		bool bTargetChanged = false;
+		// Only solve IK while we are moving toward a target or the target has changed.
+		// Compare in the target's ACTIVE frame: a base-frame target riding a driving
+		// vehicle changes its WORLD pose every tick, but that's base motion (handled
+		// by bBaseMoved below), not a new command — treating it as a target change
+		// would permanently reset the pose-reached latch and spam OnPoseTargetReached.
+		const FTransform ActiveFrameTarget = (bSmoothInBaseFrame) ? TargetEndEffectorBaseFrame : TargetEndEffectorTransform;
+		bool			 bTargetChanged = false;
 		if (!bIKTargetInitialized)
 		{
 			bTargetChanged = true;
@@ -415,9 +454,9 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		}
 		else
 		{
-			const float PosDelta = FVector::Dist(TargetEndEffectorTransform.GetLocation(), LastIKTargetTransform.GetLocation());
+			const float PosDelta = FVector::Dist(ActiveFrameTarget.GetLocation(), LastIKTargetTransform.GetLocation());
 			const float RotDelta = FMath::RadiansToDegrees(
-				TargetEndEffectorTransform.GetRotation().AngularDistance(LastIKTargetTransform.GetRotation()));
+				ActiveFrameTarget.GetRotation().AngularDistance(LastIKTargetTransform.GetRotation()));
 			bTargetChanged = (PosDelta > IKTargetChangePosThreshold) || (RotDelta > IKTargetChangeRotThreshold);
 		}
 
@@ -425,33 +464,36 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		{
 			bIKTargetSatisfied = false;
 			bPoseTargetReached = false;
-			LastIKTargetTransform = TargetEndEffectorTransform;
+			LastIKTargetTransform = ActiveFrameTarget;
 		}
 
 		// Detect base movement — if the base is moving, always re-solve to avoid
-		// "bang-bang" jitter from intermittent solve/skip cycles.
-		FVector CurrentBaseLocation = SkeletalMeshComponent->GetComponentTransform().GetLocation();
-		if (Joints.Num() > 0)
-		{
-			FName ParentBone = SkeletalMeshComponent->GetParentBone(Joints[0].BoneName);
-			if (ParentBone != NAME_None)
-			{
-				CurrentBaseLocation = SkeletalMeshComponent->GetSocketTransform(ParentBone, RTS_World).GetLocation();
-			}
-		}
-		const float BaseMoveThreshold = 0.1f; // cm — avoid re-solving on micro-movements
-		const bool	bBaseMoved = FVector::DistSquared(CurrentBaseLocation, LastSolveBaseLocation) > (BaseMoveThreshold * BaseMoveThreshold);
+		// "bang-bang" jitter from intermittent solve/skip cycles. Rotation counts:
+		// a vehicle yawing in place sweeps the whole arm through the world without
+		// moving the base location, and both target frames need fresh solves then
+		// (World: the target's pose relative to the arm changed; Base: the world
+		// target itself moved).
+		const float BaseMoveThreshold = 0.1f;	// cm — avoid re-solving on micro-movements
+		const float BaseTurnThresholdDeg = 0.1f; // deg
+		const bool	bBaseMoved =
+			 FVector::DistSquared(BaseNow.GetLocation(), LastSolveBaseTransform.GetLocation()) > (BaseMoveThreshold * BaseMoveThreshold)
+			 || FMath::RadiansToDegrees(BaseNow.GetRotation().AngularDistance(LastSolveBaseTransform.GetRotation())) > BaseTurnThresholdDeg;
 
 		// Keep solving while the smoothed target is still catching up to the raw target.
 		const float SmToRawPos = FVector::Dist(SmoothedIKTarget.GetLocation(), TargetEndEffectorTransform.GetLocation());
 		const float SmToRawRot = FMath::RadiansToDegrees(SmoothedIKTarget.GetRotation().AngularDistance(TargetEndEffectorTransform.GetRotation()));
 		const bool	bSmoothingCatchingUp = (SmToRawPos > IKTargetChangePosThreshold) || (SmToRawRot > IKTargetChangeRotThreshold);
 
-		if (!bIKTargetSatisfied || bBaseMoved || bSmoothingCatchingUp)
+		// Base motion only requires re-solving for WORLD-anchored targets (the arm
+		// must chase the fixed world pose from its new base). A base-frame target's
+		// joint solution is base-invariant — driving with a riding target commands
+		// NO joint changes at all, so skipping those solves both saves work and
+		// keeps the drives perfectly quiet while the vehicle moves.
+		if (!bIKTargetSatisfied || (bBaseMoved && !bSmoothInBaseFrame) || bSmoothingCatchingUp)
 		{
 			UpdateInverseKinematics(DeltaTime);
 			bIKTargetSatisfied = bLastIKSuccess && !bSmoothingCatchingUp;
-			LastSolveBaseLocation = CurrentBaseLocation;
+			LastSolveBaseTransform = BaseNow;
 		}
 	}
 
@@ -510,6 +552,10 @@ void UKinovaGen3ControllerComponent::TickComponent(float DeltaTime, ELevelTick T
 		{
 			bPoseTargetReached = true;
 			OnPoseTargetReached.Broadcast(PosErr, RotErr);
+			if (TargetActor && TargetActor->IsValidLowLevel())
+			{
+				OnTargetActorPoseReached.Broadcast(TargetActor, PosErr, RotErr);
+			}
 		}
 		else if (!bReached)
 		{
@@ -1932,28 +1978,97 @@ TArray<float> UKinovaGen3ControllerComponent::GetAllJointAngles() const
 	return Angles;
 }
 
-void UKinovaGen3ControllerComponent::SetEndEffectorTarget(const FTransform& TargetTransform)
+FTransform UKinovaGen3ControllerComponent::GetLiveEndEffectorTransform() const
 {
-	TargetEndEffectorTransform = TargetTransform;
+	if (SkeletalMeshComponent && EndEffectorBoneName != NAME_None)
+	{
+		return SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World);
+	}
+	return TargetEndEffectorTransform;
+}
+
+FTransform UKinovaGen3ControllerComponent::GetArmBaseTransform() const
+{
+	// Single source of truth for "the arm's base": the first joint's parent BODY
+	// (matches the FK chain anchor in UpdateInverseKinematics — body, not bone,
+	// because the FK chain tracks body rotations via CRest.Rot), falling back to
+	// the socket, then the component transform.
+	if (!SkeletalMeshComponent)
+	{
+		return FTransform::Identity;
+	}
+	if (Joints.Num() > 0 && Joints[0].BoneName != NAME_None)
+	{
+		const FName ParentBone = SkeletalMeshComponent->GetParentBone(Joints[0].BoneName);
+		if (ParentBone != NAME_None)
+		{
+			if (FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(ParentBone))
+			{
+				return BaseBody->GetUnrealWorldTransform();
+			}
+			return SkeletalMeshComponent->GetSocketTransform(ParentBone, RTS_World);
+		}
+	}
+	return SkeletalMeshComponent->GetComponentTransform();
+}
+
+void UKinovaGen3ControllerComponent::CommitWorldTarget(const FTransform& NewWorldTarget)
+{
+	TargetEndEffectorTransform = NewWorldTarget;
+	if (TargetFrame == EEndEffectorTargetFrame::Base)
+	{
+		// Keep the canonical base-frame target in sync so the world target keeps
+		// deriving to this same pose as the base moves.
+		TargetEndEffectorBaseFrame = NewWorldTarget.GetRelativeTransform(GetArmBaseTransform());
+	}
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
 	bPoseTargetReached = false;
+}
+
+void UKinovaGen3ControllerComponent::CommitBaseFrameTarget(const FTransform& NewBaseFrameTarget)
+{
+	TargetEndEffectorBaseFrame = NewBaseFrameTarget;
+	TargetEndEffectorTransform = NewBaseFrameTarget * GetArmBaseTransform();
+	bIKTargetInitialized = false;
+	bIKTargetSatisfied = false;
+	bPoseTargetReached = false;
+}
+
+void UKinovaGen3ControllerComponent::SetEndEffectorTargetFrame(EEndEffectorTargetFrame NewFrame)
+{
+	if (TargetFrame == NewFrame)
+	{
+		return;
+	}
+	TargetFrame = NewFrame;
+	// Preserve the current world pose across the switch; only future base motion
+	// behaves differently. Re-committing also refreshes the base-frame mirror and
+	// re-seeds smoothing in the new frame.
+	bSmoothedIKTargetInitialized = false;
+	CommitWorldTarget(TargetEndEffectorTransform);
+}
+
+void UKinovaGen3ControllerComponent::SetEndEffectorTarget(const FTransform& TargetTransform)
+{
+	TargetFrame = EEndEffectorTargetFrame::World;
+	CommitWorldTarget(TargetTransform);
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetPosition(const FVector& TargetPosition)
 {
-	TargetEndEffectorTransform.SetLocation(TargetPosition);
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	FTransform NewTarget = TargetEndEffectorTransform;
+	NewTarget.SetLocation(TargetPosition);
+	TargetFrame = EEndEffectorTargetFrame::World;
+	CommitWorldTarget(NewTarget);
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetRotation(const FRotator& TargetRotation)
 {
-	TargetEndEffectorTransform.SetRotation(TargetRotation.Quaternion());
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	FTransform NewTarget = TargetEndEffectorTransform;
+	NewTarget.SetRotation(TargetRotation.Quaternion());
+	TargetFrame = EEndEffectorTargetFrame::World;
+	CommitWorldTarget(NewTarget);
 }
 
 void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToBase(const FTransform& RelativeTransform)
@@ -1964,16 +2079,18 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToBase(const FT
 		return;
 	}
 
-	// Convert from component-relative to world space
-	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
-	TargetEndEffectorTransform = RelativeTransform * BaseTransform;
+	// Base-frame target: tracks the moving base continuously (the world target is
+	// re-derived from the live base pose every tick).
+	TargetFrame = EEndEffectorTargetFrame::Base;
+	TargetEndEffectorBaseFrame = RelativeTransform;
+	TargetEndEffectorTransform = RelativeTransform * GetArmBaseTransform();
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
 	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set IK target relative to base: World Pos=(%.1f, %.1f, %.1f)"),
+		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set base-frame IK target (tracks moving base): World Pos=(%.1f, %.1f, %.1f)"),
 			TargetEndEffectorTransform.GetLocation().X,
 			TargetEndEffectorTransform.GetLocation().Y,
 			TargetEndEffectorTransform.GetLocation().Z);
@@ -1988,18 +2105,27 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToBase(
 		return;
 	}
 
-	// Convert position from component-relative to world space, preserve current rotation
-	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
-	FVector	   WorldPosition = BaseTransform.TransformPosition(RelativePosition);
-	TargetEndEffectorTransform.SetLocation(WorldPosition);
+	const FTransform BaseTransform = GetArmBaseTransform();
+	// Preserve the current base-relative rotation; if we were in World mode, derive
+	// it from the current world target so nothing visibly jumps at the switch.
+	FTransform NewBaseFrameTarget = (TargetFrame == EEndEffectorTargetFrame::Base)
+		? TargetEndEffectorBaseFrame
+		: TargetEndEffectorTransform.GetRelativeTransform(BaseTransform);
+	NewBaseFrameTarget.SetLocation(RelativePosition);
+
+	TargetFrame = EEndEffectorTargetFrame::Base;
+	TargetEndEffectorBaseFrame = NewBaseFrameTarget;
+	TargetEndEffectorTransform = NewBaseFrameTarget * BaseTransform;
 	bIKTargetInitialized = false;
 	bIKTargetSatisfied = false;
 	bPoseTargetReached = false;
 
 	if (bEnableDebugLogging)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set IK target position relative to base: World Pos=(%.1f, %.1f, %.1f)"),
-			WorldPosition.X, WorldPosition.Y, WorldPosition.Z);
+		UE_LOG(LogTemp, Verbose, TEXT("[KinovaGen3] Set base-frame IK target position (tracks moving base): World Pos=(%.1f, %.1f, %.1f)"),
+			TargetEndEffectorTransform.GetLocation().X,
+			TargetEndEffectorTransform.GetLocation().Y,
+			TargetEndEffectorTransform.GetLocation().Z);
 	}
 }
 
@@ -2012,12 +2138,11 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetRelativeToActor(const F
 		return;
 	}
 
-	// Convert from actor-relative to world space
+	// Convert from actor-relative to world space (one-shot snapshot — for a target
+	// that keeps tracking a moving base, use SetEndEffectorTargetRelativeToBase).
 	FTransform ActorTransform = Owner->GetActorTransform();
-	TargetEndEffectorTransform = RelativeTransform * ActorTransform;
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	TargetFrame = EEndEffectorTargetFrame::World;
+	CommitWorldTarget(RelativeTransform * ActorTransform);
 
 	if (bEnableDebugLogging)
 	{
@@ -2038,12 +2163,14 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToActor
 	}
 
 	// Convert position from actor-relative to world space, preserve current rotation
+	// (one-shot snapshot — use SetEndEffectorTargetPositionRelativeToBase to track
+	// a moving base).
 	FTransform ActorTransform = Owner->GetActorTransform();
 	FVector	   WorldPosition = ActorTransform.TransformPosition(RelativePosition);
-	TargetEndEffectorTransform.SetLocation(WorldPosition);
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	FTransform NewTarget = TargetEndEffectorTransform;
+	NewTarget.SetLocation(WorldPosition);
+	TargetFrame = EEndEffectorTargetFrame::World;
+	CommitWorldTarget(NewTarget);
 
 	if (bEnableDebugLogging)
 	{
@@ -2054,12 +2181,22 @@ void UKinovaGen3ControllerComponent::SetEndEffectorTargetPositionRelativeToActor
 
 void UKinovaGen3ControllerComponent::MoveEndEffectorTargetBy(const FVector& Offset)
 {
-	// Move target by world-space offset
-	FVector CurrentPos = TargetEndEffectorTransform.GetLocation();
-	TargetEndEffectorTransform.SetLocation(CurrentPos + Offset);
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	// Move target by world-space offset, applied natively in the ACTIVE frame.
+	if (TargetFrame == EEndEffectorTargetFrame::Base)
+	{
+		// Rotate the world delta into the base frame and mutate the canonical
+		// base-frame target — never re-anchor a derived world pose (see
+		// CommitBaseFrameTarget for the drift this avoids).
+		FTransform NewTarget = TargetEndEffectorBaseFrame;
+		NewTarget.SetLocation(NewTarget.GetLocation() + GetArmBaseTransform().GetRotation().Inverse().RotateVector(Offset));
+		CommitBaseFrameTarget(NewTarget);
+	}
+	else
+	{
+		FTransform NewTarget = TargetEndEffectorTransform;
+		NewTarget.SetLocation(NewTarget.GetLocation() + Offset);
+		CommitWorldTarget(NewTarget);
+	}
 
 	if (bEnableDebugLogging)
 	{
@@ -2073,15 +2210,24 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetBy(const FVector& Offs
 
 void UKinovaGen3ControllerComponent::MoveEndEffectorTargetByLocal(const FVector& LocalOffset)
 {
-	// Move target by offset in end effector's current orientation
-	FQuat	CurrentRotation = TargetEndEffectorTransform.GetRotation();
-	FVector WorldOffset = CurrentRotation.RotateVector(LocalOffset);
+	// Move target by offset in the target's own (end-effector) orientation.
+	if (TargetFrame == EEndEffectorTargetFrame::Base)
+	{
+		// EE-local axes expressed in the base frame — pure base-frame math, no
+		// world round-trip.
+		FTransform NewTarget = TargetEndEffectorBaseFrame;
+		NewTarget.SetLocation(NewTarget.GetLocation() + NewTarget.GetRotation().RotateVector(LocalOffset));
+		CommitBaseFrameTarget(NewTarget);
+	}
+	else
+	{
+		FQuat	CurrentRotation = TargetEndEffectorTransform.GetRotation();
+		FVector WorldOffset = CurrentRotation.RotateVector(LocalOffset);
 
-	FVector CurrentPos = TargetEndEffectorTransform.GetLocation();
-	TargetEndEffectorTransform.SetLocation(CurrentPos + WorldOffset);
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+		FTransform NewTarget = TargetEndEffectorTransform;
+		NewTarget.SetLocation(NewTarget.GetLocation() + WorldOffset);
+		CommitWorldTarget(NewTarget);
+	}
 
 	if (bEnableDebugLogging)
 	{
@@ -2096,11 +2242,23 @@ void UKinovaGen3ControllerComponent::MoveEndEffectorTargetByLocal(const FVector&
 void UKinovaGen3ControllerComponent::RotateEndEffectorTargetBy(const FRotator& DeltaRotation)
 {
 	const FQuat WorldDelta = DeltaRotation.Quaternion();
-	const FQuat UpdatedRotation = (WorldDelta * TargetEndEffectorTransform.GetRotation()).GetNormalized();
-	TargetEndEffectorTransform.SetRotation(UpdatedRotation);
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	if (TargetFrame == EEndEffectorTargetFrame::Base)
+	{
+		// Conjugate the world-axis delta into the base frame, then apply to the
+		// canonical base-frame target.
+		const FQuat BaseRot = GetArmBaseTransform().GetRotation();
+		const FQuat BaseFrameDelta = (BaseRot.Inverse() * WorldDelta * BaseRot).GetNormalized();
+		FTransform	NewTarget = TargetEndEffectorBaseFrame;
+		NewTarget.SetRotation((BaseFrameDelta * NewTarget.GetRotation()).GetNormalized());
+		CommitBaseFrameTarget(NewTarget);
+	}
+	else
+	{
+		const FQuat UpdatedRotation = (WorldDelta * TargetEndEffectorTransform.GetRotation()).GetNormalized();
+		FTransform	NewTarget = TargetEndEffectorTransform;
+		NewTarget.SetRotation(UpdatedRotation);
+		CommitWorldTarget(NewTarget);
+	}
 
 	if (bEnableDebugLogging)
 	{
@@ -2112,11 +2270,20 @@ void UKinovaGen3ControllerComponent::RotateEndEffectorTargetBy(const FRotator& D
 void UKinovaGen3ControllerComponent::RotateEndEffectorTargetByLocal(const FRotator& LocalDeltaRotation)
 {
 	const FQuat LocalDelta = LocalDeltaRotation.Quaternion();
-	const FQuat UpdatedRotation = (TargetEndEffectorTransform.GetRotation() * LocalDelta).GetNormalized();
-	TargetEndEffectorTransform.SetRotation(UpdatedRotation);
-	bIKTargetInitialized = false;
-	bIKTargetSatisfied = false;
-	bPoseTargetReached = false;
+	if (TargetFrame == EEndEffectorTargetFrame::Base)
+	{
+		// EE-local delta composes on the right in any frame — pure base-frame math.
+		FTransform NewTarget = TargetEndEffectorBaseFrame;
+		NewTarget.SetRotation((NewTarget.GetRotation() * LocalDelta).GetNormalized());
+		CommitBaseFrameTarget(NewTarget);
+	}
+	else
+	{
+		const FQuat UpdatedRotation = (TargetEndEffectorTransform.GetRotation() * LocalDelta).GetNormalized();
+		FTransform	NewTarget = TargetEndEffectorTransform;
+		NewTarget.SetRotation(UpdatedRotation);
+		CommitWorldTarget(NewTarget);
+	}
 
 	if (bEnableDebugLogging)
 	{
@@ -2139,7 +2306,10 @@ void UKinovaGen3ControllerComponent::SnapEndEffectorTargetToCurrentPose()
 		return;
 	}
 
-	SetEndEffectorTarget(SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World));
+	// Commit in the ACTIVE frame (snap must not kick a base-frame teleop target
+	// back into world mode — the whole point on a moving base is to re-anchor
+	// the target at the current pose and keep riding the vehicle).
+	CommitWorldTarget(SkeletalMeshComponent->GetSocketTransform(EndEffectorBoneName, RTS_World));
 
 	// Force the IK seed and smoothed target to resync to this freshly snapped pose.
 	bIKSeedInitialized = false;
@@ -2587,19 +2757,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	// Use BODY transform (not bone/socket transform) because the FK chain tracks
 	// body rotations via CRest.Rot. If there's a body-to-bone rotation offset on
 	// the base bone, using the bone transform would cause accumulated FK rotation error.
-	FTransform BaseTransform = SkeletalMeshComponent->GetComponentTransform();
-	if (FirstJointParent != NAME_None)
-	{
-		FBodyInstance* BaseBody = SkeletalMeshComponent->GetBodyInstance(FirstJointParent);
-		if (BaseBody)
-		{
-			BaseTransform = BaseBody->GetUnrealWorldTransform();
-		}
-		else
-		{
-			BaseTransform = SkeletalMeshComponent->GetSocketTransform(FirstJointParent, RTS_World);
-		}
-	}
+	// GetArmBaseTransform implements exactly this chain and is the same frame the
+	// base-relative target APIs use, so target and solve stay consistent on a
+	// moving base.
+	const FTransform BaseTransform = GetArmBaseTransform();
 
 	if (bEnableDebugLogging)
 	{
@@ -2873,10 +3034,22 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 
 	const float StepClipDeg = FMath::RadiansToDegrees(IKStepClip);
 
-	// Solve against the smoothed target when target smoothing is enabled (see TickComponent slew).
-	const FTransform SolveTarget = (TargetSmoothingSpeed > 0.0f && bSmoothedIKTargetInitialized)
-		? SmoothedIKTarget
-		: TargetEndEffectorTransform;
+	// Solve in the target's ACTIVE frame. For a base-frame target the entire solve
+	// runs relative to the base body (identity base, base-frame target): the joint
+	// solution is then mathematically independent of base motion — driving the
+	// vehicle cannot perturb the commanded joint angles, which removes end-effector
+	// lag while driving AND stops per-tick joint-target churn from pumping drive
+	// torques into the chassis (the world round-trip only cancels if every base
+	// read is perfectly consistent; solving in the base frame removes the
+	// cancellation requirement entirely). World / TargetActor targets still solve
+	// in world space, where chasing a fixed world pose from a moving base is the
+	// intended behavior.
+	const bool bSolveInBaseFrame = (TargetFrame == EEndEffectorTargetFrame::Base) && !(TargetActor && TargetActor->IsValidLowLevel());
+	const bool bUseSmoothedTarget = (TargetSmoothingSpeed > 0.0f && bSmoothedIKTargetInitialized);
+	const FTransform SolveBase = bSolveInBaseFrame ? FTransform::Identity : BaseTransform;
+	const FTransform SolveTarget = bSolveInBaseFrame
+		? (bUseSmoothedTarget ? SmoothedIKTargetBase : TargetEndEffectorBaseFrame)
+		: (bUseSmoothedTarget ? SmoothedIKTarget : TargetEndEffectorTransform);
 
 	FIKSolveResult IKResult;
 
@@ -2884,7 +3057,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	{
 		// Use FABRIK solver with hard joint limits
 		IKResult = URammsIKLibrary::SolveIK_FABRIK(
-			BaseTransform,
+			SolveBase,
 			SeedAngles,
 			JointLocalTransformsForSolver,
 			JointAxesLocalForSolver,
@@ -2904,7 +3077,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	else if (IKSolverType == EIKSolverType::CCD)
 	{
 		IKResult = URammsIKLibrary::SolveIK_CCD(
-			BaseTransform,
+			SolveBase,
 			SeedAngles,
 			JointLocalTransformsForSolver,
 			JointAxesLocalForSolver,
@@ -2923,7 +3096,7 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 	{
 		// Use DLS solver (original)
 		IKResult = URammsIKLibrary::SolveIK_FKChain(
-			BaseTransform,
+			SolveBase,
 			SeedAngles,
 			JointLocalTransforms,
 			JointAxesLocal,
@@ -2942,10 +3115,23 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			IKRotationTolerance);
 	}
 
+	// Rate-limit the commanded solution against the previous one (see
+	// MaxIKSolutionSpeedDegPerSecond). The seed advances to the CLAMPED value so
+	// commanded target and solver seed stay coherent: the next solve continues
+	// from what was actually commanded and converges over multiple ticks.
+	const float MaxSolutionStepDeg = (MaxIKSolutionSpeedDegPerSecond > 0.0f && DeltaTime > 0.0f)
+		? MaxIKSolutionSpeedDegPerSecond * DeltaTime
+		: 0.0f;
 	for (int32 i = 0; i < FMath::Min(IKResult.JointAngles.Num(), Joints.Num()); i++)
 	{
-		Joints[i].TargetAngle = IKResult.JointAngles[i];
-		IKSeedAngles[i] = IKResult.JointAngles[i]; // advance the open-loop seed
+		float NewAngle = IKResult.JointAngles[i];
+		if (MaxSolutionStepDeg > 0.0f && i < SeedAngles.Num())
+		{
+			const float Delta = FMath::FindDeltaAngleDegrees(SeedAngles[i], NewAngle);
+			NewAngle = SeedAngles[i] + FMath::Clamp(Delta, -MaxSolutionStepDeg, MaxSolutionStepDeg);
+		}
+		Joints[i].TargetAngle = NewAngle;
+		IKSeedAngles[i] = NewAngle; // advance the open-loop seed (clamped)
 	}
 
 	LastIKPositionError = IKResult.PositionError;

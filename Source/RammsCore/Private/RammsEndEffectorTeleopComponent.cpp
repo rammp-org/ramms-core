@@ -32,6 +32,16 @@ void URammsEndEffectorTeleopComponent::BeginPlay()
 	{
 		SyncTargetToCurrentPose();
 	}
+	// Frame preference lands AFTER the initial sync: the sync commits the live EE
+	// pose in whatever frame is active, and the switch then converts it preserving
+	// the world pose. Doing it first would convert an uninitialized (identity)
+	// target through a possibly not-yet-resolved base — a target at the chassis
+	// origin for the first frames.
+	if (KinovaControllerComponent)
+	{
+		KinovaControllerComponent->SetEndEffectorTargetFrame(
+			bTargetRidesBase ? EEndEffectorTargetFrame::Base : EEndEffectorTargetFrame::World);
+	}
 }
 
 void URammsEndEffectorTeleopComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -72,6 +82,10 @@ void URammsEndEffectorTeleopComponent::ApplyTeleopInput(const FVector& LinearInp
 		{
 			Controller->ArmControlMode = EArmControlMode::EndEffectorControl;
 		}
+		// Re-assert the frame preference (no-op when unchanged): a programmatic
+		// world-target call may have switched the controller to World in between.
+		Controller->SetEndEffectorTargetFrame(
+			bTargetRidesBase ? EEndEffectorTargetFrame::Base : EEndEffectorTargetFrame::World);
 
 		const float SafeScale = FMath::Max(0.0f, SpeedScale);
 		Controller->ApplyEndEffectorTeleopInput(
@@ -147,7 +161,7 @@ void URammsEndEffectorTeleopComponent::DrawDebugVisualization() const
 	{
 		const bool	  bInEndEffectorMode = KinovaControllerComponent->ArmControlMode == EArmControlMode::EndEffectorControl;
 		const bool	  bTargetActorHijack = KinovaControllerComponent->TargetActor != nullptr;
-		const FVector ActualEELocation = KinovaControllerComponent->GetEndEffectorState().Position;
+		const FVector ActualEELocation = KinovaControllerComponent->GetLiveEndEffectorTransform().GetLocation();
 		const float	  TargetErrorCm = FVector::Dist(ActualEELocation, TargetLocation);
 
 		// Did the controller actually run a solve since we last drew? If the solver is
@@ -187,9 +201,12 @@ void URammsEndEffectorTeleopComponent::DrawDebugVisualization() const
 
 	if (bDrawCurrentEndEffector || bDrawTargetErrorLine)
 	{
-		const FEndEffectorState EndEffectorState = KinovaControllerComponent->GetEndEffectorState();
-		const FVector			CurrentLocation = EndEffectorState.Position;
-		const FQuat				CurrentRotation = EndEffectorState.Rotation.Quaternion();
+		// Live socket read: this component ticks BEFORE the controller, so the
+		// cached EndEffectorState is a frame stale and visibly trails the arm
+		// whenever the vehicle moves.
+		const FTransform LiveEE = KinovaControllerComponent->GetLiveEndEffectorTransform();
+		const FVector	 CurrentLocation = LiveEE.GetLocation();
+		const FQuat		 CurrentRotation = LiveEE.GetRotation();
 
 		if (bDrawCurrentEndEffector)
 		{
