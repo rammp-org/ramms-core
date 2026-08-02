@@ -271,6 +271,10 @@ private:
 	/** Wall-clock time of the last SetExternalDriveInput call (-1 = never). */
 	double LastExternalInputSeconds = -1.0;
 
+	/** Shared input application (store + debug log + anti-windup reset) for the
+	 *  player and external input paths — keeps both sources consistent. */
+	void ApplyDriveInputInternal(FVector2D Input, const TCHAR* SourceLabel);
+
 	// PID state for velocity control
 	float LeftIntegralError = 0.0f;
 	float LeftPreviousError = 0.0f;
