@@ -126,13 +126,13 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	}
 }
 
-void URammsDifferentialDriveController::SetDriveInput(FVector2D Input)
+void URammsDifferentialDriveController::ApplyDriveInputInternal(FVector2D Input, const TCHAR* SourceLabel)
 {
 	DriveInput = Input;
 
 	if (bEnableDebugLogging)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] SetDriveInput: X=%.3f, Y=%.3f"), Input.X, Input.Y);
+		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] %s: X=%.3f, Y=%.3f"), SourceLabel, Input.X, Input.Y);
 	}
 
 	// Reset integral terms when input changes significantly (prevents windup)
@@ -141,6 +141,30 @@ void URammsDifferentialDriveController::SetDriveInput(FVector2D Input)
 		LeftIntegralError = 0.0f;
 		RightIntegralError = 0.0f;
 	}
+}
+
+void URammsDifferentialDriveController::SetDriveInput(FVector2D Input)
+{
+	// The pawn writes this every tick from its input bindings (BP Event Tick →
+	// Enhanced Input values) — while an external access/autonomy session holds
+	// priority, those per-tick writes must not clobber the external command.
+	if (IsExternalDriveActive())
+	{
+		return;
+	}
+	ApplyDriveInputInternal(Input, TEXT("SetDriveInput"));
+}
+
+void URammsDifferentialDriveController::SetExternalDriveInput(FVector2D Input)
+{
+	LastExternalInputSeconds = FPlatformTime::Seconds();
+	ApplyDriveInputInternal(Input, TEXT("SetExternalDriveInput"));
+}
+
+bool URammsDifferentialDriveController::IsExternalDriveActive() const
+{
+	return LastExternalInputSeconds >= 0.0
+		&& (FPlatformTime::Seconds() - LastExternalInputSeconds) < ExternalInputHoldSeconds;
 }
 
 void URammsDifferentialDriveController::ResetOdometry(FVector Position, FRotator Orientation)

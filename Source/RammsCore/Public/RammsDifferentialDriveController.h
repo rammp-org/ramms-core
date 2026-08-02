@@ -161,6 +161,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Input", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float InputDeadZone = 0.05f;
 
+	/**
+	 * How long an external drive input (SetExternalDriveInput — access devices,
+	 * autonomy) holds priority over the player path. While an external input is
+	 * fresher than this window, plain SetDriveInput calls (the pawn's per-tick
+	 * joystick write) are ignored — the arbitration a physical assistive
+	 * wheelchair performs between its local joystick and alternative inputs.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Input", meta = (ClampMin = "0.05"))
+	float ExternalInputHoldSeconds = 0.3f;
+
 	// ========== State ==========
 
 	/** Left wheel state */
@@ -186,11 +196,26 @@ public:
 	// ========== Blueprint API ==========
 
 	/**
-	 * Set drive input from 2D joystick
+	 * Set drive input from 2D joystick (the player path — the pawn writes this
+	 * every tick from Enhanced Input). Ignored while an external input session
+	 * is active (see SetExternalDriveInput).
 	 * @param Input - Joystick input (X = turn, Y = forward/back), -1 to 1
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	void SetDriveInput(FVector2D Input);
+
+	/**
+	 * Set drive input from an external source (access devices via RammsAccess,
+	 * scripted control, autonomy). Takes priority over SetDriveInput for
+	 * ExternalInputHoldSeconds after each call; when the external stream stops,
+	 * the hold expires and the player path resumes automatically.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
+	void SetExternalDriveInput(FVector2D Input);
+
+	/** True while an external input session holds drive priority. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
+	bool IsExternalDriveActive() const;
 
 	/**
 	 * Get current odometry data
@@ -242,6 +267,13 @@ private:
 	// Cached skeletal mesh component reference
 	UPROPERTY(Transient)
 	USkeletalMeshComponent* SkeletalMeshComponent = nullptr;
+
+	/** Wall-clock time of the last SetExternalDriveInput call (-1 = never). */
+	double LastExternalInputSeconds = -1.0;
+
+	/** Shared input application (store + debug log + anti-windup reset) for the
+	 *  player and external input paths — keeps both sources consistent. */
+	void ApplyDriveInputInternal(FVector2D Input, const TCHAR* SourceLabel);
 
 	// PID state for velocity control
 	float LeftIntegralError = 0.0f;
