@@ -22,9 +22,17 @@
  * All geometry is expressed in that local **x-z plane**, in **centimetres**:
  * `FVector2D(X, Z)` — X along the robot's forward axis, Z (the 2D `.Y`) up.
  * Joint angle (rad, as commanded on / read from the motor) maps to a link's
- * absolute angle in that plane as: `linkAngle = ZeroDir + Sign * jointAngle`.
- * Defaults below are measured from lift_drive_linkage_ue.xml (left centre leg)
- * and should be validated in PIE.
+ * absolute angle in that plane (atan2(z, x)) as:
+ * `linkAngle = ZeroDir + Sign * jointAngle`.
+ *
+ * Sign convention (right-hand rule): a MuJoCo hinge about **+Y** rotates +X
+ * toward −Z, i.e. it DECREASES the link angle, so `Sign = -1` for a joint
+ * whose axis is `0 1 0` and `Sign = +1` for `0 -1 0`. Getting this backwards
+ * is not caught by IK/FK self-consistency checks — the leg simply moves the
+ * opposite way in the sim (extends when asked to retract).
+ *
+ * Defaults below are measured from lift_drive_linkage_ue.xml (left centre leg:
+ * hip_a axis +Y, hip_b axis −Y) and were validated live in PIE.
  */
 USTRUCT(BlueprintType)
 struct FRamms5BarLinkageSpec : public FTableRowBase
@@ -68,17 +76,19 @@ struct FRamms5BarLinkageSpec : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
 	float ZeroDirA = -0.2397f;
 
-	/** Sign mapping joint-angle increase to link-angle increase for A (±1). */
+	/** Sign mapping joint-angle increase to link-angle increase for A (±1):
+	 *  -1 for a hinge about +Y, +1 for -Y (see the class doc). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
-	float AngleSignA = 1.0f;
+	float AngleSignA = -1.0f;
 
 	/** Absolute x-z direction (rad) of proximal link B when its joint angle is 0. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
 	float ZeroDirB = -2.9019f;
 
-	/** Sign mapping joint-angle increase to link-angle increase for B (±1). */
+	/** Sign mapping joint-angle increase to link-angle increase for B (±1):
+	 *  -1 for a hinge about +Y, +1 for -Y (see the class doc). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
-	float AngleSignB = -1.0f;
+	float AngleSignB = 1.0f;
 
 	/** IK elbow branch for arm A: true = the proximal link sits at
 	 *  (pivot->endpoint direction) + interior angle. Must match the physical

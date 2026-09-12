@@ -43,6 +43,17 @@ URammsRobotBaseComponent* URamms5BarLinkageController::EnsureBase() const
 		if (const AActor* Owner = GetOwner())
 		{
 			BaseComponent = Owner->FindComponentByClass<URammsRobotBaseComponent>();
+			if (BaseComponent)
+			{
+				TArray<URammsRobotBaseComponent*> Bases;
+				Owner->GetComponents<URammsRobotBaseComponent>(Bases);
+				if (Bases.Num() > 1)
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("Ramms5BarLinkageController '%s': '%s' has %d RammsRobotBaseComponents; using '%s'. Remove the extras."),
+						*GetName(), *Owner->GetName(), Bases.Num(), *BaseComponent->GetName());
+				}
+			}
 		}
 	}
 	return BaseComponent;

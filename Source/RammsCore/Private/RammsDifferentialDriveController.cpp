@@ -29,8 +29,19 @@ void URammsDifferentialDriveController::BeginPlay()
 		if (BaseComponent)
 		{
 			UE_LOG(LogTemp, Log,
-				TEXT("[DiffDrive] Driving via RammsRobotBaseComponent (motors '%s' / '%s')."),
-				*LeftMotorId.ToString(), *RightMotorId.ToString());
+				TEXT("[DiffDrive] Driving via RammsRobotBaseComponent '%s' (motors '%s' / '%s')."),
+				*BaseComponent->GetName(), *LeftMotorId.ToString(), *RightMotorId.ToString());
+			// A robot has one base component; with several, "the first" is an
+			// arbitrary (and easily unconfigured) one — say so rather than drive
+			// through it silently.
+			TArray<URammsRobotBaseComponent*> Bases;
+			Owner->GetComponents<URammsRobotBaseComponent>(Bases);
+			if (Bases.Num() > 1)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[DiffDrive] '%s' has %d RammsRobotBaseComponents; using '%s'. Remove the extras."),
+					*Owner->GetName(), Bases.Num(), *BaseComponent->GetName());
+			}
 		}
 
 		// If a specific component name is provided, find it by name
