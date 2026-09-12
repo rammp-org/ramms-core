@@ -21,24 +21,7 @@ URammsRobotBaseComponent::~URammsRobotBaseComponent()
 void URammsRobotBaseComponent::BeginPlay()
 {
 	Super::BeginPlay();
-
-	// Load the motor registry.
-	Motors.Reset();
-	if (MotorTable)
-	{
-		static const FString Context(TEXT("RammsRobotBaseComponent"));
-		MotorTable->ForeachRow<FRammsMotorSpec>(Context,
-			[this](const FName& RowName, const FRammsMotorSpec& Row) {
-				// Id defaults to the row name when the row leaves it unset.
-				FRammsMotorSpec Spec = Row;
-				if (Spec.Id.IsNone())
-				{
-					Spec.Id = RowName;
-				}
-				Motors.Add(Spec.Id, Spec);
-			});
-	}
-
+	LoadMotorRegistry();
 	EnsureBackend();
 }
 
@@ -47,7 +30,47 @@ void URammsRobotBaseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	delete Backend_;
 	Backend_ = nullptr;
 	bBackendResolved = false;
+	bMotorsLoaded = false;
 	Super::EndPlay(EndPlayReason);
+}
+
+void URammsRobotBaseComponent::LoadMotorRegistry() const
+{
+	// Idempotent, and callable from any accessor: a sibling component may query
+	// or command motors from its own BeginPlay before ours has run, and those
+	// calls must already see the configured type / range / direction / names.
+	if (bMotorsLoaded)
+	{
+		return;
+	}
+	bMotorsLoaded = true;
+	Motors.Reset();
+	if (!MotorTable)
+	{
+		return;
+	}
+
+	static const FString Context(TEXT("RammsRobotBaseComponent"));
+	MotorTable->ForeachRow<FRammsMotorSpec>(Context,
+		[this](const FName& RowName, const FRammsMotorSpec& Row) {
+			// Id defaults to the row name when the row leaves it unset.
+			FRammsMotorSpec Spec = Row;
+			if (Spec.Id.IsNone())
+			{
+				Spec.Id = RowName;
+			}
+			// A duplicate Id would silently replace an earlier row and make the
+			// routing depend on table iteration order: keep the first, report it.
+			if (Motors.Contains(Spec.Id))
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("RammsRobotBaseComponent on '%s': motor table '%s' row '%s' duplicates motor Id '%s' — row ignored (first definition wins)."),
+					GetOwner() ? *GetOwner()->GetName() : TEXT("?"), *MotorTable->GetName(),
+					*RowName.ToString(), *Spec.Id.ToString());
+				return;
+			}
+			Motors.Add(Spec.Id, Spec);
+		});
 }
 
 void URammsRobotBaseComponent::EnsureBackend() const
@@ -63,6 +86,8 @@ void URammsRobotBaseComponent::EnsureBackend() const
 	{
 		return;
 	}
+	// The registry must be in place before a backend initializes against it.
+	LoadMotorRegistry();
 	bBackendResolved = true;
 
 	// Resolve the backend once.
@@ -119,6 +144,7 @@ bool URammsRobotBaseComponent::HasBackend() const
 
 bool URammsRobotBaseComponent::GetMotorSpec(FName MotorId, FRammsMotorSpec& OutSpec) const
 {
+	LoadMotorRegistry();
 	if (const FRammsMotorSpec* Spec = Motors.Find(MotorId))
 	{
 		OutSpec = *Spec;
@@ -129,11 +155,13 @@ bool URammsRobotBaseComponent::GetMotorSpec(FName MotorId, FRammsMotorSpec& OutS
 
 bool URammsRobotBaseComponent::HasMotor(FName MotorId) const
 {
+	LoadMotorRegistry();
 	return Motors.Contains(MotorId);
 }
 
 ERammsActuatorType URammsRobotBaseComponent::GetMotorType(FName MotorId) const
 {
+	LoadMotorRegistry();
 	const FRammsMotorSpec* Spec = Motors.Find(MotorId);
 	return Spec ? Spec->Type : ERammsActuatorType::Torque;
 }
@@ -162,9 +190,9 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 			MotorTable ? TEXT("") : TEXT(" (no MotorTable set)"));
 	}
 
-	// Clamp in the robot's sense to the authored range when one is set
-	// (zero-width = defer to the backend / actuator's own range), then map to
-	// the engine's joint sign.
+	// Clamp in the robot's sense to the authored range when one is set (a
+	// range with min >= max means "no clamp here" — defer to the backend /
+	// actuator's own range), then map to the engine's joint sign.
 	if (Spec && Spec->ControlRange.X < Spec->ControlRange.Y)
 	{
 		Value = FMath::Clamp(Value, static_cast<float>(Spec->ControlRange.X),

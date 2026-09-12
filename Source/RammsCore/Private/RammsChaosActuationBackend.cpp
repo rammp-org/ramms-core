@@ -95,8 +95,9 @@ void FRammsChaosActuationBackend::SetCommand(FName MotorId, float Value)
 	}
 	const FTransform BoneTransform = SkelMesh->GetBoneTransform(BoneIndex);
 
-	// Torque about the wheel's local spin axis (Y), N·m -> UE units (×100),
-	// applied across substeps — the established differential-drive convention.
+	// About the wheel's local spin axis (Y), ×100 and as an acceleration change —
+	// byte-for-byte the pre-existing differential-drive Chaos path (see the
+	// header's units caveat); not a physical N·m torque.
 	const FVector WorldTorque = BoneTransform.TransformVectorNoScale(FVector(0.0f, Value, 0.0f)) * 100.0f;
 	BodyInst->AddTorqueInRadians(WorldTorque, /*bAllowSubstepping=*/false, /*bAccelChange=*/true);
 }

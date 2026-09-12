@@ -103,6 +103,14 @@ FVector2D URamms5BarKinematics::ComputeEndpoint(const FRamms5BarLinkageSpec& Spe
 		const FVector2D Prox = Knee - Pivot;
 		const FVector2D Dist = Endpoint - Knee;
 		const double	Cross = Prox.X * Dist.Y - Prox.Y * Dist.X;
+		// A straight knee (the reach boundary IK treats as reachable) is valid
+		// for either bend direction; tolerance scales with the link lengths
+		// since the cross product is an area.
+		const double StraightTolerance = 1e-6 * Prox.Size() * Dist.Size();
+		if (FMath::Abs(Cross) <= StraightTolerance)
+		{
+			return true;
+		}
 		return (Cross < 0.0) == bElbowUp;
 	};
 	if (!KneeBendMatches(Spec.PivotA, KneeA, Spec.bElbowUpA) || !KneeBendMatches(Spec.PivotB, KneeB, Spec.bElbowUpB))

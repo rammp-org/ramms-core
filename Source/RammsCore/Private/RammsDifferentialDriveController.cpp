@@ -105,19 +105,27 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Once, when the base can report it: the measured drive-motor separation.
-	// Logged for comparison with TrackWidth; adopted only if opted in.
+	// Once, when the base can report it: the measured drive-motor separation,
+	// projected onto the robot's lateral axis (a track width is the distance
+	// between the wheel centrelines, not the 3D distance between staggered or
+	// unequal-height motors). Logged for comparison with TrackWidth; adopted
+	// only if opted in.
 	if (!bTrackWidthMeasured && UsesBase())
 	{
-		const float Separation = BaseComponent->GetMotorSeparation(LeftMotorId, RightMotorId);
-		if (Separation > 0.0f)
+		FTransform LeftXf, RightXf;
+		if (GetOwner() && BaseComponent->GetMotorTransform(LeftMotorId, LeftXf) && BaseComponent->GetMotorTransform(RightMotorId, RightXf))
 		{
-			bTrackWidthMeasured = true;
-			UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Measured drive-motor separation %.2f cm (TrackWidth %.2f cm)%s"),
-				Separation, TrackWidth, bUseMotorSeparationAsTrackWidth ? TEXT(" — adopting as TrackWidth.") : TEXT("."));
-			if (bUseMotorSeparationAsTrackWidth)
+			const FVector Delta = RightXf.GetLocation() - LeftXf.GetLocation();
+			const float	  Lateral = FMath::Abs(FVector::DotProduct(Delta, GetOwner()->GetActorRightVector()));
+			if (Lateral > 0.0f)
 			{
-				TrackWidth = Separation;
+				bTrackWidthMeasured = true;
+				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Measured lateral drive-motor separation %.2f cm (TrackWidth %.2f cm)%s"),
+					Lateral, TrackWidth, bUseMotorSeparationAsTrackWidth ? TEXT(" — adopting as TrackWidth.") : TEXT("."));
+				if (bUseMotorSeparationAsTrackWidth)
+				{
+					TrackWidth = Lateral;
+				}
 			}
 		}
 	}
@@ -655,15 +663,17 @@ void URammsDifferentialDriveController::ApplyBrakes()
 	// Add a deadband to prevent oscillation at very low speeds
 	const float BrakeDeadband = 0.1f; // rad/s - don't apply brakes below this angular velocity
 
-	// Base-component path: command a velocity-opposing torque about the spin
-	// axis by motor Id (the backend clamps it to the motor's range).
+	// Base-component path: damping torque proportional to spin velocity, by
+	// motor Id — BrakeTorque is the damping coefficient (per rad/s), the same
+	// law the direct Chaos path applies below (the backend clamps the command
+	// to the motor's range).
 	if (UsesBase())
 	{
 		auto BrakeMotor = [this, BrakeDeadband](FName MotorId, FWheelState& WheelState) {
 			const float AngVel = WheelState.AngularVelocity;
 			if (FMath::Abs(AngVel) > BrakeDeadband)
 			{
-				const float BrakeCmd = -FMath::Sign(AngVel) * BrakeTorque;
+				const float BrakeCmd = -AngVel * BrakeTorque;
 				BaseComponent->SetMotorCommand(MotorId, BrakeCmd);
 				WheelState.AppliedTorque = BrakeCmd;
 			}
@@ -675,6 +685,11 @@ void URammsDifferentialDriveController::ApplyBrakes()
 		};
 		BrakeMotor(LeftMotorId, LeftWheelState);
 		BrakeMotor(RightMotorId, RightWheelState);
+
+		// Reset PID integral terms while braking (as the direct path does), so
+		// velocity control doesn't surge on stale error when braking ends.
+		LeftIntegralError = 0.0f;
+		RightIntegralError = 0.0f;
 		return;
 	}
 

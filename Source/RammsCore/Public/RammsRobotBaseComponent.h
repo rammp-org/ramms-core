@@ -100,8 +100,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Robot|Geometry")
 	bool GetMotorTransform(FName MotorId, FTransform& OutWorld) const;
 
-	/** Distance between two motors (e.g. drive-motor separation → skid-steer
-	 *  track width). Returns < 0 when either transform is unavailable. */
+	/** Straight-line (3D) distance between two motors. Returns < 0 when either
+	 *  transform is unavailable. For a track width, project the two transforms
+	 *  onto the robot's lateral axis instead (see the differential-drive
+	 *  controller) — staggered or unequal-height motors make this larger. */
 	UFUNCTION(BlueprintCallable, Category = "Robot|Geometry")
 	float GetMotorSeparation(FName MotorIdA, FName MotorIdB) const;
 
@@ -111,14 +113,21 @@ public:
 	bool HasBackend() const;
 
 private:
-	/** Resolve the backend once (idempotent; safe to call from any accessor). */
+	/** Load MotorTable into Motors once (idempotent; safe from any accessor, so
+	 *  callers that arrive before BeginPlay still see the configured specs). */
+	void LoadMotorRegistry() const;
+
+	/** Resolve the backend once (idempotent; safe to call from any accessor).
+	 *  Loads the registry first, so a backend never initializes against an
+	 *  empty one. */
 	void EnsureBackend() const;
 
 	/** The registry Direction for a motor (+1 if unregistered). */
 	float DirectionOf(FName MotorId) const;
 
-	/** Resolved motor registry, Id -> spec (built from MotorTable at BeginPlay). */
-	TMap<FName, FRammsMotorSpec> Motors;
+	/** Resolved motor registry, Id -> spec. Mutable: loaded lazily. */
+	mutable TMap<FName, FRammsMotorSpec> Motors;
+	mutable bool						 bMotorsLoaded = false;
 
 	/** The resolved physics backend. Raw owning pointer (see the drive-backend
 	 *  registry note); created by EnsureBackend, freed in EndPlay/destructor.

@@ -48,8 +48,10 @@ struct FRammsMotorSpec : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	ERammsActuatorType Type = ERammsActuatorType::Torque;
 
-	/** Command clamp (min, max). Zero-width (both 0) = unbounded / defer to the
-	 *  backend's own range (e.g. a MuJoCo actuator's ctrlrange). */
+	/** Command clamp (min, max), in the robot's sense (before Direction). Any
+	 *  range with min >= max (the default (0, 0) included) means "no clamp
+	 *  here" — defer to the backend's own range (a MuJoCo actuator's
+	 *  ctrlrange). A fixed value therefore can't be expressed as (v, v). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	FVector2D ControlRange = FVector2D::ZeroVector;
 

@@ -16,10 +16,17 @@ class USkeletalMeshComponent;
  *
  * A motor's Chaos name (FRammsMotorSpec::ChaosName, falling back to Id) is a
  * skeletal **bone** with a simulated body. Only **Torque** motors are supported:
- * SetCommand applies torque (N·m) about the bone's local spin axis, matching the
+ * SetCommand applies torque about the bone's local spin axis, matching the
  * established wheel convention (local Y). Position/Velocity motors have no Chaos
  * counterpart here (those are MuJoCo <position>/<velocity> actuators) and are
  * ignored with a one-time warning — a Chaos robot drives its wheels by torque.
+ *
+ * Units caveat: this reproduces the pre-existing differential-drive Chaos path
+ * exactly — the command is scaled ×100 and applied with `bAccelChange = true`,
+ * so Chaos treats it as an inertia-independent angular acceleration change,
+ * not a physical N·m torque. Kept on purpose so the tuned Chaos chair drives
+ * identically through the base component; on MuJoCo the same command IS a
+ * torque in N·m, so motor parameters tuned on Chaos need retuning there.
  */
 class FRammsChaosActuationBackend final : public IRammsActuationBackend
 {
