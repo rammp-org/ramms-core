@@ -2,8 +2,10 @@
 
 #include "RammsDifferentialDriveController.h"
 #include "RammsDifferentialDriveLibrary.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "PhysicsEngine/BodyInstance.h"
+#include "RammsDriveBackend.h"
+#include "RammsChaosSkeletalDriveBackend.h"
+#include "GameFramework/Actor.h"
+#include "Components/PrimitiveComponent.h"
 #include "DrawDebugHelpers.h"
 
 URammsDifferentialDriveController::URammsDifferentialDriveController()
@@ -12,76 +14,34 @@ URammsDifferentialDriveController::URammsDifferentialDriveController()
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 }
 
+URammsDifferentialDriveController::~URammsDifferentialDriveController()
+{
+	// IRammsDriveBackend has a virtual destructor; delete here where it is a
+	// complete type (the backend impl header is included below).
+	delete DriveBackend;
+	DriveBackend = nullptr;
+}
+
 void URammsDifferentialDriveController::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Find the skeletal mesh component
-	AActor* Owner = GetOwner();
-	if (Owner)
+	// The Chaos skeletal-wheel backend is the default. A future MuJoCo backend
+	// (driving a URLab articulation's wheel actuators) plugs in here without
+	// touching the input/arbitration/control-law/odometry above it.
+	delete DriveBackend; // guard against a second BeginPlay
+	DriveBackend = new FRammsChaosSkeletalDriveBackend();
+	DriveBackend->Initialize(*this);
+
+	// Initialize odometry with the actor's current transform.
+	if (AActor* Owner = GetOwner())
 	{
-		// If a specific component name is provided, find it by name
-		if (SkeletalMeshComponentName != NAME_None)
-		{
-			TArray<USkeletalMeshComponent*> SkeletalMeshes;
-			Owner->GetComponents<USkeletalMeshComponent>(SkeletalMeshes);
-
-			for (USkeletalMeshComponent* SkelMesh : SkeletalMeshes)
-			{
-				if (SkelMesh && SkelMesh->GetFName() == SkeletalMeshComponentName)
-				{
-					SkeletalMeshComponent = SkelMesh;
-					break;
-				}
-			}
-		}
-		else
-		{
-			// Auto-find the first skeletal mesh component
-			SkeletalMeshComponent = Owner->FindComponentByClass<USkeletalMeshComponent>();
-		}
-
-		if (!SkeletalMeshComponent)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("RammsDifferentialDriveController: Failed to find skeletal mesh component on %s"), *Owner->GetName());
-		}
-		else
-		{
-			// Set max angular velocity on wheel body instances
-			FBodyInstance* LeftBodyInst = GetBoneBodyInstance(LeftWheelBoneName);
-			if (LeftBodyInst)
-			{
-				float MaxAngularVelRad = URammsDifferentialDriveLibrary::RPMToRadPerSec(LeftMotorParams.MaxRPM);
-				LeftBodyInst->SetMaxAngularVelocityInRadians(MaxAngularVelRad, false, true);
-
-				if (bEnableDebugLogging)
-				{
-					UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Set left wheel max angular velocity: %.1f RPM (%.3f rad/s)"),
-						LeftMotorParams.MaxRPM, MaxAngularVelRad);
-				}
-			}
-
-			FBodyInstance* RightBodyInst = GetBoneBodyInstance(RightWheelBoneName);
-			if (RightBodyInst)
-			{
-				float MaxAngularVelRad = URammsDifferentialDriveLibrary::RPMToRadPerSec(RightMotorParams.MaxRPM);
-				RightBodyInst->SetMaxAngularVelocityInRadians(MaxAngularVelRad, false, true);
-
-				if (bEnableDebugLogging)
-				{
-					UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Set right wheel max angular velocity: %.1f RPM (%.3f rad/s)"),
-						RightMotorParams.MaxRPM, MaxAngularVelRad);
-				}
-			}
-		}
-
-		// Initialize odometry with actor's current transform
 		Odometry = URammsDifferentialDriveLibrary::ResetOdometry(
 			Owner->GetActorLocation(),
 			Owner->GetActorRotation());
 	}
 
-	// Initialize previous wheel rotations
+	// Initialize previous wheel rotations.
 	PreviousLeftRotation = 0.0f;
 	PreviousRightRotation = 0.0f;
 }
@@ -90,9 +50,14 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Update wheel states
-	UpdateWheelState(LeftWheelBoneName, LeftWheelState);
-	UpdateWheelState(RightWheelBoneName, RightWheelState);
+	if (!DriveBackend)
+	{
+		return;
+	}
+
+	// Update wheel states (read from the physics backend)
+	DriveBackend->ReadWheelState(ERammsDriveWheel::Left, LeftWheelState);
+	DriveBackend->ReadWheelState(ERammsDriveWheel::Right, RightWheelState);
 
 	// Check for braking
 	bIsBraking = ShouldApplyBrakes();
@@ -174,103 +139,6 @@ void URammsDifferentialDriveController::ResetOdometry(FVector Position, FRotator
 	PreviousRightRotation = RightWheelState.TotalRotation;
 }
 
-FBodyInstance* URammsDifferentialDriveController::GetBoneBodyInstance(FName BoneName)
-{
-	if (!SkeletalMeshComponent || BoneName == NAME_None)
-	{
-		return nullptr;
-	}
-
-	return SkeletalMeshComponent->GetBodyInstance(BoneName);
-}
-
-void URammsDifferentialDriveController::UpdateWheelState(FName BoneName, FWheelState& OutState)
-{
-	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
-	if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
-	{
-		return;
-	}
-
-	// Get angular velocity in radians per second
-	// Assuming wheel spins around its local Y axis (standard for UE wheel components)
-	FVector AngularVelocity = BodyInst->GetUnrealWorldAngularVelocityInRadians();
-
-	// Get the bone transform to convert to local space
-	int32 BoneIndex = SkeletalMeshComponent->GetBoneIndex(BoneName);
-	if (BoneIndex == INDEX_NONE)
-	{
-		return;
-	}
-
-	FTransform BoneTransform = SkeletalMeshComponent->GetBoneTransform(BoneIndex);
-	FVector	   LocalAngularVelocity = BoneTransform.InverseTransformVectorNoScale(AngularVelocity);
-
-	// Extract rotation speed around wheel's spin axis (typically Y axis)
-	OutState.AngularVelocity = LocalAngularVelocity.Y;
-
-	// Calculate linear velocity at contact point
-	OutState.LinearVelocity = OutState.AngularVelocity * WheelRadius;
-
-	// Get actual linear velocity of the wheel
-	FVector WheelVelocity = BodyInst->GetUnrealWorldVelocity();
-	FVector ForwardDir = BoneTransform.GetUnitAxis(EAxis::X);
-	FVector RightDir = BoneTransform.GetUnitAxis(EAxis::Y);
-	float	ActualLinearVel = FVector::DotProduct(WheelVelocity, ForwardDir);
-
-	// Calculate lateral (sideways) velocity for slip resistance
-	OutState.LateralVelocity = FVector::DotProduct(WheelVelocity, RightDir);
-
-	// Calculate suspension load (normal force on wheel)
-	if (bEnableLoadDependentTraction)
-	{
-		// Estimate load based on vehicle mass and vertical acceleration
-		// Assuming equal weight distribution between wheels
-		float GravityForce = VehicleMass * 980.665f;   // Convert kg to Newtons (g = 9.80665 m/s²)
-		OutState.SuspensionLoad = GravityForce * 0.5f; // Split between two wheels
-
-		// TODO: Could improve by reading actual suspension compression/force
-	}
-	else
-	{
-		OutState.SuspensionLoad = 0.0f;
-	}
-
-	// Query surface friction from physical material
-	OutState.SurfaceFriction = 1.0f; // Default
-	if (bUsePhysicalMaterialFriction)
-	{
-		// Raycast down from wheel to find ground material
-		FVector WheelLocation = BoneTransform.GetLocation();
-		FVector TraceStart = WheelLocation;
-		FVector TraceEnd = WheelLocation - FVector(0, 0, WheelRadius * 2.0f);
-
-		FHitResult			  HitResult;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(GetOwner());
-
-		if (GetWorld()->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
-		{
-			if (HitResult.PhysMaterial.IsValid())
-			{
-				OutState.SurfaceFriction = HitResult.PhysMaterial->Friction;
-			}
-		}
-	}
-
-	// Calculate slip if enabled
-	if (bEnableSlipModeling && FMath::Abs(OutState.LinearVelocity) > SMALL_NUMBER)
-	{
-		OutState.SlipRatio = URammsDifferentialDriveLibrary::CalculateSlipRatio(
-			OutState.LinearVelocity,
-			ActualLinearVel);
-	}
-	else
-	{
-		OutState.SlipRatio = 0.0f;
-	}
-}
-
 void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 {
 	// Convert joystick input to differential drive commands (torque values)
@@ -342,9 +210,9 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 	LeftWheelState.TargetAngularVelocity = Command.LeftCommand;
 	RightWheelState.TargetAngularVelocity = Command.RightCommand;
 
-	// Apply torques to wheels
-	ApplyWheelTorque(LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
-	ApplyWheelTorque(RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+	// Apply torques to wheels (through the physics backend)
+	DriveBackend->ApplyWheelTorque(ERammsDriveWheel::Left, LeftTorque, LeftMotorParams, LeftWheelState);
+	DriveBackend->ApplyWheelTorque(ERammsDriveWheel::Right, RightTorque, RightMotorParams, RightWheelState);
 }
 
 void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
@@ -385,9 +253,9 @@ void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
 			LeftTorque, RightTorque);
 	}
 
-	// Apply torques to wheels
-	ApplyWheelTorque(LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
-	ApplyWheelTorque(RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+	// Apply torques to wheels (through the physics backend)
+	DriveBackend->ApplyWheelTorque(ERammsDriveWheel::Left, LeftTorque, LeftMotorParams, LeftWheelState);
+	DriveBackend->ApplyWheelTorque(ERammsDriveWheel::Right, RightTorque, RightMotorParams, RightWheelState);
 }
 
 float URammsDifferentialDriveController::CalculatePID(
@@ -417,105 +285,6 @@ float URammsDifferentialDriveController::CalculatePID(
 	PreviousError = Error;
 
 	return P + I + D;
-}
-
-void URammsDifferentialDriveController::ApplyWheelTorque(
-	FName					BoneName,
-	float					RequestedTorque,
-	const FMotorParameters& MotorParams,
-	FWheelState&			WheelState)
-{
-	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
-	if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
-	{
-		WheelState.AppliedTorque = 0.0f;
-		return;
-	}
-
-	// Convert angular velocity to RPM for motor curve evaluation
-	float CurrentRPM = URammsDifferentialDriveLibrary::RadPerSecToRPM(WheelState.AngularVelocity);
-
-	// Apply motor torque curve
-	float AvailableTorque = URammsDifferentialDriveLibrary::EvaluateMotorTorque(
-		CurrentRPM,
-		MotorParams,
-		RequestedTorque);
-
-	// Apply slip/traction modeling if enabled
-	if (bEnableSlipModeling)
-	{
-		// Calculate traction multiplier from slip using realistic tire curve
-		float TractionMultiplier = URammsDifferentialDriveLibrary::GetTractionMultiplierFromSlip(
-			WheelState.SlipRatio,
-			PeakSlipRatio);
-
-		// Calculate available grip force if load-dependent traction is enabled
-		if (bEnableLoadDependentTraction && WheelState.SuspensionLoad > 0.0f)
-		{
-			// Available grip force (Newtons)
-			float AvailableGripForce = URammsDifferentialDriveLibrary::CalculateAvailableGrip(
-				WheelState.SuspensionLoad,
-				WheelState.SurfaceFriction,
-				TractionCoefficient);
-
-			// Convert grip force to maximum torque
-			// Torque = Force × Radius, convert cm to m
-			float MaxTorqueFromGrip = (AvailableGripForce * (WheelRadius / 100.0f)) * TractionMultiplier;
-
-			// Limit available torque to what grip can support
-			AvailableTorque = FMath::Min(FMath::Abs(AvailableTorque), MaxTorqueFromGrip) * FMath::Sign(AvailableTorque);
-		}
-		else
-		{
-			// Simple traction multiplier without load dependency
-			AvailableTorque *= TractionMultiplier;
-		}
-
-		// Apply lateral slip resistance (reduces torque when sliding sideways)
-		if (bEnableLateralSlipResistance && FMath::Abs(WheelState.LateralVelocity) > LateralSlipThreshold)
-		{
-			// Reduce torque proportionally to lateral velocity
-			float LateralSlipFactor = FMath::Clamp(
-				1.0f - (FMath::Abs(WheelState.LateralVelocity) - LateralSlipThreshold) / 100.0f,
-				0.3f,
-				1.0f);
-			AvailableTorque *= LateralSlipFactor;
-		}
-	}
-
-	WheelState.AppliedTorque = AvailableTorque;
-
-	if (bEnableDebugLogging)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] ApplyTorque to %s: Requested=%.3f Nm, Available=%.3f Nm, CurrentRPM=%.1f, Slip=%.3f, Load=%.1f N, Friction=%.2f, LatVel=%.1f cm/s"),
-			*BoneName.ToString(), RequestedTorque, AvailableTorque, CurrentRPM, WheelState.SlipRatio,
-			WheelState.SuspensionLoad, WheelState.SurfaceFriction, WheelState.LateralVelocity);
-	}
-
-	// Get bone transform to apply torque in correct direction
-	int32 BoneIndex = SkeletalMeshComponent->GetBoneIndex(BoneName);
-	if (BoneIndex == INDEX_NONE)
-	{
-		return;
-	}
-
-	FTransform BoneTransform = SkeletalMeshComponent->GetBoneTransform(BoneIndex);
-
-	// Apply torque around wheel's local Y axis (spin axis)
-	FVector LocalTorque = FVector(0.0f, AvailableTorque, 0.0f);
-	FVector WorldTorque = BoneTransform.TransformVectorNoScale(LocalTorque);
-
-	// Convert Newton-meters to Unreal units (N*m to kg*cm²/s²)
-	// 1 N*m = 100 kg*cm²/s² in UE units
-	WorldTorque *= 100.0f;
-
-	if (bEnableDebugLogging)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Final WorldTorque for %s: X=%.1f, Y=%.1f, Z=%.1f (UE units)"),
-			*BoneName.ToString(), WorldTorque.X, WorldTorque.Y, WorldTorque.Z);
-	}
-
-	BodyInst->AddTorqueInRadians(WorldTorque, false, true);
 }
 
 void URammsDifferentialDriveController::UpdateOdometry(float DeltaTime)
@@ -585,64 +354,12 @@ bool URammsDifferentialDriveController::ShouldApplyBrakes() const
 
 void URammsDifferentialDriveController::ApplyBrakes()
 {
-	// Apply braking by applying damping torque proportional to velocity
-	// Add a deadband to prevent oscillation at very low speeds
-	const float BrakeDeadband = 0.1f; // rad/s - don't apply brakes below this angular velocity
-
-	FBodyInstance* LeftBodyInst = GetBoneBodyInstance(LeftWheelBoneName);
-	if (LeftBodyInst && LeftBodyInst->IsInstanceSimulatingPhysics())
+	// Braking damping per wheel is the backend's job (engine-specific); the PID
+	// integral reset is the controller's (backend-neutral control state).
+	if (DriveBackend)
 	{
-		FVector AngVel = LeftBodyInst->GetUnrealWorldAngularVelocityInRadians();
-		float	AngVelMagnitude = AngVel.Size();
-
-		// Only apply braking above deadband to prevent oscillation
-		if (AngVelMagnitude > BrakeDeadband)
-		{
-			// Apply damping torque proportional to angular velocity
-			FVector DampingTorque = -AngVel * BrakeTorque * 100.0f; // Convert to UE units
-
-			LeftBodyInst->AddTorqueInRadians(DampingTorque, false, true);
-			LeftWheelState.AppliedTorque = -FMath::Sign(LeftWheelState.AngularVelocity) * BrakeTorque;
-
-			if (bEnableDebugLogging)
-			{
-				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying LEFT brake: Damping=%.3f Nm (AngVel: %.3f rad/s)"),
-					BrakeTorque, LeftWheelState.AngularVelocity);
-			}
-		}
-		else
-		{
-			// Below deadband - just zero out the applied torque
-			LeftWheelState.AppliedTorque = 0.0f;
-		}
-	}
-
-	FBodyInstance* RightBodyInst = GetBoneBodyInstance(RightWheelBoneName);
-	if (RightBodyInst && RightBodyInst->IsInstanceSimulatingPhysics())
-	{
-		FVector AngVel = RightBodyInst->GetUnrealWorldAngularVelocityInRadians();
-		float	AngVelMagnitude = AngVel.Size();
-
-		// Only apply braking above deadband to prevent oscillation
-		if (AngVelMagnitude > BrakeDeadband)
-		{
-			// Apply damping torque proportional to angular velocity
-			FVector DampingTorque = -AngVel * BrakeTorque * 100.0f; // Convert to UE units
-
-			RightBodyInst->AddTorqueInRadians(DampingTorque, false, true);
-			RightWheelState.AppliedTorque = -FMath::Sign(RightWheelState.AngularVelocity) * BrakeTorque;
-
-			if (bEnableDebugLogging)
-			{
-				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying RIGHT brake: Damping=%.3f Nm (AngVel: %.3f rad/s)"),
-					BrakeTorque, RightWheelState.AngularVelocity);
-			}
-		}
-		else
-		{
-			// Below deadband - just zero out the applied torque
-			RightWheelState.AppliedTorque = 0.0f;
-		}
+		DriveBackend->ApplyBrake(ERammsDriveWheel::Left, LeftWheelState);
+		DriveBackend->ApplyBrake(ERammsDriveWheel::Right, RightWheelState);
 	}
 
 	// Reset PID integral terms while braking
@@ -661,7 +378,7 @@ void URammsDifferentialDriveController::DebugLogState()
 		UE_LOG(LogTemp, Log, TEXT("Input: X=%.3f, Y=%.3f"), DriveInput.X, DriveInput.Y);
 		UE_LOG(LogTemp, Log, TEXT("Control Mode: %s"), ControlMode == EDriveControlMode::TorqueControl ? TEXT("Torque") : TEXT("Velocity"));
 		UE_LOG(LogTemp, Log, TEXT("Braking: %s"), bIsBraking ? TEXT("YES") : TEXT("NO"));
-		UE_LOG(LogTemp, Log, TEXT("SkeletalMesh: %s"), SkeletalMeshComponent ? *SkeletalMeshComponent->GetName() : TEXT("NULL"));
+		UE_LOG(LogTemp, Log, TEXT("Drive backend: %s"), DriveBackend ? TEXT("active") : TEXT("none"));
 		UE_LOG(LogTemp, Log, TEXT("Left Wheel [%s]:"), *LeftWheelBoneName.ToString());
 		UE_LOG(LogTemp, Log, TEXT("  AngularVel: %.3f rad/s (%.1f RPM)"), LeftWheelState.AngularVelocity, URammsDifferentialDriveLibrary::RadPerSecToRPM(LeftWheelState.AngularVelocity));
 		UE_LOG(LogTemp, Log, TEXT("  LinearVel: %.3f cm/s"), LeftWheelState.LinearVelocity);

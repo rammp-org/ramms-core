@@ -8,6 +8,7 @@
 #include "RammsDifferentialDriveController.generated.h"
 
 class UPrimitiveComponent;
+class IRammsDriveBackend;
 
 /**
  * Differential drive controller component for powered wheelchair simulation
@@ -20,6 +21,9 @@ class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent
 
 public:
 	URammsDifferentialDriveController();
+	// Out-of-line: the DriveBackend TUniquePtr holds an incomplete IRammsDriveBackend
+	// here, so its destruction must be emitted where the type is complete (.cpp).
+	virtual ~URammsDifferentialDriveController() override;
 
 protected:
 	virtual void BeginPlay() override;
@@ -264,9 +268,14 @@ public:
 	bool bEnableDebugDisplay = false;
 
 private:
-	// Cached skeletal mesh component reference
-	UPROPERTY(Transient)
-	USkeletalMeshComponent* SkeletalMeshComponent = nullptr;
+	/** The physics backend that reads wheel state and applies torque/braking —
+	 *  Chaos skeletal wheels by default, swappable for a MuJoCo articulation.
+	 *  Owns all engine-specific I/O; the controller keeps input, arbitration,
+	 *  the control law, PID and odometry. Created in BeginPlay, deleted in the
+	 *  (out-of-line) destructor. A raw owning pointer rather than TUniquePtr:
+	 *  UHT's generated vtable-helper ctor would otherwise instantiate the
+	 *  TUniquePtr deleter against the here-incomplete IRammsDriveBackend. */
+	IRammsDriveBackend* DriveBackend = nullptr;
 
 	/** Wall-clock time of the last SetExternalDriveInput call (-1 = never). */
 	double LastExternalInputSeconds = -1.0;
@@ -285,12 +294,6 @@ private:
 	float PreviousLeftRotation = 0.0f;
 	float PreviousRightRotation = 0.0f;
 
-	/** Get body instance for a specific bone */
-	FBodyInstance* GetBoneBodyInstance(FName BoneName);
-
-	/** Update wheel state from physics */
-	void UpdateWheelState(FName BoneName, FWheelState& OutState);
-
 	/** Update controller in torque control mode */
 	void UpdateTorqueControl(float DeltaTime);
 
@@ -300,16 +303,13 @@ private:
 	/** Calculate PID control output */
 	float CalculatePID(float Error, float& IntegralError, float& PreviousError, float DeltaTime);
 
-	/** Apply torque to wheel with motor and slip modeling */
-	void ApplyWheelTorque(FName BoneName, float RequestedTorque, const FMotorParameters& MotorParams, FWheelState& WheelState);
-
 	/** Update odometry from wheel movements */
 	void UpdateOdometry(float DeltaTime);
 
 	/** Check if braking should be applied */
 	bool ShouldApplyBrakes() const;
 
-	/** Apply brake torque to both wheels */
+	/** Brake both wheels (via the backend) and reset the PID integral terms. */
 	void ApplyBrakes();
 
 	/** Debug log current state */
