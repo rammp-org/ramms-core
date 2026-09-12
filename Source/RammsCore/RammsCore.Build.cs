@@ -33,7 +33,11 @@ public class RammsCore : ModuleRules
 			new string[]
 			{
 				"Core",
-				// ... add other public dependencies that you statically link with here ...
+				// Public headers expose UActorComponent / UDataTable / FKey, so
+				// consumers of this module need these on their include path too.
+				"CoreUObject",
+				"Engine",
+				"InputCore",
 			}
 			);
 			
@@ -41,13 +45,10 @@ public class RammsCore : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"CoreUObject",
-				"Engine",
 				"Slate",
 				"SlateCore",
 				"PhysicsCore",
 				"AnimationCore",
-				"InputCore",
 				"RHI",
 				"RHICore",
 				"RenderCore",
