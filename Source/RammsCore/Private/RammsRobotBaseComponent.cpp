@@ -3,6 +3,7 @@
 #include "RammsRobotBaseComponent.h"
 #include "RammsActuationBackend.h"
 #include "RammsActuationBackendRegistry.h"
+#include "RammsChaosActuationBackend.h"
 
 URammsRobotBaseComponent::URammsRobotBaseComponent()
 {
@@ -37,11 +38,17 @@ void URammsRobotBaseComponent::BeginPlay()
 			});
 	}
 
-	// Resolve the backend once. MuJoCo (explicit or Auto) comes from the
-	// registry (RammsMujocoSupport); the Chaos actuation backend is a follow-up,
-	// so for now an unresolved backend leaves commands as safe no-ops.
+	// Resolve the backend once.
+	//  - Mujoco: the MuJoCo backend from the registry (RammsMujocoSupport).
+	//  - Chaos:  the native Chaos skeletal backend (RammsCore, no registry).
+	//  - Auto:   try MuJoCo first (a URLab articulation present + resolvable),
+	//            else fall back to Chaos.
+	// Initialize() decides whether a backend can actually drive this robot; a
+	// backend that can't is discarded, and an unresolved backend leaves motor
+	// commands as safe no-ops.
 	delete Backend_;
 	Backend_ = nullptr;
+
 	if (Backend == ERammsPhysicsBackend::Mujoco || Backend == ERammsPhysicsBackend::Auto)
 	{
 		if (IRammsActuationBackend* Mj = RammsActuationBackends::CreateMujocoBackend(*this))
@@ -56,6 +63,20 @@ void URammsRobotBaseComponent::BeginPlay()
 			}
 		}
 	}
+
+	if (!Backend_ && (Backend == ERammsPhysicsBackend::Chaos || Backend == ERammsPhysicsBackend::Auto))
+	{
+		IRammsActuationBackend* Chaos = new FRammsChaosActuationBackend();
+		if (Chaos->Initialize(*this))
+		{
+			Backend_ = Chaos;
+		}
+		else
+		{
+			delete Chaos;
+		}
+	}
+
 	if (!Backend_)
 	{
 		UE_LOG(LogTemp, Warning,
