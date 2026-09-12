@@ -50,6 +50,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
 	FName RightMotorId = FName("right_motor");
 
+	/** With a base component: replace TrackWidth with the measured separation
+	 *  of the two drive motors on the first tick it's available (the measured
+	 *  value is logged either way, so it can be checked against TrackWidth). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
+	bool bUseMotorSeparationAsTrackWidth = false;
+
 	/** Left wheel bone name — the fallback Chaos path when no base component is present. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
 	FName LeftWheelBoneName = FName("left_motor");
@@ -286,6 +292,15 @@ private:
 	 *  by motor Id instead of the direct Chaos wheel-bone path. */
 	UPROPERTY(Transient)
 	URammsRobotBaseComponent* BaseComponent = nullptr;
+
+	/** True when wheel I/O should route through the base component: one is
+	 *  present AND it resolved a physics backend. Otherwise the direct Chaos
+	 *  wheel-bone path is used (so a misconfigured backend degrades to the
+	 *  legacy behaviour rather than a silent no-op). */
+	bool UsesBase() const;
+
+	/** Set once the drive-motor separation has been read from the base. */
+	bool bTrackWidthMeasured = false;
 
 	/** Wall-clock time of the last SetExternalDriveInput call (-1 = never). */
 	double LastExternalInputSeconds = -1.0;

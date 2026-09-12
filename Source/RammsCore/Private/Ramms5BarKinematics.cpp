@@ -39,7 +39,9 @@ double URamms5BarKinematics::SolveArm(
 	const double Interior = FMath::Acos(CosInterior);
 
 	const double LinkAngle = Base + (bElbowUp ? Interior : -Interior);
-	return (LinkAngle - ZeroDir) / Sign;
+	// Joint angles are reported unwrapped near zero by the physics backends, so
+	// return the principal value rather than an aliased multiple-of-2π branch.
+	return FMath::UnwindRadians((LinkAngle - ZeroDir) / Sign);
 }
 
 FVector2D URamms5BarKinematics::SolveIK(const FRamms5BarLinkageSpec& Spec, FVector2D TargetXZ, bool& bReachable)
@@ -85,9 +87,27 @@ FVector2D URamms5BarKinematics::ComputeEndpoint(const FRamms5BarLinkageSpec& Spe
 	// Perpendicular to the knee-to-knee line.
 	const FVector2D Perp = FVector2D(-Delta.Y, Delta.X) / CenterDist;
 
-	const FVector2D Sol1 = Mid + Perp * H;
-	const FVector2D Sol2 = Mid - Perp * H;
+	// The two intersections are mirror images across the knee-to-knee line, and
+	// the assembled mechanism stays on one side of it (crossing needs the distal
+	// links collinear). Pick by fixed chirality — the sign of
+	// cross(KneeB - KneeA, Endpoint - KneeA) — rather than by height, which
+	// would flip the answer when the knees tilt far enough.
+	const FVector2D Endpoint = Spec.bFlipEndpointSide ? (Mid - Perp * H) : (Mid + Perp * H);
 
-	// The leg hangs downward: pick the lower-Z (smaller .Y) intersection.
-	return (Sol1.Y <= Sol2.Y) ? Sol1 : Sol2;
+	// Feasibility: each knee bends one way only (the passive knee joints have a
+	// hard stop at straight), so a hip pair whose geometric solution needs a
+	// knee bent past straight is not a pose the closed loop can hold. That
+	// bend direction is exactly the IK elbow branch: elbow-up ⇔
+	// cross(proximal dir, distal dir) < 0.
+	auto KneeBendMatches = [&Endpoint](FVector2D Pivot, FVector2D Knee, bool bElbowUp) {
+		const FVector2D Prox = Knee - Pivot;
+		const FVector2D Dist = Endpoint - Knee;
+		const double	Cross = Prox.X * Dist.Y - Prox.Y * Dist.X;
+		return (Cross < 0.0) == bElbowUp;
+	};
+	if (!KneeBendMatches(Spec.PivotA, KneeA, Spec.bElbowUpA) || !KneeBendMatches(Spec.PivotB, KneeB, Spec.bElbowUpB))
+	{
+		bValid = false;
+	}
+	return Endpoint;
 }

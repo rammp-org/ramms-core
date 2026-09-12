@@ -53,6 +53,20 @@ bool URamms5BarLinkageController::HasBase() const
 	return EnsureBase() != nullptr;
 }
 
+bool URamms5BarLinkageController::WithinMotorRange(URammsRobotBaseComponent& Base, FName MotorId, double Angle) const
+{
+	// A geometrically reachable endpoint can still need a hip angle outside the
+	// actuator's authored range; the base component would clamp it silently and
+	// the linkage would settle somewhere else. Treat that as unreachable. (An
+	// unset/zero-width range defers to the backend and can't be checked here.)
+	FRammsMotorSpec Spec;
+	if (Base.GetMotorSpec(MotorId, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
+	{
+		return Angle >= Spec.ControlRange.X && Angle <= Spec.ControlRange.Y;
+	}
+	return true;
+}
+
 bool URamms5BarLinkageController::SetEndpointTarget(FVector2D TargetXZ)
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
@@ -63,6 +77,9 @@ bool URamms5BarLinkageController::SetEndpointTarget(FVector2D TargetXZ)
 
 	bool			bReachable = false;
 	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	bReachable = bReachable
+		&& WithinMotorRange(*Base, Resolved.ProximalMotorA, Angles.X)
+		&& WithinMotorRange(*Base, Resolved.ProximalMotorB, Angles.Y);
 	if (!bReachable)
 	{
 		UE_LOG(LogTemp, Verbose,
@@ -114,5 +131,12 @@ FVector2D URamms5BarLinkageController::GetCurrentEndpoint() const
 
 FVector2D URamms5BarLinkageController::SolveTarget(FVector2D TargetXZ, bool& bReachable) const
 {
-	return URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	if (URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		bReachable = bReachable
+			&& WithinMotorRange(*Base, Resolved.ProximalMotorA, Angles.X)
+			&& WithinMotorRange(*Base, Resolved.ProximalMotorB, Angles.Y);
+	}
+	return Angles;
 }

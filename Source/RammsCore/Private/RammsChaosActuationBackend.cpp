@@ -11,12 +11,35 @@ bool FRammsChaosActuationBackend::Initialize(URammsRobotBaseComponent& Base)
 	BaseComp = &Base;
 	Mesh = nullptr;
 
-	// Resolve the skeletal mesh that carries the simulated wheel bodies: the
-	// first USkeletalMeshComponent on the owner (mirrors the differential-drive
-	// controller's auto-find).
+	// Resolve the skeletal mesh that carries the simulated wheel bodies: the one
+	// named on the base component, else the owner's first (mirrors the
+	// differential-drive controller's lookup).
 	if (AActor* Owner = Base.GetOwner())
 	{
-		Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+		if (!Base.ChaosSkeletalMeshComponentName.IsNone())
+		{
+			TArray<USkeletalMeshComponent*> Meshes;
+			Owner->GetComponents<USkeletalMeshComponent>(Meshes);
+			for (USkeletalMeshComponent* Candidate : Meshes)
+			{
+				if (Candidate && Candidate->GetFName() == Base.ChaosSkeletalMeshComponentName)
+				{
+					Mesh = Candidate;
+					break;
+				}
+			}
+			if (!Mesh.IsValid())
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("RammsChaosActuationBackend: no skeletal mesh component named '%s' on '%s'."),
+					*Base.ChaosSkeletalMeshComponentName.ToString(), *Owner->GetName());
+				return false;
+			}
+		}
+		else
+		{
+			Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+		}
 	}
 	return Mesh.IsValid();
 }

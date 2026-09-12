@@ -80,11 +80,20 @@ struct FRamms5BarLinkageSpec : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
 	float AngleSignB = -1.0f;
 
-	/** IK elbow branch (which way the knee bends) for arm A. */
+	/** IK elbow branch for arm A: true = the proximal link sits at
+	 *  (pivot->endpoint direction) + interior angle. Must match the physical
+	 *  assembly or IK returns the mirrored (crossed-knee) solution. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
-	bool bElbowUpA = false;
+	bool bElbowUpA = true;
 
-	/** IK elbow branch for arm B. */
+	/** IK elbow branch for arm B (see bElbowUpA). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
-	bool bElbowUpB = true;
+	bool bElbowUpB = false;
+
+	/** FK picks the endpoint on a fixed side of the knee-A -> knee-B line
+	 *  (the mechanism can't cross that line without the distal links going
+	 *  collinear). Default side is the lift_drive assembly (endpoint below the
+	 *  knees); flip for a mechanism assembled the other way round. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
+	bool bFlipEndpointSide = false;
 };

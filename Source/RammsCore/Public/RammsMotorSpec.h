@@ -52,4 +52,11 @@ struct FRammsMotorSpec : public FTableRowBase
 	 *  backend's own range (e.g. a MuJoCo actuator's ctrlrange). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	FVector2D ControlRange = FVector2D::ZeroVector;
+
+	/** +1 or -1: maps the robot's positive sense for this motor (e.g. "wheel
+	 *  rolls forward") onto the engine's joint sign, which depends on how the
+	 *  joint axis is authored. Applied to commands and to value/velocity reads,
+	 *  so controllers never carry per-side sign flips. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float Direction = 1.0f;
 };

@@ -4,6 +4,7 @@
 #include "RammsActuationBackend.h"
 #include "RammsActuationBackendRegistry.h"
 #include "RammsChaosActuationBackend.h"
+#include "Engine/World.h"
 
 URammsRobotBaseComponent::URammsRobotBaseComponent()
 {
@@ -38,22 +39,47 @@ void URammsRobotBaseComponent::BeginPlay()
 			});
 	}
 
+	EnsureBackend();
+}
+
+void URammsRobotBaseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	delete Backend_;
+	Backend_ = nullptr;
+	bBackendResolved = false;
+	Super::EndPlay(EndPlayReason);
+}
+
+void URammsRobotBaseComponent::EnsureBackend() const
+{
+	if (bBackendResolved)
+	{
+		return;
+	}
+	// Only resolve inside a running game world: backends look up live actors /
+	// components, which don't exist for the CDO or an editor-preview instance.
+	const UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		return;
+	}
+	bBackendResolved = true;
+
 	// Resolve the backend once.
 	//  - Mujoco: the MuJoCo backend from the registry (RammsMujocoSupport).
 	//  - Chaos:  the native Chaos skeletal backend (RammsCore, no registry).
-	//  - Auto:   try MuJoCo first (a URLab articulation present + resolvable),
-	//            else fall back to Chaos.
+	//  - Auto:   try MuJoCo first (an articulation on/under this actor), else
+	//            fall back to Chaos.
 	// Initialize() decides whether a backend can actually drive this robot; a
 	// backend that can't is discarded, and an unresolved backend leaves motor
 	// commands as safe no-ops.
-	delete Backend_;
-	Backend_ = nullptr;
+	URammsRobotBaseComponent& Self = *const_cast<URammsRobotBaseComponent*>(this);
 
 	if (Backend == ERammsPhysicsBackend::Mujoco || Backend == ERammsPhysicsBackend::Auto)
 	{
-		if (IRammsActuationBackend* Mj = RammsActuationBackends::CreateMujocoBackend(*this))
+		if (IRammsActuationBackend* Mj = RammsActuationBackends::CreateMujocoBackend(Self))
 		{
-			if (Mj->Initialize(*this))
+			if (Mj->Initialize(Self))
 			{
 				Backend_ = Mj;
 			}
@@ -67,7 +93,7 @@ void URammsRobotBaseComponent::BeginPlay()
 	if (!Backend_ && (Backend == ERammsPhysicsBackend::Chaos || Backend == ERammsPhysicsBackend::Auto))
 	{
 		IRammsActuationBackend* Chaos = new FRammsChaosActuationBackend();
-		if (Chaos->Initialize(*this))
+		if (Chaos->Initialize(Self))
 		{
 			Backend_ = Chaos;
 		}
@@ -80,16 +106,15 @@ void URammsRobotBaseComponent::BeginPlay()
 	if (!Backend_)
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("RammsRobotBaseComponent on '%s': no actuation backend resolved (motor commands are no-ops until one is available)."),
-			GetOwner() ? *GetOwner()->GetName() : TEXT("?"));
+			TEXT("RammsRobotBaseComponent on '%s': no actuation backend resolved for mode %d (motor commands are no-ops)."),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("?"), static_cast<int32>(Backend));
 	}
 }
 
-void URammsRobotBaseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+bool URammsRobotBaseComponent::HasBackend() const
 {
-	delete Backend_;
-	Backend_ = nullptr;
-	Super::EndPlay(EndPlayReason);
+	EnsureBackend();
+	return Backend_ != nullptr;
 }
 
 bool URammsRobotBaseComponent::GetMotorSpec(FName MotorId, FRammsMotorSpec& OutSpec) const
@@ -113,37 +138,56 @@ ERammsActuatorType URammsRobotBaseComponent::GetMotorType(FName MotorId) const
 	return Spec ? Spec->Type : ERammsActuatorType::Torque;
 }
 
+float URammsRobotBaseComponent::DirectionOf(FName MotorId) const
+{
+	const FRammsMotorSpec* Spec = Motors.Find(MotorId);
+	return (Spec && Spec->Direction < 0.0f) ? -1.0f : 1.0f;
+}
+
 void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 {
+	EnsureBackend();
 	if (!Backend_)
 	{
 		return;
 	}
-	// Clamp to the motor's authored range when one is set (zero-width = defer to
-	// the backend / actuator's own range).
-	if (const FRammsMotorSpec* Spec = Motors.Find(MotorId))
+
+	const FRammsMotorSpec* Spec = Motors.Find(MotorId);
+	if (!Spec && !WarnedUnregistered.Contains(MotorId))
 	{
-		if (Spec->ControlRange.X < Spec->ControlRange.Y)
-		{
-			Value = FMath::Clamp(Value, static_cast<float>(Spec->ControlRange.X),
-				static_cast<float>(Spec->ControlRange.Y));
-		}
+		WarnedUnregistered.Add(MotorId);
+		UE_LOG(LogTemp, Warning,
+			TEXT("RammsRobotBaseComponent on '%s': motor '%s' is not in the motor registry%s; routing by Id as-is (Torque, unbounded, Direction +1)."),
+			GetOwner() ? *GetOwner()->GetName() : TEXT("?"), *MotorId.ToString(),
+			MotorTable ? TEXT("") : TEXT(" (no MotorTable set)"));
 	}
-	Backend_->SetCommand(MotorId, Value);
+
+	// Clamp in the robot's sense to the authored range when one is set
+	// (zero-width = defer to the backend / actuator's own range), then map to
+	// the engine's joint sign.
+	if (Spec && Spec->ControlRange.X < Spec->ControlRange.Y)
+	{
+		Value = FMath::Clamp(Value, static_cast<float>(Spec->ControlRange.X),
+			static_cast<float>(Spec->ControlRange.Y));
+	}
+	Backend_->SetCommand(MotorId, Value * DirectionOf(MotorId));
 }
 
 float URammsRobotBaseComponent::GetMotorValue(FName MotorId) const
 {
-	return Backend_ ? Backend_->GetValue(MotorId) : 0.0f;
+	EnsureBackend();
+	return Backend_ ? Backend_->GetValue(MotorId) * DirectionOf(MotorId) : 0.0f;
 }
 
 float URammsRobotBaseComponent::GetMotorVelocity(FName MotorId) const
 {
-	return Backend_ ? Backend_->GetVelocity(MotorId) : 0.0f;
+	EnsureBackend();
+	return Backend_ ? Backend_->GetVelocity(MotorId) * DirectionOf(MotorId) : 0.0f;
 }
 
 bool URammsRobotBaseComponent::GetMotorTransform(FName MotorId, FTransform& OutWorld) const
 {
+	EnsureBackend();
 	return Backend_ ? Backend_->GetMotorTransform(MotorId, OutWorld) : false;
 }
 

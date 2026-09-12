@@ -31,6 +31,12 @@ enum class ERammsPhysicsBackend : uint8
  * motors (skid-steer track width). It holds no notion of what motors are *for*
  * — a controller names the Ids it drives.
  *
+ * The backend resolves at BeginPlay, and also lazily on first use, so consumer
+ * components may call in from their own BeginPlay regardless of component
+ * ordering. Motor Ids are the engine names (MuJoCo actuator name; Chaos bone via
+ * ChaosName) — an Id absent from the registry still routes, with a one-time
+ * warning, using the Id itself.
+ *
  * A 5-bar linkage's mechanical geometry is deliberately NOT modelled here; that
  * controller takes its own kinematic data table and still commands its motors
  * through this component by Id.
@@ -56,17 +62,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot")
 	ERammsPhysicsBackend Backend = ERammsPhysicsBackend::Auto;
 
+	/** Chaos only: the skeletal mesh component holding the motor bones. Leave
+	 *  empty to use the owner's first skeletal mesh. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos")
+	FName ChaosSkeletalMeshComponentName = NAME_None;
+
 	// --- Motor command / read (by registry Id), routed to the backend --------
 
-	/** Command a motor by Id (interpreted per its ERammsActuatorType). */
+	/** Command a motor by Id in the robot's sense (interpreted per its
+	 *  ERammsActuatorType; clamped to its ControlRange; Direction applied). */
 	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
 	void SetMotorCommand(FName MotorId, float Value);
 
-	/** Current scalar value of a motor's joint (position/angle), 0 if unknown. */
+	/** Current scalar value of a motor's joint (position/angle) in the robot's
+	 *  sense, 0 if unknown. */
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	float GetMotorValue(FName MotorId) const;
 
-	/** Current joint velocity of a motor, 0 if unknown. */
+	/** Current joint velocity of a motor in the robot's sense, 0 if unknown. */
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	float GetMotorVelocity(FName MotorId) const;
 
@@ -92,15 +105,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Robot|Geometry")
 	float GetMotorSeparation(FName MotorIdA, FName MotorIdB) const;
 
-	/** True once a physics backend has been resolved for this robot. */
+	/** True once a physics backend has been resolved for this robot (resolves
+	 *  lazily if not yet attempted). */
 	UFUNCTION(BlueprintPure, Category = "Robot")
-	bool HasBackend() const { return Backend_ != nullptr; }
+	bool HasBackend() const;
 
 private:
+	/** Resolve the backend once (idempotent; safe to call from any accessor). */
+	void EnsureBackend() const;
+
+	/** The registry Direction for a motor (+1 if unregistered). */
+	float DirectionOf(FName MotorId) const;
+
 	/** Resolved motor registry, Id -> spec (built from MotorTable at BeginPlay). */
 	TMap<FName, FRammsMotorSpec> Motors;
 
 	/** The resolved physics backend. Raw owning pointer (see the drive-backend
-	 *  registry note); created in BeginPlay, freed in the destructor. */
-	IRammsActuationBackend* Backend_ = nullptr;
+	 *  registry note); created by EnsureBackend, freed in EndPlay/destructor.
+	 *  Mutable so const accessors can resolve lazily. */
+	mutable IRammsActuationBackend* Backend_ = nullptr;
+	mutable bool					bBackendResolved = false;
+
+	/** Ids commanded without a registry row (warned once each). */
+	mutable TSet<FName> WarnedUnregistered;
 };

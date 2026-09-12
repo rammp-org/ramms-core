@@ -54,8 +54,10 @@ void URammsDifferentialDriveController::BeginPlay()
 			SkeletalMeshComponent = Owner->FindComponentByClass<USkeletalMeshComponent>();
 		}
 
-		if (!SkeletalMeshComponent)
+		if (!SkeletalMeshComponent && !BaseComponent)
 		{
+			// Only a problem on the direct Chaos path; a base-component robot
+			// (e.g. a MuJoCo articulation) has no wheel skeletal mesh to find.
 			UE_LOG(LogTemp, Warning, TEXT("RammsDifferentialDriveController: Failed to find skeletal mesh component on %s"), *Owner->GetName());
 		}
 		else
@@ -102,6 +104,23 @@ void URammsDifferentialDriveController::BeginPlay()
 void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Once, when the base can report it: the measured drive-motor separation.
+	// Logged for comparison with TrackWidth; adopted only if opted in.
+	if (!bTrackWidthMeasured && UsesBase())
+	{
+		const float Separation = BaseComponent->GetMotorSeparation(LeftMotorId, RightMotorId);
+		if (Separation > 0.0f)
+		{
+			bTrackWidthMeasured = true;
+			UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Measured drive-motor separation %.2f cm (TrackWidth %.2f cm)%s"),
+				Separation, TrackWidth, bUseMotorSeparationAsTrackWidth ? TEXT(" — adopting as TrackWidth.") : TEXT("."));
+			if (bUseMotorSeparationAsTrackWidth)
+			{
+				TrackWidth = Separation;
+			}
+		}
+	}
 
 	// Update wheel states
 	UpdateWheelState(LeftMotorId, LeftWheelBoneName, LeftWheelState);
@@ -187,6 +206,11 @@ void URammsDifferentialDriveController::ResetOdometry(FVector Position, FRotator
 	PreviousRightRotation = RightWheelState.TotalRotation;
 }
 
+bool URammsDifferentialDriveController::UsesBase() const
+{
+	return BaseComponent && BaseComponent->HasBackend();
+}
+
 FBodyInstance* URammsDifferentialDriveController::GetBoneBodyInstance(FName BoneName)
 {
 	if (!SkeletalMeshComponent || BoneName == NAME_None)
@@ -203,7 +227,7 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 	// velocity / slip / surface friction need contact data the generic motor
 	// interface doesn't expose (and MuJoCo resolves contact itself), so those
 	// fields stay at their neutral defaults — slip modeling is off by default.
-	if (BaseComponent)
+	if (UsesBase())
 	{
 		OutState.AngularVelocity = BaseComponent->GetMotorVelocity(MotorId);
 		OutState.LinearVelocity = OutState.AngularVelocity * WheelRadius;
@@ -454,7 +478,7 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 {
 	// The direct Chaos path needs a simulating wheel body; the base-component
 	// path commands by motor Id and has no bone body to guard on.
-	if (!BaseComponent)
+	if (!UsesBase())
 	{
 		FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
 		if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
@@ -527,7 +551,7 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 	// Base-component path: command the computed torque (N·m) by motor Id; the
 	// resolved backend (Chaos torque about the wheel's spin axis, or MuJoCo
 	// <motor> ctrl) applies it and clamps to the motor's range.
-	if (BaseComponent)
+	if (UsesBase())
 	{
 		BaseComponent->SetMotorCommand(MotorId, AvailableTorque);
 		return;
@@ -633,7 +657,7 @@ void URammsDifferentialDriveController::ApplyBrakes()
 
 	// Base-component path: command a velocity-opposing torque about the spin
 	// axis by motor Id (the backend clamps it to the motor's range).
-	if (BaseComponent)
+	if (UsesBase())
 	{
 		auto BrakeMotor = [this, BrakeDeadband](FName MotorId, FWheelState& WheelState) {
 			const float AngVel = WheelState.AngularVelocity;

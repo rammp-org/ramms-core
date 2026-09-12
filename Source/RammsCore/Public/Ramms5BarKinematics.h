@@ -31,9 +31,12 @@ public:
 
 	/**
 	 * Forward kinematics: the shared endpoint (x-z, cm) for a pair of proximal
-	 * joint angles (FVector2D(A, B), rad). bValid is false when the two distal
-	 * links can't meet (the mechanism can't hold those angles); the returned
-	 * point is then the closest approach midpoint.
+	 * joint angles (FVector2D(A, B), rad). bValid is false when the closed loop
+	 * can't hold those angles — either the distal links can't meet (the point
+	 * returned is then the closest-approach midpoint) or a passive knee would
+	 * have to bend past straight (the geometric intersection is returned, but
+	 * it is not a pose of the assembled mechanism). Live joint readings always
+	 * produce valid poses; the flag matters for hypothetical angle pairs.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	static FVector2D ComputeEndpoint(const FRamms5BarLinkageSpec& Spec, FVector2D JointAnglesAB, bool& bValid);

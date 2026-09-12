@@ -83,6 +83,9 @@ private:
 	/** Resolve (and cache) the sibling base component; nullptr if none. */
 	URammsRobotBaseComponent* EnsureBase() const;
 
+	/** False when Angle lies outside the motor's authored ControlRange. */
+	bool WithinMotorRange(URammsRobotBaseComponent& Base, FName MotorId, double Angle) const;
+
 	/** Cached base component. Mutable: resolved lazily (BeginPlay order-safe). */
 	UPROPERTY(Transient)
 	mutable TObjectPtr<URammsRobotBaseComponent> BaseComponent = nullptr;
