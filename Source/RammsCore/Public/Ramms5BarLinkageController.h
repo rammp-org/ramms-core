@@ -1,0 +1,96 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "Ramms5BarLinkageSpec.h"
+#include "Ramms5BarLinkageController.generated.h"
+
+class URammsRobotBaseComponent;
+
+/**
+ * Drives one parallel 5-bar linkage (e.g. a lift_drive centre leg, or a seat
+ * elevator) by positioning its shared endpoint in the linkage's local x-z plane.
+ *
+ * It is a thin consumer of the robot base component: it holds only its own
+ * KINEMATIC config (an FRamms5BarLinkageSpec, from a data table or inline —
+ * geometry the motor registry deliberately doesn't model) and commands its two
+ * proximal Position motors *by Id* through the sibling URammsRobotBaseComponent,
+ * which owns the physics backend. Add one component per 5-bar linkage on the
+ * robot actor; each names its own two motor Ids.
+ */
+UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
+class RAMMSCORE_API URamms5BarLinkageController : public UActorComponent
+{
+	GENERATED_BODY()
+
+public:
+	URamms5BarLinkageController();
+
+	virtual void BeginPlay() override;
+
+	/** Optional kinematic data table (row struct: FRamms5BarLinkageSpec). When
+	 *  set with LinkageRow, its row overrides the inline Linkage below. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar")
+	TObjectPtr<UDataTable> KinematicTable;
+
+	/** Row in KinematicTable to use (ignored when KinematicTable is unset). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar")
+	FName LinkageRow;
+
+	/** Inline kinematic config, used when no KinematicTable/LinkageRow resolves. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar")
+	FRamms5BarLinkageSpec Linkage;
+
+	// --- Command / query -----------------------------------------------------
+
+	/** Position the linkage endpoint at TargetXZ (local x-z plane, cm): solve IK
+	 *  and command both proximal motors. Returns false (and commands nothing) if
+	 *  the target is unreachable or no base component is available. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
+	bool SetEndpointTarget(FVector2D TargetXZ);
+
+	/** Convenience: keep the current endpoint X and move to height Z (cm). */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
+	bool SetEndpointHeight(float Z);
+
+	/** Command the two proximal joint angles directly (rad; A = X, B = Y). */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
+	void SetJointAngles(FVector2D AnglesAB);
+
+	/** Current endpoint (local x-z, cm) from the live proximal joint angles. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetCurrentEndpoint() const;
+
+	/** Live proximal joint angles (rad; A = X, B = Y) read from the base. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetCurrentJointAngles() const;
+
+	/** Last endpoint target commanded via SetEndpointTarget/Height. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetLastTarget() const { return LastTarget; }
+
+	/** IK preview without commanding: joint angles for TargetXZ. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
+	FVector2D SolveTarget(FVector2D TargetXZ, bool& bReachable) const;
+
+	/** True once a base component has been resolved. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	bool HasBase() const;
+
+private:
+	/** Resolve (and cache) the sibling base component; nullptr if none. */
+	URammsRobotBaseComponent* EnsureBase() const;
+
+	/** Cached base component. Mutable: resolved lazily (BeginPlay order-safe). */
+	UPROPERTY(Transient)
+	mutable TObjectPtr<URammsRobotBaseComponent> BaseComponent = nullptr;
+
+	/** The resolved spec (table row if present, else the inline Linkage). */
+	FRamms5BarLinkageSpec Resolved;
+
+	/** Last endpoint target commanded (local x-z, cm). */
+	FVector2D LastTarget = FVector2D::ZeroVector;
+	bool	  bHasTarget = false;
+};
