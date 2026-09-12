@@ -3,6 +3,7 @@
 #include "RammsDifferentialDriveController.h"
 #include "RammsDifferentialDriveLibrary.h"
 #include "RammsDriveBackend.h"
+#include "RammsDriveBackendRegistry.h"
 #include "RammsChaosSkeletalDriveBackend.h"
 #include "GameFramework/Actor.h"
 #include "Components/PrimitiveComponent.h"
@@ -26,12 +27,39 @@ void URammsDifferentialDriveController::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// The Chaos skeletal-wheel backend is the default. A future MuJoCo backend
-	// (driving a URLab articulation's wheel actuators) plugs in here without
-	// touching the input/arbitration/control-law/odometry above it.
+	// Pick the drive backend. When MuJoCo is requested (explicitly or Auto),
+	// ask the registry — RammsMujocoSupport registers a factory that drives a
+	// URLab articulation's wheel actuators. Fall back to the built-in Chaos
+	// skeletal-wheel backend when no factory is registered or the MuJoCo backend
+	// can't resolve an articulation (Initialize returns false).
 	delete DriveBackend; // guard against a second BeginPlay
-	DriveBackend = new FRammsChaosSkeletalDriveBackend();
-	DriveBackend->Initialize(*this);
+	DriveBackend = nullptr;
+
+	if (PhysicsBackend == EDrivePhysicsBackend::Mujoco || PhysicsBackend == EDrivePhysicsBackend::Auto)
+	{
+		if (IRammsDriveBackend* Mujoco = RammsDriveBackends::CreateMujocoBackend(*this))
+		{
+			if (Mujoco->Initialize(*this))
+			{
+				DriveBackend = Mujoco;
+			}
+			else
+			{
+				delete Mujoco; // no articulation resolved — fall through to Chaos
+			}
+		}
+		if (!DriveBackend && PhysicsBackend == EDrivePhysicsBackend::Mujoco)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[DiffDrive] MuJoCo backend requested but unavailable; using Chaos."));
+		}
+	}
+
+	if (!DriveBackend)
+	{
+		FRammsChaosSkeletalDriveBackend* Chaos = new FRammsChaosSkeletalDriveBackend();
+		Chaos->Initialize(*this);
+		DriveBackend = Chaos;
+	}
 
 	// Initialize odometry with the actor's current transform.
 	if (AActor* Owner = GetOwner())

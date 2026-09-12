@@ -16,6 +16,20 @@ enum class EDriveControlMode : uint8
 };
 
 /**
+ * Which physics engine drives the wheels. Chaos = the built-in skeletal-wheel
+ * backend. Mujoco = a URLab/MuJoCo articulation (provided by RammsMujocoSupport
+ * via the drive-backend registry). Auto = MuJoCo when a backend is registered
+ * and resolves an articulation, otherwise Chaos.
+ */
+UENUM(BlueprintType)
+enum class EDrivePhysicsBackend : uint8
+{
+	Auto   UMETA(DisplayName = "Auto"),
+	Chaos  UMETA(DisplayName = "Chaos (skeletal wheels)"),
+	Mujoco UMETA(DisplayName = "MuJoCo (URLab articulation)")
+};
+
+/**
  * Motor parameters for electric wheelchair motors
  */
 USTRUCT(BlueprintType)

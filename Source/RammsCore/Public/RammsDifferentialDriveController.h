@@ -37,6 +37,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Control")
 	EDriveControlMode ControlMode = EDriveControlMode::TorqueControl;
 
+	/** Which physics engine drives the wheels. Auto uses MuJoCo when a backend
+	 *  is registered (RammsMujocoSupport) and resolves an articulation on this
+	 *  actor, else the built-in Chaos skeletal-wheel backend. Read in BeginPlay. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Control")
+	EDrivePhysicsBackend PhysicsBackend = EDrivePhysicsBackend::Auto;
+
 	/** Name of the skeletal mesh component containing the wheel bones (leave empty to auto-find first skeletal mesh) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
 	FName SkeletalMeshComponentName = NAME_None;
