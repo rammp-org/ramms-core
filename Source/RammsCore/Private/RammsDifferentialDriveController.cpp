@@ -2,6 +2,7 @@
 
 #include "RammsDifferentialDriveController.h"
 #include "RammsDifferentialDriveLibrary.h"
+#include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "DrawDebugHelpers.h"
@@ -20,6 +21,18 @@ void URammsDifferentialDriveController::BeginPlay()
 	AActor* Owner = GetOwner();
 	if (Owner)
 	{
+		// A sibling robot base component, when present, owns the physics I/O:
+		// wheel state, torque, and braking route through it by motor Id (Chaos or
+		// MuJoCo). Without one, the controller keeps the direct Chaos wheel-bone
+		// path below, so existing blueprints keep driving.
+		BaseComponent = Owner->FindComponentByClass<URammsRobotBaseComponent>();
+		if (BaseComponent)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[DiffDrive] Driving via RammsRobotBaseComponent (motors '%s' / '%s')."),
+				*LeftMotorId.ToString(), *RightMotorId.ToString());
+		}
+
 		// If a specific component name is provided, find it by name
 		if (SkeletalMeshComponentName != NAME_None)
 		{
@@ -91,8 +104,8 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	// Update wheel states
-	UpdateWheelState(LeftWheelBoneName, LeftWheelState);
-	UpdateWheelState(RightWheelBoneName, RightWheelState);
+	UpdateWheelState(LeftMotorId, LeftWheelBoneName, LeftWheelState);
+	UpdateWheelState(RightMotorId, RightWheelBoneName, RightWheelState);
 
 	// Check for braking
 	bIsBraking = ShouldApplyBrakes();
@@ -184,8 +197,21 @@ FBodyInstance* URammsDifferentialDriveController::GetBoneBodyInstance(FName Bone
 	return SkeletalMeshComponent->GetBodyInstance(BoneName);
 }
 
-void URammsDifferentialDriveController::UpdateWheelState(FName BoneName, FWheelState& OutState)
+void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState)
 {
+	// Base-component path: read the wheel joint velocity by motor Id. Lateral
+	// velocity / slip / surface friction need contact data the generic motor
+	// interface doesn't expose (and MuJoCo resolves contact itself), so those
+	// fields stay at their neutral defaults — slip modeling is off by default.
+	if (BaseComponent)
+	{
+		OutState.AngularVelocity = BaseComponent->GetMotorVelocity(MotorId);
+		OutState.LinearVelocity = OutState.AngularVelocity * WheelRadius;
+		OutState.LateralVelocity = 0.0f;
+		OutState.SlipRatio = 0.0f;
+		return;
+	}
+
 	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
 	if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
 	{
@@ -343,8 +369,8 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 	RightWheelState.TargetAngularVelocity = Command.RightCommand;
 
 	// Apply torques to wheels
-	ApplyWheelTorque(LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
-	ApplyWheelTorque(RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+	ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
+	ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
 }
 
 void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
@@ -386,8 +412,8 @@ void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
 	}
 
 	// Apply torques to wheels
-	ApplyWheelTorque(LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
-	ApplyWheelTorque(RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+	ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
+	ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
 }
 
 float URammsDifferentialDriveController::CalculatePID(
@@ -420,16 +446,22 @@ float URammsDifferentialDriveController::CalculatePID(
 }
 
 void URammsDifferentialDriveController::ApplyWheelTorque(
+	FName					MotorId,
 	FName					BoneName,
 	float					RequestedTorque,
 	const FMotorParameters& MotorParams,
 	FWheelState&			WheelState)
 {
-	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
-	if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
+	// The direct Chaos path needs a simulating wheel body; the base-component
+	// path commands by motor Id and has no bone body to guard on.
+	if (!BaseComponent)
 	{
-		WheelState.AppliedTorque = 0.0f;
-		return;
+		FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
+		if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
+		{
+			WheelState.AppliedTorque = 0.0f;
+			return;
+		}
 	}
 
 	// Convert angular velocity to RPM for motor curve evaluation
@@ -492,9 +524,19 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 			WheelState.SuspensionLoad, WheelState.SurfaceFriction, WheelState.LateralVelocity);
 	}
 
-	// Get bone transform to apply torque in correct direction
-	int32 BoneIndex = SkeletalMeshComponent->GetBoneIndex(BoneName);
-	if (BoneIndex == INDEX_NONE)
+	// Base-component path: command the computed torque (N·m) by motor Id; the
+	// resolved backend (Chaos torque about the wheel's spin axis, or MuJoCo
+	// <motor> ctrl) applies it and clamps to the motor's range.
+	if (BaseComponent)
+	{
+		BaseComponent->SetMotorCommand(MotorId, AvailableTorque);
+		return;
+	}
+
+	// Direct Chaos path: torque about the wheel bone's local Y (spin) axis.
+	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
+	int32		   BoneIndex = SkeletalMeshComponent->GetBoneIndex(BoneName);
+	if (!BodyInst || BoneIndex == INDEX_NONE)
 	{
 		return;
 	}
@@ -588,6 +630,29 @@ void URammsDifferentialDriveController::ApplyBrakes()
 	// Apply braking by applying damping torque proportional to velocity
 	// Add a deadband to prevent oscillation at very low speeds
 	const float BrakeDeadband = 0.1f; // rad/s - don't apply brakes below this angular velocity
+
+	// Base-component path: command a velocity-opposing torque about the spin
+	// axis by motor Id (the backend clamps it to the motor's range).
+	if (BaseComponent)
+	{
+		auto BrakeMotor = [this, BrakeDeadband](FName MotorId, FWheelState& WheelState) {
+			const float AngVel = WheelState.AngularVelocity;
+			if (FMath::Abs(AngVel) > BrakeDeadband)
+			{
+				const float BrakeCmd = -FMath::Sign(AngVel) * BrakeTorque;
+				BaseComponent->SetMotorCommand(MotorId, BrakeCmd);
+				WheelState.AppliedTorque = BrakeCmd;
+			}
+			else
+			{
+				BaseComponent->SetMotorCommand(MotorId, 0.0f);
+				WheelState.AppliedTorque = 0.0f;
+			}
+		};
+		BrakeMotor(LeftMotorId, LeftWheelState);
+		BrakeMotor(RightMotorId, RightWheelState);
+		return;
+	}
 
 	FBodyInstance* LeftBodyInst = GetBoneBodyInstance(LeftWheelBoneName);
 	if (LeftBodyInst && LeftBodyInst->IsInstanceSimulatingPhysics())

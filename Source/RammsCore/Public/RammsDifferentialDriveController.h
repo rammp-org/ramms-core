@@ -8,6 +8,7 @@
 #include "RammsDifferentialDriveController.generated.h"
 
 class UPrimitiveComponent;
+class URammsRobotBaseComponent;
 
 /**
  * Differential drive controller component for powered wheelchair simulation
@@ -37,11 +38,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
 	FName SkeletalMeshComponentName = NAME_None;
 
-	/** Left wheel bone name */
+	/**
+	 * Left drive-motor Id in the robot's motor registry, used when a
+	 * URammsRobotBaseComponent is present on the actor — physics I/O then routes
+	 * through it (Chaos or MuJoCo) instead of touching a wheel bone directly.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
+	FName LeftMotorId = FName("left_motor");
+
+	/** Right drive-motor Id (see LeftMotorId). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
+	FName RightMotorId = FName("right_motor");
+
+	/** Left wheel bone name — the fallback Chaos path when no base component is present. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
 	FName LeftWheelBoneName = FName("left_motor");
 
-	/** Right wheel bone name */
+	/** Right wheel bone name — the fallback Chaos path when no base component is present. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Wheels")
 	FName RightWheelBoneName = FName("right_motor");
 
@@ -268,6 +281,12 @@ private:
 	UPROPERTY(Transient)
 	USkeletalMeshComponent* SkeletalMeshComponent = nullptr;
 
+	/** Sibling robot base component, if this actor has one. When set, wheel
+	 *  physics I/O (velocity read, torque command, braking) routes through it
+	 *  by motor Id instead of the direct Chaos wheel-bone path. */
+	UPROPERTY(Transient)
+	URammsRobotBaseComponent* BaseComponent = nullptr;
+
 	/** Wall-clock time of the last SetExternalDriveInput call (-1 = never). */
 	double LastExternalInputSeconds = -1.0;
 
@@ -288,8 +307,9 @@ private:
 	/** Get body instance for a specific bone */
 	FBodyInstance* GetBoneBodyInstance(FName BoneName);
 
-	/** Update wheel state from physics */
-	void UpdateWheelState(FName BoneName, FWheelState& OutState);
+	/** Update wheel state from physics (base component by MotorId when present,
+	 *  else the Chaos wheel bone). */
+	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState);
 
 	/** Update controller in torque control mode */
 	void UpdateTorqueControl(float DeltaTime);
@@ -300,8 +320,9 @@ private:
 	/** Calculate PID control output */
 	float CalculatePID(float Error, float& IntegralError, float& PreviousError, float DeltaTime);
 
-	/** Apply torque to wheel with motor and slip modeling */
-	void ApplyWheelTorque(FName BoneName, float RequestedTorque, const FMotorParameters& MotorParams, FWheelState& WheelState);
+	/** Apply torque to wheel with motor and slip modeling (commanded through the
+	 *  base component by MotorId when present, else the Chaos wheel bone). */
+	void ApplyWheelTorque(FName MotorId, FName BoneName, float RequestedTorque, const FMotorParameters& MotorParams, FWheelState& WheelState);
 
 	/** Update odometry from wheel movements */
 	void UpdateOdometry(float DeltaTime);
