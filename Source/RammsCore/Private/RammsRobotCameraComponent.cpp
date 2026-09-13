@@ -2,6 +2,7 @@
 
 #include "RammsRobotCameraComponent.h"
 #include "Camera/CameraComponent.h"
+#include "Framework/Application/SlateApplication.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -175,20 +176,42 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 
 	// Orbit: mouse delta while the orbit button (or a left drag) is held, or
 	// always if no button is configured.
-	// "Just released" counts too: a very short drag (touch flick, automation)
-	// can press, move and release inside one frame, and its movement would
-	// otherwise be thrown away.
-	auto	   Held = [PC](const FKey& Key) { return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustReleased(Key); };
+	//
+	// The button state comes from Slate as well as PlayerInput: in an editor
+	// PIE viewport the press that starts a drag is taken by the viewport
+	// (focus / capture) and never reaches PlayerInput, while the drag's mouse
+	// movement does — so IsInputKeyDown alone sees a drag only at its end.
+	// Slate's pressed set is the OS (or streamed) button state regardless of
+	// which widget consumed the click — but it is global, so it only counts
+	// while the cursor is over the game viewport (a drag on an editor panel
+	// must not orbit). "Just released" also counts so a drag that begins and
+	// ends inside one frame still applies its movement.
+	const bool bSlate = FSlateApplication::IsInitialized();
+	float	   ViewportX = 0.0f, ViewportY = 0.0f;
+	const bool bCursorOverViewport = PC->GetMousePosition(ViewportX, ViewportY);
+	auto	   Held = [PC, bSlate, bCursorOverViewport](const FKey& Key) {
+		return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustReleased(Key)
+			|| (bSlate && bCursorOverViewport && FSlateApplication::Get().GetPressedMouseButtons().Contains(Key));
+	};
 	const bool bOrbiting = !OrbitButton.IsValid() || Held(OrbitButton)
 		|| (bAlsoOrbitWithLeftDrag && Held(EKeys::LeftMouseButton));
 
-	// Two delta sources: the raw mouse axes (only fed while the viewport has
-	// captured the mouse) and the cursor's position change (what a streamed
-	// "hovering" cursor or a touch drag produces). Use whichever moved.
+	// Two delta sources: the raw mouse axes (fed while the viewport receives
+	// mouse moves, including a captured / hidden cursor) and the cursor's
+	// position change (Slate's cursor, or the viewport's when Slate has none —
+	// what a hovering cursor, a streamed client or a touch drag produces).
+	// The raw axes win when they moved; the position delta is the fallback.
 	float DX = 0.0f, DY = 0.0f;
 	PC->GetInputMouseDelta(DX, DY);
-	float	   CursorX = 0.0f, CursorY = 0.0f;
-	const bool bHaveCursor = PC->GetMousePosition(CursorX, CursorY);
+	float CursorX = ViewportX, CursorY = ViewportY;
+	bool  bHaveCursor = bCursorOverViewport;
+	if (bSlate)
+	{
+		const FVector2D Pos = FSlateApplication::Get().GetCursorPos();
+		CursorX = Pos.X;
+		CursorY = Pos.Y;
+		bHaveCursor = true;
+	}
 	if (bOrbiting && bHaveCursor && bHadCursor && DX == 0.0f && DY == 0.0f)
 	{
 		DX = CursorX - LastCursorX;

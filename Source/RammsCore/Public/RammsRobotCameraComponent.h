@@ -23,11 +23,11 @@ class USpringArmComponent;
  *    ResetKey (Home) restores the arm's authored pose. Cameras without a spring
  *    arm parent are fixed.
  *
- * Polled from the possessing player controller each tick (no input mapping
- * assets). Orbit() / Zoom() / NextCamera() are also callable directly, for a
- * touch UI, a gamepad stick or Blueprint. Note that when a Pixel Streaming
- * client drives an editor PIE session, keys and the wheel reach the player
- * controller but mouse buttons / movement do not (only the API path orbits).
+ * Polled each tick from the possessing player controller, with Slate's
+ * pressed-button / cursor state as the mouse fallback (an editor PIE viewport
+ * keeps the press that starts a drag for itself). No input mapping assets.
+ * Orbit() / Zoom() / NextCamera() are also callable directly, for a touch UI,
+ * a gamepad stick or Blueprint.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsRobotCameraComponent : public UActorComponent
