@@ -14,10 +14,11 @@ class USpringArmComponent;
  * Player camera control for a robot pawn: cycles between the pawn's camera
  * components and lets the mouse orbit / zoom the active one.
  *
- *  - NextCameraKey (Tab) activates the next UCameraComponent on the pawn (in
- *    component order — e.g. the follow camera, a top-down camera, URLab's own
- *    possess camera). Exactly one camera is active, so the view target picks
- *    it up with no view-target changes.
+ *  - NextCameraKey (Tab) activates the next UCameraComponent on the pawn: the
+ *    CameraNames list in order, or else the authored cameras first and any
+ *    runtime-added one (URLab's possess camera) last. The first is the start
+ *    camera. Exactly one camera is active, so the view target picks it up
+ *    with no view-target changes.
  *  - While OrbitButton (right mouse) is held, mouse movement yaws / pitches
  *    the spring arm the active camera hangs from; the wheel changes its length;
  *    ResetKey (Home) restores the arm's authored pose. Cameras without a spring
@@ -45,8 +46,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Switch")
 	FKey NextCameraKey = EKeys::Tab;
 
-	/** Restrict cycling to these camera component names (empty = every
-	 *  UCameraComponent on the pawn, including ones added at possession). */
+	/** Restrict cycling to these camera component names, in this order ([0] is
+	 *  the start camera). Empty = every UCameraComponent on the pawn, authored
+	 *  ones first, then ones added at runtime (e.g. at possession). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Switch")
 	TArray<FName> CameraNames;
 

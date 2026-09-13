@@ -17,21 +17,14 @@ void URammsRobotCameraComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Start on the first camera so exactly one is active from the first frame.
+	// Start on the first camera (CameraNames[0], else the first authored one)
+	// so exactly one is active from the first frame. Any camera added at
+	// possession before BeginPlay is left for Tab.
 	TArray<UCameraComponent*> Cameras;
 	GatherCameras(Cameras);
 	if (Cameras.Num() > 0)
 	{
-		UCameraComponent* First = nullptr;
-		for (UCameraComponent* C : Cameras)
-		{
-			if (C->IsActive())
-			{
-				First = C;
-				break;
-			}
-		}
-		SetActiveCamera(First ? First : Cameras[0]);
+		SetActiveCamera(Cameras[0]);
 	}
 }
 
@@ -44,16 +37,48 @@ APlayerController* URammsRobotCameraComponent::GetPlayerController() const
 void URammsRobotCameraComponent::GatherCameras(TArray<UCameraComponent*>& Out) const
 {
 	Out.Reset();
-	if (const AActor* Owner = GetOwner())
+	const AActor* Owner = GetOwner();
+	if (!Owner)
 	{
-		TArray<UCameraComponent*> All;
-		Owner->GetComponents<UCameraComponent>(All);
-		for (UCameraComponent* C : All)
+		return;
+	}
+	TArray<UCameraComponent*> All;
+	Owner->GetComponents<UCameraComponent>(All);
+
+	if (CameraNames.Num() > 0)
+	{
+		// Explicit list: its order is the cycle order and [0] is the default.
+		for (const FName& Name : CameraNames)
 		{
-			if (C && (CameraNames.Num() == 0 || CameraNames.Contains(C->GetFName())))
+			for (UCameraComponent* C : All)
 			{
-				Out.Add(C);
+				if (C && C->GetFName() == Name)
+				{
+					Out.Add(C);
+					break;
+				}
 			}
+		}
+		return;
+	}
+
+	// Otherwise the authored cameras (Blueprint / native) come first and
+	// runtime-added ones (e.g. URLab's possess camera) last. GetComponents
+	// order is the owned-component set's, which can put a component added
+	// at possession *before* the authored ones once earlier removals left
+	// holes — the start camera must not depend on that.
+	for (UCameraComponent* C : All)
+	{
+		if (C && C->CreationMethod != EComponentCreationMethod::Instance)
+		{
+			Out.Add(C);
+		}
+	}
+	for (UCameraComponent* C : All)
+	{
+		if (C && C->CreationMethod == EComponentCreationMethod::Instance)
+		{
+			Out.Add(C);
 		}
 	}
 }
