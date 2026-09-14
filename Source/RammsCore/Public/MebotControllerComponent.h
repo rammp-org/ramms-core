@@ -26,6 +26,11 @@ struct FAngularMotorConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	FName ConstraintName;
 
+	// Registry Id of this motor on the owner's RammsRobotBaseComponent. Empty =
+	// the registry motor whose ChaosName is ConstraintName (resolved at play).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
+	FName MotorId;
+
 	// Which angular axis this motor controls
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	EMotorAxis ControlAxis;
@@ -72,6 +77,12 @@ struct FAngularMotorConfig
 	// Cached constraint reference
 	FConstraintInstance* CachedConstraint;
 
+	// A settings/target change not yet pushed to the drive. The drive holds its
+	// last target, so it is only re-commanded while moving or after a change —
+	// never every tick, which would override anyone else commanding the same
+	// motor through the robot base.
+	bool bPendingApply = true;
+
 	FAngularMotorConfig()
 		: ConstraintName(NAME_None)
 		, ControlAxis(EMotorAxis::Z)
@@ -97,6 +108,11 @@ struct FLinearMotorConfig
 	// Name of the constraint component to control
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	FName ConstraintName;
+
+	// Registry Id of this motor on the owner's RammsRobotBaseComponent. Empty =
+	// the registry motor whose ChaosName is ConstraintName (resolved at play).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
+	FName MotorId;
 
 	// Which linear axis this motor controls
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
@@ -133,6 +149,9 @@ struct FLinearMotorConfig
 	// Cached constraint reference
 	FConstraintInstance* CachedConstraint;
 
+	// See FAngularMotorConfig::bPendingApply.
+	bool bPendingApply = true;
+
 	FLinearMotorConfig()
 		: ConstraintName(NAME_None)
 		, ControlAxis(EMotorAxis::Z)
@@ -148,6 +167,19 @@ struct FLinearMotorConfig
 	}
 };
 
+class URammsRobotBaseComponent;
+
+/**
+ * Rate-limited position targets for the chair's lift / linkage actuators
+ * (drive-motor elevators, drive-plate translators, caster arms), addressed
+ * by their physics-asset constraint name (angles in degrees, travel in cm).
+ *
+ * When the owner carries a RammsRobotBaseComponent with a backend, each
+ * motor is routed through it by registry Id (bUseRobotBase): the base's
+ * backend drives the constraint on Chaos, or the matching position actuator
+ * on MuJoCo, and reads come back the same way. Without a base the component
+ * drives the constraints directly, as it always has.
+ */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API UMebotControllerComponent : public UActorComponent
 {
@@ -155,6 +187,16 @@ class RAMMSCORE_API UMebotControllerComponent : public UActorComponent
 
 public:
 	UMebotControllerComponent();
+
+	// Route motors through the owner's RammsRobotBaseComponent (by MotorId, or
+	// the registry motor whose ChaosName is the constraint) when it has a
+	// backend; otherwise drive the constraints directly.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller")
+	bool bUseRobotBase = true;
+
+	// True while motors are being routed through the robot base component.
+	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	bool IsUsingRobotBase() const;
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -250,6 +292,17 @@ private:
 	// Cached skeletal mesh component
 	UPROPERTY()
 	USkeletalMeshComponent* CachedSkeletalMesh;
+
+	// The owner's robot base, when routing through it
+	UPROPERTY(Transient)
+	TObjectPtr<URammsRobotBaseComponent> RobotBase;
+
+	// Resolve the base (once) and each motor's registry Id
+	void ResolveRobotBase();
+
+	// Registry Id for a motor entry (MotorId, else the motor whose ChaosName is
+	// the constraint); NAME_None when the base doesn't know it
+	FName BaseMotorId(FName ConstraintName, FName ExplicitMotorId) const;
 
 	// Find and cache skeletal mesh and constraints
 	void FindConstraints();

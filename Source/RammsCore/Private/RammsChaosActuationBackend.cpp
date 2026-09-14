@@ -177,11 +177,12 @@ void FRammsChaosActuationBackend::TakeOverFromMebotController(FConstraintMotor& 
 	const URammsRobotBaseComponent* Base = BaseComp.Get();
 	AActor*							Owner = Base ? Base->GetOwner() : nullptr;
 	UMebotControllerComponent*		MC = Owner ? Owner->FindComponentByClass<UMebotControllerComponent>() : nullptr;
-	if (!MC)
+	// A MebotController routing through the base is the caller, not a rival.
+	if (!MC || MC->IsUsingRobotBase())
 	{
 		return;
 	}
-	// Its per-tick update would keep overwriting the drive target we set.
+	// Otherwise its per-tick update would keep overwriting the drive target we set.
 	for (const FAngularMotorConfig& M : MC->GetAngularMotors())
 	{
 		if (M.ConstraintName == Info.ConstraintName && M.bEnabled)

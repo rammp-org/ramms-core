@@ -142,6 +142,23 @@ bool URammsRobotBaseComponent::HasBackend() const
 	return Backend_ != nullptr;
 }
 
+FName URammsRobotBaseComponent::FindMotorIdByChaosName(FName ChaosName) const
+{
+	LoadMotorRegistry();
+	if (ChaosName.IsNone())
+	{
+		return NAME_None;
+	}
+	for (const TPair<FName, FRammsMotorSpec>& Pair : Motors)
+	{
+		if (Pair.Value.ChaosName == ChaosName)
+		{
+			return Pair.Key;
+		}
+	}
+	return Motors.Contains(ChaosName) ? ChaosName : NAME_None;
+}
+
 bool URammsRobotBaseComponent::GetMotorSpec(FName MotorId, FRammsMotorSpec& OutSpec) const
 {
 	LoadMotorRegistry();

@@ -108,6 +108,12 @@ public:
 	/** Copy of a motor's registry spec; false if not found. */
 	bool GetMotorSpec(FName MotorId, FRammsMotorSpec& OutSpec) const;
 
+	/** The Id of the registry motor whose ChaosName (or, failing that, Id) is
+	 *  ChaosName — lets a Chaos-era consumer that knows a bone / constraint
+	 *  find its motor. NAME_None if there is none. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
+	FName FindMotorIdByChaosName(FName ChaosName) const;
+
 	// --- Geometry queries (derived from the backend's motor transforms) ------
 
 	/** World transform of a motor's joint/body; false if unavailable. */
