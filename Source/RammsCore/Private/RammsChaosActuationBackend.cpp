@@ -133,6 +133,14 @@ FConstraintInstance* FRammsChaosActuationBackend::ResolveConstraintMotor(FName M
 		}
 		New.bLinear = bLinear;
 		New.Axis = Axis;
+		// Chaos has one swing drive for both swing axes: if both are unlocked,
+		// commanding one also servos the other toward zero. Say so once.
+		if (!bLinear && Axis != 0 && Ang[1] != EAngularConstraintMotion::ACM_Locked && Ang[2] != EAngularConstraintMotion::ACM_Locked)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("RammsChaosActuationBackend: constraint '%s' (motor '%s') has both swing axes unlocked; Chaos's single swing drive will also hold the other swing at zero while this motor is driven."),
+				*ConstraintName.ToString(), *MotorId.ToString());
+		}
 		if (const USkeletalMesh* Asset = SkelMesh->GetSkeletalMeshAsset())
 		{
 			const FMatrix ParentRef = Asset->GetComposedRefPoseMatrix(New.ParentBone);
@@ -236,7 +244,9 @@ void FRammsChaosActuationBackend::SetCommand(FName MotorId, float Value)
 		}
 		else
 		{
-			CI->SetOrientationDriveTwistAndSwing(true, true);
+			// Only the drive group that owns the selected axis: twist for X, the
+			// swing group for Y / Z (see the multi-swing note in Resolve).
+			CI->SetOrientationDriveTwistAndSwing(/*bTwist=*/Info->Axis == 0, /*bSwing=*/Info->Axis != 0);
 			CI->SetAngularDriveParams(Stiffness, Damping, ForceLimit);
 			FVector AxisVec = FVector::ZeroVector;
 			AxisVec[Info->Axis] = 1.0f;
@@ -364,6 +374,29 @@ float FRammsChaosActuationBackend::GetVelocity(FName MotorId) const
 	const FVector	 WorldAngVel = BodyInst->GetUnrealWorldAngularVelocityInRadians();
 	// Spin about the bone's local Y axis.
 	return BoneTransform.InverseTransformVectorNoScale(WorldAngVel).Y;
+}
+
+void FRammsChaosActuationBackend::ReleaseMotor(FName MotorId)
+{
+	if (!IsConstraintMotor(MotorId))
+	{
+		return; // torque motors apply per frame; nothing is latched
+	}
+	FConstraintMotor*	 Info = nullptr;
+	FConstraintInstance* CI = ResolveConstraintMotor(MotorId, Info);
+	if (!CI || !Info)
+	{
+		return;
+	}
+	if (Info->bLinear)
+	{
+		CI->SetLinearPositionDrive(false, false, false);
+		CI->SetLinearVelocityDrive(false, false, false);
+	}
+	else
+	{
+		CI->SetOrientationDriveTwistAndSwing(false, false);
+	}
 }
 
 bool FRammsChaosActuationBackend::GetMotorTransform(FName MotorId, FTransform& OutWorld) const

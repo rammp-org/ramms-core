@@ -353,7 +353,9 @@ float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) co
 					CurrentAngle = Constraint->GetCurrentTwist();
 					break;
 			}
-			return CurrentAngle;
+			// Chaos reports the constraint angles in radians; this API is degrees
+			// on both paths (TargetAngle is degrees).
+			return FMath::RadiansToDegrees(CurrentAngle);
 		}
 	}
 	return 0.0f;
@@ -464,13 +466,25 @@ void UMebotControllerComponent::RefreshConstraintCache()
 	// while physics is torn down mid-reregistration); motor updates already null-check and
 	// skip the frame instead of driving a freed constraint.
 	USkeletalMeshComponent* Mesh = IsValid(CachedSkeletalMesh) ? CachedSkeletalMesh : nullptr;
+	// A new instance (physics state recreated) starts from the asset's defaults:
+	// mark the motor pending so its target / drive settings are pushed again.
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		FConstraintInstance* Found = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		if (Found && Found != Motor.CachedConstraint)
+		{
+			Motor.bPendingApply = true;
+		}
+		Motor.CachedConstraint = Found;
 	}
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		FConstraintInstance* Found = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		if (Found && Found != Motor.CachedConstraint)
+		{
+			Motor.bPendingApply = true;
+		}
+		Motor.CachedConstraint = Found;
 	}
 }
 
@@ -641,6 +655,12 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 			const float EffectiveAngle = Motor.bInvertDirection ? -Motor.CurrentAngle : Motor.CurrentAngle;
 			RobotBase->SetMotorCommand(Motor.MotorId, FMath::DegreesToRadians(EffectiveAngle));
 		}
+		else
+		{
+			// Disabled: stop servoing (the backend disables its drive), as the
+			// direct path does.
+			RobotBase->ReleaseMotor(Motor.MotorId);
+		}
 		return;
 	}
 	if (!Motor.CachedConstraint)
@@ -686,6 +706,10 @@ void UMebotControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Mot
 		if (Motor.bEnabled)
 		{
 			RobotBase->SetMotorCommand(Motor.MotorId, Motor.CurrentPosition);
+		}
+		else
+		{
+			RobotBase->ReleaseMotor(Motor.MotorId);
 		}
 		return;
 	}

@@ -47,16 +47,18 @@ FDifferentialDriveCommand URammsDifferentialDriveLibrary::CalculateWheelVelociti
 	// Convert angular velocity from degrees/s to rad/s
 	float AngularVelRad = FMath::DegreesToRadians(AngularVelocity);
 
-	// Differential drive kinematics
-	// V_left = (2 * V - omega * L) / (2 * R)
-	// V_right = (2 * V + omega * L) / (2 * R)
+	// Differential drive kinematics, in the engine's yaw sense: a positive
+	// angular velocity is clockwise seen from above (a right turn, UE yaw
+	// increasing), which the LEFT wheel outrunning the right produces.
+	// V_left = (2 * V + omega * L) / (2 * R)
+	// V_right = (2 * V - omega * L) / (2 * R)
 	// Where: V = linear velocity, omega = angular velocity, L = track width, R = wheel radius
 
 	float HalfTrack = TrackWidth * 0.5f;
 
 	// Calculate linear velocity at each wheel
-	float LeftLinearVel = LinearVelocity - (AngularVelRad * HalfTrack);
-	float RightLinearVel = LinearVelocity + (AngularVelRad * HalfTrack);
+	float LeftLinearVel = LinearVelocity + (AngularVelRad * HalfTrack);
+	float RightLinearVel = LinearVelocity - (AngularVelRad * HalfTrack);
 
 	// Convert to angular velocity (rad/s)
 	float LeftAngularVel = LeftLinearVel / WheelRadius;
@@ -73,15 +75,16 @@ void URammsDifferentialDriveLibrary::CalculateChassisVelocity(
 	float& OutLinearVelocity,
 	float& OutAngularVelocity)
 {
-	// Inverse differential drive kinematics
+	// Inverse differential drive kinematics (same sign convention as
+	// CalculateWheelVelocities / the joystick mixing: positive = right turn)
 	// V = R * (omega_left + omega_right) / 2
-	// omega = R * (omega_right - omega_left) / L
+	// omega = R * (omega_left - omega_right) / L
 
 	// Linear velocity (cm/s)
 	OutLinearVelocity = WheelRadius * (LeftWheelVelocity + RightWheelVelocity) * 0.5f;
 
-	// Angular velocity (rad/s)
-	float AngularVelRad = WheelRadius * (RightWheelVelocity - LeftWheelVelocity) / TrackWidth;
+	// Angular velocity (rad/s), positive clockwise (UE yaw sense)
+	float AngularVelRad = WheelRadius * (LeftWheelVelocity - RightWheelVelocity) / TrackWidth;
 
 	// Convert to degrees/s
 	OutAngularVelocity = FMath::RadiansToDegrees(AngularVelRad);
@@ -160,7 +163,9 @@ FOdometryData URammsDifferentialDriveLibrary::UpdateOdometry(
 
 	// Calculate center distance and angle change
 	float CenterDistance = (LeftDistance + RightDistance) * 0.5f;
-	float AngleChange = (RightDistance - LeftDistance) / TrackWidth; // in radians
+	// Heading change in the engine's yaw sense (positive = clockwise), so the
+	// integrated Orientation.Yaw matches the actor's FRotator yaw.
+	float AngleChange = (LeftDistance - RightDistance) / TrackWidth; // in radians
 
 	// Update total distance
 	NewOdometry.TotalDistance += FMath::Abs(CenterDistance);

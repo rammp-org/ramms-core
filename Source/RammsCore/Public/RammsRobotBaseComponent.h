@@ -7,6 +7,8 @@
 #include "RammsMotorSpec.h"
 #include "RammsRobotBaseComponent.generated.h"
 
+class USkeletalMeshComponent;
+
 class IRammsActuationBackend;
 
 /** Which physics engine simulates this robot's motors. Auto = MuJoCo when a
@@ -87,6 +89,20 @@ public:
 	 *  ERammsActuatorType; clamped to its ControlRange; Direction applied). */
 	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
 	void SetMotorCommand(FName MotorId, float Value);
+
+	/** Stop actively driving a motor (a position servo lets go of its joint;
+	 *  see IRammsActuationBackend::ReleaseMotor). */
+	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
+	void ReleaseMotor(FName MotorId);
+
+	/** Chaos only: the skeletal mesh component the Chaos backend drives
+	 *  (ChaosSkeletalMeshComponentName, else the owner's first). */
+	UFUNCTION(BlueprintPure, Category = "Robot|Chaos")
+	USkeletalMeshComponent* GetChaosSkeletalMesh() const;
+
+	/** The Chaos-side name a motor maps to (its ChaosName, else its Id). */
+	UFUNCTION(BlueprintPure, Category = "Robot|Chaos")
+	FName GetChaosName(FName MotorId) const;
 
 	/** Current scalar value of a motor's joint (position/angle) in the robot's
 	 *  sense, 0 if unknown. */

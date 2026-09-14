@@ -33,7 +33,9 @@ public:
 	/**
 	 * Calculate wheel velocities from linear and angular velocities
 	 * @param LinearVelocity - Forward velocity in cm/s
-	 * @param AngularVelocity - Turning rate in degrees/s
+	 * @param AngularVelocity - Turning rate in degrees/s, positive = clockwise seen
+	 *        from above (a right turn, UE yaw increasing) — the same sense as the
+	 *        joystick mixing, CalculateChassisVelocity and the odometry
 	 * @param TrackWidth - Distance between left and right wheels in cm
 	 * @param WheelRadius - Radius of wheels in cm
 	 * @return Left and right wheel angular velocities in rad/s
@@ -52,7 +54,8 @@ public:
 	 * @param TrackWidth - Distance between left and right wheels in cm
 	 * @param WheelRadius - Radius of wheels in cm
 	 * @param OutLinearVelocity - Calculated linear velocity in cm/s
-	 * @param OutAngularVelocity - Calculated angular velocity in degrees/s
+	 * @param OutAngularVelocity - Calculated angular velocity in degrees/s, positive
+	 *        = clockwise / right turn (UE yaw sense)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Differential Drive")
 	static void CalculateChassisVelocity(

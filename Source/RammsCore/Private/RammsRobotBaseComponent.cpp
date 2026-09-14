@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsRobotBaseComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "RammsActuationBackend.h"
 #include "RammsActuationBackendRegistry.h"
 #include "RammsChaosActuationBackend.h"
@@ -140,6 +141,51 @@ bool URammsRobotBaseComponent::HasBackend() const
 {
 	EnsureBackend();
 	return Backend_ != nullptr;
+}
+
+void URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
+{
+	EnsureBackend();
+	if (Backend_)
+	{
+		Backend_->ReleaseMotor(MotorId);
+	}
+}
+
+USkeletalMeshComponent* URammsRobotBaseComponent::GetChaosSkeletalMesh() const
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return nullptr;
+	}
+	if (ChaosSkeletalMeshComponentName.IsNone())
+	{
+		return Owner->FindComponentByClass<USkeletalMeshComponent>();
+	}
+	TArray<USkeletalMeshComponent*> Meshes;
+	Owner->GetComponents<USkeletalMeshComponent>(Meshes);
+	for (USkeletalMeshComponent* Candidate : Meshes)
+	{
+		if (Candidate && Candidate->GetFName() == ChaosSkeletalMeshComponentName)
+		{
+			return Candidate;
+		}
+	}
+	return nullptr;
+}
+
+FName URammsRobotBaseComponent::GetChaosName(FName MotorId) const
+{
+	LoadMotorRegistry();
+	if (const FRammsMotorSpec* Spec = Motors.Find(MotorId))
+	{
+		if (!Spec->ChaosName.IsNone())
+		{
+			return Spec->ChaosName;
+		}
+	}
+	return MotorId;
 }
 
 FName URammsRobotBaseComponent::FindMotorIdByChaosName(FName ChaosName) const

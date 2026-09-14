@@ -58,6 +58,13 @@ void URammsKeyboardTeleopComponent::ReleaseDrive()
 	// input path (SetExternalDriveInput) is untouched.
 	if (bDriveCommandActive && Drive)
 	{
+		if (Drive->IsExternalDriveActive())
+		{
+			// SetDriveInput is ignored while an external command holds
+			// priority; keep the release pending (Tick retries every frame)
+			// instead of pretending it went through.
+			return;
+		}
 		Drive->SetDriveInput(FVector2D::ZeroVector);
 		if (bLogCommands)
 		{

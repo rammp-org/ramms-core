@@ -48,6 +48,7 @@ public:
 	virtual void  SetCommand(FName MotorId, float Value) override;
 	virtual float GetValue(FName MotorId) const override;
 	virtual float GetVelocity(FName MotorId) const override;
+	virtual void  ReleaseMotor(FName MotorId) override;
 	virtual bool  GetMotorTransform(FName MotorId, FTransform& OutWorld) const override;
 
 private:

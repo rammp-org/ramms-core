@@ -2,6 +2,38 @@
 
 #include "Ramms5BarKinematics.h"
 
+namespace
+{
+	// AngleSignA/B are documented as ±1. Anything else (0, NaN, a stray 0.5)
+	// would divide by zero in the IK or silently rescale angles, so both public
+	// entry points validate and normalise them before touching the maths.
+	bool NormalizeSign(double In, double& Out)
+	{
+		if (!FMath::IsFinite(In) || FMath::Abs(In) < KINDA_SMALL_NUMBER)
+		{
+			return false;
+		}
+		Out = In > 0.0 ? 1.0 : -1.0;
+		return true;
+	}
+
+	bool NormalizeSigns(const FRamms5BarLinkageSpec& Spec, double& SignA, double& SignB)
+	{
+		const bool bOk = NormalizeSign(Spec.AngleSignA, SignA) & NormalizeSign(Spec.AngleSignB, SignB);
+		if (!bOk)
+		{
+			static bool bWarned = false;
+			if (!bWarned)
+			{
+				bWarned = true;
+				UE_LOG(LogTemp, Error, TEXT("Ramms5BarKinematics: linkage (motors '%s' / '%s') has AngleSignA/B = %g / %g; they must be +1 or -1. Targets are reported unreachable until the table is fixed."),
+					*Spec.ProximalMotorA.ToString(), *Spec.ProximalMotorB.ToString(), Spec.AngleSignA, Spec.AngleSignB);
+			}
+		}
+		return bOk;
+	}
+} // namespace
+
 FVector2D URamms5BarKinematics::KneePosition(
 	FVector2D Pivot, double ProximalLen, double ZeroDir, double Sign, double JointAngle)
 {
@@ -46,20 +78,32 @@ double URamms5BarKinematics::SolveArm(
 
 FVector2D URamms5BarKinematics::SolveIK(const FRamms5BarLinkageSpec& Spec, FVector2D TargetXZ, bool& bReachable)
 {
+	double SignA = 1.0, SignB = 1.0;
+	if (!NormalizeSigns(Spec, SignA, SignB))
+	{
+		bReachable = false;
+		return FVector2D::ZeroVector;
+	}
 	bool		 bReachA = false;
 	bool		 bReachB = false;
 	const double AngleA = SolveArm(Spec.PivotA, Spec.ProximalLengthA, Spec.DistalLengthA,
-		Spec.ZeroDirA, Spec.AngleSignA, Spec.bElbowUpA, TargetXZ, bReachA);
+		Spec.ZeroDirA, SignA, Spec.bElbowUpA, TargetXZ, bReachA);
 	const double AngleB = SolveArm(Spec.PivotB, Spec.ProximalLengthB, Spec.DistalLengthB,
-		Spec.ZeroDirB, Spec.AngleSignB, Spec.bElbowUpB, TargetXZ, bReachB);
+		Spec.ZeroDirB, SignB, Spec.bElbowUpB, TargetXZ, bReachB);
 	bReachable = bReachA && bReachB;
 	return FVector2D(AngleA, AngleB);
 }
 
 FVector2D URamms5BarKinematics::ComputeEndpoint(const FRamms5BarLinkageSpec& Spec, FVector2D JointAnglesAB, bool& bValid)
 {
-	const FVector2D KneeA = KneePosition(Spec.PivotA, Spec.ProximalLengthA, Spec.ZeroDirA, Spec.AngleSignA, JointAnglesAB.X);
-	const FVector2D KneeB = KneePosition(Spec.PivotB, Spec.ProximalLengthB, Spec.ZeroDirB, Spec.AngleSignB, JointAnglesAB.Y);
+	double SignA = 1.0, SignB = 1.0;
+	if (!NormalizeSigns(Spec, SignA, SignB))
+	{
+		bValid = false;
+		return Spec.PivotA;
+	}
+	const FVector2D KneeA = KneePosition(Spec.PivotA, Spec.ProximalLengthA, Spec.ZeroDirA, SignA, JointAnglesAB.X);
+	const FVector2D KneeB = KneePosition(Spec.PivotB, Spec.ProximalLengthB, Spec.ZeroDirB, SignB, JointAnglesAB.Y);
 
 	// Endpoint = intersection of circle(KneeA, DistalA) and circle(KneeB, DistalB).
 	const FVector2D Delta = KneeB - KneeA;

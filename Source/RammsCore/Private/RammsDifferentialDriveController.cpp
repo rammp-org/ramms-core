@@ -244,10 +244,22 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 {
 	// The contact-dependent fields (lateral velocity, load, surface friction,
 	// slip) need the wheel's simulating Chaos body; the generic motor interface
-	// doesn't expose contact data and MuJoCo resolves contact itself.
-	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
+	// doesn't expose contact data and MuJoCo resolves contact itself. On the
+	// base path the body is the one the base's Chaos mapping names (its mesh
+	// and the motor's ChaosName), not this controller's legacy bone fields.
+	USkeletalMeshComponent* ContactMesh = SkeletalMeshComponent;
+	FName					ContactBone = BoneName;
+	if (UsesBase())
+	{
+		if (USkeletalMeshComponent* BaseMesh = BaseComponent->GetChaosSkeletalMesh())
+		{
+			ContactMesh = BaseMesh;
+		}
+		ContactBone = BaseComponent->GetChaosName(MotorId);
+	}
+	FBodyInstance* BodyInst = (ContactMesh && ContactBone != NAME_None) ? ContactMesh->GetBodyInstance(ContactBone) : nullptr;
 	const bool	   bHaveBody = BodyInst && BodyInst->IsInstanceSimulatingPhysics();
-	const int32	   BoneIndex = (bHaveBody && SkeletalMeshComponent) ? SkeletalMeshComponent->GetBoneIndex(BoneName) : INDEX_NONE;
+	const int32	   BoneIndex = bHaveBody ? ContactMesh->GetBoneIndex(ContactBone) : INDEX_NONE;
 
 	if (UsesBase())
 	{
@@ -267,7 +279,7 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 			{
 				bWarnedNoContactBody = true;
 				UE_LOG(LogTemp, Warning, TEXT("[DiffDrive] '%s': slip modeling is enabled but wheel '%s' (motor '%s') has no simulating Chaos body to read contact from — traction modeling is bypassed on this backend."),
-					*GetName(), *BoneName.ToString(), *MotorId.ToString());
+					*GetName(), *ContactBone.ToString(), *MotorId.ToString());
 			}
 			return;
 		}
@@ -285,7 +297,7 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 
 		// Convert to local space to extract the rotation speed around the
 		// wheel's spin axis (typically Y axis)
-		FTransform SpinTransform = SkeletalMeshComponent->GetBoneTransform(BoneIndex);
+		FTransform SpinTransform = ContactMesh->GetBoneTransform(BoneIndex);
 		FVector	   LocalAngularVelocity = SpinTransform.InverseTransformVectorNoScale(AngularVelocity);
 		OutState.AngularVelocity = LocalAngularVelocity.Y;
 
@@ -294,7 +306,7 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 	}
 
 	// Contact state from the Chaos wheel body (both paths from here on).
-	FTransform BoneTransform = SkeletalMeshComponent->GetBoneTransform(BoneIndex);
+	FTransform BoneTransform = ContactMesh->GetBoneTransform(BoneIndex);
 
 	// Get actual linear velocity of the wheel
 	FVector WheelVelocity = BodyInst->GetUnrealWorldVelocity();
