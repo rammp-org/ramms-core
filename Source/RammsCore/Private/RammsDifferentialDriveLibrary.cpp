@@ -20,8 +20,11 @@ FDifferentialDriveCommand URammsDifferentialDriveLibrary::JoystickToDifferential
 	// Calculate left and right values
 	// When turning left (negative steering), left wheel slows/reverses, right speeds up
 	// When turning right (positive steering), right wheel slows/reverses, left speeds up
-	float Left = Throttle - Steering;
-	float Right = Throttle + Steering;
+	// (Left/Right are the robot's physical sides. This used to be the other way
+	// round — the chair Blueprint compensated by swapping its wheel bones, and
+	// every honestly-named robot turned backwards.)
+	float Left = Throttle + Steering;
+	float Right = Throttle - Steering;
 
 	// Normalize if either value exceeds 1.0 to maintain turn rate
 	float MaxMagnitude = FMath::Max(FMath::Abs(Left), FMath::Abs(Right));

@@ -393,9 +393,12 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 		// Only apply damping if we're significantly over the limit (>10% overshoot)
 		if (TurnSpeedError > MaxTurningSpeed * 0.1f)
 		{
+			// Oppose the turn: a positive (clockwise / right) yaw rate comes from
+			// the left wheel outrunning the right, so take torque from the
+			// left and give it to the right.
 			float TurnDirection = FMath::Sign(CurrentTurningSpeed);
-			LeftTorque += TurnDirection * TurnDampingTorque;
-			RightTorque -= TurnDirection * TurnDampingTorque;
+			LeftTorque -= TurnDirection * TurnDampingTorque;
+			RightTorque += TurnDirection * TurnDampingTorque;
 
 			if (bEnableDebugLogging)
 			{
