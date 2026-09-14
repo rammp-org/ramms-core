@@ -14,7 +14,7 @@ class USpringArmComponent;
  * Player camera control for a robot pawn: cycles between the pawn's camera
  * components and lets the mouse orbit / zoom the active one.
  *
- *  - NextCameraKey (Tab) activates the next UCameraComponent on the pawn: the
+ *  - NextCameraKey (N) activates the next UCameraComponent on the pawn: the
  *    CameraNames list in order, or else the authored cameras first and any
  *    runtime-added one (URLab's possess camera) last. The first is the start
  *    camera. Exactly one camera is active, so the view target picks it up
@@ -43,8 +43,10 @@ public:
 
 	// --- Camera switching ------------------------------------------------------
 
+	/** N ("next view"). Tab is taken by URLab's simulate widget (input-mode
+	 *  toggle) and by the project's own input mappings. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Switch")
-	FKey NextCameraKey = EKeys::Tab;
+	FKey NextCameraKey = EKeys::N;
 
 	/** Restrict cycling to these camera component names, in this order ([0] is
 	 *  the start camera). Empty = every UCameraComponent on the pawn, authored
