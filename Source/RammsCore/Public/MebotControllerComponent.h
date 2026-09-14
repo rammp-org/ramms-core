@@ -79,6 +79,11 @@ struct FAngularMotorConfig
 	// Cached constraint reference
 	FConstraintInstance* CachedConstraint;
 
+	// The registry Id this motor is routed through at runtime (resolved from
+	// MotorId / ConstraintName by ResolveRobotBase; NAME_None = drive the
+	// constraint directly). The authored MotorId is never overwritten.
+	FName ResolvedMotorId;
+
 	// A settings/target change not yet pushed to the drive. The drive holds its
 	// last target, so it is only re-commanded while moving or after a change —
 	// never every tick, which would override anyone else commanding the same
@@ -152,6 +157,9 @@ struct FLinearMotorConfig
 
 	// Cached constraint reference
 	FConstraintInstance* CachedConstraint;
+
+	// See FAngularMotorConfig::ResolvedMotorId.
+	FName ResolvedMotorId;
 
 	// See FAngularMotorConfig::bPendingApply.
 	bool bPendingApply = true;

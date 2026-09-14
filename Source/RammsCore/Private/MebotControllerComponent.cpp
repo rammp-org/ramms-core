@@ -115,29 +115,40 @@ void UMebotControllerComponent::ResolveRobotBase()
 	}
 	if (!IsUsingRobotBase())
 	{
+		for (FAngularMotorConfig& Motor : AngularMotors)
+		{
+			Motor.ResolvedMotorId = NAME_None;
+		}
+		for (FLinearMotorConfig& Motor : LinearMotors)
+		{
+			Motor.ResolvedMotorId = NAME_None;
+		}
 		return;
 	}
-	// Pin each motor's registry Id so the per-tick path is a direct lookup;
-	// motors the registry doesn't list keep driving their constraint directly.
+	// Resolve each motor's routing Id once so the per-tick path is a direct
+	// lookup; the authored MotorId stays as configured (so "explicit but not in
+	// the registry" is still known on a later re-resolve). Motors the registry
+	// doesn't list keep driving their constraint directly.
+	auto Warn = [this](FName ConstraintName, FName ExplicitId) {
+		UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
+			*RobotBase->GetName(), *ConstraintName.ToString(),
+			ExplicitId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *ExplicitId.ToString()));
+	};
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		const FName Id = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
-		if (Id.IsNone())
-		{			UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
-				*RobotBase->GetName(), *Motor.ConstraintName.ToString(),
-				Motor.MotorId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *Motor.MotorId.ToString()));
+		Motor.ResolvedMotorId = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
+		if (Motor.ResolvedMotorId.IsNone())
+		{
+			Warn(Motor.ConstraintName, Motor.MotorId);
 		}
-		Motor.MotorId = Id;
 	}
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		const FName Id = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
-		if (Id.IsNone())
-		{			UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
-				*RobotBase->GetName(), *Motor.ConstraintName.ToString(),
-				Motor.MotorId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *Motor.MotorId.ToString()));
+		Motor.ResolvedMotorId = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
+		if (Motor.ResolvedMotorId.IsNone())
+		{
+			Warn(Motor.ConstraintName, Motor.MotorId);
 		}
-		Motor.MotorId = Id;
 	}
 	UE_LOG(LogTemp, Log, TEXT("MebotController: routing motors through robot base '%s'."), *RobotBase->GetName());
 }
@@ -295,12 +306,12 @@ void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEn
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
-			if (!bEnabled && IsUsingRobotBase() && !Motor.MotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.MotorId))
+			if (!bEnabled && IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.ResolvedMotorId))
 			{
 				// The backend can't let go (e.g. an actuator with no off switch):
 				// saying "disabled" would be a lie — the motor keeps holding.
 				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
-					*Motor.MotorId.ToString(), *MotorName.ToString());
+					*Motor.ResolvedMotorId.ToString(), *MotorName.ToString());
 				return;
 			}
 			Motor.bEnabled = bEnabled;
@@ -318,10 +329,10 @@ void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEna
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
-			if (!bEnabled && IsUsingRobotBase() && !Motor.MotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.MotorId))
+			if (!bEnabled && IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.ResolvedMotorId))
 			{
 				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
-					*Motor.MotorId.ToString(), *MotorName.ToString());
+					*Motor.ResolvedMotorId.ToString(), *MotorName.ToString());
 				return;
 			}
 			Motor.bEnabled = bEnabled;
@@ -338,11 +349,11 @@ float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) co
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
-			if (IsUsingRobotBase() && !Motor.MotorId.IsNone())
+			if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
 			{
 				// The base reads the joint in radians (constraint angle on Chaos,
 				// position actuator's joint on MuJoCo).
-				return FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.MotorId));
+				return FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
 			}
 			// Const getter callable from Blueprint at any point in the frame: resolve from
 			// the mesh's CURRENT physics state instead of trusting the tick-time cache,
@@ -382,10 +393,10 @@ float UMebotControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) 
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
-			if (IsUsingRobotBase() && !Motor.MotorId.IsNone())
+			if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
 			{
 				// Real travel (cm) from the base
-				return RobotBase->GetMotorValue(Motor.MotorId);
+				return RobotBase->GetMotorValue(Motor.ResolvedMotorId);
 			}
 			if (Motor.CachedConstraint)
 			{
@@ -402,10 +413,13 @@ void UMebotControllerComponent::ReinitializeMotors()
 	ResolveRobotBase();
 	FindConstraints();
 
-	// Initialize current angles/positions from constraint states
+	// Seed the rate limiters from the live joints (base-routed motors read the
+	// base; direct ones the constraint) so a reinit eases from where the
+	// mechanism is instead of jumping from a stale value. Targets are kept.
+	const bool bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		if (Motor.CachedConstraint)
+		if (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone()))
 		{
 			Motor.CurrentAngle = GetAngularMotorCurrentAngle(Motor.ConstraintName);
 		}
@@ -413,7 +427,8 @@ void UMebotControllerComponent::ReinitializeMotors()
 
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		Motor.CurrentPosition = Motor.TargetPosition;
+		// The direct path can't read a constraint's linear position; the base can.
+		Motor.CurrentPosition = (bViaBase && !Motor.ResolvedMotorId.IsNone()) ? RobotBase->GetMotorValue(Motor.ResolvedMotorId) : Motor.TargetPosition;
 	}
 
 	for (FAngularMotorConfig& Motor : AngularMotors)
@@ -442,7 +457,7 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 	{
 		FString AxisStr = Motor.ControlAxis == EMotorAxis::X ? TEXT("X") : Motor.ControlAxis == EMotorAxis::Y ? TEXT("Y")
 																											  : TEXT("Z");
-		FString StatusStr = (bViaBase && !Motor.MotorId.IsNone()) ? FString::Printf(TEXT("base:%s"), *Motor.MotorId.ToString())
+		FString StatusStr = (bViaBase && !Motor.ResolvedMotorId.IsNone()) ? FString::Printf(TEXT("base:%s"), *Motor.ResolvedMotorId.ToString())
 																  : (Motor.CachedConstraint ? TEXT("OK") : TEXT("NOT FOUND"));
 		Info += FString::Printf(TEXT("  %s: Target=%.1f° | Axis=%s | Enabled=%s | Status=%s\n"),
 			*Motor.ConstraintName.ToString(),
@@ -457,7 +472,7 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 	{
 		FString AxisStr = Motor.ControlAxis == EMotorAxis::X ? TEXT("X") : Motor.ControlAxis == EMotorAxis::Y ? TEXT("Y")
 																											  : TEXT("Z");
-		FString StatusStr = (bViaBase && !Motor.MotorId.IsNone()) ? FString::Printf(TEXT("base:%s"), *Motor.MotorId.ToString())
+		FString StatusStr = (bViaBase && !Motor.ResolvedMotorId.IsNone()) ? FString::Printf(TEXT("base:%s"), *Motor.ResolvedMotorId.ToString())
 																  : (Motor.CachedConstraint ? TEXT("OK") : TEXT("NOT FOUND"));
 		Info += FString::Printf(TEXT("  %s: Target=%.1fcm | Axis=%s | Enabled=%s | Status=%s\n"),
 			*Motor.ConstraintName.ToString(),
@@ -597,7 +612,7 @@ void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 	const bool bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.MotorId.IsNone())))
+		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone())))
 		{
 			const bool bMoving = !FMath::IsNearlyEqual(Motor.CurrentAngle, Motor.TargetAngle);
 			if (!bMoving && !Motor.bPendingApply)
@@ -630,7 +645,7 @@ void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
 	const bool bViaBase = IsUsingRobotBase();
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.MotorId.IsNone())))
+		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone())))
 		{
 			const bool bMoving = !FMath::IsNearlyEqual(Motor.CurrentPosition, Motor.TargetPosition);
 			if (!bMoving && !Motor.bPendingApply)
@@ -663,18 +678,18 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 	// Through the robot base: the interpolated angle (degrees, inverted if
 	// asked) becomes a Position command in radians; the backend owns the
 	// drive (constraint drive on Chaos, position actuator on MuJoCo).
-	if (IsUsingRobotBase() && !Motor.MotorId.IsNone())
+	if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
 	{
 		if (Motor.bEnabled)
 		{
 			const float EffectiveAngle = Motor.bInvertDirection ? -Motor.CurrentAngle : Motor.CurrentAngle;
-			RobotBase->SetMotorCommand(Motor.MotorId, FMath::DegreesToRadians(EffectiveAngle));
+			RobotBase->SetMotorCommand(Motor.ResolvedMotorId, FMath::DegreesToRadians(EffectiveAngle));
 		}
 		else
 		{
 			// Disabled: stop servoing (the backend disables its drive), as the
 			// direct path does.
-			RobotBase->ReleaseMotor(Motor.MotorId);
+			RobotBase->ReleaseMotor(Motor.ResolvedMotorId);
 		}
 		return;
 	}
@@ -716,15 +731,15 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 void UMebotControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Motor)
 {
 	// Through the robot base: the interpolated travel (cm) is the Position command.
-	if (IsUsingRobotBase() && !Motor.MotorId.IsNone())
+	if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
 	{
 		if (Motor.bEnabled)
 		{
-			RobotBase->SetMotorCommand(Motor.MotorId, Motor.CurrentPosition);
+			RobotBase->SetMotorCommand(Motor.ResolvedMotorId, Motor.CurrentPosition);
 		}
 		else
 		{
-			RobotBase->ReleaseMotor(Motor.MotorId);
+			RobotBase->ReleaseMotor(Motor.ResolvedMotorId);
 		}
 		return;
 	}

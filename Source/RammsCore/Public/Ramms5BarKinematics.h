@@ -24,7 +24,9 @@ public:
 	 * Inverse kinematics: the two proximal joint angles (FVector2D(A, B), rad)
 	 * that place the shared endpoint at TargetXZ. bReachable is false when either
 	 * arm can't reach (the returned angles then clamp that arm as close as it
-	 * gets); callers should gate commanding on it.
+	 * gets) or when the pair is not a pose the assembled mechanism can hold at
+	 * the target (checked with ComputeEndpoint: mirrored assembly, knee past
+	 * straight); callers should gate commanding on it.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	static FVector2D SolveIK(const FRamms5BarLinkageSpec& Spec, FVector2D TargetXZ, bool& bReachable);

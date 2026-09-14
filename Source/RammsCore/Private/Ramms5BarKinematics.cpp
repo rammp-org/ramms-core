@@ -84,14 +84,26 @@ FVector2D URamms5BarKinematics::SolveIK(const FRamms5BarLinkageSpec& Spec, FVect
 		bReachable = false;
 		return FVector2D::ZeroVector;
 	}
-	bool		 bReachA = false;
-	bool		 bReachB = false;
-	const double AngleA = SolveArm(Spec.PivotA, Spec.ProximalLengthA, Spec.DistalLengthA,
+	bool			bReachA = false;
+	bool			bReachB = false;
+	const double	AngleA = SolveArm(Spec.PivotA, Spec.ProximalLengthA, Spec.DistalLengthA,
 		Spec.ZeroDirA, SignA, Spec.bElbowUpA, TargetXZ, bReachA);
-	const double AngleB = SolveArm(Spec.PivotB, Spec.ProximalLengthB, Spec.DistalLengthB,
+	const double	AngleB = SolveArm(Spec.PivotB, Spec.ProximalLengthB, Spec.DistalLengthB,
 		Spec.ZeroDirB, SignB, Spec.bElbowUpB, TargetXZ, bReachB);
+	const FVector2D Angles(AngleA, AngleB);
 	bReachable = bReachA && bReachB;
-	return FVector2D(AngleA, AngleB);
+	if (bReachable)
+	{
+		// Each arm's annulus test is necessary, not sufficient: the pair can
+		// belong to the mirrored assembly (the other side of the knee-to-knee
+		// line) or need a knee past straight. Only a pose the closed loop can
+		// hold, that actually lands on the target, is reachable.
+		bool			bValid = false;
+		const FVector2D Endpoint = ComputeEndpoint(Spec, Angles, bValid);
+		const double	Tolerance = 1e-4 * (Spec.ProximalLengthA + Spec.DistalLengthA + Spec.ProximalLengthB + Spec.DistalLengthB);
+		bReachable = bValid && (Endpoint - TargetXZ).Size() <= Tolerance;
+	}
+	return Angles;
 }
 
 FVector2D URamms5BarKinematics::ComputeEndpoint(const FRamms5BarLinkageSpec& Spec, FVector2D JointAnglesAB, bool& bValid)

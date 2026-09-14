@@ -19,7 +19,7 @@ void URammsRobotCameraComponent::BeginPlay()
 
 	// Start on the first camera (CameraNames[0], else the first authored one)
 	// so exactly one is active from the first frame. Any camera added at
-	// possession before BeginPlay is left for Tab.
+	// possession before BeginPlay is reachable with NextCameraKey.
 	TArray<UCameraComponent*> Cameras;
 	GatherCameras(Cameras);
 	if (Cameras.Num() > 0)
