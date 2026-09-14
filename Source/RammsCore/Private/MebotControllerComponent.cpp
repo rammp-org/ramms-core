@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MebotControllerComponent.h"
+#include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/ConstraintInstance.h"
 #include "GameFramework/Actor.h"
@@ -65,16 +66,91 @@ void UMebotControllerComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	ResolveRobotBase();
 	if (bAutoFindConstraints)
 	{
+		// Direct-constraint path for motors the base doesn't know (or all of
+		// them when there is no base).
 		FindConstraints();
 	}
 
 	if (bEnableDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("MebotController: Initialized with %d angular motors and %d linear motors"),
-			AngularMotors.Num(), LinearMotors.Num());
+		UE_LOG(LogTemp, Log, TEXT("MebotController: Initialized with %d angular motors and %d linear motors (robot base: %s)"),
+			AngularMotors.Num(), LinearMotors.Num(), IsUsingRobotBase() ? TEXT("yes") : TEXT("no"));
 	}
+}
+
+bool UMebotControllerComponent::IsUsingRobotBase() const
+{
+	return bUseRobotBase && RobotBase && RobotBase->HasBackend();
+}
+
+FName UMebotControllerComponent::BaseMotorId(FName ConstraintName, FName ExplicitMotorId) const
+{
+	if (!RobotBase)
+	{
+		return NAME_None;
+	}	// An explicit Id is authoritative: a typo must not silently pick a
+	// different motor via the constraint-name fallback.
+	if (!ExplicitMotorId.IsNone())
+	{
+		return RobotBase->HasMotor(ExplicitMotorId) ? ExplicitMotorId : NAME_None;
+	}
+	return RobotBase->FindMotorIdByChaosName(ConstraintName);
+}
+
+void UMebotControllerComponent::ResolveRobotBase()
+{
+	if (!bUseRobotBase)
+	{
+		return;
+	}
+	if (!RobotBase)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			RobotBase = Owner->FindComponentByClass<URammsRobotBaseComponent>();
+		}
+	}
+	if (!IsUsingRobotBase())
+	{
+		for (FAngularMotorConfig& Motor : AngularMotors)
+		{
+			Motor.ResolvedMotorId = NAME_None;
+		}
+		for (FLinearMotorConfig& Motor : LinearMotors)
+		{
+			Motor.ResolvedMotorId = NAME_None;
+		}
+		return;
+	}
+	// Resolve each motor's routing Id once so the per-tick path is a direct
+	// lookup; the authored MotorId stays as configured (so "explicit but not in
+	// the registry" is still known on a later re-resolve). Motors the registry
+	// doesn't list keep driving their constraint directly.
+	auto Warn = [this](FName ConstraintName, FName ExplicitId) {
+		UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
+			*RobotBase->GetName(), *ConstraintName.ToString(),
+			ExplicitId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *ExplicitId.ToString()));
+	};
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		Motor.ResolvedMotorId = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
+		if (Motor.ResolvedMotorId.IsNone())
+		{
+			Warn(Motor.ConstraintName, Motor.MotorId);
+		}
+	}
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		Motor.ResolvedMotorId = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
+		if (Motor.ResolvedMotorId.IsNone())
+		{
+			Warn(Motor.ConstraintName, Motor.MotorId);
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("MebotController: routing motors through robot base '%s'."), *RobotBase->GetName());
 }
 
 void UMebotControllerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -107,6 +183,7 @@ void UMebotControllerComponent::SetAngularMotorTarget(FName MotorName, float Tar
 		if (Motor.ConstraintName == MotorName)
 		{
 			Motor.TargetAngle = TargetAngle;
+			Motor.bPendingApply = true;
 			ApplyAngularMotorSettings(Motor);
 
 			if (bEnableDebugLog)
@@ -128,6 +205,7 @@ void UMebotControllerComponent::SetLinearMotorTarget(FName MotorName, float Targ
 		if (Motor.ConstraintName == MotorName)
 		{
 			Motor.TargetPosition = TargetPosition;
+			Motor.bPendingApply = true;
 			ApplyLinearMotorSettings(Motor);
 
 			if (bEnableDebugLog)
@@ -148,6 +226,7 @@ void UMebotControllerComponent::SetAngularMotorMaxSpeed(FName MotorName, float M
 		if (Motor.ConstraintName == MotorName)
 		{
 			Motor.MaxSpeed = FMath::Max(0.0f, MaxSpeed);
+			Motor.bPendingApply = true;
 
 			if (bEnableDebugLog)
 			{
@@ -167,6 +246,7 @@ void UMebotControllerComponent::SetLinearMotorMaxSpeed(FName MotorName, float Ma
 		if (Motor.ConstraintName == MotorName)
 		{
 			Motor.MaxSpeed = FMath::Max(0.0f, MaxSpeed);
+			Motor.bPendingApply = true;
 
 			if (bEnableDebugLog)
 			{
@@ -186,6 +266,7 @@ void UMebotControllerComponent::SetAngularMotorSpeedMultiplier(FName MotorName, 
 		if (Motor.ConstraintName == MotorName)
 		{
 			Motor.SpeedMultiplier = FMath::Clamp(SpeedMultiplier, 0.0f, 1.0f);
+			Motor.bPendingApply = true;
 
 			if (bEnableDebugLog)
 			{
@@ -205,6 +286,7 @@ void UMebotControllerComponent::SetLinearMotorSpeedMultiplier(FName MotorName, f
 		if (Motor.ConstraintName == MotorName)
 		{
 			Motor.SpeedMultiplier = FMath::Clamp(SpeedMultiplier, 0.0f, 1.0f);
+			Motor.bPendingApply = true;
 
 			if (bEnableDebugLog)
 			{
@@ -224,7 +306,16 @@ void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEn
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			if (!bEnabled && IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.ResolvedMotorId))
+			{
+				// The backend can't let go (e.g. an actuator with no off switch):
+				// saying "disabled" would be a lie — the motor keeps holding.
+				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
+					*Motor.ResolvedMotorId.ToString(), *MotorName.ToString());
+				return;
+			}
 			Motor.bEnabled = bEnabled;
+			Motor.bPendingApply = true;
 			ApplyAngularMotorSettings(Motor);
 			return;
 		}
@@ -238,7 +329,14 @@ void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEna
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			if (!bEnabled && IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.ResolvedMotorId))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
+					*Motor.ResolvedMotorId.ToString(), *MotorName.ToString());
+				return;
+			}
 			Motor.bEnabled = bEnabled;
+			Motor.bPendingApply = true;
 			ApplyLinearMotorSettings(Motor);
 			return;
 		}
@@ -251,6 +349,12 @@ float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) co
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
+			{
+				// The base reads the joint in radians (constraint angle on Chaos,
+				// position actuator's joint on MuJoCo).
+				return FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
+			}
 			// Const getter callable from Blueprint at any point in the frame: resolve from
 			// the mesh's CURRENT physics state instead of trusting the tick-time cache,
 			// which dangles after a physics state recreation until the next refresh.
@@ -275,7 +379,9 @@ float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) co
 					CurrentAngle = Constraint->GetCurrentTwist();
 					break;
 			}
-			return CurrentAngle;
+			// Chaos reports the constraint angles in radians; this API is degrees
+			// on both paths (TargetAngle is degrees).
+			return FMath::RadiansToDegrees(CurrentAngle);
 		}
 	}
 	return 0.0f;
@@ -285,10 +391,18 @@ float UMebotControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) 
 {
 	for (const FLinearMotorConfig& Motor : LinearMotors)
 	{
-		if (Motor.ConstraintName == MotorName && Motor.CachedConstraint)
+		if (Motor.ConstraintName == MotorName)
 		{
-			// Get current linear state from constraint - not directly available, return target
-			return Motor.TargetPosition;
+			if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
+			{
+				// Real travel (cm) from the base
+				return RobotBase->GetMotorValue(Motor.ResolvedMotorId);
+			}
+			if (Motor.CachedConstraint)
+			{
+				// Get current linear state from constraint - not directly available, return target
+				return Motor.TargetPosition;
+			}
 		}
 	}
 	return 0.0f;
@@ -296,12 +410,16 @@ float UMebotControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) 
 
 void UMebotControllerComponent::ReinitializeMotors()
 {
+	ResolveRobotBase();
 	FindConstraints();
 
-	// Initialize current angles/positions from constraint states
+	// Seed the rate limiters from the live joints (base-routed motors read the
+	// base; direct ones the constraint) so a reinit eases from where the
+	// mechanism is instead of jumping from a stale value. Targets are kept.
+	const bool bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		if (Motor.CachedConstraint)
+		if (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone()))
 		{
 			Motor.CurrentAngle = GetAngularMotorCurrentAngle(Motor.ConstraintName);
 		}
@@ -309,9 +427,18 @@ void UMebotControllerComponent::ReinitializeMotors()
 
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		Motor.CurrentPosition = Motor.TargetPosition;
+		// The direct path can't read a constraint's linear position; the base can.
+		Motor.CurrentPosition = (bViaBase && !Motor.ResolvedMotorId.IsNone()) ? RobotBase->GetMotorValue(Motor.ResolvedMotorId) : Motor.TargetPosition;
 	}
 
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		Motor.bPendingApply = true;
+	}
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		Motor.bPendingApply = true;
+	}
 	UpdateAngularMotors(0.0f);
 	UpdateLinearMotors(0.0f);
 
@@ -325,11 +452,13 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 {
 	FString Info = TEXT("=== Mebot Motor Status ===\n\nAngular Motors:\n");
 
+	const bool bViaBase = IsUsingRobotBase();
 	for (const FAngularMotorConfig& Motor : AngularMotors)
 	{
 		FString AxisStr = Motor.ControlAxis == EMotorAxis::X ? TEXT("X") : Motor.ControlAxis == EMotorAxis::Y ? TEXT("Y")
 																											  : TEXT("Z");
-		FString StatusStr = Motor.CachedConstraint ? TEXT("OK") : TEXT("NOT FOUND");
+		FString StatusStr = (bViaBase && !Motor.ResolvedMotorId.IsNone()) ? FString::Printf(TEXT("base:%s"), *Motor.ResolvedMotorId.ToString())
+																  : (Motor.CachedConstraint ? TEXT("OK") : TEXT("NOT FOUND"));
 		Info += FString::Printf(TEXT("  %s: Target=%.1f° | Axis=%s | Enabled=%s | Status=%s\n"),
 			*Motor.ConstraintName.ToString(),
 			Motor.TargetAngle,
@@ -343,7 +472,8 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 	{
 		FString AxisStr = Motor.ControlAxis == EMotorAxis::X ? TEXT("X") : Motor.ControlAxis == EMotorAxis::Y ? TEXT("Y")
 																											  : TEXT("Z");
-		FString StatusStr = Motor.CachedConstraint ? TEXT("OK") : TEXT("NOT FOUND");
+		FString StatusStr = (bViaBase && !Motor.ResolvedMotorId.IsNone()) ? FString::Printf(TEXT("base:%s"), *Motor.ResolvedMotorId.ToString())
+																  : (Motor.CachedConstraint ? TEXT("OK") : TEXT("NOT FOUND"));
 		Info += FString::Printf(TEXT("  %s: Target=%.1fcm | Axis=%s | Enabled=%s | Status=%s\n"),
 			*Motor.ConstraintName.ToString(),
 			Motor.TargetPosition,
@@ -366,13 +496,25 @@ void UMebotControllerComponent::RefreshConstraintCache()
 	// while physics is torn down mid-reregistration); motor updates already null-check and
 	// skip the frame instead of driving a freed constraint.
 	USkeletalMeshComponent* Mesh = IsValid(CachedSkeletalMesh) ? CachedSkeletalMesh : nullptr;
+	// A new instance (physics state recreated) starts from the asset's defaults:
+	// mark the motor pending so its target / drive settings are pushed again.
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		FConstraintInstance* Found = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		if (Found && Found != Motor.CachedConstraint)
+		{
+			Motor.bPendingApply = true;
+		}
+		Motor.CachedConstraint = Found;
 	}
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		Motor.CachedConstraint = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		FConstraintInstance* Found = Mesh ? Mesh->FindConstraintInstance(Motor.ConstraintName) : nullptr;
+		if (Found && Found != Motor.CachedConstraint)
+		{
+			Motor.bPendingApply = true;
+		}
+		Motor.CachedConstraint = Found;
 	}
 }
 
@@ -467,10 +609,16 @@ USkeletalMeshComponent* UMebotControllerComponent::GetOwnerSkeletalMesh()
 
 void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 {
+	const bool bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
-		if (Motor.bEnabled && Motor.CachedConstraint)
+		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone())))
 		{
+			const bool bMoving = !FMath::IsNearlyEqual(Motor.CurrentAngle, Motor.TargetAngle);
+			if (!bMoving && !Motor.bPendingApply)
+			{
+				continue; // the drive holds its target; nothing to push
+			}
 			// Smoothly interpolate current angle toward target at specified speed
 			float EffectiveSpeed = Motor.MaxSpeed * Motor.SpeedMultiplier;
 			float MaxDelta = EffectiveSpeed * DeltaTime;
@@ -487,16 +635,23 @@ void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 			}
 
 			ApplyAngularMotorSettings(Motor);
+			Motor.bPendingApply = false;
 		}
 	}
 }
 
 void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
 {
+	const bool bViaBase = IsUsingRobotBase();
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
-		if (Motor.bEnabled && Motor.CachedConstraint)
+		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone())))
 		{
+			const bool bMoving = !FMath::IsNearlyEqual(Motor.CurrentPosition, Motor.TargetPosition);
+			if (!bMoving && !Motor.bPendingApply)
+			{
+				continue; // the drive holds its target; nothing to push
+			}
 			// Smoothly interpolate current position toward target at specified speed
 			float EffectiveSpeed = Motor.MaxSpeed * Motor.SpeedMultiplier;
 			float MaxDelta = EffectiveSpeed * DeltaTime;
@@ -513,12 +668,31 @@ void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
 			}
 
 			ApplyLinearMotorSettings(Motor);
+			Motor.bPendingApply = false;
 		}
 	}
 }
 
 void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& Motor)
 {
+	// Through the robot base: the interpolated angle (degrees, inverted if
+	// asked) becomes a Position command in radians; the backend owns the
+	// drive (constraint drive on Chaos, position actuator on MuJoCo).
+	if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
+	{
+		if (Motor.bEnabled)
+		{
+			const float EffectiveAngle = Motor.bInvertDirection ? -Motor.CurrentAngle : Motor.CurrentAngle;
+			RobotBase->SetMotorCommand(Motor.ResolvedMotorId, FMath::DegreesToRadians(EffectiveAngle));
+		}
+		else
+		{
+			// Disabled: stop servoing (the backend disables its drive), as the
+			// direct path does.
+			RobotBase->ReleaseMotor(Motor.ResolvedMotorId);
+		}
+		return;
+	}
 	if (!Motor.CachedConstraint)
 	{
 		return;
@@ -556,6 +730,19 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 
 void UMebotControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Motor)
 {
+	// Through the robot base: the interpolated travel (cm) is the Position command.
+	if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
+	{
+		if (Motor.bEnabled)
+		{
+			RobotBase->SetMotorCommand(Motor.ResolvedMotorId, Motor.CurrentPosition);
+		}
+		else
+		{
+			RobotBase->ReleaseMotor(Motor.ResolvedMotorId);
+		}
+		return;
+	}
 	if (!Motor.CachedConstraint)
 	{
 		return;
