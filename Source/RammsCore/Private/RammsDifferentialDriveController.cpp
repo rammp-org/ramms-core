@@ -242,44 +242,59 @@ FBodyInstance* URammsDifferentialDriveController::GetBoneBodyInstance(FName Bone
 
 void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState)
 {
-	// Base-component path: read the wheel joint velocity by motor Id. Lateral
-	// velocity / slip / surface friction need contact data the generic motor
-	// interface doesn't expose (and MuJoCo resolves contact itself), so those
-	// fields stay at their neutral defaults — slip modeling is off by default.
+	// The contact-dependent fields (lateral velocity, load, surface friction,
+	// slip) need the wheel's simulating Chaos body; the generic motor interface
+	// doesn't expose contact data and MuJoCo resolves contact itself.
+	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
+	const bool	   bHaveBody = BodyInst && BodyInst->IsInstanceSimulatingPhysics();
+	const int32	   BoneIndex = (bHaveBody && SkeletalMeshComponent) ? SkeletalMeshComponent->GetBoneIndex(BoneName) : INDEX_NONE;
+
 	if (UsesBase())
 	{
+		// Base-component path: the wheel joint velocity comes by motor Id.
 		OutState.AngularVelocity = BaseComponent->GetMotorVelocity(MotorId);
 		OutState.LinearVelocity = OutState.AngularVelocity * WheelRadius;
-		OutState.LateralVelocity = 0.0f;
-		OutState.SlipRatio = 0.0f;
-		return;
+		if (BoneIndex == INDEX_NONE)
+		{
+			// No Chaos wheel body to read contact from (MuJoCo, or no bone
+			// mapping): neutral contact state, so traction modeling is a
+			// pass-through. Say so once if it was asked for.
+			OutState.LateralVelocity = 0.0f;
+			OutState.SlipRatio = 0.0f;
+			OutState.SuspensionLoad = 0.0f;
+			OutState.SurfaceFriction = 1.0f;
+			if (bEnableSlipModeling && !bWarnedNoContactBody)
+			{
+				bWarnedNoContactBody = true;
+				UE_LOG(LogTemp, Warning, TEXT("[DiffDrive] '%s': slip modeling is enabled but wheel '%s' (motor '%s') has no simulating Chaos body to read contact from — traction modeling is bypassed on this backend."),
+					*GetName(), *BoneName.ToString(), *MotorId.ToString());
+			}
+			return;
+		}
 	}
-
-	FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
-	if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
+	else
 	{
-		return;
+		if (BoneIndex == INDEX_NONE)
+		{
+			return;
+		}
+
+		// Get angular velocity in radians per second
+		// Assuming wheel spins around its local Y axis (standard for UE wheel components)
+		FVector AngularVelocity = BodyInst->GetUnrealWorldAngularVelocityInRadians();
+
+		// Convert to local space to extract the rotation speed around the
+		// wheel's spin axis (typically Y axis)
+		FTransform SpinTransform = SkeletalMeshComponent->GetBoneTransform(BoneIndex);
+		FVector	   LocalAngularVelocity = SpinTransform.InverseTransformVectorNoScale(AngularVelocity);
+		OutState.AngularVelocity = LocalAngularVelocity.Y;
+
+		// Calculate linear velocity at contact point
+		OutState.LinearVelocity = OutState.AngularVelocity * WheelRadius;
 	}
 
-	// Get angular velocity in radians per second
-	// Assuming wheel spins around its local Y axis (standard for UE wheel components)
-	FVector AngularVelocity = BodyInst->GetUnrealWorldAngularVelocityInRadians();
-
-	// Get the bone transform to convert to local space
-	int32 BoneIndex = SkeletalMeshComponent->GetBoneIndex(BoneName);
-	if (BoneIndex == INDEX_NONE)
-	{
-		return;
-	}
-
+	// Contact state from the Chaos wheel body (both paths from here on).
 	FTransform BoneTransform = SkeletalMeshComponent->GetBoneTransform(BoneIndex);
-	FVector	   LocalAngularVelocity = BoneTransform.InverseTransformVectorNoScale(AngularVelocity);
-
-	// Extract rotation speed around wheel's spin axis (typically Y axis)
-	OutState.AngularVelocity = LocalAngularVelocity.Y;
-
-	// Calculate linear velocity at contact point
-	OutState.LinearVelocity = OutState.AngularVelocity * WheelRadius;
 
 	// Get actual linear velocity of the wheel
 	FVector WheelVelocity = BodyInst->GetUnrealWorldVelocity();

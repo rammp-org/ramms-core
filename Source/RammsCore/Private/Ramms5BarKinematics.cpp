@@ -70,15 +70,31 @@ FVector2D URamms5BarKinematics::ComputeEndpoint(const FRamms5BarLinkageSpec& Spe
 	bValid = true;
 	if (CenterDist < KINDA_SMALL_NUMBER || CenterDist > Ra + Rb || CenterDist < FMath::Abs(Ra - Rb))
 	{
-		// Distal links can't meet: return the midpoint along the knee-to-knee
-		// line at the proportional radius (closest consistent approximation).
+		// Distal links can't meet: return the midpoint of the two circles' closest
+		// points, which lie on the knee-to-knee line. T is the parameter along
+		// Delta (0 = KneeA, 1 = KneeB).
 		bValid = false;
 		if (CenterDist < KINDA_SMALL_NUMBER)
 		{
 			return KneeA;
 		}
-		const double AClosest = (Ra * Ra - Rb * Rb + CenterDist * CenterDist) / (2.0 * CenterDist);
-		return KneeA + Delta * (AClosest / CenterDist);
+		double T;
+		if (CenterDist > Ra + Rb)
+		{
+			// Disjoint: A's point at Ra towards B, B's point at Rb towards A.
+			T = (Ra + CenterDist - Rb) / (2.0 * CenterDist);
+		}
+		else if (Ra >= Rb)
+		{
+			// B's circle inside A's: both points beyond KneeB, away from A.
+			T = (Ra + CenterDist + Rb) / (2.0 * CenterDist);
+		}
+		else
+		{
+			// A's circle inside B's: both points behind KneeA, away from B.
+			T = (CenterDist - Ra - Rb) / (2.0 * CenterDist);
+		}
+		return KneeA + Delta * T;
 	}
 
 	const double	A = (Ra * Ra - Rb * Rb + CenterDist * CenterDist) / (2.0 * CenterDist);

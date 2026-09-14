@@ -10,8 +10,9 @@
 URammsKeyboardTeleopComponent::URammsKeyboardTeleopComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	// Before the drive controller's own PrePhysics tick, so the input it reads
-	// this frame is this frame's keys.
+	// Same group as the consumers; BeginPlay registers this component as their
+	// tick prerequisite so the input they read this frame is this frame's keys
+	// (peer order inside a tick group is otherwise unspecified).
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 }
 
@@ -30,12 +31,41 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 			if (Linkage.ControllerNames.Num() == 0 || Linkage.ControllerNames.Contains(C->GetFName()))
 			{
 				Linkages.Add(C);
+				C->AddTickPrerequisiteComponent(this);
 			}
+		}
+		if (Drive)
+		{
+			Drive->AddTickPrerequisiteComponent(this);
 		}
 		UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': drive=%s linkages=%d motor bindings=%d base=%s"),
 			*Owner->GetName(), Drive ? TEXT("yes") : TEXT("no"), Linkages.Num(), MotorBindings.Num(),
 			Base ? TEXT("yes") : TEXT("no"));
 	}
+}
+
+void URammsKeyboardTeleopComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	ReleaseDrive();
+	Super::EndPlay(EndPlayReason);
+}
+
+void URammsKeyboardTeleopComponent::ReleaseDrive()
+{
+	// The drive controller latches the last SetDriveInput; without this the
+	// robot keeps driving after the player lets go of it (unpossess, drive
+	// disabled, end of play). Only our own command is released — the external
+	// input path (SetExternalDriveInput) is untouched.
+	if (bDriveCommandActive && Drive)
+	{
+		Drive->SetDriveInput(FVector2D::ZeroVector);
+		if (bLogCommands)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] drive input released"));
+		}
+	}
+	bDriveCommandActive = false;
+	LastDrive = FVector2D::ZeroVector;
 }
 
 APlayerController* URammsKeyboardTeleopComponent::GetPlayerController() const
@@ -68,21 +98,28 @@ void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	APlayerController* PC = GetPlayerController();
-	if (!PC)
-	{
-		return;
-	}
 
 	// --- Drive -----------------------------------------------------------
-	if (bDriveEnabled && Drive)
+	if (PC && bDriveEnabled && Drive)
 	{
 		const FVector2D Input(Axis(PC, TurnRightKey, TurnLeftKey) * TurnScale, Axis(PC, ForwardKey, BackwardKey) * ForwardScale);
 		Drive->SetDriveInput(Input);
+		bDriveCommandActive = true;
 		if (bLogCommands && !Input.Equals(LastDrive))
 		{
 			UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] drive input (%.2f, %.2f)"), Input.X, Input.Y);
 		}
 		LastDrive = Input;
+	}
+	else
+	{
+		// Unpossessed or driving disabled: don't leave the last command latched.
+		ReleaseDrive();
+	}
+
+	if (!PC)
+	{
+		return;
 	}
 
 	// --- 5-bar endpoint height ------------------------------------------
@@ -99,7 +136,17 @@ void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick Ti
 			FVector2D* Target = LinkageTargets.Find(C);
 			if (!Target)
 			{
-				Target = &LinkageTargets.Add(C, C->GetCurrentEndpoint());
+				// Seed from the live endpoint. An inconsistent live pose only
+				// yields an estimate; that's fine as a seed because a target
+				// is only adopted once the linkage accepts it.
+				bool			bValid = false;
+				const FVector2D Seed = C->GetCurrentEndpointChecked(bValid);
+				if (!bValid)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[KeyboardTeleop] %s: live joint angles don't close the linkage; seeding the endpoint target from the estimate (%.2f, %.2f)"),
+						*C->GetName(), Seed.X, Seed.Y);
+				}
+				Target = &LinkageTargets.Add(C, Seed);
 			}
 			const FVector2D Candidate(Target->X, Target->Y + Dz);
 			// Only advance the target when the linkage accepts it (reachable and

@@ -59,9 +59,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	void SetJointAngles(FVector2D AnglesAB);
 
-	/** Current endpoint (local x-z, cm) from the live proximal joint angles. */
+	/** Current endpoint (local x-z, cm) from the live proximal joint angles.
+	 *  If the live angles don't close the loop (distal links can't meet, or a
+	 *  knee is bent past straight) this is the closest estimate — use
+	 *  GetCurrentEndpointChecked to know. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
 	FVector2D GetCurrentEndpoint() const;
+
+	/** As GetCurrentEndpoint, with bValid false when the live angles don't
+	 *  describe a closed, feasible linkage (the result is then an estimate). */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetCurrentEndpointChecked(bool& bValid) const;
 
 	/** Live proximal joint angles (rad; A = X, B = Y) read from the base. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")

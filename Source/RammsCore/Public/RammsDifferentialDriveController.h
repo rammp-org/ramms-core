@@ -326,6 +326,9 @@ private:
 	 *  else the Chaos wheel bone). */
 	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState);
 
+	/** One-time notice that slip modeling has no Chaos contact body on this backend. */
+	bool bWarnedNoContactBody = false;
+
 	/** Update controller in torque control mode */
 	void UpdateTorqueControl(float DeltaTime);
 

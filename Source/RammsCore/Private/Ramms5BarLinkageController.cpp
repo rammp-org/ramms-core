@@ -137,6 +137,11 @@ FVector2D URamms5BarLinkageController::GetCurrentJointAngles() const
 FVector2D URamms5BarLinkageController::GetCurrentEndpoint() const
 {
 	bool bValid = false;
+	return GetCurrentEndpointChecked(bValid);
+}
+
+FVector2D URamms5BarLinkageController::GetCurrentEndpointChecked(bool& bValid) const
+{
 	return URamms5BarKinematics::ComputeEndpoint(Resolved, GetCurrentJointAngles(), bValid);
 }
 

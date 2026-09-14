@@ -84,6 +84,7 @@ public:
 	URammsKeyboardTeleopComponent();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	// --- Driving ---------------------------------------------------------------
@@ -130,6 +131,8 @@ public:
 private:
 	APlayerController* GetPlayerController() const;
 	float			   Axis(APlayerController* PC, const FKey& Positive, const FKey& Negative) const;
+	/** Zero the drive command this component issued (unpossessed, disabled, end of play). */
+	void ReleaseDrive();
 
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
@@ -147,4 +150,7 @@ private:
 	TMap<FName, float> MotorTargets;
 
 	FVector2D LastDrive = FVector2D::ZeroVector;
+
+	/** True while the drive controller holds a command this component issued. */
+	bool bDriveCommandActive = false;
 };
