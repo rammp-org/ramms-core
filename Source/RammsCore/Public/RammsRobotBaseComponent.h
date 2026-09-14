@@ -67,6 +67,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos")
 	FName ChaosSkeletalMeshComponentName = NAME_None;
 
+	/** Chaos only: constraint drive stiffness (spring) for Position motors
+	 *  mapped to physics-asset constraints. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
+	float ChaosPositionDriveStiffness = 100000.0f;
+
+	/** Chaos only: constraint drive damping for Position motors. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
+	float ChaosPositionDriveDamping = 10000.0f;
+
+	/** Chaos only: constraint drive force/torque limit for Position motors
+	 *  (0 = unlimited). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
+	float ChaosPositionDriveForceLimit = 0.0f;
+
 	// --- Motor command / read (by registry Id), routed to the backend --------
 
 	/** Command a motor by Id in the robot's sense (interpreted per its
