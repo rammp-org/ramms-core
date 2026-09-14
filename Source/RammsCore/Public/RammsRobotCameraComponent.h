@@ -20,7 +20,8 @@ class USpringArmComponent;
  *    camera. Exactly one camera is active, so the view target picks it up
  *    with no view-target changes.
  *  - While OrbitButton (right mouse) is held, mouse movement yaws / pitches
- *    the spring arm the active camera hangs from; the wheel changes its length;
+ *    the spring arm the active camera hangs from; the wheel eases its length
+ *    (proportional steps, sensitivity, smoothing — see the Zoom settings);
  *    ResetKey (Home) restores the arm's authored pose. Cameras without a spring
  *    arm parent are fixed.
  *
@@ -83,14 +84,52 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
 	float MaxPitch = 15.0f;
 
-	/** Arm length change per wheel notch (cm). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit", meta = (ClampMin = "0.0"))
-	float ZoomStep = 40.0f;
+	// --- Zoom ------------------------------------------------------------------
+	// A wheel notch changes the *desired* arm length; the arm then eases toward
+	// it (ZoomInterpSpeed), so one notch is a short glide rather than a jump.
+	// A physical wheel click arrives as a burst of events; ZoomRepeatDelay
+	// collapses the burst into one step, ZoomSensitivity scales the step, and a
+	// proportional step keeps it feeling the same whether the camera is close
+	// or far.
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit", meta = (ClampMin = "1.0"))
+	/** Multiplier on the zoom step. Lower it if one wheel click zooms too far. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "0.0"))
+	float ZoomSensitivity = 1.0f;
+
+	/** Step per notch as a fraction of the current arm length (0.08 = 8 %), so
+	 *  zooming is geometric: each notch feels the same at any distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (EditCondition = "bZoomProportional", ClampMin = "0.0", ClampMax = "1.0"))
+	float ZoomStepFraction = 0.08f;
+
+	/** Off: a fixed ZoomStep (cm) per notch instead of a fraction. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
+	bool bZoomProportional = true;
+
+	/** Arm length change per wheel notch (cm) when not proportional. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (EditCondition = "!bZoomProportional", ClampMin = "0.0"))
+	float ZoomStep = 20.0f;
+
+	/** One physical wheel click reaches the game as a burst of events spread
+	 *  over ~0.15-0.2 s (macOS smooth scrolling: ~16 events for one line;
+	 *  high-resolution wheels more). A burst is ONE step: a new step starts
+	 *  when the wheel was idle for at least ZoomIdleGap before this event, or
+	 *  when ZoomRepeatDelay has passed since the last step (a held wheel then
+	 *  repeats at 1 / ZoomRepeatDelay). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "0.0"))
+	float ZoomIdleGap = 0.08f;
+
+	/** See ZoomIdleGap. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "0.0"))
+	float ZoomRepeatDelay = 0.3f;
+
+	/** How quickly the arm eases toward the desired length (1/s); 0 = instant. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "0.0"))
+	float ZoomInterpSpeed = 10.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "1.0"))
 	float MinArmLength = 60.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit", meta = (ClampMin = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "1.0"))
 	float MaxArmLength = 1500.0f;
 
 	/** Activate the next camera (also bound to NextCameraKey). */
@@ -107,10 +146,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera")
 	void Orbit(float DeltaYawDegrees, float DeltaPitchDegrees);
 
-	/** Change the active camera's spring arm length by DeltaLength cm (clamped
-	 *  to [MinArmLength, MaxArmLength]); negative zooms in. */
+	/** Change the active camera's desired spring arm length by DeltaLength cm
+	 *  (clamped to [MinArmLength, MaxArmLength]); negative zooms in. The arm
+	 *  eases toward it at ZoomInterpSpeed. */
 	UFUNCTION(BlueprintCallable, Category = "Camera")
 	void Zoom(float DeltaLength);
+
+	/** Zoom by wheel notches (positive = in), applying ZoomSensitivity and the
+	 *  proportional / fixed step — what the wheel calls. */
+	UFUNCTION(BlueprintCallable, Category = "Camera")
+	void ZoomNotches(float Notches);
+
+	/** The arm length the zoom is easing toward (the arm's own TargetArmLength
+	 *  lags it while ZoomInterpSpeed > 0). */
+	UFUNCTION(BlueprintPure, Category = "Camera")
+	float GetDesiredArmLength() const { return DesiredArmLength; }
 
 	/** Restore the active camera's spring arm to its authored rotation/length. */
 	UFUNCTION(BlueprintCallable, Category = "Camera")
@@ -130,6 +180,13 @@ private:
 
 	/** Authored (pre-orbit) pose per spring arm, captured on first use. */
 	TMap<TWeakObjectPtr<USpringArmComponent>, TPair<FRotator, float>> ArmDefaults;
+
+	/** Arm length the active arm eases toward; re-seeded on camera switch / reset. */
+	float DesiredArmLength = 0.0f;
+
+	/** Burst gating: when the last wheel event arrived and the last step fired. */
+	double LastWheelEventTime = -1.0;
+	double LastZoomStepTime = -1.0;
 
 	/** Last cursor position, for the position-delta orbit path. */
 	float LastCursorX = 0.0f;

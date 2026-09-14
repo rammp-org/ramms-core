@@ -102,6 +102,7 @@ void URammsRobotCameraComponent::SetActiveCamera(UCameraComponent* Camera)
 		{
 			ArmDefaults.Add(Arm, TPair<FRotator, float>(Arm->GetRelativeRotation(), Arm->TargetArmLength));
 		}
+		DesiredArmLength = Arm->TargetArmLength;
 	}
 	UE_LOG(LogTemp, Log, TEXT("[RobotCamera] '%s' active camera -> %s"),
 		GetOwner() ? *GetOwner()->GetName() : TEXT("?"), Camera ? *Camera->GetName() : TEXT("none"));
@@ -158,8 +159,22 @@ void URammsRobotCameraComponent::Zoom(float DeltaLength)
 {
 	if (USpringArmComponent* Arm = ActiveArm())
 	{
-		Arm->TargetArmLength = FMath::Clamp(Arm->TargetArmLength + DeltaLength, MinArmLength, MaxArmLength);
+		DesiredArmLength = FMath::Clamp(DesiredArmLength + DeltaLength, MinArmLength, MaxArmLength);
+		if (ZoomInterpSpeed <= 0.0f)
+		{
+			Arm->TargetArmLength = DesiredArmLength;
+		}
 	}
+}
+
+void URammsRobotCameraComponent::ZoomNotches(float Notches)
+{
+	if (Notches == 0.0f || !ActiveArm())
+	{
+		return;
+	}
+	const float Step = bZoomProportional ? DesiredArmLength * ZoomStepFraction : ZoomStep;
+	Zoom(-Notches * Step * ZoomSensitivity); // positive notches zoom in
 }
 
 void URammsRobotCameraComponent::ResetOrbit()
@@ -170,6 +185,7 @@ void URammsRobotCameraComponent::ResetOrbit()
 		{
 			Arm->SetRelativeRotation(Def->Key);
 			Arm->TargetArmLength = Def->Value;
+			DesiredArmLength = Def->Value;
 		}
 	}
 }
@@ -251,15 +267,34 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		Orbit(DX * OrbitSensitivity, DY * OrbitSensitivity * (bInvertPitch ? -1.0f : 1.0f));
 	}
 
-	// Zoom: wheel notches arrive as key presses.
-	float ZoomDelta = 0.0f;
-	if (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
+	// Zoom: the wheel axis carries this frame's notches (fractional on
+	// high-resolution wheels); the scroll-up/down key presses are the fallback
+	// for inputs that only deliver those (never both, to avoid double counting).
+	float Notches = PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis);
+	if (Notches == 0.0f)
 	{
-		ZoomDelta -= ZoomStep;
+		Notches = (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp) ? 1.0f : 0.0f) - (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown) ? 1.0f : 0.0f);
 	}
-	if (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
+	if (Notches != 0.0f)
 	{
-		ZoomDelta += ZoomStep;
+		// One step per burst: a single physical click reaches us as many
+		// events over several frames (measured: ~16 on macOS for one line),
+		// so the magnitude is meaningless as a step count — only the direction
+		// is used; a step fires on a new burst (idle gap) or on repeat.
+		const double Now = FPlatformTime::Seconds();
+		const bool	 bNewBurst = LastWheelEventTime < 0.0 || Now - LastWheelEventTime >= ZoomIdleGap;
+		const bool	 bRepeat = LastZoomStepTime < 0.0 || Now - LastZoomStepTime >= ZoomRepeatDelay;
+		if (bNewBurst || bRepeat)
+		{
+			ZoomNotches(FMath::Sign(Notches));
+			LastZoomStepTime = Now;
+		}
+		LastWheelEventTime = Now;
 	}
-	Zoom(ZoomDelta);
+
+	// Ease the arm toward the desired length.
+	if (ZoomInterpSpeed > 0.0f && !FMath::IsNearlyEqual(Arm->TargetArmLength, DesiredArmLength, 0.01f))
+	{
+		Arm->TargetArmLength = FMath::FInterpTo(Arm->TargetArmLength, DesiredArmLength, DeltaTime, ZoomInterpSpeed);
+	}
 }
