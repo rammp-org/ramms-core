@@ -73,8 +73,9 @@ void URammsDifferentialDriveController::BeginPlay()
 		}
 		else
 		{
-			// Set max angular velocity on wheel body instances
-			FBodyInstance* LeftBodyInst = GetBoneBodyInstance(LeftWheelBoneName);
+			// Set max angular velocity on wheel body instances (through the
+			// base's Chaos mapping when a base drives this robot)
+			FBodyInstance* LeftBodyInst = GetWheelBody(LeftMotorId, LeftWheelBoneName);
 			if (LeftBodyInst)
 			{
 				float MaxAngularVelRad = URammsDifferentialDriveLibrary::RPMToRadPerSec(LeftMotorParams.MaxRPM);
@@ -87,7 +88,7 @@ void URammsDifferentialDriveController::BeginPlay()
 				}
 			}
 
-			FBodyInstance* RightBodyInst = GetBoneBodyInstance(RightWheelBoneName);
+			FBodyInstance* RightBodyInst = GetWheelBody(RightMotorId, RightWheelBoneName);
 			if (RightBodyInst)
 			{
 				float MaxAngularVelRad = URammsDifferentialDriveLibrary::RPMToRadPerSec(RightMotorParams.MaxRPM);
@@ -228,6 +229,20 @@ void URammsDifferentialDriveController::ResetOdometry(FVector Position, FRotator
 bool URammsDifferentialDriveController::UsesBase() const
 {
 	return BaseComponent && BaseComponent->HasBackend();
+}
+
+FBodyInstance* URammsDifferentialDriveController::GetWheelBody(FName MotorId, FName BoneName)
+{
+	if (UsesBase())
+	{
+		if (USkeletalMeshComponent* BaseMesh = BaseComponent->GetChaosSkeletalMesh())
+		{
+			const FName ChaosBone = BaseComponent->GetChaosName(MotorId);
+			return ChaosBone.IsNone() ? nullptr : BaseMesh->GetBodyInstance(ChaosBone);
+		}
+		return nullptr;
+	}
+	return GetBoneBodyInstance(BoneName);
 }
 
 FBodyInstance* URammsDifferentialDriveController::GetBoneBodyInstance(FName BoneName)

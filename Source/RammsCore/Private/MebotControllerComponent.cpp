@@ -91,10 +91,11 @@ FName UMebotControllerComponent::BaseMotorId(FName ConstraintName, FName Explici
 	if (!RobotBase)
 	{
 		return NAME_None;
-	}
-	if (!ExplicitMotorId.IsNone() && RobotBase->HasMotor(ExplicitMotorId))
+	}	// An explicit Id is authoritative: a typo must not silently pick a
+	// different motor via the constraint-name fallback.
+	if (!ExplicitMotorId.IsNone())
 	{
-		return ExplicitMotorId;
+		return RobotBase->HasMotor(ExplicitMotorId) ? ExplicitMotorId : NAME_None;
 	}
 	return RobotBase->FindMotorIdByChaosName(ConstraintName);
 }
@@ -122,9 +123,9 @@ void UMebotControllerComponent::ResolveRobotBase()
 	{
 		const FName Id = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
 		if (Id.IsNone())
-		{
-			UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s' — driving it directly."),
-				*RobotBase->GetName(), *Motor.ConstraintName.ToString());
+		{			UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
+				*RobotBase->GetName(), *Motor.ConstraintName.ToString(),
+				Motor.MotorId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *Motor.MotorId.ToString()));
 		}
 		Motor.MotorId = Id;
 	}
@@ -132,9 +133,9 @@ void UMebotControllerComponent::ResolveRobotBase()
 	{
 		const FName Id = BaseMotorId(Motor.ConstraintName, Motor.MotorId);
 		if (Id.IsNone())
-		{
-			UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s' — driving it directly."),
-				*RobotBase->GetName(), *Motor.ConstraintName.ToString());
+		{			UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
+				*RobotBase->GetName(), *Motor.ConstraintName.ToString(),
+				Motor.MotorId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *Motor.MotorId.ToString()));
 		}
 		Motor.MotorId = Id;
 	}
@@ -294,6 +295,14 @@ void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEn
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			if (!bEnabled && IsUsingRobotBase() && !Motor.MotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.MotorId))
+			{
+				// The backend can't let go (e.g. an actuator with no off switch):
+				// saying "disabled" would be a lie — the motor keeps holding.
+				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
+					*Motor.MotorId.ToString(), *MotorName.ToString());
+				return;
+			}
 			Motor.bEnabled = bEnabled;
 			Motor.bPendingApply = true;
 			ApplyAngularMotorSettings(Motor);
@@ -309,6 +318,12 @@ void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEna
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			if (!bEnabled && IsUsingRobotBase() && !Motor.MotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.MotorId))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
+					*Motor.MotorId.ToString(), *MotorName.ToString());
+				return;
+			}
 			Motor.bEnabled = bEnabled;
 			Motor.bPendingApply = true;
 			ApplyLinearMotorSettings(Motor);

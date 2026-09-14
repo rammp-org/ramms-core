@@ -4,7 +4,6 @@
 #include "MebotControllerComponent.h"
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Engine/SkeletalMesh.h"
 #include "GameFramework/Actor.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/ConstraintInstance.h"
@@ -141,12 +140,6 @@ FConstraintInstance* FRammsChaosActuationBackend::ResolveConstraintMotor(FName M
 				TEXT("RammsChaosActuationBackend: constraint '%s' (motor '%s') has both swing axes unlocked; Chaos's single swing drive will also hold the other swing at zero while this motor is driven."),
 				*ConstraintName.ToString(), *MotorId.ToString());
 		}
-		if (const USkeletalMesh* Asset = SkelMesh->GetSkeletalMeshAsset())
-		{
-			const FMatrix ParentRef = Asset->GetComposedRefPoseMatrix(New.ParentBone);
-			const FMatrix ChildRef = Asset->GetComposedRefPoseMatrix(New.ChildBone);
-			New.RestOffset = ParentRef.InverseFast().TransformPosition(ChildRef.GetOrigin());
-		}
 		static const TCHAR* AxisNames[3] = { TEXT("X"), TEXT("Y"), TEXT("Z") };
 		static const TCHAR* AngNames[3] = { TEXT("twist"), TEXT("swing2"), TEXT("swing1") };
 		UE_LOG(LogTemp, Log, TEXT("RammsChaosActuationBackend: motor '%s' -> constraint '%s' (%s -> %s), %s %s%s."),
@@ -158,7 +151,7 @@ FConstraintInstance* FRammsChaosActuationBackend::ResolveConstraintMotor(FName M
 	return CI;
 }
 
-bool FRammsChaosActuationBackend::GetChildInParent(const FConstraintMotor& Info, FTransform& OutChildInParent) const
+bool FRammsChaosActuationBackend::GetConstraintFrames(const FConstraintInstance& CI, const FConstraintMotor& Info, FTransform& OutParentFrameWorld, FTransform& OutChildFrameWorld) const
 {
 	USkeletalMeshComponent* SkelMesh = Mesh.Get();
 	if (!SkelMesh)
@@ -171,7 +164,9 @@ bool FRammsChaosActuationBackend::GetChildInParent(const FConstraintMotor& Info,
 	{
 		return false;
 	}
-	OutChildInParent = SkelMesh->GetBoneTransform(ChildIndex).GetRelativeTransform(SkelMesh->GetBoneTransform(ParentIndex));
+	// ConstraintBone1 is the child (Frame1), ConstraintBone2 the parent (Frame2).
+	OutParentFrameWorld = CI.GetRefFrame(EConstraintFrame::Frame2) * SkelMesh->GetBoneTransform(ParentIndex);
+	OutChildFrameWorld = CI.GetRefFrame(EConstraintFrame::Frame1) * SkelMesh->GetBoneTransform(ChildIndex);
 	return true;
 }
 
@@ -304,10 +299,14 @@ float FRammsChaosActuationBackend::GetValue(FName MotorId) const
 		}
 		if (Info->bLinear)
 		{
-			// Travel along the axis from the reference pose, in the parent
-			// bone's space (the constraint frame is authored bone-aligned here).
-			FTransform ChildInParent;
-			return GetChildInParent(*Info, ChildInParent) ? static_cast<float>(ChildInParent.GetLocation()[Info->Axis] - Info->RestOffset[Info->Axis]) : 0.0f;
+			// The child frame's offset in the parent frame, on the constraint's
+			// own axis (zero at the reference pose, where the frames coincide).
+			FTransform ParentFrameW, ChildFrameW;
+			if (!GetConstraintFrames(*CI, *Info, ParentFrameW, ChildFrameW))
+			{
+				return 0.0f;
+			}
+			return static_cast<float>(ParentFrameW.InverseTransformPositionNoScale(ChildFrameW.GetLocation())[Info->Axis]);
 		}
 		// Chaos reports these in radians.
 		switch (Info->Axis)
@@ -343,20 +342,23 @@ float FRammsChaosActuationBackend::GetVelocity(FName MotorId) const
 		}
 		FBodyInstance* Child = SkelMesh->GetBodyInstance(Info->ChildBone);
 		FBodyInstance* Parent = SkelMesh->GetBodyInstance(Info->ParentBone);
-		const int32	   ParentIndex = SkelMesh->GetBoneIndex(Info->ParentBone);
-		if (!Child || ParentIndex == INDEX_NONE)
+		FTransform	   ParentFrameW, ChildFrameW;
+		if (!Child || !GetConstraintFrames(*CI, *Info, ParentFrameW, ChildFrameW))
 		{
 			return 0.0f;
 		}
-		const FTransform ParentXf = SkelMesh->GetBoneTransform(ParentIndex);
-		// Relative velocity of the child body w.r.t. the parent, in the parent's frame.
+		// Joint-coordinate velocity: the child's motion relative to the parent
+		// AT the constraint anchor (so a rotating parent's ω × r doesn't leak
+		// into a locked slider), projected on the constraint's world axis.
+		const FVector Axis = ParentFrameW.GetUnitAxis(static_cast<EAxis::Type>(Info->Axis + 1));
 		if (Info->bLinear)
 		{
-			const FVector Rel = Child->GetUnrealWorldVelocity() - (Parent ? Parent->GetUnrealWorldVelocity() : FVector::ZeroVector);
-			return static_cast<float>(ParentXf.InverseTransformVectorNoScale(Rel)[Info->Axis]);
+			const FVector Anchor = ChildFrameW.GetLocation();
+			const FVector Rel = Child->GetUnrealWorldVelocityAtPoint(Anchor) - (Parent ? Parent->GetUnrealWorldVelocityAtPoint(Anchor) : FVector::ZeroVector);
+			return static_cast<float>(FVector::DotProduct(Rel, Axis));
 		}
 		const FVector Rel = Child->GetUnrealWorldAngularVelocityInRadians() - (Parent ? Parent->GetUnrealWorldAngularVelocityInRadians() : FVector::ZeroVector);
-		return static_cast<float>(ParentXf.InverseTransformVectorNoScale(Rel)[Info->Axis]);
+		return static_cast<float>(FVector::DotProduct(Rel, Axis));
 	}
 
 	const FName	   Bone = BoneFor(MotorId);
@@ -376,17 +378,17 @@ float FRammsChaosActuationBackend::GetVelocity(FName MotorId) const
 	return BoneTransform.InverseTransformVectorNoScale(WorldAngVel).Y;
 }
 
-void FRammsChaosActuationBackend::ReleaseMotor(FName MotorId)
+bool FRammsChaosActuationBackend::ReleaseMotor(FName MotorId)
 {
 	if (!IsConstraintMotor(MotorId))
 	{
-		return; // torque motors apply per frame; nothing is latched
+		return true; // torque motors apply per frame; nothing is latched
 	}
 	FConstraintMotor*	 Info = nullptr;
 	FConstraintInstance* CI = ResolveConstraintMotor(MotorId, Info);
 	if (!CI || !Info)
 	{
-		return;
+		return false;
 	}
 	if (Info->bLinear)
 	{
@@ -397,6 +399,7 @@ void FRammsChaosActuationBackend::ReleaseMotor(FName MotorId)
 	{
 		CI->SetOrientationDriveTwistAndSwing(false, false);
 	}
+	return true;
 }
 
 bool FRammsChaosActuationBackend::GetMotorTransform(FName MotorId, FTransform& OutWorld) const

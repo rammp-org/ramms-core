@@ -324,7 +324,9 @@ private:
 
 	/** Update wheel state from physics (base component by MotorId when present,
 	 *  else the Chaos wheel bone). */
-	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState);
+	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState);	/** The wheel's Chaos body: through the base's Chaos mesh / ChaosName when a
+	 *  base drives this robot, else the legacy mesh / bone name. */
+	FBodyInstance* GetWheelBody(FName MotorId, FName BoneName);
 
 	/** One-time notice that slip modeling has no Chaos contact body on this backend. */
 	bool bWarnedNoContactBody = false;

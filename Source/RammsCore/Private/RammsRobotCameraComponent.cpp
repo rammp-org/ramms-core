@@ -194,6 +194,17 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// Ease the arm toward the desired length — independent of possession, so
+	// Zoom() / ZoomNotches() called from Blueprint or Python on an
+	// unpossessed pawn still move the camera.
+	if (USpringArmComponent* EasedArm = ActiveArm())
+	{
+		if (ZoomInterpSpeed > 0.0f && !FMath::IsNearlyEqual(EasedArm->TargetArmLength, DesiredArmLength, 0.01f))
+		{
+			EasedArm->TargetArmLength = FMath::FInterpTo(EasedArm->TargetArmLength, DesiredArmLength, DeltaTime, ZoomInterpSpeed);
+		}
+	}
+
 	APlayerController* PC = GetPlayerController();
 	if (!PC)
 	{
@@ -290,11 +301,5 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 			LastZoomStepTime = Now;
 		}
 		LastWheelEventTime = Now;
-	}
-
-	// Ease the arm toward the desired length.
-	if (ZoomInterpSpeed > 0.0f && !FMath::IsNearlyEqual(Arm->TargetArmLength, DesiredArmLength, 0.01f))
-	{
-		Arm->TargetArmLength = FMath::FInterpTo(Arm->TargetArmLength, DesiredArmLength, DeltaTime, ZoomInterpSpeed);
 	}
 }

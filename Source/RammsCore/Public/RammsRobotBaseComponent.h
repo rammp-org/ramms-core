@@ -91,9 +91,10 @@ public:
 	void SetMotorCommand(FName MotorId, float Value);
 
 	/** Stop actively driving a motor (a position servo lets go of its joint;
-	 *  see IRammsActuationBackend::ReleaseMotor). */
+	 *  see IRammsActuationBackend::ReleaseMotor). False if the backend cannot
+	 *  release it — it is then still driven at its last command. */
 	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
-	void ReleaseMotor(FName MotorId);
+	bool ReleaseMotor(FName MotorId);
 
 	/** Chaos only: the skeletal mesh component the Chaos backend drives
 	 *  (ChaosSkeletalMeshComponentName, else the owner's first). */

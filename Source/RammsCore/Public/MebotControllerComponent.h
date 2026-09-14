@@ -28,6 +28,8 @@ struct FAngularMotorConfig
 
 	// Registry Id of this motor on the owner's RammsRobotBaseComponent. Empty =
 	// the registry motor whose ChaosName is ConstraintName (resolved at play).
+	// An explicit Id that is not in the registry drives the constraint directly
+	// (with a warning) rather than falling back to the constraint-name lookup.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	FName MotorId;
 
@@ -111,6 +113,8 @@ struct FLinearMotorConfig
 
 	// Registry Id of this motor on the owner's RammsRobotBaseComponent. Empty =
 	// the registry motor whose ChaosName is ConstraintName (resolved at play).
+	// An explicit Id that is not in the registry drives the constraint directly
+	// (with a warning) rather than falling back to the constraint-name lookup.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor")
 	FName MotorId;
 

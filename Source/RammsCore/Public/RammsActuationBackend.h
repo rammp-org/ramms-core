@@ -39,10 +39,11 @@ public:
 	virtual float GetVelocity(FName MotorId) const = 0;
 
 	/** Stop actively driving a motor: a Position/Velocity servo lets go of its
-	 *  joint (a Chaos constraint drive is disabled; a MuJoCo actuator has no
-	 *  off switch and keeps its last ctrl). Torque motors have nothing to
-	 *  release. Default: no-op. */
-	virtual void ReleaseMotor(FName MotorId) {}
+	 *  joint (a Chaos constraint drive is disabled; a MuJoCo position actuator
+	 *  is parked at the joint's current position). Torque motors have nothing
+	 *  to release. Returns false when this backend cannot release the motor —
+	 *  the caller must then treat it as still driven. Default: unsupported. */
+	virtual bool ReleaseMotor(FName MotorId) { return false; }
 
 	/** World transform of the motor's joint/body, for the base component's
 	 *  geometry queries (e.g. drive-motor separation). Returns false when the

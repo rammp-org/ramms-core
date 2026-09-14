@@ -48,7 +48,7 @@ public:
 	virtual void  SetCommand(FName MotorId, float Value) override;
 	virtual float GetValue(FName MotorId) const override;
 	virtual float GetVelocity(FName MotorId) const override;
-	virtual void  ReleaseMotor(FName MotorId) override;
+	virtual bool  ReleaseMotor(FName MotorId) override;
 	virtual bool  GetMotorTransform(FName MotorId, FTransform& OutWorld) const override;
 
 private:
@@ -62,10 +62,7 @@ private:
 		int32 Axis = 0;
 		FName ChildBone;
 		FName ParentBone;
-		/** Child bone's reference-pose location in the parent bone's space:
-		 *  the linear travel's zero. */
-		FVector RestOffset = FVector::ZeroVector;
-		bool	bTakenOver = false;
+		bool  bTakenOver = false;
 	};
 
 	/** The skeletal bone / constraint name a motor maps to (ChaosName, else Id). */
@@ -76,10 +73,11 @@ private:
 
 	/** Resolve (and cache) a Position motor's constraint and driven axis. Null
 	 *  (with a one-time warning) when the constraint is missing or fully locked. */
-	FConstraintInstance* ResolveConstraintMotor(FName MotorId, FConstraintMotor*& OutInfo) const;
-
-	/** Relative transform of the constraint's child bone in its parent bone's space. */
-	bool GetChildInParent(const FConstraintMotor& Info, FTransform& OutChildInParent) const;
+	FConstraintInstance* ResolveConstraintMotor(FName MotorId, FConstraintMotor*& OutInfo) const; /** The constraint's two reference frames in world space (Frame2 on the
+																								   *  parent body, Frame1 on the child); they coincide at the reference pose,
+																								   *  so the child frame's offset / rotation in the parent frame IS the joint
+																								   *  coordinate, on the constraint's own axes. */
+	bool GetConstraintFrames(const FConstraintInstance& CI, const FConstraintMotor& Info, FTransform& OutParentFrameWorld, FTransform& OutChildFrameWorld) const;
 
 	/** Hand the constraint over from a UMebotControllerComponent on the owner, once. */
 	void TakeOverFromMebotController(FConstraintMotor& Info);

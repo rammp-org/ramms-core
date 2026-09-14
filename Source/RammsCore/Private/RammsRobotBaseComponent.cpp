@@ -143,13 +143,10 @@ bool URammsRobotBaseComponent::HasBackend() const
 	return Backend_ != nullptr;
 }
 
-void URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
+bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 {
 	EnsureBackend();
-	if (Backend_)
-	{
-		Backend_->ReleaseMotor(MotorId);
-	}
+	return Backend_ && Backend_->ReleaseMotor(MotorId);
 }
 
 USkeletalMeshComponent* URammsRobotBaseComponent::GetChaosSkeletalMesh() const
