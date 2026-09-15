@@ -167,7 +167,9 @@ FVector2D URamms5BarLinkageController::GetReachableHeightRange(float X, bool& bV
 	{
 		Max += Step;
 	}
-	bValid = true;
+	// A single reachable sample (equal scan limits, or an interval narrower
+	// than the step) is not a range: a zero-width one would read as unbounded.
+	bValid = Max > Min;
 	return FVector2D(Min, Max);
 }
 
