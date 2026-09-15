@@ -692,6 +692,10 @@ bool URammsEndEffectorTeleopComponent::ApplyControl(FName Id, float Value)
 
 bool URammsEndEffectorTeleopComponent::TriggerControl(FName Id)
 {
+	if (!bTeleopEnabled)
+	{
+		return false; // the master enable covers both advertised paths
+	}
 	if (Id == ArmResync)
 	{
 		SyncTargetToCurrentPose();
@@ -722,8 +726,39 @@ bool URammsEndEffectorTeleopComponent::TriggerControl(FName Id)
 
 bool URammsEndEffectorTeleopComponent::ReleaseControl(FName Id)
 {
-	// Rate axes spring to zero; the arm holds wherever the target is.
-	return ApplyControl(Id, 0.0f);
+	// Rate axes spring to zero by clearing the cached rate directly — even
+	// while teleop is disabled, so no stale rate resumes motion when it is
+	// re-enabled. The arm holds wherever the target is. gripper.closed is
+	// state: releasing it is a no-op.
+	if (Id == ArmForward)
+	{
+		ControlLinear.X = 0.0f;
+	}
+	else if (Id == ArmStrafe)
+	{
+		ControlLinear.Y = 0.0f;
+	}
+	else if (Id == ArmUp)
+	{
+		ControlLinear.Z = 0.0f;
+	}
+	else if (Id == ArmYaw)
+	{
+		ControlAngular.Yaw = 0.0f;
+	}
+	else if (Id == ArmPitch)
+	{
+		ControlAngular.Pitch = 0.0f;
+	}
+	else if (Id == ArmRoll)
+	{
+		ControlAngular.Roll = 0.0f;
+	}
+	else if (Id != GripperClosed)
+	{
+		return false;
+	}
+	return true;
 }
 
 bool URammsEndEffectorTeleopComponent::ReadControl(FName Id, float& OutValue) const
