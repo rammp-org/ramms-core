@@ -182,6 +182,20 @@ private:
 	double LastZoomStepTime = -1.0;
 
 	/** Last cursor position, for the position-delta orbit path. */
+public:
+	/** True while a UI widget (the HUD) is under the cursor rather than the bare game viewport:
+	 *  drags that start there and the wheel over it belong to the UI, not the camera. */
+	UFUNCTION(BlueprintPure, Category = "Camera|Orbit")
+	bool IsCursorOverUI() const;
+
+	/** Slate type of the deepest widget under the cursor inside the game viewport (diagnostics). */
+	UFUNCTION(BlueprintPure, Category = "Camera|Orbit")
+	FString GetWidgetTypeUnderCursor() const;
+
+private:
+	bool bButtonWasHeld = false;
+	bool bDragOnUI = false;
+
 	float LastCursorX = 0.0f;
 	float LastCursorY = 0.0f;
 	bool  bHadCursor = false;

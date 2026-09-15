@@ -3,6 +3,11 @@
 #include "RammsRobotCameraComponent.h"
 #include "Camera/CameraComponent.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Application/SlateUser.h"
+#include "Layout/WidgetPath.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
+#include "Widgets/SViewport.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -249,8 +254,20 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustReleased(Key)
 			|| (bSlate && bCursorOverViewport && FSlateApplication::Get().GetPressedMouseButtons().Contains(Key));
 	};
-	const bool bOrbiting = !OrbitButton.IsValid() || Held(OrbitButton)
-		|| (bAlsoOrbitWithLeftDrag && Held(EKeys::LeftMouseButton));
+	const bool bAnyHeld = (OrbitButton.IsValid() && Held(OrbitButton)) || (bAlsoOrbitWithLeftDrag && Held(EKeys::LeftMouseButton));
+	// A press that lands on a UI widget (the HUD's joystick, a slider, a
+	// button) belongs to that widget for the whole drag: latch it at the
+	// press and don't orbit until the buttons are released.
+	if (bAnyHeld && !bButtonWasHeld)
+	{
+		bDragOnUI = IsCursorOverUI();
+	}
+	else if (!bAnyHeld)
+	{
+		bDragOnUI = false;
+	}
+	bButtonWasHeld = bAnyHeld;
+	const bool bOrbiting = !bDragOnUI && (!OrbitButton.IsValid() || bAnyHeld);
 
 	// Two delta sources: the raw mouse axes (fed while the viewport receives
 	// mouse moves, including a captured / hidden cursor) and the cursor's
@@ -285,7 +302,8 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	// Zoom: the wheel axis carries this frame's notches (fractional on
 	// high-resolution wheels); the scroll-up/down key presses are the fallback
 	// for inputs that only deliver those (never both, to avoid double counting).
-	float Notches = PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis);
+	// The wheel over a UI widget is that widget's (a scrolling panel).
+	float Notches = IsCursorOverUI() ? 0.0f : PC->GetInputAnalogKeyState(EKeys::MouseWheelAxis);
 	if (Notches == 0.0f)
 	{
 		Notches = (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp) ? 1.0f : 0.0f) - (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown) ? 1.0f : 0.0f);
@@ -318,6 +336,52 @@ namespace
 	const FName CameraOrbitPitchId(TEXT("camera.orbit_pitch"));
 	const FName CameraZoomId(TEXT("camera.zoom"));
 } // namespace
+
+namespace
+{
+	/** The widget path under the cursor from the last pointer event, if it lies inside the game viewport. */
+	bool WidgetsUnderCursorInViewport(FWidgetPath& OutPath, TSharedPtr<SViewport>& OutViewport)
+	{
+		if (!FSlateApplication::IsInitialized() || !GEngine || !GEngine->GameViewport)
+		{
+			return false;
+		}
+		OutViewport = GEngine->GameViewport->GetGameViewportWidget();
+		TSharedPtr<FSlateUser> User = FSlateApplication::Get().GetUser(0);
+		if (!OutViewport.IsValid() || !User.IsValid())
+		{
+			return false;
+		}
+		OutPath = User->GetLastWidgetsUnderCursor().ToWidgetPath();
+		return OutPath.IsValid() && OutPath.ContainsWidget(OutViewport.Get());
+	}
+} // namespace
+
+bool URammsRobotCameraComponent::IsCursorOverUI() const
+{
+	// Slate's path under the cursor: its deepest widget is the viewport itself
+	// over the bare game, and a UMG / Slate widget (the HUD) when one sits
+	// there. Pass-through layers are self-hit-test-invisible and never end
+	// the path.
+	FWidgetPath			  Path;
+	TSharedPtr<SViewport> Viewport;
+	if (!WidgetsUnderCursorInViewport(Path, Viewport))
+	{
+		return false;
+	}
+	return &Path.GetLastWidget().Get() != Viewport.Get();
+}
+
+FString URammsRobotCameraComponent::GetWidgetTypeUnderCursor() const
+{
+	FWidgetPath			  Path;
+	TSharedPtr<SViewport> Viewport;
+	if (!WidgetsUnderCursorInViewport(Path, Viewport))
+	{
+		return TEXT("(none)");
+	}
+	return Path.GetLastWidget()->GetTypeAsString();
+}
 
 void URammsRobotCameraComponent::DescribeControls(FRammsControlSurface& OutSurface) const
 {
