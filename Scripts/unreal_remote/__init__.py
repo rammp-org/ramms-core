@@ -12,6 +12,10 @@ Core features (RammsCore plugin only):
     - Function calls on any UObject
     - Object description (introspection)
 
+Control surfaces (requires the robot's ControlSurface component):
+    - unreal_remote.control_surface.ControlSurface: describe / set / trigger /
+      release / get any control by Id, no controller paths needed
+
 Optional UI features (requires RammsUI plugin):
     - Widget discovery, notifications, status panel control
     - Pass ui_bridge="/Script/RammsUI.Default__RammsRemoteBridge" to enable
@@ -277,7 +281,7 @@ class UnrealRemote:
             result = self._call_function(
                 self.RAMMS_CORE_BRIDGE,
                 "FindActorsByComponent",
-                {"ComponentClassFilter": component_class_filter}
+                {"ComponentFilter": component_class_filter}  # matches URammsCoreBridge::FindActorsByComponent
             )
             if isinstance(result, dict):
                 result = result.get("ReturnValue", result)

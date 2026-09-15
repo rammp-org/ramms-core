@@ -913,13 +913,12 @@ bool URammsDifferentialDriveController::ApplyControl(FName Id, float Value)
 	{
 		return false;
 	}
-	// The external-input hold (access devices, autonomy) still wins at this
-	// level until it moves onto the control surface's own arbitration.
-	if (IsExternalDriveActive())
-	{
-		return false;
-	}
-	SetDriveInput(ControlDriveInput);
+	// Through the external hold: the surface has already arbitrated between
+	// its sources, and the hold makes the command outrank any legacy per-tick
+	// joystick writer (the chair pawn's tick) for ExternalInputHoldSeconds
+	// after each call — releasing pushes zero the same way, so the legacy
+	// path resumes once the hold lapses.
+	SetExternalDriveInput(ControlDriveInput);
 	return true;
 }
 
