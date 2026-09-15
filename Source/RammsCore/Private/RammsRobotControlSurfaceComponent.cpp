@@ -6,6 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "JsonObjectConverter.h"
 #include "TimerManager.h"
+#include "RammsUISubsystem.h"
 
 URammsRobotControlSurfaceComponent::URammsRobotControlSurfaceComponent()
 {
@@ -28,7 +29,35 @@ void URammsRobotControlSurfaceComponent::BeginPlay()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimerForNextTick(this, &URammsRobotControlSurfaceComponent::RebuildControlSurface);
+		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		{
+			UI->RegisterControlSurface(this);
+		}
 	}
+}
+
+TArray<UObject*> URammsRobotControlSurfaceComponent::FindControlSurfaces(const UObject* WorldContextObject)
+{
+	if (const UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr)
+	{
+		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		{
+			return UI->GetAllControlSurfaces();
+		}
+	}
+	return {};
+}
+
+void URammsRobotControlSurfaceComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		{
+			UI->UnregisterControlSurface(this);
+		}
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 void URammsRobotControlSurfaceComponent::OnRegistryLoaded(URammsRobotBaseComponent* /*InBase*/)
@@ -89,7 +118,13 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 					*Owner->GetName(), *Axis.Id.ToString(), *Pair.Value->GetName());
 				continue;
 			}
-			Surface.Add(Axis);
+			FRammsControlAxis Normalized = Axis;
+			if (Normalized.IsAction())
+			{
+				// Actions have no value to read back, whatever the contributor left set.
+				Normalized.bReadback = false;
+			}
+			Surface.Add(Normalized);
 			FRoute Route;
 			Route.Contributor = Pair.Value;
 			Routes.Add(Axis.Id, Route);

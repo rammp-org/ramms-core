@@ -61,6 +61,7 @@ public class RammsCore : ModuleRules
                 "Eigen",
 				"Json",
 				"JsonUtilities", // control surface as JSON for Remote Control
+				"RammsUI",       // URammsUISubsystem: control-surface registry
 			}
 			);
 

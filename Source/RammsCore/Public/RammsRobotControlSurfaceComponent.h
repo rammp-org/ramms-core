@@ -25,7 +25,9 @@ class IRammsControlContributor;
  *    command to the owning contributor (or straight to the RobotBase for a
  *    raw motor) and arbitrates between sources — an Autonomy or Remote
  *    command holds an axis over local input for ExternalHoldSeconds, the way
- *    the differential drive's external input does.
+ *    the differential drive's external input does,
+ *  - registers itself with URammsUISubsystem (ramms-ui) so generic panels and
+ *    input components find every controllable robot in the world.
  *
  * Nothing here is wired by name: add a contributor component to the actor and
  * its controls appear. The plain UFUNCTIONs (DescribeControlSurface,
@@ -80,6 +82,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Control Surface")
 	FString GetControlSurfaceJson() const;
 
+	/** Every control surface registered in the world (URammsUISubsystem's
+	 *  registry), for callers without subsystem access such as Python. */
+	UFUNCTION(BlueprintPure, Category = "Control Surface", meta = (WorldContext = "WorldContextObject"))
+	static TArray<UObject*> FindControlSurfaces(const UObject* WorldContextObject);
+
 	// --- IRammsControlSurfaceProvider ---------------------------------------
 	virtual FRammsControlSurface GetControlSurface_Implementation() const override;
 	virtual int32				 GetControlSurfaceVersion_Implementation() const override;
@@ -93,6 +100,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
 	/** Where a control routes: a contributor, or a raw RobotBase motor. */
