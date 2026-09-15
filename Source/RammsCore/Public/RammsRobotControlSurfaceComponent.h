@@ -78,6 +78,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Control Surface")
 	float GetControlValue(FName Id) const;
 
+	/** The value last commanded for a control through this surface, from any source. */
+	UFUNCTION(BlueprintPure, Category = "Control Surface")
+	bool GetControlTarget(FName Id, float& OutTarget) const;
+
 	/** The surface as JSON (FJsonObjectConverter), for Remote Control clients. */
 	UFUNCTION(BlueprintCallable, Category = "Control Surface")
 	FString GetControlSurfaceJson() const;
@@ -97,6 +101,7 @@ public:
 	virtual bool				ReleaseAxis_Implementation(FName Id, ERammsControlSource Source) override;
 	virtual float				GetAxisValue_Implementation(FName Id) const override;
 	virtual ERammsControlSource GetAxisOwner_Implementation(FName Id) const override;
+	virtual bool				GetAxisTarget_Implementation(FName Id, float& OutTarget) const override;
 
 protected:
 	virtual void BeginPlay() override;
@@ -132,6 +137,8 @@ private:
 	mutable FRammsControlSurface Surface;
 	mutable TMap<FName, FRoute>	 Routes;
 	mutable TMap<FName, FHold>	 Holds;
+	/** Last value commanded per control (any source); cleared when a Position / Velocity axis is released. */
+	TMap<FName, float>			 Targets;
 	mutable int32				 Version = 0;
 	mutable bool				 bBuilt = false;
 };

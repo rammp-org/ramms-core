@@ -177,8 +177,15 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 		}
 	}
 
-	// Anything held by a control that no longer exists is forgotten.
+	// Anything held by (or targeted through) a control that no longer exists is forgotten.
 	for (auto It = Holds.CreateIterator(); It; ++It)
+	{
+		if (!Routes.Contains(It.Key()))
+		{
+			It.RemoveCurrent();
+		}
+	}
+	for (auto It = Targets.CreateIterator(); It; ++It)
 	{
 		if (!Routes.Contains(It.Key()))
 		{
@@ -266,6 +273,7 @@ bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float 
 	if (bApplied)
 	{
 		Hold(Id, Source);
+		Targets.Add(Id, Clamped);
 	}
 	return bApplied;
 }
@@ -324,6 +332,14 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 	if (bReleased)
 	{
 		Holds.Remove(Id);
+		if (Axis->Kind == ERammsControlKind::Continuous)
+		{
+			Targets.Add(Id, Axis->DefaultValue); // sprung back: that is the target now
+		}
+		else
+		{
+			Targets.Remove(Id); // no longer holding a target
+		}
 	}
 	return bReleased;
 }
@@ -400,4 +416,20 @@ FString URammsRobotControlSurfaceComponent::GetControlSurfaceJson() const
 	FString Out;
 	FJsonObjectConverter::UStructToJsonObjectString(Surface, Out);
 	return Out;
+}
+
+bool URammsRobotControlSurfaceComponent::GetAxisTarget_Implementation(FName Id, float& OutTarget) const
+{
+	if (const float* Target = Targets.Find(Id))
+	{
+		OutTarget = *Target;
+		return true;
+	}
+	OutTarget = 0.0f;
+	return false;
+}
+
+bool URammsRobotControlSurfaceComponent::GetControlTarget(FName Id, float& OutTarget) const
+{
+	return GetAxisTarget_Implementation(Id, OutTarget);
 }
