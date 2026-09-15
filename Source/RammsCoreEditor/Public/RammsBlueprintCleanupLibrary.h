@@ -20,7 +20,8 @@ class RAMMSCOREEDITOR_API URammsBlueprintCleanupLibrary : public UBlueprintFunct
 	GENERATED_BODY()
 
 public:
-	/** Remove from the event graph every InputKey / InputAction / InputAxis /
+	/** Remove from the event graphs (UbergraphPages only; function and macro
+	 *  graphs are left alone) every InputKey / InputAction / InputAxis /
 	 *  EnhancedInputAction / GetInputActionValue node, plus every call to a
 	 *  function named in FunctionsToRemove (e.g. "SetDriveInput" for the
 	 *  legacy per-tick joystick write). Nodes that were only fed by the
@@ -29,7 +30,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Blueprint Cleanup")
 	static int32 RemoveLegacyInputNodes(UBlueprint* Blueprint, const TArray<FName>& FunctionsToRemove);
 
-	/** Names of the input-related nodes currently in the event graph (audit). */
+	/** Names of the input-related nodes in every graph of the Blueprint (audit). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Blueprint Cleanup")
 	static TArray<FString> ListInputNodes(UBlueprint* Blueprint);
 };

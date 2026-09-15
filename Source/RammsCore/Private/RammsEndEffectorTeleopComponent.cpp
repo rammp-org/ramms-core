@@ -646,6 +646,7 @@ void URammsEndEffectorTeleopComponent::DescribeControls(FRammsControlSurface& Ou
 		Closed.Units = ERammsControlUnits::Normalized;
 		Closed.Range = FVector2D(0.0, 1.0);
 		Closed.bReadback = true;
+		Closed.bReadOnly = true; // state only: change it through the actions
 		Closed.Order = 3;
 		OutSurface.Add(Closed);
 	}
@@ -682,13 +683,9 @@ bool URammsEndEffectorTeleopComponent::ApplyControl(FName Id, float Value)
 	{
 		ControlAngular.Roll = V;
 	}
-	else if (Id == GripperClosed && GripperControllerComponent)
-	{
-		V >= 0.5f ? CloseGripper() : OpenGripper();
-	}
 	else
 	{
-		return false;
+		return false; // gripper.closed is readback-only: use the gripper actions
 	}
 	return true;
 }
@@ -726,7 +723,7 @@ bool URammsEndEffectorTeleopComponent::TriggerControl(FName Id)
 bool URammsEndEffectorTeleopComponent::ReleaseControl(FName Id)
 {
 	// Rate axes spring to zero; the arm holds wherever the target is.
-	return ApplyControl(Id, 0.0f) || Id == GripperClosed;
+	return ApplyControl(Id, 0.0f);
 }
 
 bool URammsEndEffectorTeleopComponent::ReadControl(FName Id, float& OutValue) const

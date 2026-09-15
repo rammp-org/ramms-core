@@ -65,9 +65,9 @@ int32 URammsBlueprintCleanupLibrary::RemoveLegacyInputNodes(UBlueprint* Blueprin
 		return 0;
 	}
 	TArray<UEdGraphNode*> ToRemove;
-	TArray<UEdGraph*>	  Graphs;
-	Blueprint->GetAllGraphs(Graphs);
-	for (UEdGraph* Graph : Graphs)
+	// Event graphs only: a named call in a function or macro graph is a
+	// helper, not legacy input wiring.
+	for (UEdGraph* Graph : Blueprint->UbergraphPages)
 	{
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{

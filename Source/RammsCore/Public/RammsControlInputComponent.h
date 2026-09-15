@@ -12,6 +12,7 @@ class APlayerController;
 class UEnhancedInputComponent;
 class UEnhancedInputLocalPlayerSubsystem;
 class UInputAction;
+class UInputMappingContext;
 struct FInputActionInstance;
 
 /**
@@ -105,6 +106,8 @@ private:
 	TWeakObjectPtr<APlayerController>				   BoundPC;
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> BoundSubsystem;
 	TArray<uint32>									   BindingHandles;
+	/** Mapping contexts this component added (so unbinding removes only those, not ones others own). */
+	TArray<TWeakObjectPtr<const UInputMappingContext>> AddedContexts;
 	TArray<FSlot>									   Slots;
 	TMap<FName, float>								   IncrementTargets;
 	TSet<FName>										   HeldAxes;

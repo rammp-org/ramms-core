@@ -149,23 +149,25 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 			Axis.Group = UnclaimedMotorGroup;
 			Axis.DisplayName = FText::FromName(Spec.Id);
 			Axis.Order = Order++;
-			const bool bRanged = Spec.ControlRange.X < Spec.ControlRange.Y;
+			// The registry's ControlRange is the command clamp; an unset one
+			// (min >= max) means "defer to the backend" and stays unbounded here
+			// too — SetAxis clamps to Axis.Range, so substituting limits would
+			// refuse commands the backend accepts. Panels pick a display range
+			// for an unbounded axis themselves.
+			Axis.Range = Spec.ControlRange;
 			switch (Spec.Type)
 			{
 				case ERammsActuatorType::Position:
 					Axis.Kind = ERammsControlKind::Position;
 					Axis.Units = ERammsControlUnits::Radians;
-					Axis.Range = bRanged ? Spec.ControlRange : FVector2D(-PI, PI);
 					break;
 				case ERammsActuatorType::Velocity:
 					Axis.Kind = ERammsControlKind::Velocity;
 					Axis.Units = ERammsControlUnits::RadiansPerSecond;
-					Axis.Range = bRanged ? Spec.ControlRange : FVector2D(-10.0, 10.0);
 					break;
 				default:
 					Axis.Kind = ERammsControlKind::Continuous;
 					Axis.Units = ERammsControlUnits::None; // backend units (N·m on MuJoCo)
-					Axis.Range = bRanged ? Spec.ControlRange : FVector2D(-1.0, 1.0);
 					break;
 			}
 			Surface.Add(Axis);
@@ -245,7 +247,7 @@ bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float 
 	EnsureBuilt();
 	const FRammsControlAxis* Axis = Surface.Find(Id);
 	const FRoute*			 Route = Routes.Find(Id);
-	if (!Axis || !Route || Axis->IsAction() || !MayDrive(Id, Source))
+	if (!Axis || !Route || Axis->IsAction() || Axis->bReadOnly || !MayDrive(Id, Source))
 	{
 		return false;
 	}
@@ -255,8 +257,9 @@ bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float 
 	{
 		bApplied = C->ApplyControl(Id, Clamped);
 	}
-	else if (Base && !Route->MotorId.IsNone())
+	else if (Base && Base->HasBackend() && !Route->MotorId.IsNone())
 	{
+		// Without a backend SetMotorCommand is a silent no-op: not applied.
 		Base->SetMotorCommand(Route->MotorId, Clamped);
 		bApplied = true;
 	}
@@ -306,9 +309,17 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 			bReleased = C->ApplyControl(Id, Axis->DefaultValue); // spring back
 		}
 	}
-	else if (Base && !Route->MotorId.IsNone())
+	else if (Base && Base->HasBackend() && !Route->MotorId.IsNone())
 	{
-		bReleased = (Axis->Kind == ERammsControlKind::Continuous) ? (Base->SetMotorCommand(Route->MotorId, Axis->DefaultValue), true) : Base->ReleaseMotor(Route->MotorId);
+		if (Axis->Kind == ERammsControlKind::Continuous)
+		{
+			Base->SetMotorCommand(Route->MotorId, Axis->DefaultValue); // spring back
+			bReleased = true;
+		}
+		else
+		{
+			bReleased = Base->ReleaseMotor(Route->MotorId);
+		}
 	}
 	if (bReleased)
 	{

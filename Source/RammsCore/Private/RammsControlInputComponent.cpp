@@ -164,6 +164,7 @@ void URammsControlInputComponent::TryBind()
 			if (Map && Map->MappingContext && !BoundSubsystem->HasMappingContext(Map->MappingContext))
 			{
 				BoundSubsystem->AddMappingContext(Map->MappingContext, Map->Priority);
+				AddedContexts.Add(Map->MappingContext);
 			}
 		}
 	}
@@ -217,14 +218,17 @@ void URammsControlInputComponent::Unbind()
 	BindingHandles.Reset();
 	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundSubsystem.Get())
 	{
-		for (const URammsControlInputMap* Map : InputMaps)
+		// Only the contexts this component added: one already present at bind
+		// time belongs to someone else (a controller, another pawn component).
+		for (const TWeakObjectPtr<const UInputMappingContext>& Context : AddedContexts)
 		{
-			if (Map && Map->MappingContext)
+			if (const UInputMappingContext* IMC = Context.Get())
 			{
-				Subsystem->RemoveMappingContext(Map->MappingContext);
+				Subsystem->RemoveMappingContext(IMC);
 			}
 		}
 	}
+	AddedContexts.Reset();
 	// Let go of everything this driver was holding.
 	if (Sink)
 	{

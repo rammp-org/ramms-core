@@ -230,6 +230,14 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	{
 		bool bValid = false;
 		Axis.Range = GetReachableHeightRange(HeldX(), bValid);
+		if (!bValid)
+		{
+			// No reachable height at the held X (no base, no table, or the live
+			// pose is off the mechanism): an unbounded axis would accept targets
+			// SetEndpointHeight then refuses, so offer nothing.
+			UE_LOG(LogTemp, Verbose, TEXT("Ramms5BarLinkageController '%s': no reachable height range; control not offered."), *GetName());
+			return;
+		}
 	}
 	Axis.DefaultValue = FMath::Clamp(static_cast<float>(GetCurrentEndpoint().Y), static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
 	OutSurface.Add(Axis);
