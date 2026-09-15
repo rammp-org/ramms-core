@@ -347,8 +347,8 @@ void URammsRobotCameraComponent::DescribeControls(FRammsControlSurface& OutSurfa
 	};
 	Action(CameraNextId, NSLOCTEXT("Ramms", "CameraNext", "Next camera"), 0);
 	Action(CameraResetId, NSLOCTEXT("Ramms", "CameraReset", "Reset view"), 1);
-	Rate(CameraOrbitYawId, NSLOCTEXT("Ramms", "CameraOrbitYaw", "Orbit yaw"), 2, CameraOrbitPitchId);
-	Rate(CameraOrbitPitchId, NSLOCTEXT("Ramms", "CameraOrbitPitch", "Orbit pitch"), 3, CameraOrbitYawId);
+	Rate(CameraOrbitPitchId, NSLOCTEXT("Ramms", "CameraOrbitPitch", "Orbit pitch"), 2, CameraOrbitYawId); // paired: lower Order = vertical
+	Rate(CameraOrbitYawId, NSLOCTEXT("Ramms", "CameraOrbitYaw", "Orbit yaw"), 3, CameraOrbitPitchId);
 	Rate(CameraZoomId, NSLOCTEXT("Ramms", "CameraZoom", "Zoom"), 4, NAME_None);
 }
 
