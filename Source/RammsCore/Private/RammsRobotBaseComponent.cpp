@@ -46,6 +46,7 @@ void URammsRobotBaseComponent::LoadMotorRegistry() const
 	}
 	bMotorsLoaded = true;
 	Motors.Reset();
+	MotorOrder.Reset();
 	if (!MotorTable)
 	{
 		return;
@@ -71,7 +72,12 @@ void URammsRobotBaseComponent::LoadMotorRegistry() const
 				return;
 			}
 			Motors.Add(Spec.Id, Spec);
+			MotorOrder.Add(Spec.Id);
 		});
+
+	// Non-const delegate on a const path: the registry is logically const state
+	// loaded lazily; announcing it doesn't change the component.
+	const_cast<URammsRobotBaseComponent*>(this)->OnMotorRegistryLoaded.Broadcast(const_cast<URammsRobotBaseComponent*>(this));
 }
 
 void URammsRobotBaseComponent::EnsureBackend() const
@@ -183,6 +189,33 @@ FName URammsRobotBaseComponent::GetChaosName(FName MotorId) const
 		}
 	}
 	return MotorId;
+}
+
+TArray<FName> URammsRobotBaseComponent::GetMotorIds() const
+{
+	LoadMotorRegistry();
+	return MotorOrder;
+}
+
+TArray<FRammsMotorSpec> URammsRobotBaseComponent::GetMotorSpecs() const
+{
+	LoadMotorRegistry();
+	TArray<FRammsMotorSpec> Out;
+	Out.Reserve(MotorOrder.Num());
+	for (const FName& Id : MotorOrder)
+	{
+		if (const FRammsMotorSpec* Spec = Motors.Find(Id))
+		{
+			Out.Add(*Spec);
+		}
+	}
+	return Out;
+}
+
+int32 URammsRobotBaseComponent::GetMotorCount() const
+{
+	LoadMotorRegistry();
+	return MotorOrder.Num();
 }
 
 FName URammsRobotBaseComponent::FindMotorIdByChaosName(FName ChaosName) const
