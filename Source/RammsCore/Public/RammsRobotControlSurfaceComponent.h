@@ -1,0 +1,129 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "RammsControlTypes.h"
+#include "RammsControlSurfaceProvider.h"
+#include "RammsControlSink.h"
+#include "RammsRobotControlSurfaceComponent.generated.h"
+
+class URammsRobotBaseComponent;
+class IRammsControlContributor;
+
+/**
+ * The robot's control surface: one component per robot actor that
+ *
+ *  - gathers every IRammsControlContributor on the actor (differential
+ *    drive, MeBot lift controller, 5-bar linkages, camera, arm...) and merges
+ *    their descriptions into one FRammsControlSurface,
+ *  - appends a raw "Motors" group for every RobotBase registry motor no
+ *    contributor claims (type / range / units from FRammsMotorSpec), so a
+ *    freshly imported robot with only a RobotBase is already controllable,
+ *  - implements IRammsControlSurfaceProvider / IRammsControlSink: routes each
+ *    command to the owning contributor (or straight to the RobotBase for a
+ *    raw motor) and arbitrates between sources — an Autonomy or Remote
+ *    command holds an axis over local input for ExternalHoldSeconds, the way
+ *    the differential drive's external input does.
+ *
+ * Nothing here is wired by name: add a contributor component to the actor and
+ * its controls appear. The plain UFUNCTIONs (DescribeControlSurface,
+ * SetControl...) mirror the interface for Python / Remote Control callers.
+ */
+UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
+class RAMMSCORE_API URammsRobotControlSurfaceComponent : public UActorComponent, public IRammsControlSurfaceProvider, public IRammsControlSink
+{
+	GENERATED_BODY()
+
+public:
+	URammsRobotControlSurfaceComponent();
+
+	/** Shown by panels; empty = the owner's name. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface")
+	FText RobotDisplayName;
+
+	/** Expose registry motors no contributor claims as raw motor axes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface")
+	bool bExposeUnclaimedMotors = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface")
+	FName UnclaimedMotorGroup = FName("Motors");
+
+	/** How long a Remote / Autonomy command holds a control over local input. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.0"))
+	float ExternalHoldSeconds = 0.3f;
+
+	/** Re-gather contributors and registry motors (also done on BeginPlay, on
+	 *  the next tick, and when the RobotBase loads its table). */
+	UFUNCTION(BlueprintCallable, Category = "Control Surface")
+	void RebuildControlSurface();
+
+	// --- Plain-function twins of the interfaces (Python / Remote Control) -----
+
+	UFUNCTION(BlueprintPure, Category = "Control Surface")
+	FRammsControlSurface DescribeControlSurface() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Control Surface")
+	bool SetControl(FName Id, float Value, ERammsControlSource Source = ERammsControlSource::Script);
+
+	UFUNCTION(BlueprintCallable, Category = "Control Surface")
+	bool TriggerControl(FName Id, ERammsControlSource Source = ERammsControlSource::Script);
+
+	UFUNCTION(BlueprintCallable, Category = "Control Surface")
+	bool ReleaseControl(FName Id, ERammsControlSource Source = ERammsControlSource::Script);
+
+	UFUNCTION(BlueprintPure, Category = "Control Surface")
+	float GetControlValue(FName Id) const;
+
+	/** The surface as JSON (FJsonObjectConverter), for Remote Control clients. */
+	UFUNCTION(BlueprintCallable, Category = "Control Surface")
+	FString GetControlSurfaceJson() const;
+
+	// --- IRammsControlSurfaceProvider ---------------------------------------
+	virtual FRammsControlSurface GetControlSurface_Implementation() const override;
+	virtual int32				 GetControlSurfaceVersion_Implementation() const override;
+
+	// --- IRammsControlSink ----------------------------------------------------
+	virtual bool				SetAxis_Implementation(FName Id, float Value, ERammsControlSource Source) override;
+	virtual bool				TriggerAction_Implementation(FName Id, ERammsControlSource Source) override;
+	virtual bool				ReleaseAxis_Implementation(FName Id, ERammsControlSource Source) override;
+	virtual float				GetAxisValue_Implementation(FName Id) const override;
+	virtual ERammsControlSource GetAxisOwner_Implementation(FName Id) const override;
+
+protected:
+	virtual void BeginPlay() override;
+
+private:
+	/** Where a control routes: a contributor, or a raw RobotBase motor. */
+	struct FRoute
+	{
+		TWeakObjectPtr<UObject> Contributor; // implements IRammsControlContributor
+		FName					MotorId;	 // raw motor when Contributor is null
+	};
+
+	/** Who last drove a control and when (for source arbitration). */
+	struct FHold
+	{
+		ERammsControlSource Source = ERammsControlSource::Script;
+		double				Time = 0.0;
+	};
+
+	UFUNCTION()
+	void OnRegistryLoaded(URammsRobotBaseComponent* InBase);
+
+	static int32			  Priority(ERammsControlSource Source);
+	bool					  MayDrive(FName Id, ERammsControlSource Source) const;
+	void					  Hold(FName Id, ERammsControlSource Source);
+	IRammsControlContributor* ContributorFor(FName Id) const;
+	void					  EnsureBuilt() const;
+
+	UPROPERTY(Transient)
+	TObjectPtr<URammsRobotBaseComponent> Base;
+
+	mutable FRammsControlSurface Surface;
+	mutable TMap<FName, FRoute>	 Routes;
+	mutable TMap<FName, FHold>	 Holds;
+	mutable int32				 Version = 0;
+	mutable bool				 bBuilt = false;
+};

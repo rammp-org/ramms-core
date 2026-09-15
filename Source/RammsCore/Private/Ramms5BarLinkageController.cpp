@@ -106,11 +106,69 @@ bool URamms5BarLinkageController::SetEndpointTarget(FVector2D TargetXZ)
 	return true;
 }
 
+float URamms5BarLinkageController::HeldX() const
+{
+	return bHasTarget ? static_cast<float>(LastTarget.X) : static_cast<float>(GetCurrentEndpoint().X);
+}
+
 bool URamms5BarLinkageController::SetEndpointHeight(float Z)
 {
 	// Keep the current (or last-commanded) endpoint X, change only height.
-	const float X = bHasTarget ? static_cast<float>(LastTarget.X) : static_cast<float>(GetCurrentEndpoint().X);
-	return SetEndpointTarget(FVector2D(X, Z));
+	return SetEndpointTarget(FVector2D(HeldX(), Z));
+}
+
+FVector2D URamms5BarLinkageController::GetReachableHeightRange(float X, bool& bValid) const
+{
+	// Walk up and down from the current height until the IK (with the motors'
+	// ControlRanges) first refuses; the mechanism's reach is contiguous there.
+	// Starting at the live height rather than the scan floor also keeps a
+	// disconnected reachable island elsewhere from being reported.
+	bValid = false;
+	const float Step = FMath::Max(HeightScanStep, 0.05f);
+	const float Lo = static_cast<float>(FMath::Min(HeightScanLimits.X, HeightScanLimits.Y));
+	const float Hi = static_cast<float>(FMath::Max(HeightScanLimits.X, HeightScanLimits.Y));
+	const float Z0 = FMath::Clamp(static_cast<float>(GetCurrentEndpoint().Y), Lo, Hi);
+
+	auto Reachable = [this, X](float Z) {
+		bool bOk = false;
+		SolveTarget(FVector2D(X, Z), bOk);
+		return bOk;
+	};
+
+	// Find any reachable seed near the current height (the live pose can sit a
+	// hair outside the range while settling).
+	float Seed = Z0;
+	bool  bSeed = Reachable(Seed);
+	for (float D = Step; !bSeed && D <= 8.0f * Step; D += Step)
+	{
+		if (Seed - D >= Lo && Reachable(Seed - D))
+		{
+			Seed -= D;
+			bSeed = true;
+		}
+		else if (Seed + D <= Hi && Reachable(Seed + D))
+		{
+			Seed += D;
+			bSeed = true;
+		}
+	}
+	if (!bSeed)
+	{
+		return FVector2D(Z0, Z0);
+	}
+
+	float Min = Seed;
+	while (Min - Step >= Lo && Reachable(Min - Step))
+	{
+		Min -= Step;
+	}
+	float Max = Seed;
+	while (Max + Step <= Hi && Reachable(Max + Step))
+	{
+		Max += Step;
+	}
+	bValid = true;
+	return FVector2D(Min, Max);
 }
 
 void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
@@ -155,4 +213,63 @@ FVector2D URamms5BarLinkageController::SolveTarget(FVector2D TargetXZ, bool& bRe
 			&& WithinMotorRange(*Base, Resolved.ProximalMotorB, Angles.Y);
 	}
 	return Angles;
+}
+
+// --- control surface -----------------------------------------------------------
+
+void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurface) const
+{
+	FRammsControlAxis Axis;
+	Axis.Id = HeightControlId();
+	Axis.Group = FName("Linkage");
+	Axis.DisplayName = FText::FromString(GetName().Replace(TEXT("Linkage"), TEXT("")).Replace(TEXT("_"), TEXT(" ")) + TEXT(" height"));
+	Axis.Kind = ERammsControlKind::Position;
+	Axis.Units = ERammsControlUnits::Centimeters;
+	Axis.Range = EndpointHeightRange;
+	if (EndpointHeightRange.X >= EndpointHeightRange.Y)
+	{
+		bool bValid = false;
+		Axis.Range = GetReachableHeightRange(HeldX(), bValid);
+	}
+	Axis.DefaultValue = FMath::Clamp(static_cast<float>(GetCurrentEndpoint().Y), static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
+	OutSurface.Add(Axis);
+}
+
+bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
+{
+	return Id == HeightControlId() && SetEndpointHeight(Value);
+}
+
+bool URamms5BarLinkageController::ReleaseControl(FName Id)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (Id != HeightControlId() || !Base)
+	{
+		return false;
+	}
+	const bool bA = Base->ReleaseMotor(Resolved.ProximalMotorA);
+	const bool bB = Base->ReleaseMotor(Resolved.ProximalMotorB);
+	return bA && bB;
+}
+
+bool URamms5BarLinkageController::ReadControl(FName Id, float& OutValue) const
+{
+	if (Id != HeightControlId())
+	{
+		return false;
+	}
+	OutValue = static_cast<float>(GetCurrentEndpoint().Y);
+	return true;
+}
+
+void URamms5BarLinkageController::GetClaimedMotorIds(TArray<FName>& OutIds) const
+{
+	if (!Resolved.ProximalMotorA.IsNone())
+	{
+		OutIds.Add(Resolved.ProximalMotorA);
+	}
+	if (!Resolved.ProximalMotorB.IsNone())
+	{
+		OutIds.Add(Resolved.ProximalMotorB);
+	}
 }

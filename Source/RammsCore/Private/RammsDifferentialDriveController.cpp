@@ -869,3 +869,82 @@ void URammsDifferentialDriveController::DebugLogState()
 		DrawDebugString(GetWorld(), ActorLocation + FVector(0, 0, 100), DebugText, nullptr, FColor::Yellow, 0.0f, true, 1.2f);
 	}
 }
+
+// --- control surface -----------------------------------------------------------
+
+namespace
+{
+	const FName DriveForwardId(TEXT("drive.forward"));
+	const FName DriveTurnId(TEXT("drive.turn"));
+} // namespace
+
+void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const
+{
+	FRammsControlAxis Forward;
+	Forward.Id = DriveForwardId;
+	Forward.Group = FName("Drive");
+	Forward.DisplayName = NSLOCTEXT("Ramms", "DriveForward", "Forward");
+	Forward.Kind = ERammsControlKind::Continuous;
+	Forward.Units = ERammsControlUnits::Normalized;
+	Forward.Range = FVector2D(-1.0, 1.0);
+	Forward.Order = 0;
+	Forward.PairedAxis = DriveTurnId;
+	OutSurface.Add(Forward);
+
+	FRammsControlAxis Turn = Forward;
+	Turn.Id = DriveTurnId;
+	Turn.DisplayName = NSLOCTEXT("Ramms", "DriveTurn", "Turn");
+	Turn.Order = 1;
+	Turn.PairedAxis = DriveForwardId;
+	OutSurface.Add(Turn);
+}
+
+bool URammsDifferentialDriveController::ApplyControl(FName Id, float Value)
+{
+	if (Id == DriveForwardId)
+	{
+		ControlDriveInput.Y = Value;
+	}
+	else if (Id == DriveTurnId)
+	{
+		ControlDriveInput.X = Value;
+	}
+	else
+	{
+		return false;
+	}
+	// The external-input hold (access devices, autonomy) still wins at this
+	// level until it moves onto the control surface's own arbitration.
+	if (IsExternalDriveActive())
+	{
+		return false;
+	}
+	SetDriveInput(ControlDriveInput);
+	return true;
+}
+
+bool URammsDifferentialDriveController::ReleaseControl(FName Id)
+{
+	return ApplyControl(Id, 0.0f);
+}
+
+bool URammsDifferentialDriveController::ReadControl(FName Id, float& OutValue) const
+{
+	if (Id == DriveForwardId)
+	{
+		OutValue = static_cast<float>(DriveInput.Y);
+		return true;
+	}
+	if (Id == DriveTurnId)
+	{
+		OutValue = static_cast<float>(DriveInput.X);
+		return true;
+	}
+	return false;
+}
+
+void URammsDifferentialDriveController::GetClaimedMotorIds(TArray<FName>& OutIds) const
+{
+	OutIds.Add(LeftMotorId);
+	OutIds.Add(RightMotorId);
+}

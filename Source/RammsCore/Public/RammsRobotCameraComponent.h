@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "InputCoreTypes.h"
+#include "RammsControlContributor.h"
 #include "RammsRobotCameraComponent.generated.h"
 
 class UCameraComponent;
@@ -32,7 +33,7 @@ class USpringArmComponent;
  * a gamepad stick or Blueprint.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsRobotCameraComponent : public UActorComponent
+class RAMMSCORE_API URammsRobotCameraComponent : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
@@ -192,4 +193,25 @@ private:
 	float LastCursorX = 0.0f;
 	float LastCursorY = 0.0f;
 	bool  bHadCursor = false;
+
+public:
+	// --- Control surface ("camera.*") ----------------------------------------
+	/** Orbit rate at full deflection of the camera.orbit_* axes (deg/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Control", meta = (ClampMin = "0.0"))
+	float ControlOrbitRateDegPerSec = 90.0f;
+
+	/** Zoom rate at full deflection of camera.zoom, in wheel notches per second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Control", meta = (ClampMin = "0.0"))
+	float ControlZoomNotchesPerSec = 6.0f;
+
+	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
+	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  TriggerControl(FName Id) override;
+	virtual bool  ReleaseControl(FName Id) override;
+	virtual int32 GetControlOrder() const override { return 90; }
+
+private:
+	/** Orbit / zoom rates as last set through the control surface; integrated in Tick. */
+	FVector2D ControlOrbit = FVector2D::ZeroVector;
+	float	  ControlZoom = 0.0f;
 };

@@ -205,6 +205,17 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		}
 	}
 
+	// Control-surface orbit / zoom (a joystick or a held key), integrated
+	// here so it works whether or not a player controller is attached.
+	if (!ControlOrbit.IsNearlyZero())
+	{
+		Orbit(static_cast<float>(ControlOrbit.X) * ControlOrbitRateDegPerSec * DeltaTime, static_cast<float>(ControlOrbit.Y) * ControlOrbitRateDegPerSec * DeltaTime);
+	}
+	if (!FMath::IsNearlyZero(ControlZoom))
+	{
+		ZoomNotches(ControlZoom * ControlZoomNotchesPerSec * DeltaTime);
+	}
+
 	APlayerController* PC = GetPlayerController();
 	if (!PC)
 	{
@@ -302,4 +313,89 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		}
 		LastWheelEventTime = Now;
 	}
+}
+
+// --- control surface -----------------------------------------------------------
+
+namespace
+{
+	const FName CameraNextId(TEXT("camera.next"));
+	const FName CameraResetId(TEXT("camera.reset"));
+	const FName CameraOrbitYawId(TEXT("camera.orbit_yaw"));
+	const FName CameraOrbitPitchId(TEXT("camera.orbit_pitch"));
+	const FName CameraZoomId(TEXT("camera.zoom"));
+} // namespace
+
+void URammsRobotCameraComponent::DescribeControls(FRammsControlSurface& OutSurface) const
+{
+	auto Action = [&](FName Id, const FText& Name, int32 Order) {
+		FRammsControlAxis A;
+		A.Id = Id;
+		A.Group = FName("Camera");
+		A.DisplayName = Name;
+		A.Kind = ERammsControlKind::Action;
+		A.Units = ERammsControlUnits::None;
+		A.bReadback = false;
+		A.Order = Order;
+		OutSurface.Add(A);
+	};
+	auto Rate = [&](FName Id, const FText& Name, int32 Order, FName Paired) {
+		FRammsControlAxis A;
+		A.Id = Id;
+		A.Group = FName("Camera");
+		A.DisplayName = Name;
+		A.Kind = ERammsControlKind::Continuous;
+		A.Units = ERammsControlUnits::Normalized;
+		A.Range = FVector2D(-1.0, 1.0);
+		A.bReadback = false;
+		A.Order = Order;
+		A.PairedAxis = Paired;
+		OutSurface.Add(A);
+	};
+	Action(CameraNextId, NSLOCTEXT("Ramms", "CameraNext", "Next camera"), 0);
+	Action(CameraResetId, NSLOCTEXT("Ramms", "CameraReset", "Reset view"), 1);
+	Rate(CameraOrbitYawId, NSLOCTEXT("Ramms", "CameraOrbitYaw", "Orbit yaw"), 2, CameraOrbitPitchId);
+	Rate(CameraOrbitPitchId, NSLOCTEXT("Ramms", "CameraOrbitPitch", "Orbit pitch"), 3, CameraOrbitYawId);
+	Rate(CameraZoomId, NSLOCTEXT("Ramms", "CameraZoom", "Zoom"), 4, NAME_None);
+}
+
+bool URammsRobotCameraComponent::ApplyControl(FName Id, float Value)
+{
+	if (Id == CameraOrbitYawId)
+	{
+		ControlOrbit.X = Value;
+	}
+	else if (Id == CameraOrbitPitchId)
+	{
+		ControlOrbit.Y = Value;
+	}
+	else if (Id == CameraZoomId)
+	{
+		ControlZoom = Value;
+	}
+	else
+	{
+		return false;
+	}
+	return true;
+}
+
+bool URammsRobotCameraComponent::TriggerControl(FName Id)
+{
+	if (Id == CameraNextId)
+	{
+		NextCamera();
+		return true;
+	}
+	if (Id == CameraResetId)
+	{
+		ResetOrbit();
+		return true;
+	}
+	return false;
+}
+
+bool URammsRobotCameraComponent::ReleaseControl(FName Id)
+{
+	return ApplyControl(Id, 0.0f);
 }

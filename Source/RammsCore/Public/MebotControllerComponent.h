@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "RammsControlContributor.h"
 #include "MebotControllerComponent.generated.h"
 
 class USkeletalMeshComponent;
@@ -193,7 +194,7 @@ class URammsRobotBaseComponent;
  * drives the constraints directly, as it always has.
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API UMebotControllerComponent : public UActorComponent
+class RAMMSCORE_API UMebotControllerComponent : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
@@ -343,4 +344,16 @@ private:
 
 	// Draw debug visualization
 	void DrawDebugVisualization();
+
+	// --- IRammsControlContributor: one Position control per motor ("lift.<constraint>") ---
+	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
+	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  ReleaseControl(FName Id) override;
+	virtual bool  ReadControl(FName Id, float& OutValue) const override;
+	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
+	virtual int32 GetControlOrder() const override { return 20; }
+
+private:
+	static FName ControlIdFor(FName ConstraintName);
+	static FName ConstraintFor(FName ControlId);
 };
