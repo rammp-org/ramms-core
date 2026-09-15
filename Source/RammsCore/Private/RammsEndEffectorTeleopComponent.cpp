@@ -733,7 +733,10 @@ bool URammsEndEffectorTeleopComponent::ReadControl(FName Id, float& OutValue) co
 {
 	if (Id == GripperClosed && GripperControllerComponent)
 	{
-		OutValue = GripperControllerComponent->IsClosed() ? 1.0f : 0.0f;
+		// Commanded state: closing counts as closed so a panel reflects the
+		// press immediately rather than when the fingers stall.
+		const EGripperState State = GripperControllerComponent->GetGripperState();
+		OutValue = (State == EGripperState::Closed || State == EGripperState::Closing) ? 1.0f : 0.0f;
 		return true;
 	}
 	if (Id == ArmForward || Id == ArmStrafe || Id == ArmUp)

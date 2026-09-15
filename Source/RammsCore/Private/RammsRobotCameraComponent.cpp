@@ -222,15 +222,8 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		return;
 	}
 
-	if (NextCameraKey.IsValid() && PC->WasInputKeyJustPressed(NextCameraKey))
-	{
-		NextCamera();
-	}
-	if (ResetKey.IsValid() && PC->WasInputKeyJustPressed(ResetKey))
-	{
-		ResetOrbit();
-	}
-
+	// Keys (next view, reset) arrive through the control surface — camera.next /
+	// camera.reset from the Enhanced Input map. Only the mouse is read here.
 	USpringArmComponent* Arm = ActiveArm();
 	if (!Arm)
 	{

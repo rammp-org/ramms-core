@@ -62,6 +62,7 @@ public class RammsCore : ModuleRules
 				"Json",
 				"JsonUtilities", // control surface as JSON for Remote Control
 				"RammsUI",       // URammsUISubsystem: control-surface registry
+				"EnhancedInput", // URammsControlInputComponent
 			}
 			);
 

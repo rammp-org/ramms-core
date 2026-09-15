@@ -49,9 +49,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|State")
 	bool bTeleopEnabled = true;
 
-	/** Poll keyboard / mouse from the first local player controller each tick */
+	/** Legacy: poll the keys below (and the mouse) from the first local player
+	 *  controller each tick. Off by default — the Enhanced Input map drives the
+	 *  arm.* / gripper.* controls through the control surface instead. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|State")
-	bool bEnableKeyboardMouseTeleop = true;
+	bool bEnableKeyboardMouseTeleop = false;
 
 	/** Force the target Kinova controller into EndEffectorControl while teleop is active */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|State")

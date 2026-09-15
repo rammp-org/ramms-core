@@ -45,11 +45,6 @@ public:
 
 	// --- Camera switching ------------------------------------------------------
 
-	/** N ("next view"). Tab is taken by URLab's simulate widget (input-mode
-	 *  toggle) and by the project's own input mappings. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Switch")
-	FKey NextCameraKey = EKeys::N;
-
 	/** Restrict cycling to these camera component names, in this order ([0] is
 	 *  the start camera). Empty = every UCameraComponent on the pawn, authored
 	 *  ones first, then ones added at runtime (e.g. at possession). */
@@ -68,9 +63,6 @@ public:
 	 *  of its own, so this costs nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
 	bool bAlsoOrbitWithLeftDrag = true;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
-	FKey ResetKey = EKeys::Home;
 
 	/** Degrees of arm rotation per unit of mouse delta. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit", meta = (ClampMin = "0.0"))
