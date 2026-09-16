@@ -420,6 +420,7 @@ FString URammsRobotControlSurfaceComponent::GetControlSurfaceJson() const
 
 bool URammsRobotControlSurfaceComponent::GetAxisTarget_Implementation(FName Id, float& OutTarget) const
 {
+	EnsureBuilt(); // may be the first surface call a panel makes: routes must exist for the lookup
 	// The owning contributor knows the real target, including one set by a
 	// direct call on the controller that never passed through the surface.
 	if (IRammsControlContributor* C = ContributorFor(Id))
