@@ -48,6 +48,10 @@ public:
 	/** Live value of a control with readback. False = unknown. */
 	virtual bool ReadControl(FName Id, float& OutValue) const { return false; }
 
+	/** The control's current commanded target, whoever set it (a direct call
+	 *  on the controller included). False = no target / not applicable. */
+	virtual bool ReadTarget(FName Id, float& OutTarget) const { return false; }
+
 	/** RobotBase motor Ids this contributor drives (not exposed as raw motors). */
 	virtual void GetClaimedMotorIds(TArray<FName>& OutIds) const {}
 
