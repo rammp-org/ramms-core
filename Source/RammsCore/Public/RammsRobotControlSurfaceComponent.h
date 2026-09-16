@@ -78,7 +78,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Control Surface")
 	float GetControlValue(FName Id) const;
 
-	/** The value last commanded for a control through this surface, from any source. */
+	/** The control's current commanded target — what a panel shows on a slider,
+	 *  as opposed to the live readback of GetControlValue.
+	 *
+	 *  For a Position / Velocity control routed to a contributor, the
+	 *  contributor is authoritative: it reports the target it is actually
+	 *  holding, including one set by a direct call on the controller
+	 *  (SetAngularMotorTarget, SetEndpointTarget, SetJointAngles...) that
+	 *  never passed through this surface — and false once it has released or
+	 *  disabled that control, whatever was last commanded here.
+	 *
+	 *  Otherwise (raw registry motors, rate axes, contributors that don't
+	 *  track targets) it is the last value this surface applied, from any
+	 *  source.
+	 *
+	 *  False means no target: nothing commanded yet, or released. */
 	UFUNCTION(BlueprintPure, Category = "Control Surface")
 	bool GetControlTarget(FName Id, float& OutTarget) const;
 
@@ -101,6 +115,7 @@ public:
 	virtual bool				ReleaseAxis_Implementation(FName Id, ERammsControlSource Source) override;
 	virtual float				GetAxisValue_Implementation(FName Id) const override;
 	virtual ERammsControlSource GetAxisOwner_Implementation(FName Id) const override;
+	/** See GetControlTarget for the precedence rules this implements. */
 	virtual bool				GetAxisTarget_Implementation(FName Id, float& OutTarget) const override;
 
 protected:

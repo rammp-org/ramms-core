@@ -350,6 +350,7 @@ private:
 	virtual bool  ApplyControl(FName Id, float Value) override;
 	virtual bool  ReleaseControl(FName Id) override;
 	virtual bool  ReadControl(FName Id, float& OutValue) const override;
+	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 	virtual int32 GetControlOrder() const override { return 20; }
 

@@ -182,6 +182,18 @@ void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
 	}
 	Base->SetMotorCommand(Resolved.ProximalMotorA, static_cast<float>(AnglesAB.X));
 	Base->SetMotorCommand(Resolved.ProximalMotorB, static_cast<float>(AnglesAB.Y));
+
+	// These angles replace whatever SetEndpointTarget commanded, so the
+	// endpoint target has to follow them (forward kinematics) or the control
+	// surface keeps reporting the old height. Angles that don't close the
+	// linkage describe no endpoint at all: then there is no target.
+	bool			bValid = false;
+	const FVector2D Endpoint = URamms5BarKinematics::ComputeEndpoint(Resolved, AnglesAB, bValid);
+	bHasTarget = bValid;
+	if (bValid)
+	{
+		LastTarget = Endpoint;
+	}
 }
 
 FVector2D URamms5BarLinkageController::GetCurrentJointAngles() const
@@ -259,6 +271,10 @@ bool URamms5BarLinkageController::ReleaseControl(FName Id)
 	}
 	const bool bA = Base->ReleaseMotor(Resolved.ProximalMotorA);
 	const bool bB = Base->ReleaseMotor(Resolved.ProximalMotorB);
+	if (bA && bB)
+	{
+		bHasTarget = false; // no longer holding an endpoint (LastTarget stays as history; HeldX falls back to the live X)
+	}
 	return bA && bB;
 }
 
@@ -282,4 +298,14 @@ void URamms5BarLinkageController::GetClaimedMotorIds(TArray<FName>& OutIds) cons
 	{
 		OutIds.Add(Resolved.ProximalMotorB);
 	}
+}
+
+bool URamms5BarLinkageController::ReadTarget(FName Id, float& OutTarget) const
+{
+	if (Id != HeightControlId() || !bHasTarget)
+	{
+		return false;
+	}
+	OutTarget = static_cast<float>(LastTarget.Y);
+	return true;
 }
