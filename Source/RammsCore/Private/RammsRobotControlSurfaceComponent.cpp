@@ -421,6 +421,7 @@ FString URammsRobotControlSurfaceComponent::GetControlSurfaceJson() const
 bool URammsRobotControlSurfaceComponent::GetAxisTarget_Implementation(FName Id, float& OutTarget) const
 {
 	EnsureBuilt(); // may be the first surface call a panel makes: routes must exist for the lookup
+	const FRammsControlAxis* Axis = Surface.Find(Id);
 	// The owning contributor knows the real target, including one set by a
 	// direct call on the controller that never passed through the surface.
 	if (IRammsControlContributor* C = ContributorFor(Id))
@@ -428,6 +429,15 @@ bool URammsRobotControlSurfaceComponent::GetAxisTarget_Implementation(FName Id, 
 		if (C->ReadTarget(Id, OutTarget))
 		{
 			return true;
+		}
+		// For a servo axis the contributor's "no target" is the answer: it has
+		// been released (or disabled behind our back), and our own record of
+		// the last command would report a target nothing is holding. Rate
+		// axes and contributors that don't track targets fall through.
+		if (Axis && (Axis->Kind == ERammsControlKind::Position || Axis->Kind == ERammsControlKind::Velocity))
+		{
+			OutTarget = 0.0f;
+			return false;
 		}
 	}
 	if (const float* Target = Targets.Find(Id))
