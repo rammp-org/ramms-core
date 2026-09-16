@@ -49,7 +49,12 @@ public:
 	virtual bool ReadControl(FName Id, float& OutValue) const { return false; }
 
 	/** The control's current commanded target, whoever set it (a direct call
-	 *  on the controller included). False = no target / not applicable. */
+	 *  on the controller included). False = no target: released, disabled, or
+	 *  never commanded. For a Position / Velocity control a false answer is
+	 *  authoritative — the surface reports "no target" rather than falling
+	 *  back to the last value commanded through it — so a contributor that
+	 *  holds targets must implement this, and one that doesn't must keep the
+	 *  default. */
 	virtual bool ReadTarget(FName Id, float& OutTarget) const { return false; }
 
 	/** RobotBase motor Ids this contributor drives (not exposed as raw motors). */
