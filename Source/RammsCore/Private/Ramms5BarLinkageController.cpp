@@ -259,6 +259,10 @@ bool URamms5BarLinkageController::ReleaseControl(FName Id)
 	}
 	const bool bA = Base->ReleaseMotor(Resolved.ProximalMotorA);
 	const bool bB = Base->ReleaseMotor(Resolved.ProximalMotorB);
+	if (bA && bB)
+	{
+		bHasTarget = false; // no longer holding an endpoint (LastTarget stays as history; HeldX falls back to the live X)
+	}
 	return bA && bB;
 }
 

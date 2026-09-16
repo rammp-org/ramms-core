@@ -1057,12 +1057,13 @@ bool UMebotControllerComponent::ReadTarget(FName Id, float& OutTarget) const
 	// The motor configs hold the commanded target (SetAngularMotorTarget /
 	// SetLinearMotorTarget write it), whichever path set it.
 	const FName Constraint = ConstraintFor(Id);
+	// A released motor (disabled drive) is not holding a target any more.
 	for (const FAngularMotorConfig& M : AngularMotors)
 	{
 		if (M.ConstraintName == Constraint)
 		{
 			OutTarget = M.TargetAngle;
-			return true;
+			return M.bEnabled;
 		}
 	}
 	for (const FLinearMotorConfig& M : LinearMotors)
@@ -1070,7 +1071,7 @@ bool UMebotControllerComponent::ReadTarget(FName Id, float& OutTarget) const
 		if (M.ConstraintName == Constraint)
 		{
 			OutTarget = M.TargetPosition;
-			return true;
+			return M.bEnabled;
 		}
 	}
 	return false;
