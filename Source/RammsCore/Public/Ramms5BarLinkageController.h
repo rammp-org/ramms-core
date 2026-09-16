@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Ramms5BarLinkageSpec.h"
+#include "RammsControlContributor.h"
 #include "Ramms5BarLinkageController.generated.h"
 
 class URammsRobotBaseComponent;
@@ -21,7 +22,7 @@ class URammsRobotBaseComponent;
  * robot actor; each names its own two motor Ids.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URamms5BarLinkageController : public UActorComponent
+class RAMMSCORE_API URamms5BarLinkageController : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
@@ -104,4 +105,37 @@ private:
 	/** Last endpoint target commanded (local x-z, cm). */
 	FVector2D LastTarget = FVector2D::ZeroVector;
 	bool	  bHasTarget = false;
+
+public:
+	/** Endpoint heights (cm) the control surface offers for this linkage. Leave
+	 *  zero-width (the default) to derive it from the mechanism: the heights at
+	 *  the linkage's current X that the IK and the two motors' ControlRanges
+	 *  reach (see GetReachableHeightRange). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D EndpointHeightRange = FVector2D::ZeroVector;
+
+	/** Contiguous height interval (cm) reachable at X, scanned from
+	 *  HeightScanMin..HeightScanMax around the current height. bValid is false
+	 *  when nothing is reachable there. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetReachableHeightRange(float X, bool& bValid) const;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0.05"))
+	float HeightScanStep = 0.25f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D HeightScanLimits = FVector2D(-100.0, 100.0);
+
+	// --- IRammsControlContributor: "linkage.<name>.height" ---------------------
+	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
+	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  ReleaseControl(FName Id) override;
+	virtual bool  ReadControl(FName Id, float& OutValue) const override;
+	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
+	virtual int32 GetControlOrder() const override { return 10; }
+
+private:
+	FName HeightControlId() const { return *FString::Printf(TEXT("linkage.%s.height"), *GetName()); }
+
+	/** The X SetEndpointHeight keeps: the last target's, else the live endpoint's. */
+	float HeldX() const;
 };

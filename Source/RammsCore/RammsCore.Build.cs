@@ -38,6 +38,9 @@ public class RammsCore : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"InputCore",
+				// The control-surface model (RammsUI plugin's light RammsControl
+				// module): contributor / provider / sink types in public headers.
+				"RammsControl",
 			}
 			);
 			
@@ -56,6 +59,10 @@ public class RammsCore : ModuleRules
 				"Projects",
 				// ... add private dependencies that you statically link with here ...	
                 "Eigen",
+				"Json",
+				"JsonUtilities", // control surface as JSON for Remote Control
+				"RammsUI",       // URammsUISubsystem: control-surface registry
+				"EnhancedInput", // URammsControlInputComponent
 			}
 			);
 

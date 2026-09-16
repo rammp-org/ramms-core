@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "InputCoreTypes.h"
+#include "RammsControlContributor.h"
 #include "RammsRobotCameraComponent.generated.h"
 
 class UCameraComponent;
@@ -32,7 +33,7 @@ class USpringArmComponent;
  * a gamepad stick or Blueprint.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsRobotCameraComponent : public UActorComponent
+class RAMMSCORE_API URammsRobotCameraComponent : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
@@ -43,11 +44,6 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	// --- Camera switching ------------------------------------------------------
-
-	/** N ("next view"). Tab is taken by URLab's simulate widget (input-mode
-	 *  toggle) and by the project's own input mappings. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Switch")
-	FKey NextCameraKey = EKeys::N;
 
 	/** Restrict cycling to these camera component names, in this order ([0] is
 	 *  the start camera). Empty = every UCameraComponent on the pawn, authored
@@ -67,9 +63,6 @@ public:
 	 *  of its own, so this costs nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
 	bool bAlsoOrbitWithLeftDrag = true;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
-	FKey ResetKey = EKeys::Home;
 
 	/** Degrees of arm rotation per unit of mouse delta. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit", meta = (ClampMin = "0.0"))
@@ -189,7 +182,42 @@ private:
 	double LastZoomStepTime = -1.0;
 
 	/** Last cursor position, for the position-delta orbit path. */
+public:
+	/** True while a UI widget (the HUD) is under the cursor rather than the bare game viewport:
+	 *  drags that start there and the wheel over it belong to the UI, not the camera. */
+	UFUNCTION(BlueprintPure, Category = "Camera|Orbit")
+	bool IsCursorOverUI() const;
+
+	/** Slate type of the deepest widget under the cursor inside the game viewport (diagnostics). */
+	UFUNCTION(BlueprintPure, Category = "Camera|Orbit")
+	FString GetWidgetTypeUnderCursor() const;
+
+private:
+	bool bButtonWasHeld = false;
+	bool bDragOnUI = false;
+
 	float LastCursorX = 0.0f;
 	float LastCursorY = 0.0f;
 	bool  bHadCursor = false;
+
+public:
+	// --- Control surface ("camera.*") ----------------------------------------
+	/** Orbit rate at full deflection of the camera.orbit_* axes (deg/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Control", meta = (ClampMin = "0.0"))
+	float ControlOrbitRateDegPerSec = 90.0f;
+
+	/** Zoom rate at full deflection of camera.zoom, in wheel notches per second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Control", meta = (ClampMin = "0.0"))
+	float ControlZoomNotchesPerSec = 6.0f;
+
+	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
+	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  TriggerControl(FName Id) override;
+	virtual bool  ReleaseControl(FName Id) override;
+	virtual int32 GetControlOrder() const override { return 90; }
+
+private:
+	/** Orbit / zoom rates as last set through the control surface; integrated in Tick. */
+	FVector2D ControlOrbit = FVector2D::ZeroVector;
+	float	  ControlZoom = 0.0f;
 };

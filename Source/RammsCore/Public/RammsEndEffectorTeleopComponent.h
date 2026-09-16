@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "InputCoreTypes.h"
+#include "RammsControlContributor.h"
 #include "RammsEndEffectorTeleopComponent.generated.h"
 
 class UCameraComponent;
@@ -18,9 +19,16 @@ class USpringArmComponent;
  * Add this to an actor that already has a UKinovaGen3ControllerComponent.
  * It polls the local player controller for keyboard / mouse input and nudges
  * the arm's end-effector target pose each tick.
+ *
+ * It is also the arm's control-surface contributor: rate axes
+ * arm.forward / arm.strafe / arm.up / arm.yaw / arm.pitch / arm.roll
+ * (normalized, integrated per tick at the teleop speeds), the arm.resync
+ * action, and gripper.open / gripper.close / gripper.toggle when a gripper
+ * controller is present. The key polling is legacy, to be replaced by the
+ * Enhanced Input map driving these same controls.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsEndEffectorTeleopComponent : public UActorComponent
+class RAMMSCORE_API URammsEndEffectorTeleopComponent : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
@@ -41,9 +49,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|State")
 	bool bTeleopEnabled = true;
 
-	/** Poll keyboard / mouse from the first local player controller each tick */
+	/** Legacy: poll the keys below (and the mouse) from the first local player
+	 *  controller each tick. Off by default — the Enhanced Input map drives the
+	 *  arm.* / gripper.* controls through the control surface instead. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|State")
-	bool bEnableKeyboardMouseTeleop = true;
+	bool bEnableKeyboardMouseTeleop = false;
 
 	/** Force the target Kinova controller into EndEffectorControl while teleop is active */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop|State")
@@ -283,7 +293,19 @@ public:
 		return GripperControllerComponent;
 	}
 
+	// --- IRammsControlContributor: "arm.*", "gripper.*" ------------------------
+	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
+	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  TriggerControl(FName Id) override;
+	virtual bool  ReleaseControl(FName Id) override;
+	virtual bool  ReadControl(FName Id, float& OutValue) const override;
+	virtual int32 GetControlOrder() const override { return 30; }
+
 private:
+	/** Rate input from the control surface, applied in TickComponent. */
+	FVector	 ControlLinear = FVector::ZeroVector;
+	FRotator ControlAngular = FRotator::ZeroRotator;
+
 	UKinovaGen3ControllerComponent* ResolveKinovaController();
 	UGripperControllerComponent*	ResolveGripperController();
 	void							ResolveFollowCameraComponents();

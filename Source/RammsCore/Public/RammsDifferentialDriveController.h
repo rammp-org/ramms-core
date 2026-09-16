@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "RammsDifferentialDriveTypes.h"
+#include "RammsControlContributor.h"
 #include "RammsDifferentialDriveController.generated.h"
 
 class UPrimitiveComponent;
@@ -15,7 +16,7 @@ class URammsRobotBaseComponent;
  * Manages motor control, applies forces to wheels, tracks odometry
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent
+class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
@@ -355,4 +356,16 @@ private:
 
 	/** Debug log current state */
 	void DebugLogState();
+
+	// --- IRammsControlContributor: "drive.forward" / "drive.turn" -------------
+	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
+	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  ReleaseControl(FName Id) override;
+	virtual bool  ReadControl(FName Id, float& OutValue) const override;
+	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
+	virtual int32 GetControlOrder() const override { return 0; }
+
+private:
+	/** The two drive axes as last set through the control surface. */
+	FVector2D ControlDriveInput = FVector2D::ZeroVector;
 };

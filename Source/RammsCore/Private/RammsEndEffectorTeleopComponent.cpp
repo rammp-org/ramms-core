@@ -48,6 +48,21 @@ void URammsEndEffectorTeleopComponent::TickComponent(float DeltaTime, ELevelTick
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// Control-surface rate axes (panels, input maps, remote clients) integrate
+	// here at the teleop speeds, independent of the legacy key polling below.
+	if (bTeleopEnabled && (!ControlLinear.IsNearlyZero() || !ControlAngular.IsNearlyZero()))
+	{
+		FVector Linear = ControlLinear;
+		Linear.X *= ForwardSign;
+		Linear.Y *= StrafeSign;
+		Linear.Z *= UpSign;
+		FRotator Angular = ControlAngular;
+		Angular.Pitch *= PitchSign;
+		Angular.Yaw *= YawSign;
+		Angular.Roll *= RollSign;
+		ApplyTeleopInput(Linear, Angular, DeltaTime, 1.0f);
+	}
+
 	if (!bTeleopEnabled || !bEnableKeyboardMouseTeleop)
 	{
 		if (bEnableFollowCamera)
@@ -553,4 +568,218 @@ void URammsEndEffectorTeleopComponent::ApplyKeyboardMouseTeleop(float DeltaTime)
 	{
 		Controller->RotateEndEffectorTargetBy(MouseRotationDelta);
 	}
+}
+
+// --- control surface -----------------------------------------------------------
+
+namespace
+{
+	const FName ArmForward(TEXT("arm.forward"));
+	const FName ArmStrafe(TEXT("arm.strafe"));
+	const FName ArmUp(TEXT("arm.up"));
+	const FName ArmYaw(TEXT("arm.yaw"));
+	const FName ArmPitch(TEXT("arm.pitch"));
+	const FName ArmRoll(TEXT("arm.roll"));
+	const FName ArmResync(TEXT("arm.resync"));
+	const FName GripperOpen(TEXT("gripper.open"));
+	const FName GripperClose(TEXT("gripper.close"));
+	const FName GripperToggle(TEXT("gripper.toggle"));
+	const FName GripperClosed(TEXT("gripper.closed"));
+} // namespace
+
+void URammsEndEffectorTeleopComponent::DescribeControls(FRammsControlSurface& OutSurface) const
+{
+	if (!KinovaControllerComponent)
+	{
+		return;
+	}
+	auto Rate = [&OutSurface](FName Id, const TCHAR* Name, FName Paired, int32 Order) {
+		FRammsControlAxis Axis;
+		Axis.Id = Id;
+		Axis.Group = FName("Arm");
+		Axis.DisplayName = FText::FromString(Name);
+		Axis.Kind = ERammsControlKind::Continuous;
+		Axis.Units = ERammsControlUnits::Normalized;
+		Axis.Range = FVector2D(-1.0, 1.0);
+		Axis.PairedAxis = Paired;
+		Axis.Order = Order;
+		OutSurface.Add(Axis);
+	};
+	Rate(ArmForward, TEXT("Forward"), ArmStrafe, 0);
+	Rate(ArmStrafe, TEXT("Strafe"), ArmForward, 1);
+	Rate(ArmUp, TEXT("Up"), NAME_None, 2);
+	Rate(ArmPitch, TEXT("Pitch"), ArmYaw, 3); // paired: lower Order = the joystick's vertical axis
+	Rate(ArmYaw, TEXT("Yaw"), ArmPitch, 4);
+	Rate(ArmRoll, TEXT("Roll"), NAME_None, 5);
+
+	FRammsControlAxis Resync;
+	Resync.Id = ArmResync;
+	Resync.Group = FName("Arm");
+	Resync.DisplayName = FText::FromString(TEXT("Resync target"));
+	Resync.Kind = ERammsControlKind::Action;
+	Resync.Units = ERammsControlUnits::None;
+	Resync.Order = 6;
+	OutSurface.Add(Resync);
+
+	if (GripperControllerComponent)
+	{
+		auto Action = [&OutSurface](FName Id, const TCHAR* Name, int32 Order) {
+			FRammsControlAxis Axis;
+			Axis.Id = Id;
+			Axis.Group = FName("Gripper");
+			Axis.DisplayName = FText::FromString(Name);
+			Axis.Kind = ERammsControlKind::Action;
+			Axis.Units = ERammsControlUnits::None;
+			Axis.Order = Order;
+			OutSurface.Add(Axis);
+		};
+		Action(GripperOpen, TEXT("Open"), 0);
+		Action(GripperClose, TEXT("Close"), 1);
+		Action(GripperToggle, TEXT("Toggle"), 2);
+
+		// Readback-only state (0 = open, 1 = closed) for panels / status.
+		FRammsControlAxis Closed;
+		Closed.Id = GripperClosed;
+		Closed.Group = FName("Gripper");
+		Closed.DisplayName = FText::FromString(TEXT("Closed"));
+		Closed.Kind = ERammsControlKind::Position;
+		Closed.Units = ERammsControlUnits::Normalized;
+		Closed.Range = FVector2D(0.0, 1.0);
+		Closed.bReadback = true;
+		Closed.bReadOnly = true; // state only: change it through the actions
+		Closed.Order = 3;
+		OutSurface.Add(Closed);
+	}
+}
+
+bool URammsEndEffectorTeleopComponent::ApplyControl(FName Id, float Value)
+{
+	if (!bTeleopEnabled || !KinovaControllerComponent)
+	{
+		return false;
+	}
+	const float V = FMath::Clamp(Value, -1.0f, 1.0f);
+	if (Id == ArmForward)
+	{
+		ControlLinear.X = V;
+	}
+	else if (Id == ArmStrafe)
+	{
+		ControlLinear.Y = V;
+	}
+	else if (Id == ArmUp)
+	{
+		ControlLinear.Z = V;
+	}
+	else if (Id == ArmYaw)
+	{
+		ControlAngular.Yaw = V;
+	}
+	else if (Id == ArmPitch)
+	{
+		ControlAngular.Pitch = V;
+	}
+	else if (Id == ArmRoll)
+	{
+		ControlAngular.Roll = V;
+	}
+	else
+	{
+		return false; // gripper.closed is readback-only: use the gripper actions
+	}
+	return true;
+}
+
+bool URammsEndEffectorTeleopComponent::TriggerControl(FName Id)
+{
+	if (!bTeleopEnabled)
+	{
+		return false; // the master enable covers both advertised paths
+	}
+	if (Id == ArmResync)
+	{
+		SyncTargetToCurrentPose();
+		return KinovaControllerComponent != nullptr;
+	}
+	if (!GripperControllerComponent)
+	{
+		return false;
+	}
+	if (Id == GripperOpen)
+	{
+		OpenGripper();
+	}
+	else if (Id == GripperClose)
+	{
+		CloseGripper();
+	}
+	else if (Id == GripperToggle)
+	{
+		ToggleGripper();
+	}
+	else
+	{
+		return false;
+	}
+	return true;
+}
+
+bool URammsEndEffectorTeleopComponent::ReleaseControl(FName Id)
+{
+	// Rate axes spring to zero by clearing the cached rate directly — even
+	// while teleop is disabled, so no stale rate resumes motion when it is
+	// re-enabled. The arm holds wherever the target is. gripper.closed is
+	// state: releasing it is a no-op.
+	if (Id == ArmForward)
+	{
+		ControlLinear.X = 0.0f;
+	}
+	else if (Id == ArmStrafe)
+	{
+		ControlLinear.Y = 0.0f;
+	}
+	else if (Id == ArmUp)
+	{
+		ControlLinear.Z = 0.0f;
+	}
+	else if (Id == ArmYaw)
+	{
+		ControlAngular.Yaw = 0.0f;
+	}
+	else if (Id == ArmPitch)
+	{
+		ControlAngular.Pitch = 0.0f;
+	}
+	else if (Id == ArmRoll)
+	{
+		ControlAngular.Roll = 0.0f;
+	}
+	else if (Id != GripperClosed)
+	{
+		return false;
+	}
+	return true;
+}
+
+bool URammsEndEffectorTeleopComponent::ReadControl(FName Id, float& OutValue) const
+{
+	if (Id == GripperClosed && GripperControllerComponent)
+	{
+		// Commanded state: closing counts as closed so a panel reflects the
+		// press immediately rather than when the fingers stall.
+		const EGripperState State = GripperControllerComponent->GetGripperState();
+		OutValue = (State == EGripperState::Closed || State == EGripperState::Closing) ? 1.0f : 0.0f;
+		return true;
+	}
+	if (Id == ArmForward || Id == ArmStrafe || Id == ArmUp)
+	{
+		OutValue = Id == ArmForward ? ControlLinear.X : (Id == ArmStrafe ? ControlLinear.Y : ControlLinear.Z);
+		return true;
+	}
+	if (Id == ArmYaw || Id == ArmPitch || Id == ArmRoll)
+	{
+		OutValue = Id == ArmYaw ? ControlAngular.Yaw : (Id == ArmPitch ? ControlAngular.Pitch : ControlAngular.Roll);
+		return true;
+	}
+	return false;
 }

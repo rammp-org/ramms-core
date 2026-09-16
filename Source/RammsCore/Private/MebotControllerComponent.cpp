@@ -2,6 +2,7 @@
 
 #include "MebotControllerComponent.h"
 #include "RammsRobotBaseComponent.h"
+#include "RammsMotorSpec.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/ConstraintInstance.h"
 #include "GameFramework/Actor.h"
@@ -876,5 +877,177 @@ void UMebotControllerComponent::DrawDebugVisualization()
 			MotorInfo, nullptr, FColor::Yellow, 0.0f, true, 1.0f);
 
 		YOffset += 1.0f;
+	}
+}
+
+// --- control surface -----------------------------------------------------------
+
+FName UMebotControllerComponent::ControlIdFor(FName ConstraintName)
+{
+	return *FString::Printf(TEXT("lift.%s"), *ConstraintName.ToString());
+}
+
+FName UMebotControllerComponent::ConstraintFor(FName ControlId)
+{
+	FString S = ControlId.ToString();
+	return S.RemoveFromStart(TEXT("lift.")) ? FName(*S) : NAME_None;
+}
+
+void UMebotControllerComponent::DescribeControls(FRammsControlSurface& OutSurface) const
+{
+	const bool bViaBase = IsUsingRobotBase();
+	auto GroupFor = [](FName Constraint) { return Constraint.ToString().Contains(TEXT("caster")) ? FName("Casters") : FName("Lift"); };
+	auto RegistryRange = [&](FName MotorId, FVector2D& Out) {
+		FRammsMotorSpec Spec;
+		if (bViaBase && !MotorId.IsNone() && RobotBase->GetMotorSpec(MotorId, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
+		{
+			Out = Spec.ControlRange;
+			return true;
+		}
+		return false;
+	};
+	int32 Order = 0;
+	for (const FAngularMotorConfig& M : AngularMotors)
+	{
+		FRammsControlAxis Axis;
+		Axis.Id = ControlIdFor(M.ConstraintName);
+		Axis.Group = GroupFor(M.ConstraintName);
+		Axis.DisplayName = FText::FromString(M.ConstraintName.ToString().Replace(TEXT("_"), TEXT(" ")));
+		Axis.Kind = ERammsControlKind::Position;
+		Axis.Units = ERammsControlUnits::Degrees;
+		Axis.Order = Order++;
+		FVector2D Range;
+		if (RegistryRange(M.ResolvedMotorId, Range))
+		{
+			Axis.Range = FVector2D(FMath::RadiansToDegrees(Range.X), FMath::RadiansToDegrees(Range.Y));
+		}
+		else if (M.CachedConstraint)
+		{
+			const float Limit = M.ControlAxis == EMotorAxis::X ? M.CachedConstraint->GetAngularTwistLimit()
+				: M.ControlAxis == EMotorAxis::Y				  ? M.CachedConstraint->GetAngularSwing2Limit()
+																  : M.CachedConstraint->GetAngularSwing1Limit();
+			Axis.Range = Limit > 0.0f ? FVector2D(-Limit, Limit) : FVector2D(-90.0, 90.0);
+		}
+		else
+		{
+			Axis.Range = FVector2D(-90.0, 90.0);
+		}
+		OutSurface.Add(Axis);
+	}
+	for (const FLinearMotorConfig& M : LinearMotors)
+	{
+		FRammsControlAxis Axis;
+		Axis.Id = ControlIdFor(M.ConstraintName);
+		Axis.Group = GroupFor(M.ConstraintName);
+		Axis.DisplayName = FText::FromString(M.ConstraintName.ToString().Replace(TEXT("_"), TEXT(" ")));
+		Axis.Kind = ERammsControlKind::Position;
+		Axis.Units = ERammsControlUnits::Centimeters;
+		Axis.Order = Order++;
+		FVector2D Range;
+		if (RegistryRange(M.ResolvedMotorId, Range))
+		{
+			Axis.Range = Range;
+		}
+		else if (M.CachedConstraint && M.CachedConstraint->GetLinearLimit() > 0.0f)
+		{
+			Axis.Range = FVector2D(-M.CachedConstraint->GetLinearLimit(), M.CachedConstraint->GetLinearLimit());
+		}
+		else
+		{
+			Axis.Range = FVector2D(-20.0, 20.0);
+		}
+		OutSurface.Add(Axis);
+	}
+}
+
+bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
+{
+	const FName Constraint = ConstraintFor(Id);
+	for (FAngularMotorConfig& M : AngularMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			if (!M.bEnabled)
+			{
+				SetAngularMotorEnabled(Constraint, true);
+			}
+			SetAngularMotorTarget(Constraint, Value);
+			return true;
+		}
+	}
+	for (FLinearMotorConfig& M : LinearMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			if (!M.bEnabled)
+			{
+				SetLinearMotorEnabled(Constraint, true);
+			}
+			SetLinearMotorTarget(Constraint, Value);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UMebotControllerComponent::ReleaseControl(FName Id)
+{
+	const FName Constraint = ConstraintFor(Id);
+	for (const FAngularMotorConfig& M : AngularMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			SetAngularMotorEnabled(Constraint, false);
+			return !M.bEnabled; // stays enabled when the backend can't let go
+		}
+	}
+	for (const FLinearMotorConfig& M : LinearMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			SetLinearMotorEnabled(Constraint, false);
+			return !M.bEnabled;
+		}
+	}
+	return false;
+}
+
+bool UMebotControllerComponent::ReadControl(FName Id, float& OutValue) const
+{
+	const FName Constraint = ConstraintFor(Id);
+	for (const FAngularMotorConfig& M : AngularMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			OutValue = GetAngularMotorCurrentAngle(Constraint);
+			return true;
+		}
+	}
+	for (const FLinearMotorConfig& M : LinearMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			OutValue = GetLinearMotorCurrentPosition(Constraint);
+			return true;
+		}
+	}
+	return false;
+}
+
+void UMebotControllerComponent::GetClaimedMotorIds(TArray<FName>& OutIds) const
+{
+	for (const FAngularMotorConfig& M : AngularMotors)
+	{
+		if (!M.ResolvedMotorId.IsNone())
+		{
+			OutIds.Add(M.ResolvedMotorId);
+		}
+	}
+	for (const FLinearMotorConfig& M : LinearMotors)
+	{
+		if (!M.ResolvedMotorId.IsNone())
+		{
+			OutIds.Add(M.ResolvedMotorId);
+		}
 	}
 }

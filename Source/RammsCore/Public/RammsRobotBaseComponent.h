@@ -123,7 +123,28 @@ public:
 	ERammsActuatorType GetMotorType(FName MotorId) const;
 
 	/** Copy of a motor's registry spec; false if not found. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool GetMotorSpec(FName MotorId, FRammsMotorSpec& OutSpec) const;
+
+	// --- Registry enumeration (what a UI / remote client needs to discover the robot)
+
+	/** Every registered motor Id, in table order. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
+	TArray<FName> GetMotorIds() const;
+
+	/** Every registered motor spec, in table order. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
+	TArray<FRammsMotorSpec> GetMotorSpecs() const;
+
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
+	int32 GetMotorCount() const;
+
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMotorRegistryLoaded, URammsRobotBaseComponent*, Base);
+
+	/** Fired once the motor table has been loaded (lazily, on first access or
+	 *  BeginPlay) — consumers that describe the robot can build from it. */
+	UPROPERTY(BlueprintAssignable, Category = "Robot|Motors")
+	FOnMotorRegistryLoaded OnMotorRegistryLoaded;
 
 	/** The Id of the registry motor whose ChaosName (or, failing that, Id) is
 	 *  ChaosName — lets a Chaos-era consumer that knows a bone / constraint
@@ -164,7 +185,9 @@ private:
 
 	/** Resolved motor registry, Id -> spec. Mutable: loaded lazily. */
 	mutable TMap<FName, FRammsMotorSpec> Motors;
-	mutable bool						 bMotorsLoaded = false;
+	/** Ids in table order (TMap order is not a contract). */
+	mutable TArray<FName> MotorOrder;
+	mutable bool		  bMotorsLoaded = false;
 
 	/** The resolved physics backend. Raw owning pointer (see the drive-backend
 	 *  registry note); created by EnsureBackend, freed in EndPlay/destructor.

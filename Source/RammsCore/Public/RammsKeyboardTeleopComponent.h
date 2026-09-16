@@ -74,6 +74,10 @@ struct FRammsLinkageKeyBinding
  * mapping assets and coexists with Enhanced Input; Pixel Streaming keyboard
  * input reaches it the same way. Everything is data: which keys, which motor
  * Ids, which rates.
+ *
+ * LEGACY: superseded by URammsControlInputComponent + a URammsControlInputMap
+ * (Enhanced Input -> the robot's control surface). Not added to new pawns;
+ * kept for one release for existing Blueprints.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsKeyboardTeleopComponent : public UActorComponent
