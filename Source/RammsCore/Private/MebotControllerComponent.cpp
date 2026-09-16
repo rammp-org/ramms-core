@@ -1051,3 +1051,27 @@ void UMebotControllerComponent::GetClaimedMotorIds(TArray<FName>& OutIds) const
 		}
 	}
 }
+
+bool UMebotControllerComponent::ReadTarget(FName Id, float& OutTarget) const
+{
+	// The motor configs hold the commanded target (SetAngularMotorTarget /
+	// SetLinearMotorTarget write it), whichever path set it.
+	const FName Constraint = ConstraintFor(Id);
+	for (const FAngularMotorConfig& M : AngularMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			OutTarget = M.TargetAngle;
+			return true;
+		}
+	}
+	for (const FLinearMotorConfig& M : LinearMotors)
+	{
+		if (M.ConstraintName == Constraint)
+		{
+			OutTarget = M.TargetPosition;
+			return true;
+		}
+	}
+	return false;
+}

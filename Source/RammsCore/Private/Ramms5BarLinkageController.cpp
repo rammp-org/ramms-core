@@ -283,3 +283,13 @@ void URamms5BarLinkageController::GetClaimedMotorIds(TArray<FName>& OutIds) cons
 		OutIds.Add(Resolved.ProximalMotorB);
 	}
 }
+
+bool URamms5BarLinkageController::ReadTarget(FName Id, float& OutTarget) const
+{
+	if (Id != HeightControlId() || !bHasTarget)
+	{
+		return false;
+	}
+	OutTarget = static_cast<float>(LastTarget.Y);
+	return true;
+}
