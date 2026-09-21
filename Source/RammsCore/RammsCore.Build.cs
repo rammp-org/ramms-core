@@ -38,6 +38,9 @@ public class RammsCore : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"InputCore",
+				// IPlatformInputDeviceMapper, for the editor-only input test
+				// helper that injects key state (RammsInputTestLibrary).
+				"ApplicationCore",
 				// The control-surface model (RammsUI plugin's light RammsControl
 				// module): contributor / provider / sink types in public headers.
 				"RammsControl",
