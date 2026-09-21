@@ -2,8 +2,8 @@
 
 #include "RammsKeyboardTeleopComponent.h"
 #include "RammsRobotBaseComponent.h"
-#include "RammsDifferentialDriveController.h"
-#include "Ramms5BarLinkageController.h"
+#include "RammsControlIds.h"
+#include "RammsRobotControlSurfaceComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 
@@ -16,6 +16,25 @@ URammsKeyboardTeleopComponent::URammsKeyboardTeleopComponent()
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 }
 
+bool URammsKeyboardTeleopComponent::MatchesLinkageFilter(FName ControlId) const
+{
+	if (Linkage.ControllerNames.Num() == 0)
+	{
+		return true;
+	}
+	// Linkage controls are named "linkage.<component>.height", so a filter that
+	// used to match component names matches the middle segment.
+	const FString Id = ControlId.ToString();
+	for (const FName& Name : Linkage.ControllerNames)
+	{
+		if (Id.Contains(FString::Printf(TEXT(".%s."), *Name.ToString())))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void URammsKeyboardTeleopComponent::BeginPlay()
 {
 	Super::BeginPlay();
@@ -23,24 +42,42 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 	if (AActor* Owner = GetOwner())
 	{
 		Base = Owner->FindComponentByClass<URammsRobotBaseComponent>();
-		Drive = Owner->FindComponentByClass<URammsDifferentialDriveController>();
-		TArray<URamms5BarLinkageController*> Found;
-		Owner->GetComponents<URamms5BarLinkageController>(Found);
-		for (URamms5BarLinkageController* C : Found)
+		Surface = Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
+
+		bool bHasDrive = false;
+		if (Surface)
 		{
-			if (Linkage.ControllerNames.Num() == 0 || Linkage.ControllerNames.Contains(C->GetFName()))
+			// Discover what this robot can actually do rather than looking for
+			// known controller classes. Linkage controls are per instance
+			// ("linkage.<component>.height"), so they are matched by group and
+			// kind; the drive axes are well-known Ids.
+			const FRammsControlSurface Described = Surface->DescribeControlSurface();
+			for (const FRammsControlAxis& Axis : Described.Axes)
 			{
-				Linkages.Add(C);
-				C->AddTickPrerequisiteComponent(this);
+				if (Axis.Id == RammsControlIds::Drive::Forward())
+				{
+					bHasDrive = true;
+				}
+				if (Axis.Group == RammsControlIds::Groups::Linkage()
+					&& Axis.Kind == ERammsControlKind::Position && !Axis.bReadOnly
+					&& MatchesLinkageFilter(Axis.Id))
+				{
+					LinkageControlIds.Add(Axis.Id);
+				}
+			}
+			// Tick before whatever contributes those controls, so a key pressed
+			// this frame is applied this frame. Done by component, not by class.
+			for (UActorComponent* C : Surface->GetContributorComponents())
+			{
+				if (C && C != this)
+				{
+					C->AddTickPrerequisiteComponent(this);
+				}
 			}
 		}
-		if (Drive)
-		{
-			Drive->AddTickPrerequisiteComponent(this);
-		}
-		UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': drive=%s linkages=%d motor bindings=%d base=%s"),
-			*Owner->GetName(), Drive ? TEXT("yes") : TEXT("no"), Linkages.Num(), MotorBindings.Num(),
-			Base ? TEXT("yes") : TEXT("no"));
+		UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': surface=%s drive=%s linkage controls=%d motor bindings=%d base=%s"),
+			*Owner->GetName(), Surface ? TEXT("yes") : TEXT("no"), bHasDrive ? TEXT("yes") : TEXT("no"),
+			LinkageControlIds.Num(), MotorBindings.Num(), Base ? TEXT("yes") : TEXT("no"));
 	}
 }
 
@@ -56,16 +93,17 @@ void URammsKeyboardTeleopComponent::ReleaseDrive()
 	// robot keeps driving after the player lets go of it (unpossess, drive
 	// disabled, end of play). Only our own command is released — the external
 	// input path (SetExternalDriveInput) is untouched.
-	if (bDriveCommandActive && Drive)
+	if (bDriveCommandActive && Surface)
 	{
-		if (Drive->IsExternalDriveActive())
+		// The surface refuses a write while a higher-priority source holds the
+		// axis, so a false here means the release did not happen -- keep it
+		// pending (Tick retries every frame) rather than pretending it did.
+		const bool bF = Surface->SetControl(RammsControlIds::Drive::Forward(), 0.0f, ERammsControlSource::Keyboard);
+		const bool bT = Surface->SetControl(RammsControlIds::Drive::Turn(), 0.0f, ERammsControlSource::Keyboard);
+		if (!bF && !bT)
 		{
-			// SetDriveInput is ignored while an external command holds
-			// priority; keep the release pending (Tick retries every frame)
-			// instead of pretending it went through.
 			return;
 		}
-		Drive->SetDriveInput(FVector2D::ZeroVector);
 		if (bLogCommands)
 		{
 			UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] drive input released"));
@@ -107,10 +145,12 @@ void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	APlayerController* PC = GetPlayerController();
 
 	// --- Drive -----------------------------------------------------------
-	if (PC && bDriveEnabled && Drive)
+	if (PC && bDriveEnabled && Surface)
 	{
+		// Kept as (turn, forward) to match what this component always sent.
 		const FVector2D Input(Axis(PC, TurnRightKey, TurnLeftKey) * TurnScale, Axis(PC, ForwardKey, BackwardKey) * ForwardScale);
-		Drive->SetDriveInput(Input);
+		Surface->SetControl(RammsControlIds::Drive::Forward(), Input.Y, ERammsControlSource::Keyboard);
+		Surface->SetControl(RammsControlIds::Drive::Turn(), Input.X, ERammsControlSource::Keyboard);
 		bDriveCommandActive = true;
 		if (bLogCommands && !Input.Equals(LastDrive))
 		{
@@ -134,37 +174,32 @@ void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	if (LinkageDir != 0.0f)
 	{
 		const float Dz = LinkageDir * Linkage.RateCmPerSecond * DeltaTime;
-		for (URamms5BarLinkageController* C : Linkages)
+		for (const FName& Id : LinkageControlIds)
 		{
-			if (!C)
-			{
-				continue;
-			}
-			FVector2D* Target = LinkageTargets.Find(C);
+			float* Target = LinkageTargets.Find(Id);
 			if (!Target)
 			{
-				// Seed from the live endpoint. An inconsistent live pose only
-				// yields an estimate; that's fine as a seed because a target
-				// is only adopted once the linkage accepts it.
-				bool			bValid = false;
-				const FVector2D Seed = C->GetCurrentEndpointChecked(bValid);
-				if (!bValid)
+				// Seed from whatever the control currently reports: its own
+				// commanded target if it holds one, else the live readback.
+				// Only an estimate if the linkage is not closed, which is fine
+				// -- a target is adopted only once the control accepts it.
+				float Seed = 0.0f;
+				if (!Surface->GetControlTarget(Id, Seed))
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[KeyboardTeleop] %s: live joint angles don't close the linkage; seeding the endpoint target from the estimate (%.2f, %.2f)"),
-						*C->GetName(), Seed.X, Seed.Y);
+					Seed = Surface->GetControlValue(Id);
 				}
-				Target = &LinkageTargets.Add(C, Seed);
+				Target = &LinkageTargets.Add(Id, Seed);
 			}
-			const FVector2D Candidate(Target->X, Target->Y + Dz);
-			// Only advance the target when the linkage accepts it (reachable and
-			// inside the motors' ranges), so holding a key at a limit doesn't
-			// wind the target off into the unreachable.
-			if (C->SetEndpointTarget(Candidate))
+			const float Candidate = *Target + Dz;
+			// Only advance the target when the control accepts it (reachable
+			// and inside the motors' ranges), so holding a key at a limit does
+			// not wind the target off into the unreachable.
+			if (Surface->SetControl(Id, Candidate, ERammsControlSource::Keyboard))
 			{
 				*Target = Candidate;
 				if (bLogCommands)
 				{
-					UE_LOG(LogTemp, Verbose, TEXT("[KeyboardTeleop] %s endpoint -> (%.2f, %.2f)"), *C->GetName(), Candidate.X, Candidate.Y);
+					UE_LOG(LogTemp, Verbose, TEXT("[KeyboardTeleop] %s -> %.2f"), *Id.ToString(), Candidate);
 				}
 			}
 		}

@@ -8,8 +8,7 @@
 #include "RammsKeyboardTeleopComponent.generated.h"
 
 class URammsRobotBaseComponent;
-class URammsDifferentialDriveController;
-class URamms5BarLinkageController;
+class URammsRobotControlSurfaceComponent;
 
 /** A pair of keys that nudges the target of a group of position motors. */
 USTRUCT(BlueprintType)
@@ -53,7 +52,7 @@ struct FRammsLinkageKeyBinding
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop", meta = (ClampMin = "0.0"))
 	float RateCmPerSecond = 6.0f;
 
-	/** Component names of the Ramms5BarLinkageControllers to move; empty = all
+	/** Component names of the linkage controllers to move; empty = all
 	 *  of them on the actor (both legs together). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop")
 	TArray<FName> ControllerNames;
@@ -64,9 +63,9 @@ struct FRammsLinkageKeyBinding
  * Put it on a pawn that owns a URammsRobotBaseComponent; when that pawn is
  * possessed by a player, each tick it polls the player's keys and:
  *
- *  - feeds the sibling URammsDifferentialDriveController with a joystick-style
+ *  - feeds the robot's drive controls (drive.forward / drive.turn) joystick-style
  *    input (W/S forward-back, A/D turn) via SetDriveInput;
- *  - raises / lowers the endpoint of the Ramms5BarLinkageControllers (E/Q);
+ *  - raises / lowers every Position control in the Linkage group (E/Q);
  *  - nudges arbitrary groups of position motors by Id (MotorBindings — e.g. the
  *    front and rear cranks of a lift_drive base).
  *
@@ -141,14 +140,20 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
 
+	/** Everything is driven through the robot's surface by control Id, so this
+	 *  component names no controller class: a holonomic base, or anything else
+	 *  advertising the same Ids, works here unchanged. */
 	UPROPERTY(Transient)
-	TObjectPtr<URammsDifferentialDriveController> Drive;
+	TObjectPtr<URammsRobotControlSurfaceComponent> Surface;
 
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<URamms5BarLinkageController>> Linkages;
+	/** Position controls in the Linkage group, discovered from the surface. */
+	TArray<FName> LinkageControlIds;
 
-	/** Per-linkage endpoint target (x, z), seeded from the live endpoint. */
-	TMap<URamms5BarLinkageController*, FVector2D> LinkageTargets;
+	/** Commanded height per linkage control (cm). */
+	TMap<FName, float> LinkageTargets;
+
+	/** True when ControllerNames is empty or matches this control's component. */
+	bool MatchesLinkageFilter(FName ControlId) const;
 
 	/** Per-motor target, seeded from the live value on first use. */
 	TMap<FName, float> MotorTargets;

@@ -249,6 +249,20 @@ IRammsControlContributor* URammsRobotControlSurfaceComponent::ContributorFor(FNa
 
 // --- sink ---------------------------------------------------------------------
 
+TArray<UActorComponent*> URammsRobotControlSurfaceComponent::GetContributorComponents() const
+{
+	EnsureBuilt();
+	TArray<UActorComponent*> Out;
+	for (const TPair<FName, FRoute>& Pair : Routes)
+	{
+		if (UActorComponent* Comp = Cast<UActorComponent>(Pair.Value.Contributor.Get()))
+		{
+			Out.AddUnique(Comp);
+		}
+	}
+	return Out;
+}
+
 bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float Value, ERammsControlSource Source)
 {
 	EnsureBuilt();

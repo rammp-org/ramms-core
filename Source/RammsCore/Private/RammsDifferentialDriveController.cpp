@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsDifferentialDriveController.h"
+
+#include "RammsControlIds.h"
 #include "RammsDifferentialDriveLibrary.h"
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -872,17 +874,13 @@ void URammsDifferentialDriveController::DebugLogState()
 
 // --- control surface -----------------------------------------------------------
 
-namespace
-{
-	const FName DriveForwardId(TEXT("drive.forward"));
-	const FName DriveTurnId(TEXT("drive.turn"));
-} // namespace
-
 void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
+	const FName		  DriveForwardId = RammsControlIds::Drive::Forward();
+	const FName		  DriveTurnId = RammsControlIds::Drive::Turn();
 	FRammsControlAxis Forward;
 	Forward.Id = DriveForwardId;
-	Forward.Group = FName("Drive");
+	Forward.Group = RammsControlIds::Groups::Drive();
 	Forward.DisplayName = NSLOCTEXT("Ramms", "DriveForward", "Forward");
 	Forward.Kind = ERammsControlKind::Continuous;
 	Forward.Units = ERammsControlUnits::Normalized;
@@ -901,6 +899,8 @@ void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& O
 
 bool URammsDifferentialDriveController::ApplyControl(FName Id, float Value)
 {
+	const FName DriveForwardId = RammsControlIds::Drive::Forward();
+	const FName DriveTurnId = RammsControlIds::Drive::Turn();
 	if (Id == DriveForwardId)
 	{
 		ControlDriveInput.Y = Value;
@@ -929,6 +929,8 @@ bool URammsDifferentialDriveController::ReleaseControl(FName Id)
 
 bool URammsDifferentialDriveController::ReadControl(FName Id, float& OutValue) const
 {
+	const FName DriveForwardId = RammsControlIds::Drive::Forward();
+	const FName DriveTurnId = RammsControlIds::Drive::Turn();
 	if (Id == DriveForwardId)
 	{
 		OutValue = static_cast<float>(DriveInput.Y);
