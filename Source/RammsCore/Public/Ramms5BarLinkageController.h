@@ -6,6 +6,7 @@
 #include "Components/ActorComponent.h"
 #include "Ramms5BarLinkageSpec.h"
 #include "RammsControlContributor.h"
+#include "RammsControlIds.h"
 #include "Ramms5BarLinkageController.generated.h"
 
 class URammsRobotBaseComponent;
@@ -55,6 +56,12 @@ public:
 	/** Convenience: keep the current endpoint X and move to height Z (cm). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	bool SetEndpointHeight(float Z);
+
+	/** Convenience: keep the current endpoint height and move fore/aft to X (cm).
+	 *  The other half of what a 5-bar can do -- both proximal motors move for
+	 *  either, so this is a translation of the endpoint, not a second joint. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
+	bool SetEndpointTranslation(float X);
 
 	/** Command the two proximal joint angles directly (rad; A = X, B = Y). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
@@ -125,7 +132,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D HeightScanLimits = FVector2D(-100.0, 100.0);
 
-	// --- IRammsControlContributor: "linkage.<name>.height" ---------------------
+	/** Endpoint translations (cm) the control surface offers. Zero-width (the
+	 *  default) derives it from the mechanism, as EndpointHeightRange does. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D EndpointTranslationRange = FVector2D::ZeroVector;
+
+	/** Contiguous fore/aft interval (cm) reachable at height Z. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetReachableTranslationRange(float Z, bool& bValid) const;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D TranslationScanLimits = FVector2D(-100.0, 100.0);
+
+	// --- IRammsControlContributor --------------------------------------------
+	// "linkage.<name>.height" and "linkage.<name>.translation": the endpoint's
+	// two degrees of freedom, both driven by the same pair of proximal motors.
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
 	virtual bool  ApplyControl(FName Id, float Value) override;
 	virtual bool  ReleaseControl(FName Id) override;
@@ -135,8 +156,20 @@ public:
 	virtual int32 GetControlOrder() const override { return 10; }
 
 private:
-	FName HeightControlId() const { return *FString::Printf(TEXT("linkage.%s.height"), *GetName()); }
+	FName HeightControlId() const { return RammsControlIds::Linkage::Height(GetName()); }
+	FName TranslationControlId() const { return RammsControlIds::Linkage::Translation(GetName()); }
 
 	/** The X SetEndpointHeight keeps: the last target's, else the live endpoint's. */
 	float HeldX() const;
+
+	/** The height SetEndpointTranslation keeps, by the same rule. */
+	float HeldZ() const;
+
+	/** Walk out from Start while Reachable holds, bounded by Lo..Hi. Both
+	 *  reachable ranges are the same scan along different axes. */
+	FVector2D ScanReachable(TFunctionRef<bool(float)> Reachable, float Start, float Lo,
+		float Hi, float Step, bool& bValid) const;
+
+	/** Build one endpoint axis; Suffix picks height or translation. */
+	void DescribeEndpointAxis(FRammsControlSurface& OutSurface, bool bHeight) const;
 };

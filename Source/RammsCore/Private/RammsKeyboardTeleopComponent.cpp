@@ -58,8 +58,14 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 				{
 					bHasDrive = true;
 				}
+				// Height only. A 5-bar offers fore/aft on the same group, and
+				// the raise/lower keys must not drive both at once -- that
+				// would walk the endpoint diagonally. Fore/aft is a slider on
+				// the control surface; give it its own keys if it ever wants
+				// them.
 				if (Axis.Group == RammsControlIds::Groups::Linkage()
 					&& Axis.Kind == ERammsControlKind::Position && !Axis.bReadOnly
+					&& Axis.Id.ToString().EndsWith(RammsControlIds::Linkage::HeightSuffix())
 					&& MatchesLinkageFilter(Axis.Id))
 				{
 					LinkageControlIds.Add(Axis.Id);
