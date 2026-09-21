@@ -7,12 +7,25 @@
 
 URamms5BarLinkageController::URamms5BarLinkageController()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	// The jog axes integrate a rate into the endpoint target each frame.
+	PrimaryComponentTick.bCanEverTick = true;
 }
 
 void URamms5BarLinkageController::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// bCanEverTick is serialised on the Blueprint's component template, so a
+	// linkage authored before the jog axes existed will never tick however the
+	// CDO is set -- and the stick would silently do nothing on every existing
+	// robot. Turn it on for this instance instead of asking everyone to
+	// re-save their Blueprints.
+	if (!PrimaryComponentTick.bCanEverTick)
+	{
+		PrimaryComponentTick.bCanEverTick = true;
+		PrimaryComponentTick.SetTickFunctionEnable(true);
+		PrimaryComponentTick.RegisterTickFunction(GetComponentLevel());
+	}
 
 	// Resolve the kinematic spec: a table row if configured, else the inline one.
 	Resolved = Linkage;
@@ -285,6 +298,64 @@ FVector2D URamms5BarLinkageController::SolveTarget(FVector2D TargetXZ, bool& bRe
 	return Angles;
 }
 
+void URamms5BarLinkageController::TickComponent(float DeltaTime, ELevelTick TickType,
+	FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (Jog.IsNearlyZero() || DeltaTime <= 0.0f)
+	{
+		return;
+	}
+
+	// Integrate from where we are holding, not from the live endpoint: the
+	// live pose lags the target under load, and seeding from it every frame
+	// would make the stick fight the mechanism instead of commanding it.
+	const FVector2D From(HeldX(), HeldZ());
+	FVector2D		Candidate = From + Jog * (JogRateCmPerSecond * DeltaTime);
+
+	// The reachable set is a curved region, not a rectangle, so stepping one
+	// axis can leave it even when both coordinates are individually in range --
+	// and SetEndpointTarget then refuses, every frame, and the stick does
+	// nothing. Clamp the moving axis into the band reachable at the other.
+	bool bValid = false;
+	if (!FMath::IsNearlyZero(Jog.Y))
+	{
+		const FVector2D Band = GetReachableHeightRange(static_cast<float>(Candidate.X), bValid);
+		if (bValid)
+		{
+			Candidate.Y = FMath::Clamp(Candidate.Y, Band.X, Band.Y);
+		}
+	}
+	if (!FMath::IsNearlyZero(Jog.X))
+	{
+		const FVector2D Band = GetReachableTranslationRange(static_cast<float>(Candidate.Y), bValid);
+		if (bValid)
+		{
+			Candidate.X = FMath::Clamp(Candidate.X, Band.X, Band.Y);
+		}
+	}
+
+	// Only adopt the new target when the linkage accepts it, so holding the
+	// stick at a limit does not wind the target off into the unreachable --
+	// the same rule the keyboard raise/lower uses.
+	const bool bTookIt = SetEndpointTarget(Candidate);
+	if (!bLoggedJog)
+	{
+		bLoggedJog = true;
+		bool bSolvable = false;
+		SolveTarget(Candidate, bSolvable);
+		const FVector2D Live = GetCurrentEndpoint();
+		// One line on the first jog, so a stick that appears to do nothing can
+		// be told apart from one whose target is being refused.
+		UE_LOG(LogTemp, Verbose,
+			TEXT("[5Bar] '%s' jog: live=(%.3f, %.3f) from=(%.3f, %.3f) candidate=(%.3f, %.3f) "
+				 "solvable=%d accepted=%d"),
+			*GetName(), Live.X, Live.Y, From.X, From.Y, Candidate.X, Candidate.Y,
+			bSolvable ? 1 : 0, bTookIt ? 1 : 0);
+	}
+}
+
 // --- control surface -----------------------------------------------------------
 
 void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& OutSurface, bool bHeight) const
@@ -329,6 +400,31 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	// motors; which one a command changes depends only on which is held.
 	DescribeEndpointAxis(OutSurface, /*bHeight=*/true);
 	DescribeEndpointAxis(OutSurface, /*bHeight=*/false);
+
+	// And a rate pair. The position axes above are the honest representation of
+	// a 5-bar -- its reachable set is a curved region, and a slider per axis
+	// shows only the slice at the other axis's current value. A stick that
+	// commands a delta sidesteps that: it never has to claim a range. Paired
+	// Continuous axes are what the surface panel renders as a joystick.
+	FRammsControlAxis Up;
+	Up.Id = JogUpControlId();
+	Up.Group = RammsControlIds::Groups::Linkage();
+	const FString Pretty = GetName().Replace(TEXT("Linkage"), TEXT("")).Replace(TEXT("_"), TEXT(" "));
+	Up.DisplayName = FText::FromString(Pretty + TEXT(" jog up"));
+	Up.Kind = ERammsControlKind::Continuous;
+	Up.Units = ERammsControlUnits::Normalized;
+	Up.Range = FVector2D(-1.0, 1.0);
+	Up.bReadback = false; // a rate command; there is nothing to read back
+	Up.Order = 2;		  // lower Order is the vertical axis of the joystick
+	Up.PairedAxis = JogForwardControlId();
+	OutSurface.Add(Up);
+
+	FRammsControlAxis Fwd = Up;
+	Fwd.Id = JogForwardControlId();
+	Fwd.DisplayName = FText::FromString(Pretty + TEXT(" jog fore/aft"));
+	Fwd.Order = 3;
+	Fwd.PairedAxis = JogUpControlId();
+	OutSurface.Add(Fwd);
 }
 
 bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
@@ -341,11 +437,34 @@ bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
 	{
 		return SetEndpointTranslation(Value);
 	}
+	if (Id == JogUpControlId())
+	{
+		Jog.Y = FMath::Clamp(Value, -1.0f, 1.0f);
+		return true;
+	}
+	if (Id == JogForwardControlId())
+	{
+		Jog.X = FMath::Clamp(Value, -1.0f, 1.0f);
+		return true;
+	}
 	return false;
 }
 
 bool URamms5BarLinkageController::ReleaseControl(FName Id)
 {
+	// Letting go of the stick stops the motion but keeps the endpoint held
+	// where it got to -- the motors are not released.
+	if (Id == JogUpControlId())
+	{
+		Jog.Y = 0.0f;
+		return true;
+	}
+	if (Id == JogForwardControlId())
+	{
+		Jog.X = 0.0f;
+		return true;
+	}
+
 	URammsRobotBaseComponent* Base = EnsureBase();
 	if ((Id != HeightControlId() && Id != TranslationControlId()) || !Base)
 	{

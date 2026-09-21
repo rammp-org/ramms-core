@@ -31,6 +31,8 @@ public:
 	URamms5BarLinkageController();
 
 	virtual void BeginPlay() override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+		FActorComponentTickFunction* ThisTickFunction) override;
 
 	/** Optional kinematic data table (row struct: FRamms5BarLinkageSpec). When
 	 *  set with LinkageRow, its row overrides the inline Linkage below. */
@@ -144,6 +146,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D TranslationScanLimits = FVector2D(-100.0, 100.0);
 
+	/** How fast the jog axes move the endpoint at full deflection (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0.0"))
+	float JogRateCmPerSecond = 6.0f;
+
 	// --- IRammsControlContributor --------------------------------------------
 	// "linkage.<name>.height" and "linkage.<name>.translation": the endpoint's
 	// two degrees of freedom, both driven by the same pair of proximal motors.
@@ -172,4 +178,14 @@ private:
 
 	/** Build one endpoint axis; Suffix picks height or translation. */
 	void DescribeEndpointAxis(FRammsControlSurface& OutSurface, bool bHeight) const;
+
+	FName JogUpControlId() const { return RammsControlIds::Linkage::JogUp(GetName()); }
+	FName JogForwardControlId() const { return RammsControlIds::Linkage::JogForward(GetName()); }
+
+	/** Current jog deflection, -1..1 (X = fore/aft, Y = up). Held until
+	 *  changed or released, like a stick that stays where it is put. */
+	FVector2D Jog = FVector2D::ZeroVector;
+
+	/** Log the first jog tick, so a stick that does nothing is diagnosable. */
+	bool bLoggedJog = false;
 };
