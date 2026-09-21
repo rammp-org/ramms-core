@@ -75,6 +75,22 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 				}
 			}
 		}
+		if (!Surface)
+		{
+			// Allowed -- a robot need not expose a control surface -- but this
+			// component can then drive nothing at all, and silently doing
+			// nothing is the worse failure. Motor bindings still work: those
+			// go through the robot base directly.
+			UE_LOG(LogTemp, Warning,
+				TEXT("[KeyboardTeleop] '%s' has no RammsRobotControlSurfaceComponent: drive and linkage keys will do nothing. Add one to the robot to make its controls drivable."),
+				*Owner->GetName());
+		}
+		else if (!bHasDrive && LinkageControlIds.Num() == 0)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[KeyboardTeleop] '%s' has a control surface but it advertises no drive axes and no linkage controls: check the robot's contributors."),
+				*Owner->GetName());
+		}
 		UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': surface=%s drive=%s linkage controls=%d motor bindings=%d base=%s"),
 			*Owner->GetName(), Surface ? TEXT("yes") : TEXT("no"), bHasDrive ? TEXT("yes") : TEXT("no"),
 			LinkageControlIds.Num(), MotorBindings.Num(), Base ? TEXT("yes") : TEXT("no"));
