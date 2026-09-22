@@ -15,11 +15,14 @@ URammsRobotBaseComponent::URammsRobotBaseComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 
-	// Enough to hold a lift-drive omni wheel at its commanded speed against
-	// the other three, well inside the +/-30 N.m those actuators allow.
-	DefaultVelocityGains.Kp = 4.0f;
-	DefaultVelocityGains.Ki = 8.0f;
-	DefaultVelocityGains.MaxIntegralTorque = 15.0f;
+	// Found against the lift-drive's omni wheels in PIE, holding a 6.93 rad/s
+	// command: Kp 2.0 tracks it to -8%, Kp 3.0 to +5%, and either side of that
+	// falls away fast (Kp 0.6 reaches 42% of the commanded rate, Kp 4.0
+	// overshoots by a third). A robot whose wheels differ can override these
+	// per motor in its registry row.
+	DefaultVelocityGains.Kp = 2.5f;
+	DefaultVelocityGains.Ki = 5.0f;
+	DefaultVelocityGains.MaxIntegralTorque = 10.0f;
 }
 
 URammsRobotBaseComponent::~URammsRobotBaseComponent()
@@ -195,6 +198,19 @@ void URammsRobotBaseComponent::SetMotorVelocityCommand(FName MotorId, float Radi
 	Drive.Target = RadiansPerSecond;
 }
 
+void URammsRobotBaseComponent::SetDefaultVelocityGains(float Kp, float Ki, float MaxIntegralTorque)
+{
+	DefaultVelocityGains.Kp = FMath::Max(0.0f, Kp);
+	DefaultVelocityGains.Ki = FMath::Max(0.0f, Ki);
+	DefaultVelocityGains.MaxIntegralTorque = FMath::Max(0.0f, MaxIntegralTorque);
+	// Whatever the old gains had accumulated means nothing under new ones.
+	for (TPair<FName, FVelocityDrive>& Pair : VelocityDrives)
+	{
+		Pair.Value.Integral = 0.0f;
+	}
+	PeakVelocityError = 0.0f;
+}
+
 void URammsRobotBaseComponent::ClearMotorVelocityCommand(FName MotorId)
 {
 	VelocityDrives.Remove(MotorId);
@@ -250,6 +266,7 @@ void URammsRobotBaseComponent::StepVelocityDrives(float DeltaTime)
 		// sign is put back on the way out.
 		const FRammsVelocityGains Gains = GainsFor(MotorId);
 		const float				  Error = Drive.Target - GetMotorVelocity(MotorId);
+		PeakVelocityError = FMath::Max(PeakVelocityError, FMath::Abs(Error));
 
 		float Integral = Drive.Integral + Gains.Ki * Error * DeltaTime;
 		if (Gains.MaxIntegralTorque > 0.0f)

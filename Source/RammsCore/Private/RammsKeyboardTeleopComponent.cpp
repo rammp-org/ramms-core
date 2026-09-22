@@ -227,9 +227,24 @@ void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	{
 		// Kept as (turn, forward) to match what this component always sent.
 		const FVector2D Input(Axis(PC, TurnRightKey, TurnLeftKey) * TurnScale, Axis(PC, ForwardKey, BackwardKey) * ForwardScale);
-		Surface->SetControl(RammsControlIds::Drive::Forward(), Input.Y, ERammsControlSource::Keyboard);
-		Surface->SetControl(RammsControlIds::Drive::Turn(), Input.X, ERammsControlSource::Keyboard);
-		bDriveCommandActive = true;
+
+		// Write only while there is something to say. Re-asserting zero every
+		// frame looks harmless and is not: the surface records a Keyboard hold
+		// on the axis each time, and every lower-priority source -- a script,
+		// a remote client -- is then refused for as long as this component
+		// exists. It silently stopped a PIE drive test from commanding the
+		// robot at all, and would do the same to anything else.
+		if (!Input.IsNearlyZero())
+		{
+			Surface->SetControl(RammsControlIds::Drive::Forward(), Input.Y, ERammsControlSource::Keyboard);
+			Surface->SetControl(RammsControlIds::Drive::Turn(), Input.X, ERammsControlSource::Keyboard);
+			bDriveCommandActive = true;
+		}
+		else if (bDriveCommandActive)
+		{
+			// The keys came up: hand the axes back once, then stay quiet.
+			ReleaseDrive();
+		}
 		if (bLogCommands && !Input.Equals(LastDrive))
 		{
 			UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] drive input (%.2f, %.2f)"), Input.X, Input.Y);

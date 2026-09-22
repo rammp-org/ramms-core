@@ -128,6 +128,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool GetMotorVelocityCommand(FName MotorId, float& OutRadiansPerSecond) const;
 
+	/** Retune the velocity loop and reset its integrators. Gains are the one
+	 *  thing here that has to be found against a running robot, and poking the
+	 *  property on a live component is not a supported thing to do. */
+	UFUNCTION(BlueprintCallable, Category = "Robot|Velocity Loop")
+	void SetDefaultVelocityGains(float Kp, float Ki, float MaxIntegralTorque);
+
+	/** Worst |commanded - achieved| speed seen since the last reset (rad/s),
+	 *  across every motor under velocity command. Tuning needs a number. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Velocity Loop")
+	float GetPeakVelocityError() const { return PeakVelocityError; }
+
+	UFUNCTION(BlueprintCallable, Category = "Robot|Velocity Loop")
+	void ResetPeakVelocityError() { PeakVelocityError = 0.0f; }
+
 	/** Stop actively driving a motor (a position servo lets go of its joint;
 	 *  see IRammsActuationBackend::ReleaseMotor). False if the backend cannot
 	 *  release it — it is then still driven at its last command. */
@@ -254,4 +268,7 @@ private:
 
 	/** Run one step of the velocity loop over every motor under command. */
 	void StepVelocityDrives(float DeltaTime);
+
+	/** Worst tracking error seen since the last reset, for tuning. */
+	float PeakVelocityError = 0.0f;
 };
