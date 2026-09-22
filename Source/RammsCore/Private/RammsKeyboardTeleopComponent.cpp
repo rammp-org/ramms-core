@@ -39,68 +39,121 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (AActor* Owner = GetOwner())
+	AActor* Owner = GetOwner();
+	if (!Owner)
 	{
-		Base = Owner->FindComponentByClass<URammsRobotBaseComponent>();
-		Surface = Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
+		return;
+	}
+	Base = Owner->FindComponentByClass<URammsRobotBaseComponent>();
+	Surface = Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
 
-		bool bHasDrive = false;
-		if (Surface)
+	if (!Surface)
+	{
+		// Allowed -- a robot need not expose a control surface -- but this
+		// component can then drive nothing at all, and silently doing
+		// nothing is the worse failure. Motor bindings still work: those
+		// go through the robot base directly.
+		UE_LOG(LogTemp, Warning,
+			TEXT("[KeyboardTeleop] '%s' has no RammsRobotControlSurfaceComponent: drive and linkage keys will do nothing. Add one to the robot to make its controls drivable."),
+			*Owner->GetName());
+	}
+	// Discovery deliberately does NOT happen here: see RefreshDiscovery.
+	UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': surface=%s motor bindings=%d base=%s"),
+		*Owner->GetName(), Surface ? TEXT("yes") : TEXT("no"), MotorBindings.Num(),
+		Base ? TEXT("yes") : TEXT("no"));
+}
+
+void URammsKeyboardTeleopComponent::RefreshDiscovery()
+{
+	if (!Surface)
+	{
+		return;
+	}
+	const int32 Version = IRammsControlSurfaceProvider::Execute_GetControlSurfaceVersion(Surface);
+	if (Version == DiscoveredVersion)
+	{
+		return;
+	}
+	DiscoveredVersion = Version;
+
+	// Discover what this robot can actually do rather than looking for known
+	// controller classes. Linkage controls are per instance
+	// ("linkage.<component>.height"), so they are matched by group and kind;
+	// the drive axes are well-known Ids.
+	LinkageControlIds.Reset();
+	bool					   bHasDrive = false;
+	const FRammsControlSurface Described = Surface->DescribeControlSurface();
+	for (const FRammsControlAxis& Axis : Described.Axes)
+	{
+		if (Axis.Id == RammsControlIds::Drive::Forward())
 		{
-			// Discover what this robot can actually do rather than looking for
-			// known controller classes. Linkage controls are per instance
-			// ("linkage.<component>.height"), so they are matched by group and
-			// kind; the drive axes are well-known Ids.
-			const FRammsControlSurface Described = Surface->DescribeControlSurface();
-			for (const FRammsControlAxis& Axis : Described.Axes)
-			{
-				if (Axis.Id == RammsControlIds::Drive::Forward())
-				{
-					bHasDrive = true;
-				}
-				// Height only. A 5-bar offers fore/aft on the same group, and
-				// the raise/lower keys must not drive both at once -- that
-				// would walk the endpoint diagonally. Fore/aft is a slider on
-				// the control surface; give it its own keys if it ever wants
-				// them.
-				if (Axis.Group == RammsControlIds::Groups::Linkage()
-					&& Axis.Kind == ERammsControlKind::Position && !Axis.bReadOnly
-					&& Axis.Id.ToString().EndsWith(RammsControlIds::Linkage::HeightSuffix())
-					&& MatchesLinkageFilter(Axis.Id))
-				{
-					LinkageControlIds.Add(Axis.Id);
-				}
-			}
-			// Tick before whatever contributes those controls, so a key pressed
-			// this frame is applied this frame. Done by component, not by class.
-			for (UActorComponent* C : Surface->GetContributorComponents())
-			{
-				if (C && C != this)
-				{
-					C->AddTickPrerequisiteComponent(this);
-				}
-			}
+			bHasDrive = true;
 		}
-		if (!Surface)
+		// Height only. A 5-bar offers fore/aft on the same group, and the
+		// raise/lower keys must not drive both at once -- that would walk the
+		// endpoint diagonally. Fore/aft is a slider on the control surface;
+		// give it its own keys if it ever wants them.
+		if (Axis.Group == RammsControlIds::Groups::Linkage()
+			&& Axis.Kind == ERammsControlKind::Position && !Axis.bReadOnly
+			&& Axis.Id.ToString().EndsWith(RammsControlIds::Linkage::HeightSuffix())
+			&& MatchesLinkageFilter(Axis.Id))
 		{
-			// Allowed -- a robot need not expose a control surface -- but this
-			// component can then drive nothing at all, and silently doing
-			// nothing is the worse failure. Motor bindings still work: those
-			// go through the robot base directly.
-			UE_LOG(LogTemp, Warning,
-				TEXT("[KeyboardTeleop] '%s' has no RammsRobotControlSurfaceComponent: drive and linkage keys will do nothing. Add one to the robot to make its controls drivable."),
-				*Owner->GetName());
+			LinkageControlIds.Add(Axis.Id);
 		}
-		else if (!bHasDrive && LinkageControlIds.Num() == 0)
+	}
+
+	// A control that is gone took its target with it: keeping the old value
+	// would resume the key from a stale height when the control comes back.
+	for (auto It = LinkageTargets.CreateIterator(); It; ++It)
+	{
+		if (!LinkageControlIds.Contains(It.Key()))
 		{
+			It.RemoveCurrent();
+		}
+	}
+
+	// Tick before whatever contributes those controls, so a key pressed this
+	// frame is applied this frame. Done by component, not by class -- and
+	// redone on every rebuild, because a mode switch changes who contributes.
+	TArray<UActorComponent*> Contributors = Surface->GetContributorComponents();
+	for (const TWeakObjectPtr<UActorComponent>& Weak : TickDependents)
+	{
+		UActorComponent* Old = Weak.Get();
+		if (Old && !Contributors.Contains(Old))
+		{
+			Old->RemoveTickPrerequisiteComponent(this);
+		}
+	}
+	TickDependents.Reset();
+	for (UActorComponent* C : Contributors)
+	{
+		if (C && C != this)
+		{
+			C->AddTickPrerequisiteComponent(this);
+			TickDependents.Add(C);
+		}
+	}
+
+	if (!bHasDrive && LinkageControlIds.Num() == 0)
+	{
+		if (!bWarnedNothingToDrive)
+		{
+			bWarnedNothingToDrive = true;
 			UE_LOG(LogTemp, Warning,
 				TEXT("[KeyboardTeleop] '%s' has a control surface but it advertises no drive axes and no linkage controls: check the robot's contributors."),
-				*Owner->GetName());
+				*GetNameSafe(GetOwner()));
 		}
-		UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': surface=%s drive=%s linkage controls=%d motor bindings=%d base=%s"),
-			*Owner->GetName(), Surface ? TEXT("yes") : TEXT("no"), bHasDrive ? TEXT("yes") : TEXT("no"),
-			LinkageControlIds.Num(), MotorBindings.Num(), Base ? TEXT("yes") : TEXT("no"));
 	}
+	else
+	{
+		// Something to drive again: a later empty surface is worth saying once more.
+		bWarnedNothingToDrive = false;
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[KeyboardTeleop] '%s': surface version %d -- drive=%s linkage controls=%d"),
+		*GetNameSafe(GetOwner()), Version, bHasDrive ? TEXT("yes") : TEXT("no"),
+		LinkageControlIds.Num());
 }
 
 void URammsKeyboardTeleopComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -163,6 +216,9 @@ float URammsKeyboardTeleopComponent::Axis(APlayerController* PC, const FKey& Pos
 void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Cheap when nothing changed: a version compare.
+	RefreshDiscovery();
 
 	APlayerController* PC = GetPlayerController();
 

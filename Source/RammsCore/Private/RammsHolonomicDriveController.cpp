@@ -70,11 +70,15 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 		return;
 	}
 	bDriveModeActive = bActive;
+	// Either way this mode starts and ends at rest. Taking over matters as much
+	// as standing down: a SetDriveCommand that arrived while this mode was
+	// inactive is still sitting in Command -- Tick refuses to apply it, but
+	// activating would then lurch the base on a command nobody issued for it.
+	Command = FVector::ZeroVector;
 	if (!bActive)
 	{
-		// Stand down cleanly: zero the wheels once rather than leaving them
-		// spinning at whatever the last command was.
-		Command = FVector::ZeroVector;
+		// Zero the wheels once rather than leaving them spinning at whatever
+		// the last command was.
 		if (URammsRobotBaseComponent* Base = EnsureBase())
 		{
 			for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
@@ -220,6 +224,13 @@ bool URammsHolonomicDriveController::ApplyControl(FName Id, float Value)
 
 bool URammsHolonomicDriveController::ReleaseControl(FName Id)
 {
+	// Same gate as ApplyControl: an inactive mode owns none of these axes, and
+	// answering "released" for a control it does not contribute would have the
+	// surface record a hold against it.
+	if (!bDriveModeActive)
+	{
+		return false;
+	}
 	if (Id == RammsControlIds::Drive::Forward())
 	{
 		Command.X = 0.0;

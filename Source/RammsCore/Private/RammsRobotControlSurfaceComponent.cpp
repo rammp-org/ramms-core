@@ -266,22 +266,27 @@ TArray<UActorComponent*> URammsRobotControlSurfaceComponent::GetContributorCompo
 bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float Value, ERammsControlSource Source)
 {
 	EnsureBuilt();
-	const FRammsControlAxis* Axis = Surface.Find(Id);
+	const FRammsControlAxis* Found = Surface.Find(Id);
 	const FRoute*			 Route = Routes.Find(Id);
-	if (!Axis || !Route || Axis->IsAction() || Axis->bReadOnly || !MayDrive(Id, Source))
+	if (!Found || !Route || Found->IsAction() || Found->bReadOnly || !MayDrive(Id, Source))
 	{
 		return false;
 	}
-	const float Clamped = Axis->Clamp(Value);
-	bool		bApplied = false;
+	// By value, and the route resolved now: a contributor may rebuild the
+	// surface from inside ApplyControl -- the drive-mode selector does exactly
+	// that -- which reallocates Surface.Axes and rehashes Routes under us.
+	const FRammsControlAxis Axis = *Found;
+	const FName				MotorId = Route->MotorId;
+	const float				Clamped = Axis.Clamp(Value);
+	bool					bApplied = false;
 	if (IRammsControlContributor* C = ContributorFor(Id))
 	{
 		bApplied = C->ApplyControl(Id, Clamped);
 	}
-	else if (Base && Base->HasBackend() && !Route->MotorId.IsNone())
+	else if (Base && Base->HasBackend() && !MotorId.IsNone())
 	{
 		// Without a backend SetMotorCommand is a silent no-op: not applied.
-		Base->SetMotorCommand(Route->MotorId, Clamped);
+		Base->SetMotorCommand(MotorId, Clamped);
 		bApplied = true;
 	}
 	if (bApplied)
@@ -307,12 +312,16 @@ bool URammsRobotControlSurfaceComponent::TriggerAction_Implementation(FName Id, 
 bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ERammsControlSource Source)
 {
 	EnsureBuilt();
-	const FRammsControlAxis* Axis = Surface.Find(Id);
+	const FRammsControlAxis* Found = Surface.Find(Id);
 	const FRoute*			 Route = Routes.Find(Id);
-	if (!Axis || !Route || Axis->IsAction())
+	if (!Found || !Route || Found->IsAction())
 	{
 		return false;
 	}
+	// By value: ReleaseControl may rebuild the surface, and everything below
+	// reads the axis again afterwards. See SetAxis_Implementation.
+	const FRammsControlAxis Axis = *Found;
+	const FName				MotorId = Route->MotorId;
 	// Only the holder (or nobody) releases; a lower-priority source can't
 	// release what an autonomy client is driving.
 	if (const FHold* H = Holds.Find(Id))
@@ -326,29 +335,29 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 	if (IRammsControlContributor* C = ContributorFor(Id))
 	{
 		bReleased = C->ReleaseControl(Id);
-		if (!bReleased && Axis->Kind == ERammsControlKind::Continuous)
+		if (!bReleased && Axis.Kind == ERammsControlKind::Continuous)
 		{
-			bReleased = C->ApplyControl(Id, Axis->DefaultValue); // spring back
+			bReleased = C->ApplyControl(Id, Axis.DefaultValue); // spring back
 		}
 	}
-	else if (Base && Base->HasBackend() && !Route->MotorId.IsNone())
+	else if (Base && Base->HasBackend() && !MotorId.IsNone())
 	{
-		if (Axis->Kind == ERammsControlKind::Continuous)
+		if (Axis.Kind == ERammsControlKind::Continuous)
 		{
-			Base->SetMotorCommand(Route->MotorId, Axis->DefaultValue); // spring back
+			Base->SetMotorCommand(MotorId, Axis.DefaultValue); // spring back
 			bReleased = true;
 		}
 		else
 		{
-			bReleased = Base->ReleaseMotor(Route->MotorId);
+			bReleased = Base->ReleaseMotor(MotorId);
 		}
 	}
 	if (bReleased)
 	{
 		Holds.Remove(Id);
-		if (Axis->Kind == ERammsControlKind::Continuous)
+		if (Axis.Kind == ERammsControlKind::Continuous)
 		{
-			Targets.Add(Id, Axis->DefaultValue); // sprung back: that is the target now
+			Targets.Add(Id, Axis.DefaultValue); // sprung back: that is the target now
 		}
 		else
 		{

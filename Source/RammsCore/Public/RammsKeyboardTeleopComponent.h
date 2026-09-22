@@ -63,8 +63,10 @@ struct FRammsLinkageKeyBinding
  * Put it on a pawn that owns a URammsRobotBaseComponent; when that pawn is
  * possessed by a player, each tick it polls the player's keys and:
  *
- *  - feeds the robot's drive controls (drive.forward / drive.turn) joystick-style
- *    input (W/S forward-back, A/D turn) via SetDriveInput;
+ *  - feeds the robot's drive controls joystick-style input (W/S forward-back,
+ *    A/D turn) by writing drive.forward / drive.turn on the robot's control
+ *    surface -- it names no controller class, so a holonomic base or anything
+ *    else advertising those Ids works here unchanged;
  *  - raises / lowers every Position control in the Linkage group (E/Q);
  *  - nudges arbitrary groups of position motors by Id (MotorBindings — e.g. the
  *    front and rear cranks of a lift_drive base).
@@ -137,6 +139,21 @@ private:
 	/** Zero the drive command this component issued (unpossessed, disabled, end of play). */
 	void ReleaseDrive();
 
+	/**
+	 * Re-read what the robot advertises, when it has changed.
+	 *
+	 * Discovery cannot happen once at BeginPlay. The surface defers its first
+	 * build to the next tick precisely because sibling contributors initialise
+	 * in unspecified order, so asking it anything from BeginPlay forces a build
+	 * over half-initialised contributors -- a 5-bar that has not yet resolved
+	 * its kinematic spec offers no height control, and a snapshot taken then
+	 * would leave the raise/lower keys dead for the session.
+	 *
+	 * The surface also changes shape afterwards: switching drive mode rebuilds
+	 * it, and a suspended contributor withdraws its controls entirely.
+	 */
+	void RefreshDiscovery();
+
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
 
@@ -148,6 +165,17 @@ private:
 
 	/** Position controls in the Linkage group, discovered from the surface. */
 	TArray<FName> LinkageControlIds;
+
+	/** Surface version the discovery above was taken at; -1 = never. */
+	int32 DiscoveredVersion = -1;
+
+	/** Contributors this component made itself a tick prerequisite of, so the
+	 *  ones that go away when the surface changes can be let go again. */
+	TArray<TWeakObjectPtr<UActorComponent>> TickDependents;
+
+	/** True once the "this robot advertises nothing to drive" warning has been
+	 *  issued, so a rebuild per mode switch does not repeat it. */
+	bool bWarnedNothingToDrive = false;
 
 	/** Commanded height per linkage control (cm). */
 	TMap<FName, float> LinkageTargets;

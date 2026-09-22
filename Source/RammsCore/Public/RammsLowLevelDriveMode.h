@@ -61,4 +61,13 @@ public:
 
 private:
 	bool bDriveModeActive = false;
+
+	/** True while this mode holds other contributors suspended, so standing
+	 *  down releases them even if bClaimAllActuators changed meanwhile. */
+	bool bSuspendedOthers = false;
+
+	/** The surface's authored motor exposure, restored when this mode ends. */
+	bool  bHasSavedExposure = false;
+	bool  bSavedExposeUnclaimedMotors = true;
+	FName SavedUnclaimedMotorGroup = FName("Motors");
 };
