@@ -6,7 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "JsonObjectConverter.h"
 #include "TimerManager.h"
-#include "RammsUISubsystem.h"
+#include "RammsControlSurfaceRegistry.h"
 
 URammsRobotControlSurfaceComponent::URammsRobotControlSurfaceComponent()
 {
@@ -29,9 +29,9 @@ void URammsRobotControlSurfaceComponent::BeginPlay()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimerForNextTick(this, &URammsRobotControlSurfaceComponent::RebuildControlSurface);
-		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
 		{
-			UI->RegisterControlSurface(this);
+			Registry->RegisterControlSurface(this);
 		}
 	}
 }
@@ -40,9 +40,9 @@ TArray<UObject*> URammsRobotControlSurfaceComponent::FindControlSurfaces(const U
 {
 	if (const UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr)
 	{
-		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
 		{
-			return UI->GetAllControlSurfaces();
+			return Registry->GetAllControlSurfaces();
 		}
 	}
 	return {};
@@ -52,9 +52,9 @@ void URammsRobotControlSurfaceComponent::EndPlay(const EEndPlayReason::Type EndP
 {
 	if (UWorld* World = GetWorld())
 	{
-		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
 		{
-			UI->UnregisterControlSurface(this);
+			Registry->UnregisterControlSurface(this);
 		}
 	}
 	Super::EndPlay(EndPlayReason);
@@ -78,6 +78,19 @@ void URammsRobotControlSurfaceComponent::EnsureBuilt() const
 
 void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 {
+	// Who owned each control before this rebuild. A drive mode switch keeps
+	// the Ids -- both modes offer drive.forward -- while changing the
+	// contributor behind them, and both modes come up at zero. Carrying the
+	// old hold and target across would have the surface report the previous
+	// mode's command and refuse a lower-priority source over a robot that is
+	// not moving.
+	TMap<FName, TWeakObjectPtr<UObject>> PreviousOwners;
+	PreviousOwners.Reserve(Routes.Num());
+	for (const TPair<FName, FRoute>& Pair : Routes)
+	{
+		PreviousOwners.Add(Pair.Key, Pair.Value.Contributor);
+	}
+
 	Surface = FRammsControlSurface();
 	Routes.Reset();
 	AActor* Owner = GetOwner();
@@ -177,17 +190,27 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 		}
 	}
 
-	// Anything held by (or targeted through) a control that no longer exists is forgotten.
+	// Anything held by (or targeted through) a control that no longer exists,
+	// or that has changed hands, is forgotten.
+	auto IsStale = [this, &PreviousOwners](FName Id) {
+		const FRoute* Route = Routes.Find(Id);
+		if (!Route)
+		{
+			return true;
+		}
+		const TWeakObjectPtr<UObject>* Before = PreviousOwners.Find(Id);
+		return Before != nullptr && Before->Get() != Route->Contributor.Get();
+	};
 	for (auto It = Holds.CreateIterator(); It; ++It)
 	{
-		if (!Routes.Contains(It.Key()))
+		if (IsStale(It.Key()))
 		{
 			It.RemoveCurrent();
 		}
 	}
 	for (auto It = Targets.CreateIterator(); It; ++It)
 	{
-		if (!Routes.Contains(It.Key()))
+		if (IsStale(It.Key()))
 		{
 			It.RemoveCurrent();
 		}
@@ -249,25 +272,44 @@ IRammsControlContributor* URammsRobotControlSurfaceComponent::ContributorFor(FNa
 
 // --- sink ---------------------------------------------------------------------
 
+TArray<UActorComponent*> URammsRobotControlSurfaceComponent::GetContributorComponents() const
+{
+	EnsureBuilt();
+	TArray<UActorComponent*> Out;
+	for (const TPair<FName, FRoute>& Pair : Routes)
+	{
+		if (UActorComponent* Comp = Cast<UActorComponent>(Pair.Value.Contributor.Get()))
+		{
+			Out.AddUnique(Comp);
+		}
+	}
+	return Out;
+}
+
 bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float Value, ERammsControlSource Source)
 {
 	EnsureBuilt();
-	const FRammsControlAxis* Axis = Surface.Find(Id);
+	const FRammsControlAxis* Found = Surface.Find(Id);
 	const FRoute*			 Route = Routes.Find(Id);
-	if (!Axis || !Route || Axis->IsAction() || Axis->bReadOnly || !MayDrive(Id, Source))
+	if (!Found || !Route || Found->IsAction() || Found->bReadOnly || !MayDrive(Id, Source))
 	{
 		return false;
 	}
-	const float Clamped = Axis->Clamp(Value);
-	bool		bApplied = false;
+	// By value, and the route resolved now: a contributor may rebuild the
+	// surface from inside ApplyControl -- the drive-mode selector does exactly
+	// that -- which reallocates Surface.Axes and rehashes Routes under us.
+	const FRammsControlAxis Axis = *Found;
+	const FName				MotorId = Route->MotorId;
+	const float				Clamped = Axis.Clamp(Value);
+	bool					bApplied = false;
 	if (IRammsControlContributor* C = ContributorFor(Id))
 	{
 		bApplied = C->ApplyControl(Id, Clamped);
 	}
-	else if (Base && Base->HasBackend() && !Route->MotorId.IsNone())
+	else if (Base && Base->HasBackend() && !MotorId.IsNone())
 	{
 		// Without a backend SetMotorCommand is a silent no-op: not applied.
-		Base->SetMotorCommand(Route->MotorId, Clamped);
+		Base->SetMotorCommand(MotorId, Clamped);
 		bApplied = true;
 	}
 	if (bApplied)
@@ -293,12 +335,16 @@ bool URammsRobotControlSurfaceComponent::TriggerAction_Implementation(FName Id, 
 bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ERammsControlSource Source)
 {
 	EnsureBuilt();
-	const FRammsControlAxis* Axis = Surface.Find(Id);
+	const FRammsControlAxis* Found = Surface.Find(Id);
 	const FRoute*			 Route = Routes.Find(Id);
-	if (!Axis || !Route || Axis->IsAction())
+	if (!Found || !Route || Found->IsAction())
 	{
 		return false;
 	}
+	// By value: ReleaseControl may rebuild the surface, and everything below
+	// reads the axis again afterwards. See SetAxis_Implementation.
+	const FRammsControlAxis Axis = *Found;
+	const FName				MotorId = Route->MotorId;
 	// Only the holder (or nobody) releases; a lower-priority source can't
 	// release what an autonomy client is driving.
 	if (const FHold* H = Holds.Find(Id))
@@ -312,29 +358,62 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 	if (IRammsControlContributor* C = ContributorFor(Id))
 	{
 		bReleased = C->ReleaseControl(Id);
-		if (!bReleased && Axis->Kind == ERammsControlKind::Continuous)
+		if (!bReleased && Axis.Kind == ERammsControlKind::Continuous)
 		{
-			bReleased = C->ApplyControl(Id, Axis->DefaultValue); // spring back
+			bReleased = C->ApplyControl(Id, Axis.DefaultValue); // spring back
 		}
 	}
-	else if (Base && Base->HasBackend() && !Route->MotorId.IsNone())
+	else if (Base && Base->HasBackend() && !MotorId.IsNone())
 	{
-		if (Axis->Kind == ERammsControlKind::Continuous)
+		if (Axis.Kind == ERammsControlKind::Continuous)
 		{
-			Base->SetMotorCommand(Route->MotorId, Axis->DefaultValue); // spring back
+			Base->SetMotorCommand(MotorId, Axis.DefaultValue); // spring back
 			bReleased = true;
 		}
 		else
 		{
-			bReleased = Base->ReleaseMotor(Route->MotorId);
+			bReleased = Base->ReleaseMotor(MotorId);
 		}
 	}
 	if (bReleased)
 	{
 		Holds.Remove(Id);
-		if (Axis->Kind == ERammsControlKind::Continuous)
+
+		// Some controls cannot be let go of one at a time. A 5-bar's height and
+		// fore/aft are two axes over one pair of motors, so releasing either
+		// releases the endpoint itself -- and whoever held the other axis would
+		// otherwise keep its ownership entry over a target nobody is holding.
+		// Ask the contributor: any of its axes that now reports no target has
+		// been released too.
+		if (IRammsControlContributor* C = ContributorFor(Id))
 		{
-			Targets.Add(Id, Axis->DefaultValue); // sprung back: that is the target now
+			for (const FRammsControlAxis& Other : Surface.Axes)
+			{
+				// Position and Velocity only. A false from ReadTarget is
+				// authoritative for those -- the contributor is saying it holds
+				// no target -- but it is also the default implementation, so a
+				// Continuous contributor that never overrode it would look like
+				// it had released everything. Releasing drive.forward would
+				// then drop the holds on strafe and turn while both are still
+				// being commanded.
+				const bool bServo = Other.Kind == ERammsControlKind::Position
+					|| Other.Kind == ERammsControlKind::Velocity;
+				if (Other.Id == Id || !bServo || ContributorFor(Other.Id) != C)
+				{
+					continue;
+				}
+				float Unused = 0.0f;
+				if (!C->ReadTarget(Other.Id, Unused))
+				{
+					Holds.Remove(Other.Id);
+					Targets.Remove(Other.Id);
+				}
+			}
+		}
+
+		if (Axis.Kind == ERammsControlKind::Continuous)
+		{
+			Targets.Add(Id, Axis.DefaultValue); // sprung back: that is the target now
 		}
 		else
 		{

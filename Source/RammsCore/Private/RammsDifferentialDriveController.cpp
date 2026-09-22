@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsDifferentialDriveController.h"
+
+#include "RammsControlIds.h"
 #include "RammsDifferentialDriveLibrary.h"
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -11,6 +13,11 @@ URammsDifferentialDriveController::URammsDifferentialDriveController()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+
+	// Centre wheels down and carrying load, which is where the 5-bar sits when
+	// the robot is standing on them.
+	PlantedStance.bHasLinkageHeight = true;
+	PlantedStance.LinkageHeightCm = 12.7f;
 }
 
 void URammsDifferentialDriveController::BeginPlay()
@@ -146,26 +153,40 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	UpdateWheelState(LeftMotorId, LeftWheelBoneName, LeftWheelState);
 	UpdateWheelState(RightMotorId, RightWheelBoneName, RightWheelState);
 
-	// Check for braking
-	bIsBraking = ShouldApplyBrakes();
-
-	if (bIsBraking)
+	// Actuate only while this is the live drive mode. Zeroing the input on
+	// stand-down is not enough on its own: the braking and control paths run
+	// every frame regardless of what was commanded, so an inactive controller
+	// went on writing its motors -- over the holonomic mode's wheels, and over
+	// the raw per-motor axes the low-level mode hands out. Wheel state and
+	// odometry above and below this still update, so the estimate stays live
+	// while another mode drives.
+	if (bDriveModeActive)
 	{
-		ApplyBrakes();
+		// Check for braking
+		bIsBraking = ShouldApplyBrakes();
+
+		if (bIsBraking)
+		{
+			ApplyBrakes();
+		}
+		else
+		{
+			// Update based on control mode
+			switch (ControlMode)
+			{
+				case EDriveControlMode::TorqueControl:
+					UpdateTorqueControl(DeltaTime);
+					break;
+
+				case EDriveControlMode::VelocityControl:
+					UpdateVelocityControl(DeltaTime);
+					break;
+			}
+		}
 	}
 	else
 	{
-		// Update based on control mode
-		switch (ControlMode)
-		{
-			case EDriveControlMode::TorqueControl:
-				UpdateTorqueControl(DeltaTime);
-				break;
-
-			case EDriveControlMode::VelocityControl:
-				UpdateVelocityControl(DeltaTime);
-				break;
-		}
+		bIsBraking = false;
 	}
 
 	// Update odometry
@@ -872,17 +893,36 @@ void URammsDifferentialDriveController::DebugLogState()
 
 // --- control surface -----------------------------------------------------------
 
-namespace
+void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 {
-	const FName DriveForwardId(TEXT("drive.forward"));
-	const FName DriveTurnId(TEXT("drive.turn"));
-} // namespace
+	if (bDriveModeActive == bActive)
+	{
+		return;
+	}
+	bDriveModeActive = bActive;
+	if (!bActive)
+	{
+		// Straight to ApplyDriveInputInternal, not SetDriveInput: that one
+		// returns early while an external session holds priority, so the
+		// stand-down would be a no-op exactly when something else is driving.
+		// A mode being switched away from stops, whoever was commanding it.
+		ApplyDriveInputInternal(FVector2D::ZeroVector, TEXT("SetDriveModeActive"));
+	}
+}
 
 void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
+	if (!bDriveModeActive)
+	{
+		// Another drive mode owns these Ids right now -- or none does, and the
+		// low-level mode is handing the motors out individually.
+		return;
+	}
+	const FName		  DriveForwardId = RammsControlIds::Drive::Forward();
+	const FName		  DriveTurnId = RammsControlIds::Drive::Turn();
 	FRammsControlAxis Forward;
 	Forward.Id = DriveForwardId;
-	Forward.Group = FName("Drive");
+	Forward.Group = RammsControlIds::Groups::Drive();
 	Forward.DisplayName = NSLOCTEXT("Ramms", "DriveForward", "Forward");
 	Forward.Kind = ERammsControlKind::Continuous;
 	Forward.Units = ERammsControlUnits::Normalized;
@@ -901,6 +941,12 @@ void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& O
 
 bool URammsDifferentialDriveController::ApplyControl(FName Id, float Value)
 {
+	if (!bDriveModeActive)
+	{
+		return false;
+	}
+	const FName DriveForwardId = RammsControlIds::Drive::Forward();
+	const FName DriveTurnId = RammsControlIds::Drive::Turn();
 	if (Id == DriveForwardId)
 	{
 		ControlDriveInput.Y = Value;
@@ -929,6 +975,8 @@ bool URammsDifferentialDriveController::ReleaseControl(FName Id)
 
 bool URammsDifferentialDriveController::ReadControl(FName Id, float& OutValue) const
 {
+	const FName DriveForwardId = RammsControlIds::Drive::Forward();
+	const FName DriveTurnId = RammsControlIds::Drive::Turn();
 	if (Id == DriveForwardId)
 	{
 		OutValue = static_cast<float>(DriveInput.Y);
@@ -944,6 +992,11 @@ bool URammsDifferentialDriveController::ReadControl(FName Id, float& OutValue) c
 
 void URammsDifferentialDriveController::GetClaimedMotorIds(TArray<FName>& OutIds) const
 {
+	if (!bDriveModeActive)
+	{
+		// Standing down: let the wheels show as raw motor axes instead.
+		return;
+	}
 	OutIds.Add(LeftMotorId);
 	OutIds.Add(RightMotorId);
 }

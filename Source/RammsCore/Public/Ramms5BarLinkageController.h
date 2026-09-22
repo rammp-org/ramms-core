@@ -6,6 +6,7 @@
 #include "Components/ActorComponent.h"
 #include "Ramms5BarLinkageSpec.h"
 #include "RammsControlContributor.h"
+#include "RammsControlIds.h"
 #include "Ramms5BarLinkageController.generated.h"
 
 class URammsRobotBaseComponent;
@@ -30,6 +31,8 @@ public:
 	URamms5BarLinkageController();
 
 	virtual void BeginPlay() override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+		FActorComponentTickFunction* ThisTickFunction) override;
 
 	/** Optional kinematic data table (row struct: FRamms5BarLinkageSpec). When
 	 *  set with LinkageRow, its row overrides the inline Linkage below. */
@@ -55,6 +58,12 @@ public:
 	/** Convenience: keep the current endpoint X and move to height Z (cm). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	bool SetEndpointHeight(float Z);
+
+	/** Convenience: keep the current endpoint height and move fore/aft to X (cm).
+	 *  The other half of what a 5-bar can do -- both proximal motors move for
+	 *  either, so this is a translation of the endpoint, not a second joint. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
+	bool SetEndpointTranslation(float X);
 
 	/** Command the two proximal joint angles directly (rad; A = X, B = Y). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
@@ -125,7 +134,47 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D HeightScanLimits = FVector2D(-100.0, 100.0);
 
-	// --- IRammsControlContributor: "linkage.<name>.height" ---------------------
+	/** Endpoint translations (cm) the control surface offers. Zero-width (the
+	 *  default) derives it from the mechanism, as EndpointHeightRange does. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D EndpointTranslationRange = FVector2D::ZeroVector;
+
+	/** Contiguous fore/aft interval (cm) reachable at height Z. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetReachableTranslationRange(float Z, bool& bValid) const;
+
+	/**
+	 * How far this coordinate can travel anywhere in the reachable set, as
+	 * opposed to the slice at one pose.
+	 *
+	 * This is what the control surface advertises. The slice is the honest
+	 * answer to "where can the endpoint go from exactly here", but it is a
+	 * terrible axis range: the reachable set is a curved region whose fore/aft
+	 * width varies about six-fold with height, so near the resting pose the
+	 * slice is around a centimetre wide, the surface clamps every command into
+	 * it, and the slider cannot be moved. The extent spans the mechanism, and
+	 * a combination that is out of reach at the current height is refused by
+	 * SetEndpointTarget rather than silently clamped -- which callers already
+	 * handle, since they only adopt a target the controller accepts.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetReachableExtent(bool bHeight, bool& bValid) const;
+
+	/** Slices taken across the other axis when computing an extent. More is
+	 *  a finer outline of a curved region and a longer scan. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "2"))
+	int32 ExtentScanSamples = 9;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D TranslationScanLimits = FVector2D(-100.0, 100.0);
+
+	/** How fast the jog axes move the endpoint at full deflection (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0.0"))
+	float JogRateCmPerSecond = 6.0f;
+
+	// --- IRammsControlContributor --------------------------------------------
+	// "linkage.<name>.height" and "linkage.<name>.translation": the endpoint's
+	// two degrees of freedom, both driven by the same pair of proximal motors.
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
 	virtual bool  ApplyControl(FName Id, float Value) override;
 	virtual bool  ReleaseControl(FName Id) override;
@@ -133,10 +182,47 @@ public:
 	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 	virtual int32 GetControlOrder() const override { return 10; }
+	virtual void  SetContributionSuspended(bool bSuspended) override;
+	virtual bool  IsContributionSuspended() const override { return bSuspended; }
+	/** Yes: SetContributionSuspended below really does let go of the hips. */
+	virtual bool CanSuspendContribution() const override { return true; }
 
 private:
-	FName HeightControlId() const { return *FString::Printf(TEXT("linkage.%s.height"), *GetName()); }
+	FName HeightControlId() const { return RammsControlIds::Linkage::Height(GetName()); }
+	FName TranslationControlId() const { return RammsControlIds::Linkage::Translation(GetName()); }
+
+	/** -1 when this leg is mounted mirrored; see FRamms5BarLinkageSpec. */
+	float Handedness() const;
+
+	/** Robot-frame (x forward) <-> this linkage's own frame. Every coordinate
+	 *  in this class's public surface is robot-frame; the kinematics are not. */
+	FVector2D ToLocal(FVector2D RobotXZ) const;
+	FVector2D ToRobot(FVector2D LocalXZ) const;
 
 	/** The X SetEndpointHeight keeps: the last target's, else the live endpoint's. */
 	float HeldX() const;
+
+	/** The height SetEndpointTranslation keeps, by the same rule. */
+	float HeldZ() const;
+
+	/** Walk out from Start while Reachable holds, bounded by Lo..Hi. Both
+	 *  reachable ranges are the same scan along different axes. */
+	FVector2D ScanReachable(TFunctionRef<bool(float)> Reachable, float Start, float Lo,
+		float Hi, float Step, bool& bValid) const;
+
+	/** Build one endpoint axis; Suffix picks height or translation. */
+	void DescribeEndpointAxis(FRammsControlSurface& OutSurface, bool bHeight) const;
+
+	FName JogUpControlId() const { return RammsControlIds::Linkage::JogUp(GetName()); }
+	FName JogForwardControlId() const { return RammsControlIds::Linkage::JogForward(GetName()); }
+
+	/** Current jog deflection, -1..1 (X = fore/aft, Y = up). Held until
+	 *  changed or released, like a stick that stays where it is put. */
+	FVector2D Jog = FVector2D::ZeroVector;
+
+	/** Log the first jog tick, so a stick that does nothing is diagnosable. */
+	bool bLoggedJog = false;
+
+	/** Standing down so the low-level mode can drive these motors directly. */
+	bool bSuspended = false;
 };

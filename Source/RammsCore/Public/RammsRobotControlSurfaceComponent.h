@@ -26,8 +26,9 @@ class IRammsControlContributor;
  *    raw motor) and arbitrates between sources — an Autonomy or Remote
  *    command holds an axis over local input for ExternalHoldSeconds, the way
  *    the differential drive's external input does,
- *  - registers itself with URammsUISubsystem (ramms-ui) so generic panels and
- *    input components find every controllable robot in the world.
+ *  - registers itself with URammsControlSurfaceRegistry (ramms-control) so
+ *    generic panels and input components find every controllable robot in the
+ *    world without this module depending on any of them.
  *
  * Nothing here is wired by name: add a contributor component to the actor and
  * its controls appear. The plain UFUNCTIONs (DescribeControlSurface,
@@ -100,8 +101,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Control Surface")
 	FString GetControlSurfaceJson() const;
 
-	/** Every control surface registered in the world (URammsUISubsystem's
-	 *  registry), for callers without subsystem access such as Python. */
+	/** The components currently contributing controls.
+	 *
+	 *  For callers that need tick ordering against whatever drives the robot
+	 *  without naming controller classes: an input source ticks before these
+	 *  so its command lands in the same frame. Returns components, not the
+	 *  interface, because that is what AddTickPrerequisiteComponent takes. */
+	UFUNCTION(BlueprintPure, Category = "Control Surface")
+	TArray<UActorComponent*> GetContributorComponents() const;
+
+	/** Every control surface registered in the world
+	 *  (URammsControlSurfaceRegistry), for callers without subsystem access
+	 *  such as Python. */
 	UFUNCTION(BlueprintPure, Category = "Control Surface", meta = (WorldContext = "WorldContextObject"))
 	static TArray<UObject*> FindControlSurfaces(const UObject* WorldContextObject);
 
@@ -116,7 +127,7 @@ public:
 	virtual float				GetAxisValue_Implementation(FName Id) const override;
 	virtual ERammsControlSource GetAxisOwner_Implementation(FName Id) const override;
 	/** See GetControlTarget for the precedence rules this implements. */
-	virtual bool				GetAxisTarget_Implementation(FName Id, float& OutTarget) const override;
+	virtual bool GetAxisTarget_Implementation(FName Id, float& OutTarget) const override;
 
 protected:
 	virtual void BeginPlay() override;
@@ -153,7 +164,7 @@ private:
 	mutable TMap<FName, FRoute>	 Routes;
 	mutable TMap<FName, FHold>	 Holds;
 	/** Last value commanded per control (any source); cleared when a Position / Velocity axis is released. */
-	TMap<FName, float>			 Targets;
-	mutable int32				 Version = 0;
-	mutable bool				 bBuilt = false;
+	TMap<FName, float> Targets;
+	mutable int32	   Version = 0;
+	mutable bool	   bBuilt = false;
 };

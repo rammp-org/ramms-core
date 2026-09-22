@@ -7,12 +7,25 @@
 
 URamms5BarLinkageController::URamms5BarLinkageController()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	// The jog axes integrate a rate into the endpoint target each frame.
+	PrimaryComponentTick.bCanEverTick = true;
 }
 
 void URamms5BarLinkageController::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// bCanEverTick is serialised on the Blueprint's component template, so a
+	// linkage authored before the jog axes existed will never tick however the
+	// CDO is set -- and the stick would silently do nothing on every existing
+	// robot. Turn it on for this instance instead of asking everyone to
+	// re-save their Blueprints.
+	if (!PrimaryComponentTick.bCanEverTick)
+	{
+		PrimaryComponentTick.bCanEverTick = true;
+		PrimaryComponentTick.SetTickFunctionEnable(true);
+		PrimaryComponentTick.RegisterTickFunction(GetComponentLevel());
+	}
 
 	// Resolve the kinematic spec: a table row if configured, else the inline one.
 	Resolved = Linkage;
@@ -64,6 +77,26 @@ bool URamms5BarLinkageController::HasBase() const
 	return EnsureBase() != nullptr;
 }
 
+float URamms5BarLinkageController::Handedness() const
+{
+	// Anything but a clean -1 is treated as +1: a zero or unset sign would
+	// collapse every fore/aft command to the centre of travel.
+	return Resolved.TranslationSign < 0.0f ? -1.0f : 1.0f;
+}
+
+FVector2D URamms5BarLinkageController::ToLocal(FVector2D RobotXZ) const
+{
+	return FVector2D(RobotXZ.X * Handedness(), RobotXZ.Y);
+}
+
+FVector2D URamms5BarLinkageController::ToRobot(FVector2D LocalXZ) const
+{
+	// The sign is its own inverse, so this is ToLocal again -- named for the
+	// direction it is used in, because which frame a coordinate is in is the
+	// easy thing to get wrong here.
+	return FVector2D(LocalXZ.X * Handedness(), LocalXZ.Y);
+}
+
 bool URamms5BarLinkageController::WithinMotorRange(URammsRobotBaseComponent& Base, FName MotorId, double Angle) const
 {
 	// A geometrically reachable endpoint can still need a hip angle outside the
@@ -87,7 +120,7 @@ bool URamms5BarLinkageController::SetEndpointTarget(FVector2D TargetXZ)
 	}
 
 	bool			bReachable = false;
-	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, ToLocal(TargetXZ), bReachable);
 	bReachable = bReachable
 		&& WithinMotorRange(*Base, Resolved.ProximalMotorA, Angles.X)
 		&& WithinMotorRange(*Base, Resolved.ProximalMotorB, Angles.Y);
@@ -108,7 +141,22 @@ bool URamms5BarLinkageController::SetEndpointTarget(FVector2D TargetXZ)
 
 float URamms5BarLinkageController::HeldX() const
 {
-	return bHasTarget ? static_cast<float>(LastTarget.X) : static_cast<float>(GetCurrentEndpoint().X);
+	if (bHasTarget)
+	{
+		return static_cast<float>(LastTarget.X);
+	}
+	// The resting pose can sit outside what the motors' ControlRanges allow --
+	// the linkage settles under load a little past where the IK will follow, so
+	// SolveTarget refuses the very point the endpoint is at. Handing that
+	// coordinate to a height command would ask for a target that is infeasible
+	// in the axis the caller did not touch, and the move silently does nothing.
+	// Clamp into what is actually reachable instead.
+	const FVector2D Live = GetCurrentEndpoint();
+	bool			bValid = false;
+	const FVector2D Range = GetReachableTranslationRange(static_cast<float>(Live.Y), bValid);
+	return bValid ? FMath::Clamp(static_cast<float>(Live.X), static_cast<float>(Range.X),
+						static_cast<float>(Range.Y))
+				  : static_cast<float>(Live.X);
 }
 
 bool URamms5BarLinkageController::SetEndpointHeight(float Z)
@@ -117,27 +165,42 @@ bool URamms5BarLinkageController::SetEndpointHeight(float Z)
 	return SetEndpointTarget(FVector2D(HeldX(), Z));
 }
 
-FVector2D URamms5BarLinkageController::GetReachableHeightRange(float X, bool& bValid) const
+float URamms5BarLinkageController::HeldZ() const
 {
-	// Walk up and down from the current height until the IK (with the motors'
-	// ControlRanges) first refuses; the mechanism's reach is contiguous there.
-	// Starting at the live height rather than the scan floor also keeps a
-	// disconnected reachable island elsewhere from being reported.
+	if (bHasTarget)
+	{
+		return static_cast<float>(LastTarget.Y);
+	}
+	// See HeldX: the live height can be outside the reachable band, and a
+	// fore/aft command that inherited it would be refused or do nothing.
+	const FVector2D Live = GetCurrentEndpoint();
+	bool			bValid = false;
+	const FVector2D Range = GetReachableHeightRange(static_cast<float>(Live.X), bValid);
+	return bValid ? FMath::Clamp(static_cast<float>(Live.Y), static_cast<float>(Range.X),
+						static_cast<float>(Range.Y))
+				  : static_cast<float>(Live.Y);
+}
+
+bool URamms5BarLinkageController::SetEndpointTranslation(float X)
+{
+	// The mirror of SetEndpointHeight: hold the height, move fore/aft.
+	return SetEndpointTarget(FVector2D(X, HeldZ()));
+}
+
+FVector2D URamms5BarLinkageController::ScanReachable(TFunctionRef<bool(float)> Reachable,
+	float Start, float Lo, float Hi, float Step, bool& bValid) const
+{
+	// Walk out from Start until the IK (with the motors' ControlRanges) first
+	// refuses; the mechanism's reach is contiguous there. Starting at the live
+	// value rather than the scan floor also keeps a disconnected reachable
+	// island elsewhere from being reported.
 	bValid = false;
-	const float Step = FMath::Max(HeightScanStep, 0.05f);
-	const float Lo = static_cast<float>(FMath::Min(HeightScanLimits.X, HeightScanLimits.Y));
-	const float Hi = static_cast<float>(FMath::Max(HeightScanLimits.X, HeightScanLimits.Y));
-	const float Z0 = FMath::Clamp(static_cast<float>(GetCurrentEndpoint().Y), Lo, Hi);
+	Step = FMath::Max(Step, 0.05f);
+	const float S0 = FMath::Clamp(Start, Lo, Hi);
 
-	auto Reachable = [this, X](float Z) {
-		bool bOk = false;
-		SolveTarget(FVector2D(X, Z), bOk);
-		return bOk;
-	};
-
-	// Find any reachable seed near the current height (the live pose can sit a
-	// hair outside the range while settling).
-	float Seed = Z0;
+	// Find any reachable seed nearby (the live pose can sit a hair outside the
+	// range while settling).
+	float Seed = S0;
 	bool  bSeed = Reachable(Seed);
 	for (float D = Step; !bSeed && D <= 8.0f * Step; D += Step)
 	{
@@ -154,7 +217,7 @@ FVector2D URamms5BarLinkageController::GetReachableHeightRange(float X, bool& bV
 	}
 	if (!bSeed)
 	{
-		return FVector2D(Z0, Z0);
+		return FVector2D(S0, S0);
 	}
 
 	float Min = Seed;
@@ -171,6 +234,71 @@ FVector2D URamms5BarLinkageController::GetReachableHeightRange(float X, bool& bV
 	// than the step) is not a range: a zero-width one would read as unbounded.
 	bValid = Max > Min;
 	return FVector2D(Min, Max);
+}
+
+FVector2D URamms5BarLinkageController::GetReachableHeightRange(float X, bool& bValid) const
+{
+	auto Reachable = [this, X](float Z) {
+		bool bOk = false;
+		SolveTarget(FVector2D(X, Z), bOk);
+		return bOk;
+	};
+	return ScanReachable(Reachable, static_cast<float>(GetCurrentEndpoint().Y),
+		static_cast<float>(FMath::Min(HeightScanLimits.X, HeightScanLimits.Y)),
+		static_cast<float>(FMath::Max(HeightScanLimits.X, HeightScanLimits.Y)),
+		HeightScanStep, bValid);
+}
+
+FVector2D URamms5BarLinkageController::GetReachableTranslationRange(float Z, bool& bValid) const
+{
+	auto Reachable = [this, Z](float X) {
+		bool bOk = false;
+		SolveTarget(FVector2D(X, Z), bOk);
+		return bOk;
+	};
+	return ScanReachable(Reachable, static_cast<float>(GetCurrentEndpoint().X),
+		static_cast<float>(FMath::Min(TranslationScanLimits.X, TranslationScanLimits.Y)),
+		static_cast<float>(FMath::Max(TranslationScanLimits.X, TranslationScanLimits.Y)),
+		HeightScanStep, bValid);
+}
+
+FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bValid) const
+{
+	bValid = false;
+
+	// Walk the other axis across its own reachable span and union the slices.
+	// Seeded from where the endpoint is, so the span followed is the one this
+	// mechanism is actually on.
+	const FVector2D Live = GetCurrentEndpoint();
+	bool			bAcross = false;
+	const FVector2D Across = bHeight ? GetReachableTranslationRange(static_cast<float>(Live.Y), bAcross)
+									 : GetReachableHeightRange(static_cast<float>(Live.X), bAcross);
+	if (!bAcross)
+	{
+		// Nothing reachable across: fall back to the slice at the live pose so
+		// an axis is still offered if one exists there at all.
+		return bHeight ? GetReachableHeightRange(static_cast<float>(Live.X), bValid)
+					   : GetReachableTranslationRange(static_cast<float>(Live.Y), bValid);
+	}
+
+	const int32 Samples = FMath::Max(2, ExtentScanSamples);
+	FVector2D	Extent(TNumericLimits<float>::Max(), -TNumericLimits<float>::Max());
+	for (int32 i = 0; i < Samples; ++i)
+	{
+		const float		T = static_cast<float>(i) / static_cast<float>(Samples - 1);
+		const float		At = FMath::Lerp(static_cast<float>(Across.X), static_cast<float>(Across.Y), T);
+		bool			bSlice = false;
+		const FVector2D Slice = bHeight ? GetReachableHeightRange(At, bSlice)
+										: GetReachableTranslationRange(At, bSlice);
+		if (!bSlice)
+		{
+			continue;
+		}
+		Extent.X = FMath::Min(Extent.X, Slice.X);
+		Extent.Y = FMath::Max(Extent.Y, Slice.Y);
+		bValid = true;
+	}
+	return bValid ? Extent : FVector2D::ZeroVector;
 }
 
 void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
@@ -192,7 +320,7 @@ void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
 	bHasTarget = bValid;
 	if (bValid)
 	{
-		LastTarget = Endpoint;
+		LastTarget = ToRobot(Endpoint);
 	}
 }
 
@@ -214,12 +342,12 @@ FVector2D URamms5BarLinkageController::GetCurrentEndpoint() const
 
 FVector2D URamms5BarLinkageController::GetCurrentEndpointChecked(bool& bValid) const
 {
-	return URamms5BarKinematics::ComputeEndpoint(Resolved, GetCurrentJointAngles(), bValid);
+	return ToRobot(URamms5BarKinematics::ComputeEndpoint(Resolved, GetCurrentJointAngles(), bValid));
 }
 
 FVector2D URamms5BarLinkageController::SolveTarget(FVector2D TargetXZ, bool& bReachable) const
 {
-	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, ToLocal(TargetXZ), bReachable);
 	if (URammsRobotBaseComponent* Base = EnsureBase())
 	{
 		bReachable = bReachable
@@ -229,67 +357,263 @@ FVector2D URamms5BarLinkageController::SolveTarget(FVector2D TargetXZ, bool& bRe
 	return Angles;
 }
 
+void URamms5BarLinkageController::TickComponent(float DeltaTime, ELevelTick TickType,
+	FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (bSuspended || Jog.IsNearlyZero() || DeltaTime <= 0.0f)
+	{
+		return;
+	}
+
+	// Integrate from where we are holding, not from the live endpoint: the
+	// live pose lags the target under load, and seeding from it every frame
+	// would make the stick fight the mechanism instead of commanding it.
+	const FVector2D From(HeldX(), HeldZ());
+	FVector2D		Candidate = From + Jog * (JogRateCmPerSecond * DeltaTime);
+
+	// The reachable set is a curved region, not a rectangle, so stepping one
+	// axis can leave it even when both coordinates are individually in range --
+	// and SetEndpointTarget then refuses, every frame, and the stick does
+	// nothing. Clamp the moving axis into the band reachable at the other.
+	bool bValid = false;
+	if (!FMath::IsNearlyZero(Jog.Y))
+	{
+		const FVector2D Band = GetReachableHeightRange(static_cast<float>(Candidate.X), bValid);
+		if (bValid)
+		{
+			Candidate.Y = FMath::Clamp(Candidate.Y, Band.X, Band.Y);
+		}
+	}
+	if (!FMath::IsNearlyZero(Jog.X))
+	{
+		const FVector2D Band = GetReachableTranslationRange(static_cast<float>(Candidate.Y), bValid);
+		if (bValid)
+		{
+			Candidate.X = FMath::Clamp(Candidate.X, Band.X, Band.Y);
+		}
+	}
+
+	// Only adopt the new target when the linkage accepts it, so holding the
+	// stick at a limit does not wind the target off into the unreachable --
+	// the same rule the keyboard raise/lower uses.
+	const bool bTookIt = SetEndpointTarget(Candidate);
+	if (!bLoggedJog)
+	{
+		bLoggedJog = true;
+		bool bSolvable = false;
+		SolveTarget(Candidate, bSolvable);
+		const FVector2D Live = GetCurrentEndpoint();
+		// One line on the first jog, so a stick that appears to do nothing can
+		// be told apart from one whose target is being refused.
+		UE_LOG(LogTemp, Verbose,
+			TEXT("[5Bar] '%s' jog: live=(%.3f, %.3f) from=(%.3f, %.3f) candidate=(%.3f, %.3f) "
+				 "solvable=%d accepted=%d"),
+			*GetName(), Live.X, Live.Y, From.X, From.Y, Candidate.X, Candidate.Y,
+			bSolvable ? 1 : 0, bTookIt ? 1 : 0);
+	}
+}
+
 // --- control surface -----------------------------------------------------------
 
-void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurface) const
+void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& OutSurface, bool bHeight) const
 {
 	FRammsControlAxis Axis;
-	Axis.Id = HeightControlId();
-	Axis.Group = FName("Linkage");
-	Axis.DisplayName = FText::FromString(GetName().Replace(TEXT("Linkage"), TEXT("")).Replace(TEXT("_"), TEXT(" ")) + TEXT(" height"));
+	Axis.Id = bHeight ? HeightControlId() : TranslationControlId();
+	Axis.Group = RammsControlIds::Groups::Linkage();
+	const FString Pretty = GetName().Replace(TEXT("Linkage"), TEXT("")).Replace(TEXT("_"), TEXT(" "));
+	Axis.DisplayName = FText::FromString(Pretty + (bHeight ? TEXT(" height") : TEXT(" fore/aft")));
 	Axis.Kind = ERammsControlKind::Position;
 	Axis.Units = ERammsControlUnits::Centimeters;
-	Axis.Range = EndpointHeightRange;
-	if (EndpointHeightRange.X >= EndpointHeightRange.Y)
+	Axis.Order = bHeight ? 0 : 1;
+	Axis.Range = bHeight ? EndpointHeightRange : EndpointTranslationRange;
+	if (Axis.Range.X >= Axis.Range.Y)
 	{
 		bool bValid = false;
-		Axis.Range = GetReachableHeightRange(HeldX(), bValid);
+		// The mechanism's whole travel, not the slice at the current pose. A
+		// slice is only valid while the other axis stays put, and the surface
+		// clamps to whatever is advertised -- so publishing one froze the
+		// fore/aft slider into the roughly one-centimetre band available at
+		// the resting pose and left it unusable.
+		Axis.Range = GetReachableExtent(bHeight, bValid);
 		if (!bValid)
 		{
-			// No reachable height at the held X (no base, no table, or the live
-			// pose is off the mechanism): an unbounded axis would accept targets
-			// SetEndpointHeight then refuses, so offer nothing.
-			UE_LOG(LogTemp, Verbose, TEXT("Ramms5BarLinkageController '%s': no reachable height range; control not offered."), *GetName());
+			// Nothing reachable along this axis here (no base, no table, or the
+			// live pose is off the mechanism): an unbounded axis would accept
+			// targets the setter then refuses, so offer nothing.
+			UE_LOG(LogTemp, Verbose,
+				TEXT("Ramms5BarLinkageController '%s': no reachable %s range; control not offered."),
+				*GetName(), bHeight ? TEXT("height") : TEXT("translation"));
 			return;
 		}
 	}
-	Axis.DefaultValue = FMath::Clamp(static_cast<float>(GetCurrentEndpoint().Y), static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
+	const FVector2D Now = GetCurrentEndpoint();
+	Axis.DefaultValue = FMath::Clamp(static_cast<float>(bHeight ? Now.Y : Now.X),
+		static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
 	OutSurface.Add(Axis);
+}
+
+void URamms5BarLinkageController::SetContributionSuspended(bool bInSuspended)
+{
+	if (bSuspended == bInSuspended)
+	{
+		return;
+	}
+	bSuspended = bInSuspended;
+	if (bSuspended)
+	{
+		// Let go of the endpoint as well as the controls: a held target would
+		// fight whoever is now driving these motors by hand.
+		Jog = FVector2D::ZeroVector;
+		if (URammsRobotBaseComponent* Base = EnsureBase())
+		{
+			Base->ReleaseMotor(Resolved.ProximalMotorA);
+			Base->ReleaseMotor(Resolved.ProximalMotorB);
+		}
+		bHasTarget = false;
+	}
+}
+
+void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurface) const
+{
+	if (bSuspended)
+	{
+		return;
+	}
+
+	// A 5-bar puts its endpoint anywhere in a plane, so it offers both degrees
+	// of freedom rather than height alone. Both move the same two proximal
+	// motors; which one a command changes depends only on which is held.
+	DescribeEndpointAxis(OutSurface, /*bHeight=*/true);
+	DescribeEndpointAxis(OutSurface, /*bHeight=*/false);
+
+	// And a rate pair. The position axes above are the honest representation of
+	// a 5-bar -- its reachable set is a curved region, and a slider per axis
+	// shows only the slice at the other axis's current value. A stick that
+	// commands a delta sidesteps that: it never has to claim a range. Paired
+	// Continuous axes are what the surface panel renders as a joystick.
+	FRammsControlAxis Up;
+	Up.Id = JogUpControlId();
+	Up.Group = RammsControlIds::Groups::Linkage();
+	const FString Pretty = GetName().Replace(TEXT("Linkage"), TEXT("")).Replace(TEXT("_"), TEXT(" "));
+	Up.DisplayName = FText::FromString(Pretty + TEXT(" jog up"));
+	Up.Kind = ERammsControlKind::Continuous;
+	Up.Units = ERammsControlUnits::Normalized;
+	Up.Range = FVector2D(-1.0, 1.0);
+	Up.bReadback = false; // a rate command; there is nothing to read back
+	Up.Order = 2;		  // lower Order is the vertical axis of the joystick
+	Up.PairedAxis = JogForwardControlId();
+	OutSurface.Add(Up);
+
+	FRammsControlAxis Fwd = Up;
+	Fwd.Id = JogForwardControlId();
+	Fwd.DisplayName = FText::FromString(Pretty + TEXT(" jog fore/aft"));
+	Fwd.Order = 3;
+	Fwd.PairedAxis = JogUpControlId();
+	OutSurface.Add(Fwd);
 }
 
 bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
 {
-	return Id == HeightControlId() && SetEndpointHeight(Value);
+	if (bSuspended)
+	{
+		return false;
+	}
+	if (Id == HeightControlId())
+	{
+		return SetEndpointHeight(Value);
+	}
+	if (Id == TranslationControlId())
+	{
+		return SetEndpointTranslation(Value);
+	}
+	if (Id == JogUpControlId())
+	{
+		Jog.Y = FMath::Clamp(Value, -1.0f, 1.0f);
+		return true;
+	}
+	if (Id == JogForwardControlId())
+	{
+		Jog.X = FMath::Clamp(Value, -1.0f, 1.0f);
+		return true;
+	}
+	return false;
 }
 
 bool URamms5BarLinkageController::ReleaseControl(FName Id)
 {
+	// Letting go of the stick stops the motion but keeps the endpoint held
+	// where it got to -- the motors are not released.
+	if (Id == JogUpControlId())
+	{
+		Jog.Y = 0.0f;
+		return true;
+	}
+	if (Id == JogForwardControlId())
+	{
+		Jog.X = 0.0f;
+		return true;
+	}
+
 	URammsRobotBaseComponent* Base = EnsureBase();
-	if (Id != HeightControlId() || !Base)
+	if ((Id != HeightControlId() && Id != TranslationControlId()) || !Base)
 	{
 		return false;
 	}
+	// One pair of motors holds the endpoint, so releasing either axis lets go
+	// of the whole endpoint -- there is no way to keep holding the other.
 	const bool bA = Base->ReleaseMotor(Resolved.ProximalMotorA);
 	const bool bB = Base->ReleaseMotor(Resolved.ProximalMotorB);
 	if (bA && bB)
 	{
-		bHasTarget = false; // no longer holding an endpoint (LastTarget stays as history; HeldX falls back to the live X)
+		bHasTarget = false; // no longer holding an endpoint (LastTarget stays as history)
 	}
 	return bA && bB;
 }
 
 bool URamms5BarLinkageController::ReadControl(FName Id, float& OutValue) const
 {
-	if (Id != HeightControlId())
+	const FVector2D Now = GetCurrentEndpoint();
+	if (Id == HeightControlId())
+	{
+		OutValue = static_cast<float>(Now.Y);
+		return true;
+	}
+	if (Id == TranslationControlId())
+	{
+		OutValue = static_cast<float>(Now.X);
+		return true;
+	}
+	return false;
+}
+
+bool URamms5BarLinkageController::ReadTarget(FName Id, float& OutTarget) const
+{
+	if (!bHasTarget)
 	{
 		return false;
 	}
-	OutValue = static_cast<float>(GetCurrentEndpoint().Y);
-	return true;
+	if (Id == HeightControlId())
+	{
+		OutTarget = static_cast<float>(LastTarget.Y);
+		return true;
+	}
+	if (Id == TranslationControlId())
+	{
+		OutTarget = static_cast<float>(LastTarget.X);
+		return true;
+	}
+	return false;
 }
 
 void URamms5BarLinkageController::GetClaimedMotorIds(TArray<FName>& OutIds) const
 {
+	if (bSuspended)
+	{
+		// Suspended: the hips show up as raw motor axes instead.
+		return;
+	}
 	if (!Resolved.ProximalMotorA.IsNone())
 	{
 		OutIds.Add(Resolved.ProximalMotorA);
@@ -298,14 +622,4 @@ void URamms5BarLinkageController::GetClaimedMotorIds(TArray<FName>& OutIds) cons
 	{
 		OutIds.Add(Resolved.ProximalMotorB);
 	}
-}
-
-bool URamms5BarLinkageController::ReadTarget(FName Id, float& OutTarget) const
-{
-	if (Id != HeightControlId() || !bHasTarget)
-	{
-		return false;
-	}
-	OutTarget = static_cast<float>(LastTarget.Y);
-	return true;
 }

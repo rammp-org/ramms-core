@@ -8,8 +8,7 @@
 #include "RammsKeyboardTeleopComponent.generated.h"
 
 class URammsRobotBaseComponent;
-class URammsDifferentialDriveController;
-class URamms5BarLinkageController;
+class URammsRobotControlSurfaceComponent;
 
 /** A pair of keys that nudges the target of a group of position motors. */
 USTRUCT(BlueprintType)
@@ -53,7 +52,7 @@ struct FRammsLinkageKeyBinding
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop", meta = (ClampMin = "0.0"))
 	float RateCmPerSecond = 6.0f;
 
-	/** Component names of the Ramms5BarLinkageControllers to move; empty = all
+	/** Component names of the linkage controllers to move; empty = all
 	 *  of them on the actor (both legs together). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Teleop")
 	TArray<FName> ControllerNames;
@@ -64,9 +63,11 @@ struct FRammsLinkageKeyBinding
  * Put it on a pawn that owns a URammsRobotBaseComponent; when that pawn is
  * possessed by a player, each tick it polls the player's keys and:
  *
- *  - feeds the sibling URammsDifferentialDriveController with a joystick-style
- *    input (W/S forward-back, A/D turn) via SetDriveInput;
- *  - raises / lowers the endpoint of the Ramms5BarLinkageControllers (E/Q);
+ *  - feeds the robot's drive controls joystick-style input (W/S forward-back,
+ *    A/D turn) by writing drive.forward / drive.turn on the robot's control
+ *    surface -- it names no controller class, so a holonomic base or anything
+ *    else advertising those Ids works here unchanged;
+ *  - raises / lowers every Position control in the Linkage group (E/Q);
  *  - nudges arbitrary groups of position motors by Id (MotorBindings — e.g. the
  *    front and rear cranks of a lift_drive base).
  *
@@ -138,17 +139,54 @@ private:
 	/** Zero the drive command this component issued (unpossessed, disabled, end of play). */
 	void ReleaseDrive();
 
+	/**
+	 * Re-read what the robot advertises, when it has changed.
+	 *
+	 * Discovery cannot happen once at BeginPlay. The surface defers its first
+	 * build to the next tick precisely because sibling contributors initialise
+	 * in unspecified order, so asking it anything from BeginPlay forces a build
+	 * over half-initialised contributors -- a 5-bar that has not yet resolved
+	 * its kinematic spec offers no height control, and a snapshot taken then
+	 * would leave the raise/lower keys dead for the session.
+	 *
+	 * The surface also changes shape afterwards: switching drive mode rebuilds
+	 * it, and a suspended contributor withdraws its controls entirely.
+	 */
+	void RefreshDiscovery();
+
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
 
+	/** Everything is driven through the robot's surface by control Id, so this
+	 *  component names no controller class: a holonomic base, or anything else
+	 *  advertising the same Ids, works here unchanged. */
 	UPROPERTY(Transient)
-	TObjectPtr<URammsDifferentialDriveController> Drive;
+	TObjectPtr<URammsRobotControlSurfaceComponent> Surface;
 
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<URamms5BarLinkageController>> Linkages;
+	/** Position controls in the Linkage group, discovered from the surface. */
+	TArray<FName> LinkageControlIds;
 
-	/** Per-linkage endpoint target (x, z), seeded from the live endpoint. */
-	TMap<URamms5BarLinkageController*, FVector2D> LinkageTargets;
+	/** Surface version the discovery above was taken at; -1 = never. */
+	int32 DiscoveredVersion = -1;
+
+	/** The surface advertised drive axes at that version. A mode switch can
+	 *  take them away (low level drives nothing), and a release that retries
+	 *  against a control which no longer exists never succeeds. */
+	bool bSurfaceHasDrive = false;
+
+	/** Contributors this component made itself a tick prerequisite of, so the
+	 *  ones that go away when the surface changes can be let go again. */
+	TArray<TWeakObjectPtr<UActorComponent>> TickDependents;
+
+	/** True once the "this robot advertises nothing to drive" warning has been
+	 *  issued, so a rebuild per mode switch does not repeat it. */
+	bool bWarnedNothingToDrive = false;
+
+	/** Commanded height per linkage control (cm). */
+	TMap<FName, float> LinkageTargets;
+
+	/** True when ControllerNames is empty or matches this control's component. */
+	bool MatchesLinkageFilter(FName ControlId) const;
 
 	/** Per-motor target, seeded from the live value on first use. */
 	TMap<FName, float> MotorTargets;

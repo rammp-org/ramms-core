@@ -62,4 +62,32 @@ public:
 
 	/** Presentation order of this contributor's groups (lower first). */
 	virtual int32 GetControlOrder() const { return 100; }
+
+	/**
+	 * Stand down: contribute no controls and claim no motors, without being
+	 * removed from the robot.
+	 *
+	 * The low-level drive mode uses this to hand every actuator over for
+	 * direct driving -- a controller that keeps claiming its motors is a
+	 * controller you cannot drive around. Contributors that do not implement
+	 * it simply keep contributing.
+	 */
+	virtual void SetContributionSuspended(bool bSuspended) {}
+	virtual bool IsContributionSuspended() const { return false; }
+
+	/**
+	 * True only for a contributor that really does stand down.
+	 *
+	 * Defaults to false, and deliberately: SetContributionSuspended above is a
+	 * no-op by default, so a contributor that has not implemented it cannot
+	 * honour a suspension. Answering true by default made the low-level drive
+	 * mode believe everything had stood down while components that never
+	 * implemented it -- the MeBot controller among them -- went on claiming
+	 * and writing their motors, which is precisely what bClaimAllActuators
+	 * promises not to happen.
+	 *
+	 * Override this to true alongside an implementation of
+	 * SetContributionSuspended, not before.
+	 */
+	virtual bool CanSuspendContribution() const { return false; }
 };

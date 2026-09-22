@@ -20,6 +20,41 @@ enum class ERammsActuatorType : uint8
 };
 
 /**
+ * Gains for a velocity loop closed in software over a torque actuator.
+ *
+ * A torque actuator has no notion of speed: writing a rad/s figure into one
+ * just applies that many newton-metres, which is how a holonomic base ended up
+ * turning its wheels at 3% of the commanded rate. When a drive controller asks
+ * for a wheel speed, something has to close the loop, and doing it once in the
+ * robot base means every drive controller expresses speed the same way whatever
+ * the backend gives it.
+ */
+USTRUCT(BlueprintType)
+struct FRammsVelocityGains
+{
+	GENERATED_BODY()
+
+	/** Proportional gain, N.m per rad/s of error. 0 = use the base's default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
+	float Kp = 0.0f;
+
+	/** Integral gain, N.m per rad/s per second. Pulls out the steady-state
+	 *  droop a proportional-only loop leaves under load. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
+	float Ki = 0.0f;
+
+	/** Cap on the integral term's own contribution (N.m), so a wheel held
+	 *  against a wall does not wind up and then lurch when it comes free. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
+	float MaxIntegralTorque = 0.0f;
+
+	/** Kp is the sentinel the docs above promise: zero means "use the base's
+	 *  defaults". Treating a lone Ki as a set of gains would hand back an
+	 *  integral-only controller from a half-filled row. */
+	bool IsSet() const { return Kp > 0.0f; }
+};
+
+/**
  * One row of a robot's motor registry (a DataTable of these). Describes an
  * addressable motor with only intrinsic facts — no role, no "left/right", no
  * "lift vs seat". What a motor is *for* is expressed by which controller drives
@@ -61,4 +96,10 @@ struct FRammsMotorSpec : public FTableRowBase
 	 *  so controllers never carry per-side sign flips. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
 	float Direction = 1.0f;
+
+	/** Gains for the velocity loop the robot base closes on this motor when it
+	 *  is a Torque actuator (see URammsRobotBaseComponent::SetMotorVelocityCommand).
+	 *  Zero Kp means "use the base's default gains". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Velocity Loop")
+	FRammsVelocityGains VelocityGains;
 };
