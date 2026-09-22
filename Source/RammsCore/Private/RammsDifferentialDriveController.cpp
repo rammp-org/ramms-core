@@ -890,6 +890,12 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 
 void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
+	if (!bDriveModeActive)
+	{
+		// Another drive mode owns these Ids right now -- or none does, and the
+		// low-level mode is handing the motors out individually.
+		return;
+	}
 	const FName		  DriveForwardId = RammsControlIds::Drive::Forward();
 	const FName		  DriveTurnId = RammsControlIds::Drive::Turn();
 	FRammsControlAxis Forward;
