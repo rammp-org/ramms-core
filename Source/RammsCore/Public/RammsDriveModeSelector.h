@@ -65,6 +65,8 @@ public:
 	virtual bool  ReadControl(FName Id, float& OutValue) const override;
 	virtual bool  ReadTarget(FName Id, float& OutTarget) const override { return ReadControl(Id, OutTarget); }
 	virtual int32 GetControlOrder() const override { return -10; }
+	/** Never: suspending this would remove the control you switch back with. */
+	virtual bool CanSuspendContribution() const override { return false; }
 
 private:
 	/** Components implementing IRammsDriveMode, gathered once at BeginPlay. */

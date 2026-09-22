@@ -160,6 +160,8 @@ public:
 	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 	virtual int32 GetControlOrder() const override { return 10; }
+	virtual void  SetContributionSuspended(bool bSuspended) override;
+	virtual bool  IsContributionSuspended() const override { return bSuspended; }
 
 private:
 	FName HeightControlId() const { return RammsControlIds::Linkage::Height(GetName()); }
@@ -188,4 +190,7 @@ private:
 
 	/** Log the first jog tick, so a stick that does nothing is diagnosable. */
 	bool bLoggedJog = false;
+
+	/** Standing down so the low-level mode can drive these motors directly. */
+	bool bSuspended = false;
 };

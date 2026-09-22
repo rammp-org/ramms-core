@@ -303,7 +303,7 @@ void URamms5BarLinkageController::TickComponent(float DeltaTime, ELevelTick Tick
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (Jog.IsNearlyZero() || DeltaTime <= 0.0f)
+	if (bSuspended || Jog.IsNearlyZero() || DeltaTime <= 0.0f)
 	{
 		return;
 	}
@@ -393,8 +393,34 @@ void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& Out
 	OutSurface.Add(Axis);
 }
 
+void URamms5BarLinkageController::SetContributionSuspended(bool bInSuspended)
+{
+	if (bSuspended == bInSuspended)
+	{
+		return;
+	}
+	bSuspended = bInSuspended;
+	if (bSuspended)
+	{
+		// Let go of the endpoint as well as the controls: a held target would
+		// fight whoever is now driving these motors by hand.
+		Jog = FVector2D::ZeroVector;
+		if (URammsRobotBaseComponent* Base = EnsureBase())
+		{
+			Base->ReleaseMotor(Resolved.ProximalMotorA);
+			Base->ReleaseMotor(Resolved.ProximalMotorB);
+		}
+		bHasTarget = false;
+	}
+}
+
 void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
+	if (bSuspended)
+	{
+		return;
+	}
+
 	// A 5-bar puts its endpoint anywhere in a plane, so it offers both degrees
 	// of freedom rather than height alone. Both move the same two proximal
 	// motors; which one a command changes depends only on which is held.
@@ -429,6 +455,10 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 
 bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
 {
+	if (bSuspended)
+	{
+		return false;
+	}
 	if (Id == HeightControlId())
 	{
 		return SetEndpointHeight(Value);
@@ -518,6 +548,11 @@ bool URamms5BarLinkageController::ReadTarget(FName Id, float& OutTarget) const
 
 void URamms5BarLinkageController::GetClaimedMotorIds(TArray<FName>& OutIds) const
 {
+	if (bSuspended)
+	{
+		// Suspended: the hips show up as raw motor axes instead.
+		return;
+	}
 	if (!Resolved.ProximalMotorA.IsNone())
 	{
 		OutIds.Add(Resolved.ProximalMotorA);

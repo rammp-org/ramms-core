@@ -36,6 +36,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
 	FName MotorGroup = FName("Motors");
 
+	/**
+	 * Also stand down every other contributor, so actuators they claim -- the
+	 * 5-bar hips above all -- become raw axes too.
+	 *
+	 * Off by default: the linkages hold the robot's stance, and releasing them
+	 * drops it onto whatever the motors do next. Turn this on when the thing
+	 * being diagnosed IS a claimed actuator.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
+	bool bClaimAllActuators = false;
+
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("low_level"); }
 	virtual FText GetDriveModeDisplayName() const override

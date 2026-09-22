@@ -62,4 +62,23 @@ public:
 
 	/** Presentation order of this contributor's groups (lower first). */
 	virtual int32 GetControlOrder() const { return 100; }
+
+	/**
+	 * Stand down: contribute no controls and claim no motors, without being
+	 * removed from the robot.
+	 *
+	 * The low-level drive mode uses this to hand every actuator over for
+	 * direct driving -- a controller that keeps claiming its motors is a
+	 * controller you cannot drive around. Contributors that do not implement
+	 * it simply keep contributing.
+	 */
+	virtual void SetContributionSuspended(bool bSuspended) {}
+	virtual bool IsContributionSuspended() const { return false; }
+
+	/**
+	 * False for a contributor that must keep working whatever else stands
+	 * down -- the drive-mode selector above all, since suspending it would
+	 * remove the control you need to switch back.
+	 */
+	virtual bool CanSuspendContribution() const { return true; }
 };
