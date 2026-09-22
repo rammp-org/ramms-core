@@ -28,7 +28,7 @@
 	],
 	"Plugins": [
 		{
-			"Name": "RammsUI",
+			"Name": "RammsControl",
 			"Enabled": true
 		}
 	]

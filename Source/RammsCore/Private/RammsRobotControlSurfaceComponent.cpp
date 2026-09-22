@@ -6,7 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "JsonObjectConverter.h"
 #include "TimerManager.h"
-#include "RammsUISubsystem.h"
+#include "RammsControlSurfaceRegistry.h"
 
 URammsRobotControlSurfaceComponent::URammsRobotControlSurfaceComponent()
 {
@@ -29,9 +29,9 @@ void URammsRobotControlSurfaceComponent::BeginPlay()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimerForNextTick(this, &URammsRobotControlSurfaceComponent::RebuildControlSurface);
-		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
 		{
-			UI->RegisterControlSurface(this);
+			Registry->RegisterControlSurface(this);
 		}
 	}
 }
@@ -40,9 +40,9 @@ TArray<UObject*> URammsRobotControlSurfaceComponent::FindControlSurfaces(const U
 {
 	if (const UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr)
 	{
-		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
 		{
-			return UI->GetAllControlSurfaces();
+			return Registry->GetAllControlSurfaces();
 		}
 	}
 	return {};
@@ -52,9 +52,9 @@ void URammsRobotControlSurfaceComponent::EndPlay(const EEndPlayReason::Type EndP
 {
 	if (UWorld* World = GetWorld())
 	{
-		if (URammsUISubsystem* UI = World->GetSubsystem<URammsUISubsystem>())
+		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
 		{
-			UI->UnregisterControlSurface(this);
+			Registry->UnregisterControlSurface(this);
 		}
 	}
 	Super::EndPlay(EndPlayReason);

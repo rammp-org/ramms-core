@@ -26,8 +26,9 @@ class IRammsControlContributor;
  *    raw motor) and arbitrates between sources — an Autonomy or Remote
  *    command holds an axis over local input for ExternalHoldSeconds, the way
  *    the differential drive's external input does,
- *  - registers itself with URammsUISubsystem (ramms-ui) so generic panels and
- *    input components find every controllable robot in the world.
+ *  - registers itself with URammsControlSurfaceRegistry (ramms-control) so
+ *    generic panels and input components find every controllable robot in the
+ *    world without this module depending on any of them.
  *
  * Nothing here is wired by name: add a contributor component to the actor and
  * its controls appear. The plain UFUNCTIONs (DescribeControlSurface,
@@ -109,8 +110,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Control Surface")
 	TArray<UActorComponent*> GetContributorComponents() const;
 
-	/** Every control surface registered in the world (URammsUISubsystem's
-	 *  registry), for callers without subsystem access such as Python. */
+	/** Every control surface registered in the world
+	 *  (URammsControlSurfaceRegistry), for callers without subsystem access
+	 *  such as Python. */
 	UFUNCTION(BlueprintPure, Category = "Control Surface", meta = (WorldContext = "WorldContextObject"))
 	static TArray<UObject*> FindControlSurfaces(const UObject* WorldContextObject);
 
