@@ -355,6 +355,30 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 	if (bReleased)
 	{
 		Holds.Remove(Id);
+
+		// Some controls cannot be let go of one at a time. A 5-bar's height and
+		// fore/aft are two axes over one pair of motors, so releasing either
+		// releases the endpoint itself -- and whoever held the other axis would
+		// otherwise keep its ownership entry over a target nobody is holding.
+		// Ask the contributor: any of its axes that now reports no target has
+		// been released too.
+		if (IRammsControlContributor* C = ContributorFor(Id))
+		{
+			for (const FRammsControlAxis& Other : Surface.Axes)
+			{
+				if (Other.Id == Id || Other.IsAction() || ContributorFor(Other.Id) != C)
+				{
+					continue;
+				}
+				float Unused = 0.0f;
+				if (!C->ReadTarget(Other.Id, Unused))
+				{
+					Holds.Remove(Other.Id);
+					Targets.Remove(Other.Id);
+				}
+			}
+		}
+
 		if (Axis.Kind == ERammsControlKind::Continuous)
 		{
 			Targets.Add(Id, Axis.DefaultValue); // sprung back: that is the target now

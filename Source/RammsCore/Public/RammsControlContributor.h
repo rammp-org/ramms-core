@@ -76,9 +76,18 @@ public:
 	virtual bool IsContributionSuspended() const { return false; }
 
 	/**
-	 * False for a contributor that must keep working whatever else stands
-	 * down -- the drive-mode selector above all, since suspending it would
-	 * remove the control you need to switch back.
+	 * True only for a contributor that really does stand down.
+	 *
+	 * Defaults to false, and deliberately: SetContributionSuspended above is a
+	 * no-op by default, so a contributor that has not implemented it cannot
+	 * honour a suspension. Answering true by default made the low-level drive
+	 * mode believe everything had stood down while components that never
+	 * implemented it -- the MeBot controller among them -- went on claiming
+	 * and writing their motors, which is precisely what bClaimAllActuators
+	 * promises not to happen.
+	 *
+	 * Override this to true alongside an implementation of
+	 * SetContributionSuspended, not before.
 	 */
-	virtual bool CanSuspendContribution() const { return true; }
+	virtual bool CanSuspendContribution() const { return false; }
 };

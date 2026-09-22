@@ -52,14 +52,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Input Test")
 	static bool IsKeyDown(APlayerController* PlayerController, FName KeyName);
 
-	/** Release every key this library pressed and is still holding.
-	 *  A test that fails partway would otherwise leave a key stuck down, and
-	 *  the next test inherits it. */
+	/** Release every key this library pressed on this controller and is still
+	 *  holding. A test that fails partway would otherwise leave a key stuck
+	 *  down, and the next test inherits it. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Input Test")
 	static void ReleaseAllInjectedKeys(APlayerController* PlayerController);
 
 private:
-	/** Keys pressed through SetKeyDown and not yet released. */
-	static TSet<FKey> InjectedKeys;
+	/** Keys pressed through SetKeyDown and not yet released, per controller.
+	 *
+	 *  Per controller because a single shared set cannot be cleaned up: two
+	 *  PIE clients, or a split screen, and releasing one controller's keys
+	 *  emptied the set for both -- the other's keys stayed down with nothing
+	 *  left tracking them. Weak keys, so a controller that goes away with a
+	 *  key held does not keep it alive. */
+	static TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>> InjectedKeys;
 #endif
 };

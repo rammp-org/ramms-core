@@ -254,10 +254,23 @@ void URammsRobotBaseComponent::StepVelocityDrives(float DeltaTime)
 		const FName		MotorId = Pair.Key;
 		FVelocityDrive& Drive = Pair.Value;
 
+		FRammsMotorSpec Spec;
+		const bool		bHasSpec = GetMotorSpec(MotorId, Spec);
+		const bool		bBounded = bHasSpec && Spec.ControlRange.X < Spec.ControlRange.Y;
+
 		if (GetMotorType(MotorId) == ERammsActuatorType::Velocity)
 		{
-			// The actuator closes its own loop; hand it the rate.
-			Backend_->SetCommand(MotorId, Drive.Target * DirectionOf(MotorId));
+			// The actuator closes its own loop; hand it the rate -- clamped to
+			// the authored range like any other command, since for a Velocity
+			// actuator that range is in rad/s and SetMotorCommand would have
+			// enforced it. (min >= max still means "defer to the backend".)
+			float Rate = Drive.Target;
+			if (bBounded)
+			{
+				Rate = FMath::Clamp(Rate, static_cast<float>(Spec.ControlRange.X),
+					static_cast<float>(Spec.ControlRange.Y));
+			}
+			Backend_->SetCommand(MotorId, Rate * DirectionOf(MotorId));
 			continue;
 		}
 
@@ -279,8 +292,7 @@ void URammsRobotBaseComponent::StepVelocityDrives(float DeltaTime)
 		// Clamp to the motor's authored range, and stop integrating once there
 		// -- otherwise a wheel that cannot reach its target winds the integral
 		// up and lurches when the load comes off.
-		FRammsMotorSpec Spec;
-		if (GetMotorSpec(MotorId, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
+		if (bBounded)
 		{
 			const float Clamped = FMath::Clamp(Torque,
 				static_cast<float>(Spec.ControlRange.X), static_cast<float>(Spec.ControlRange.Y));

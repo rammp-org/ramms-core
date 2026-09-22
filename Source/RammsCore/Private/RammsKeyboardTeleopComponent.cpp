@@ -298,10 +298,19 @@ void URammsKeyboardTeleopComponent::TickComponent(float DeltaTime, ELevelTick Ti
 			// not wind the target off into the unreachable.
 			if (Surface->SetControl(Id, Candidate, ERammsControlSource::Keyboard))
 			{
-				*Target = Candidate;
+				// What the surface accepted, not what was asked for: SetControl
+				// clamps to the axis range and still reports success, so caching
+				// the candidate lets a held key wind the target past the limit
+				// and the key has to unwind that before the endpoint moves back.
+				float Accepted = Candidate;
+				if (!Surface->GetControlTarget(Id, Accepted))
+				{
+					Accepted = Candidate;
+				}
+				*Target = Accepted;
 				if (bLogCommands)
 				{
-					UE_LOG(LogTemp, Verbose, TEXT("[KeyboardTeleop] %s -> %.2f"), *Id.ToString(), Candidate);
+					UE_LOG(LogTemp, Verbose, TEXT("[KeyboardTeleop] %s -> %.2f"), *Id.ToString(), *Target);
 				}
 			}
 		}

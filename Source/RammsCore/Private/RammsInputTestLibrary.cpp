@@ -8,7 +8,7 @@
 
 	#include "InputKeyEventArgs.h"
 
-TSet<FKey> URammsInputTestLibrary::InjectedKeys;
+TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>> URammsInputTestLibrary::InjectedKeys;
 
 bool URammsInputTestLibrary::SetKeyDown(APlayerController* PlayerController, FName KeyName, bool bDown)
 {
@@ -31,11 +31,15 @@ bool URammsInputTestLibrary::SetKeyDown(APlayerController* PlayerController, FNa
 
 	if (bDown)
 	{
-		InjectedKeys.Add(Key);
+		InjectedKeys.FindOrAdd(PlayerController).Add(Key);
 	}
-	else
+	else if (TSet<FKey>* Held = InjectedKeys.Find(PlayerController))
 	{
-		InjectedKeys.Remove(Key);
+		Held->Remove(Key);
+		if (Held->IsEmpty())
+		{
+			InjectedKeys.Remove(PlayerController);
+		}
 	}
 	return bHandled;
 }
@@ -48,13 +52,27 @@ bool URammsInputTestLibrary::IsKeyDown(APlayerController* PlayerController, FNam
 
 void URammsInputTestLibrary::ReleaseAllInjectedKeys(APlayerController* PlayerController)
 {
+	// Drop entries whose controller has gone; nothing can release those.
+	for (auto It = InjectedKeys.CreateIterator(); It; ++It)
+	{
+		if (!It.Key().IsValid())
+		{
+			It.RemoveCurrent();
+		}
+	}
+
+	const TSet<FKey>* Found = InjectedKeys.Find(PlayerController);
+	if (!Found)
+	{
+		return;
+	}
 	// Copy: SetKeyDown mutates the set as it releases.
-	const TSet<FKey> Held = InjectedKeys;
+	const TSet<FKey> Held = *Found;
 	for (const FKey& Key : Held)
 	{
 		SetKeyDown(PlayerController, Key.GetFName(), false);
 	}
-	InjectedKeys.Reset();
+	InjectedKeys.Remove(PlayerController);
 }
 
 #endif // WITH_EDITOR

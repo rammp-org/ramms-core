@@ -48,7 +48,10 @@ struct FRammsVelocityGains
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
 	float MaxIntegralTorque = 0.0f;
 
-	bool IsSet() const { return Kp > 0.0f || Ki > 0.0f; }
+	/** Kp is the sentinel the docs above promise: zero means "use the base's
+	 *  defaults". Treating a lone Ki as a set of gains would hand back an
+	 *  integral-only controller from a half-filled row. */
+	bool IsSet() const { return Kp > 0.0f; }
 };
 
 /**

@@ -3,7 +3,6 @@
 #include "RammsDriveModeSelector.h"
 
 #include "GameFramework/Actor.h"
-#include "Ramms5BarLinkageController.h"
 #include "RammsDriveMode.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
@@ -121,18 +120,56 @@ void URammsDriveModeSelector::ApplyStanceFor(UActorComponent* ModeComponent)
 	// Command the stance rather than waiting for the robot to be driven into
 	// it: the wheels this mode needs on the ground are only there once the
 	// legs hold the right pose.
+	//
+	// Through the control surface by Id, not by calling a linkage controller.
+	// Naming URamms5BarLinkageController here would leave this selector
+	// depending on ramms-controllers once that class moves, which is exactly
+	// what the extraction is meant to avoid -- and it would only ever work for
+	// one kind of leg. Anything that advertises a linkage height can take a
+	// stance.
+	URammsRobotControlSurfaceComponent* Surface =
+		Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
 	if (Stance.bHasLinkageHeight)
 	{
-		TArray<URamms5BarLinkageController*> Linkages;
-		Owner->GetComponents<URamms5BarLinkageController>(Linkages);
-		for (URamms5BarLinkageController* Linkage : Linkages)
+		if (!Surface)
 		{
-			if (Linkage && !Linkage->SetEndpointHeight(Stance.LinkageHeightCm))
+			UE_LOG(LogTemp, Warning,
+				TEXT("[DriveMode] '%s' needs a %.1f cm linkage stance but the robot has no control "
+					 "surface to command it through; the wrong wheels may be on the ground."),
+				*GetNameSafe(ModeComponent), Stance.LinkageHeightCm);
+		}
+		else
+		{
+			int32		  Commanded = 0;
+			const FString HeightSuffix = RammsControlIds::Linkage::HeightSuffix();
+			for (const FRammsControlAxis& Axis : Surface->DescribeControlSurface().Axes)
+			{
+				if (Axis.Group != RammsControlIds::Groups::Linkage()
+					|| Axis.Kind != ERammsControlKind::Position || Axis.bReadOnly
+					|| !Axis.Id.ToString().EndsWith(HeightSuffix))
+				{
+					continue;
+				}
+				// Autonomy: taking a stance is the robot's own doing, and it
+				// has to win over whatever a panel last left on the axis.
+				if (Surface->SetControl(Axis.Id, Stance.LinkageHeightCm, ERammsControlSource::Autonomy))
+				{
+					++Commanded;
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("[DriveMode] '%s' refused the %.1f cm stance this mode needs; "
+							 "the wrong wheels may be on the ground."),
+						*Axis.Id.ToString(), Stance.LinkageHeightCm);
+				}
+			}
+			if (Commanded == 0)
 			{
 				UE_LOG(LogTemp, Warning,
-					TEXT("[DriveMode] '%s' could not take the %.1f cm stance this mode needs; "
-						 "the wrong wheels may be on the ground."),
-					*Linkage->GetName(), Stance.LinkageHeightCm);
+					TEXT("[DriveMode] '%s' needs a %.1f cm linkage stance but this robot advertises no "
+						 "linkage height controls to command."),
+					*GetNameSafe(ModeComponent), Stance.LinkageHeightCm);
 			}
 		}
 	}

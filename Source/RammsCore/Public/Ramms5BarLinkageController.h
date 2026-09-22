@@ -162,6 +162,8 @@ public:
 	virtual int32 GetControlOrder() const override { return 10; }
 	virtual void  SetContributionSuspended(bool bSuspended) override;
 	virtual bool  IsContributionSuspended() const override { return bSuspended; }
+	/** Yes: SetContributionSuspended below really does let go of the hips. */
+	virtual bool CanSuspendContribution() const override { return true; }
 
 private:
 	FName HeightControlId() const { return RammsControlIds::Linkage::Height(GetName()); }

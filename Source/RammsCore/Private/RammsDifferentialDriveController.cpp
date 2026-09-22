@@ -153,26 +153,40 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	UpdateWheelState(LeftMotorId, LeftWheelBoneName, LeftWheelState);
 	UpdateWheelState(RightMotorId, RightWheelBoneName, RightWheelState);
 
-	// Check for braking
-	bIsBraking = ShouldApplyBrakes();
-
-	if (bIsBraking)
+	// Actuate only while this is the live drive mode. Zeroing the input on
+	// stand-down is not enough on its own: the braking and control paths run
+	// every frame regardless of what was commanded, so an inactive controller
+	// went on writing its motors -- over the holonomic mode's wheels, and over
+	// the raw per-motor axes the low-level mode hands out. Wheel state and
+	// odometry above and below this still update, so the estimate stays live
+	// while another mode drives.
+	if (bDriveModeActive)
 	{
-		ApplyBrakes();
+		// Check for braking
+		bIsBraking = ShouldApplyBrakes();
+
+		if (bIsBraking)
+		{
+			ApplyBrakes();
+		}
+		else
+		{
+			// Update based on control mode
+			switch (ControlMode)
+			{
+				case EDriveControlMode::TorqueControl:
+					UpdateTorqueControl(DeltaTime);
+					break;
+
+				case EDriveControlMode::VelocityControl:
+					UpdateVelocityControl(DeltaTime);
+					break;
+			}
+		}
 	}
 	else
 	{
-		// Update based on control mode
-		switch (ControlMode)
-		{
-			case EDriveControlMode::TorqueControl:
-				UpdateTorqueControl(DeltaTime);
-				break;
-
-			case EDriveControlMode::VelocityControl:
-				UpdateVelocityControl(DeltaTime);
-				break;
-		}
+		bIsBraking = false;
 	}
 
 	// Update odometry
@@ -888,8 +902,11 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 	bDriveModeActive = bActive;
 	if (!bActive)
 	{
-		// Stand down cleanly rather than leaving the last command driving.
-		SetDriveInput(FVector2D::ZeroVector);
+		// Straight to ApplyDriveInputInternal, not SetDriveInput: that one
+		// returns early while an external session holds priority, so the
+		// stand-down would be a no-op exactly when something else is driving.
+		// A mode being switched away from stops, whoever was commanding it.
+		ApplyDriveInputInternal(FVector2D::ZeroVector, TEXT("SetDriveModeActive"));
 	}
 }
 
