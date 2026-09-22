@@ -77,6 +77,26 @@ bool URamms5BarLinkageController::HasBase() const
 	return EnsureBase() != nullptr;
 }
 
+float URamms5BarLinkageController::Handedness() const
+{
+	// Anything but a clean -1 is treated as +1: a zero or unset sign would
+	// collapse every fore/aft command to the centre of travel.
+	return Resolved.TranslationSign < 0.0f ? -1.0f : 1.0f;
+}
+
+FVector2D URamms5BarLinkageController::ToLocal(FVector2D RobotXZ) const
+{
+	return FVector2D(RobotXZ.X * Handedness(), RobotXZ.Y);
+}
+
+FVector2D URamms5BarLinkageController::ToRobot(FVector2D LocalXZ) const
+{
+	// The sign is its own inverse, so this is ToLocal again -- named for the
+	// direction it is used in, because which frame a coordinate is in is the
+	// easy thing to get wrong here.
+	return FVector2D(LocalXZ.X * Handedness(), LocalXZ.Y);
+}
+
 bool URamms5BarLinkageController::WithinMotorRange(URammsRobotBaseComponent& Base, FName MotorId, double Angle) const
 {
 	// A geometrically reachable endpoint can still need a hip angle outside the
@@ -100,7 +120,7 @@ bool URamms5BarLinkageController::SetEndpointTarget(FVector2D TargetXZ)
 	}
 
 	bool			bReachable = false;
-	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, ToLocal(TargetXZ), bReachable);
 	bReachable = bReachable
 		&& WithinMotorRange(*Base, Resolved.ProximalMotorA, Angles.X)
 		&& WithinMotorRange(*Base, Resolved.ProximalMotorB, Angles.Y);
@@ -242,6 +262,45 @@ FVector2D URamms5BarLinkageController::GetReachableTranslationRange(float Z, boo
 		HeightScanStep, bValid);
 }
 
+FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bValid) const
+{
+	bValid = false;
+
+	// Walk the other axis across its own reachable span and union the slices.
+	// Seeded from where the endpoint is, so the span followed is the one this
+	// mechanism is actually on.
+	const FVector2D Live = GetCurrentEndpoint();
+	bool			bAcross = false;
+	const FVector2D Across = bHeight ? GetReachableTranslationRange(static_cast<float>(Live.Y), bAcross)
+									 : GetReachableHeightRange(static_cast<float>(Live.X), bAcross);
+	if (!bAcross)
+	{
+		// Nothing reachable across: fall back to the slice at the live pose so
+		// an axis is still offered if one exists there at all.
+		return bHeight ? GetReachableHeightRange(static_cast<float>(Live.X), bValid)
+					   : GetReachableTranslationRange(static_cast<float>(Live.Y), bValid);
+	}
+
+	const int32 Samples = FMath::Max(2, ExtentScanSamples);
+	FVector2D	Extent(TNumericLimits<float>::Max(), -TNumericLimits<float>::Max());
+	for (int32 i = 0; i < Samples; ++i)
+	{
+		const float		T = static_cast<float>(i) / static_cast<float>(Samples - 1);
+		const float		At = FMath::Lerp(static_cast<float>(Across.X), static_cast<float>(Across.Y), T);
+		bool			bSlice = false;
+		const FVector2D Slice = bHeight ? GetReachableHeightRange(At, bSlice)
+										: GetReachableTranslationRange(At, bSlice);
+		if (!bSlice)
+		{
+			continue;
+		}
+		Extent.X = FMath::Min(Extent.X, Slice.X);
+		Extent.Y = FMath::Max(Extent.Y, Slice.Y);
+		bValid = true;
+	}
+	return bValid ? Extent : FVector2D::ZeroVector;
+}
+
 void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
@@ -261,7 +320,7 @@ void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
 	bHasTarget = bValid;
 	if (bValid)
 	{
-		LastTarget = Endpoint;
+		LastTarget = ToRobot(Endpoint);
 	}
 }
 
@@ -283,12 +342,12 @@ FVector2D URamms5BarLinkageController::GetCurrentEndpoint() const
 
 FVector2D URamms5BarLinkageController::GetCurrentEndpointChecked(bool& bValid) const
 {
-	return URamms5BarKinematics::ComputeEndpoint(Resolved, GetCurrentJointAngles(), bValid);
+	return ToRobot(URamms5BarKinematics::ComputeEndpoint(Resolved, GetCurrentJointAngles(), bValid));
 }
 
 FVector2D URamms5BarLinkageController::SolveTarget(FVector2D TargetXZ, bool& bReachable) const
 {
-	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, TargetXZ, bReachable);
+	const FVector2D Angles = URamms5BarKinematics::SolveIK(Resolved, ToLocal(TargetXZ), bReachable);
 	if (URammsRobotBaseComponent* Base = EnsureBase())
 	{
 		bReachable = bReachable
@@ -372,10 +431,12 @@ void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& Out
 	if (Axis.Range.X >= Axis.Range.Y)
 	{
 		bool bValid = false;
-		// Each axis is scanned with the OTHER one held where the endpoint
-		// actually is, which is the pose the slider will move from.
-		Axis.Range = bHeight ? GetReachableHeightRange(HeldX(), bValid)
-							 : GetReachableTranslationRange(HeldZ(), bValid);
+		// The mechanism's whole travel, not the slice at the current pose. A
+		// slice is only valid while the other axis stays put, and the surface
+		// clamps to whatever is advertised -- so publishing one froze the
+		// fore/aft slider into the roughly one-centimetre band available at
+		// the resting pose and left it unusable.
+		Axis.Range = GetReachableExtent(bHeight, bValid);
 		if (!bValid)
 		{
 			// Nothing reachable along this axis here (no base, no table, or the

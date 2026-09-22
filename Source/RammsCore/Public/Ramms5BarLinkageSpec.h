@@ -106,4 +106,19 @@ struct FRamms5BarLinkageSpec : public FTableRowBase
 	 *  knees); flip for a mechanism assembled the other way round. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
 	bool bFlipEndpointSide = false;
+
+	/**
+	 * +1 when this linkage's local +X points forward on the robot, -1 when the
+	 * leg is mounted mirrored and its local +X points aft.
+	 *
+	 * Without it a pair of legs disagrees about which way "forward" is: on the
+	 * lift-drive, commanding +5 cm fore/aft moved the left wheel 5.2 cm
+	 * forward and the right wheel 5.1 cm backward, because both reach the same
+	 * endpoint in their own frame and those frames are mirror images. Every
+	 * coordinate crossing this controller's public surface -- targets, the
+	 * live endpoint, the reachable ranges -- is in the robot's sense, and this
+	 * is where it is converted.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float TranslationSign = 1.0f;
 };

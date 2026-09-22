@@ -103,6 +103,36 @@ FName URammsDriveModeSelector::GetActiveModeId() const
 	return NAME_None;
 }
 
+int32 URammsDriveModeSelector::CommandLinkageAxes(URammsRobotControlSurfaceComponent& Surface,
+	const TCHAR* IdSuffix, float Value, const TCHAR* What, bool bWarn) const
+{
+	int32		  Commanded = 0;
+	const FString Suffix(IdSuffix);
+	for (const FRammsControlAxis& Axis : Surface.DescribeControlSurface().Axes)
+	{
+		if (Axis.Group != RammsControlIds::Groups::Linkage()
+			|| Axis.Kind != ERammsControlKind::Position || Axis.bReadOnly
+			|| !Axis.Id.ToString().EndsWith(Suffix))
+		{
+			continue;
+		}
+		// Autonomy: taking a stance is the robot's own doing, and it has to
+		// win over whatever a panel last left on the axis.
+		if (Surface.SetControl(Axis.Id, Value, ERammsControlSource::Autonomy))
+		{
+			++Commanded;
+		}
+		else if (bWarn)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[DriveMode] '%s' refused the %.1f cm %s its mode's stance needs; the wrong "
+					 "wheels may be on the ground."),
+				*Axis.Id.ToString(), Value, What);
+		}
+	}
+	return Commanded;
+}
+
 void URammsDriveModeSelector::ApplyStanceFor(UActorComponent* ModeComponent)
 {
 	const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(ModeComponent);
@@ -129,47 +159,48 @@ void URammsDriveModeSelector::ApplyStanceFor(UActorComponent* ModeComponent)
 	// stance.
 	URammsRobotControlSurfaceComponent* Surface =
 		Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
-	if (Stance.bHasLinkageHeight)
+	if (Stance.bHasLinkageHeight || Stance.bHasLinkageTranslation)
 	{
 		if (!Surface)
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("[DriveMode] '%s' needs a %.1f cm linkage stance but the robot has no control "
-					 "surface to command it through; the wrong wheels may be on the ground."),
-				*GetNameSafe(ModeComponent), Stance.LinkageHeightCm);
+				TEXT("[DriveMode] '%s' needs a linkage stance but the robot has no control surface to "
+					 "command it through; the wrong wheels may be on the ground."),
+				*GetNameSafe(ModeComponent));
 		}
 		else
 		{
-			int32		  Commanded = 0;
-			const FString HeightSuffix = RammsControlIds::Linkage::HeightSuffix();
-			for (const FRammsControlAxis& Axis : Surface->DescribeControlSurface().Axes)
+			// Two passes, fore/aft then height each time, because the axes are
+			// one endpoint over one pair of motors and the reachable set is a
+			// curved region: which order works depends on which way you are
+			// going. Reaching a high, narrow pose needs the endpoint brought
+			// back to the centre first, or the height is refused at the
+			// current fore/aft; reaching a far-out one needs the height
+			// dropped first, or the fore/aft is refused. Alternating twice
+			// gets there either way, and a command already satisfied is a
+			// no-op the second time.
+			int32 Commanded = 0;
+			for (int32 Pass = 0; Pass < 2; ++Pass)
 			{
-				if (Axis.Group != RammsControlIds::Groups::Linkage()
-					|| Axis.Kind != ERammsControlKind::Position || Axis.bReadOnly
-					|| !Axis.Id.ToString().EndsWith(HeightSuffix))
+				Commanded = 0;
+				if (Stance.bHasLinkageTranslation)
 				{
-					continue;
+					Commanded += CommandLinkageAxes(*Surface,
+						RammsControlIds::Linkage::TranslationSuffix(), Stance.LinkageTranslationCm,
+						TEXT("fore/aft"), /*bWarn=*/Pass == 1);
 				}
-				// Autonomy: taking a stance is the robot's own doing, and it
-				// has to win over whatever a panel last left on the axis.
-				if (Surface->SetControl(Axis.Id, Stance.LinkageHeightCm, ERammsControlSource::Autonomy))
+				if (Stance.bHasLinkageHeight)
 				{
-					++Commanded;
-				}
-				else
-				{
-					UE_LOG(LogTemp, Warning,
-						TEXT("[DriveMode] '%s' refused the %.1f cm stance this mode needs; "
-							 "the wrong wheels may be on the ground."),
-						*Axis.Id.ToString(), Stance.LinkageHeightCm);
+					Commanded += CommandLinkageAxes(*Surface, RammsControlIds::Linkage::HeightSuffix(),
+						Stance.LinkageHeightCm, TEXT("height"), /*bWarn=*/Pass == 1);
 				}
 			}
 			if (Commanded == 0)
 			{
 				UE_LOG(LogTemp, Warning,
-					TEXT("[DriveMode] '%s' needs a %.1f cm linkage stance but this robot advertises no "
-						 "linkage height controls to command."),
-					*GetNameSafe(ModeComponent), Stance.LinkageHeightCm);
+					TEXT("[DriveMode] '%s' needs a linkage stance but this robot advertises no linkage "
+						 "controls to command."),
+					*GetNameSafe(ModeComponent));
 			}
 		}
 	}
@@ -244,10 +275,15 @@ bool URammsDriveModeSelector::SetActiveMode(FName ModeId)
 		Mode->SetDriveModeActive(true);
 	}
 	ActiveIndex = Wanted;
-	ApplyStanceFor(Modes[Wanted]);
 
-	// The surface is built from what the contributors describe, and the
-	// inactive mode now describes nothing -- so its controls leave the panel.
+	// Rebuild before applying the stance, not after. The surface is built from
+	// what the contributors describe, and the inactive mode now describes
+	// nothing -- so its controls leave the panel. It also has to be current
+	// *before* the stance goes out, because the stance is commanded through it
+	// by Id: coming back from the low-level mode the 5-bars have just been
+	// un-suspended, and against a stale surface they still advertise nothing,
+	// so the stance found no linkage controls to command and the robot stayed
+	// in the wrong pose.
 	if (AActor* Owner = GetOwner())
 	{
 		if (URammsRobotControlSurfaceComponent* Surface =
@@ -256,6 +292,7 @@ bool URammsDriveModeSelector::SetActiveMode(FName ModeId)
 			Surface->RebuildControlSurface();
 		}
 	}
+	ApplyStanceFor(Modes[Wanted]);
 	UE_LOG(LogTemp, Log, TEXT("[DriveMode] '%s' -> %s"), *GetNameSafe(GetOwner()), *ModeId.ToString());
 	return true;
 }

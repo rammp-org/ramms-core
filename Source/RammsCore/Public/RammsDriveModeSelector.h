@@ -76,5 +76,10 @@ private:
 	void GatherModes();
 	void ApplyStanceFor(UActorComponent* Mode);
 
+	/** Command every linkage axis whose Id ends in IdSuffix; returns how many
+	 *  accepted. Addressed by Id, so no controller class is named here. */
+	int32 CommandLinkageAxes(class URammsRobotControlSurfaceComponent& Surface, const TCHAR* IdSuffix,
+		float Value, const TCHAR* What, bool bWarn) const;
+
 	int32 ActiveIndex = INDEX_NONE;
 };

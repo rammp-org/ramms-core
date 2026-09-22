@@ -53,6 +53,16 @@ struct RAMMSCORE_API FRammsDriveStance
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance", meta = (EditCondition = "bHasLinkageHeight"))
 	float LinkageHeightCm = 0.0f;
 
+	/** False when the mode does not care where the endpoint sits fore/aft. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance")
+	bool bHasLinkageTranslation = false;
+
+	/** 5-bar endpoint fore/aft position (cm). Where along the robot the wheel
+	 *  carries matters as much as how low it sits: the lift-drive wants its
+	 *  centre wheels further forward when they are the ones driving. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance", meta = (EditCondition = "bHasLinkageTranslation"))
+	float LinkageTranslationCm = 0.0f;
+
 	/**
 	 * Other actuators the stance depends on, by registry Id.
 	 *
@@ -65,5 +75,8 @@ struct RAMMSCORE_API FRammsDriveStance
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance")
 	TArray<FRammsStanceMotorTarget> MotorTargets;
 
-	bool IsEmpty() const { return !bHasLinkageHeight && MotorTargets.Num() == 0; }
+	bool IsEmpty() const
+	{
+		return !bHasLinkageHeight && !bHasLinkageTranslation && MotorTargets.Num() == 0;
+	}
 };

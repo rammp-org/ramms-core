@@ -143,6 +143,28 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
 	FVector2D GetReachableTranslationRange(float Z, bool& bValid) const;
 
+	/**
+	 * How far this coordinate can travel anywhere in the reachable set, as
+	 * opposed to the slice at one pose.
+	 *
+	 * This is what the control surface advertises. The slice is the honest
+	 * answer to "where can the endpoint go from exactly here", but it is a
+	 * terrible axis range: the reachable set is a curved region whose fore/aft
+	 * width varies about six-fold with height, so near the resting pose the
+	 * slice is around a centimetre wide, the surface clamps every command into
+	 * it, and the slider cannot be moved. The extent spans the mechanism, and
+	 * a combination that is out of reach at the current height is refused by
+	 * SetEndpointTarget rather than silently clamped -- which callers already
+	 * handle, since they only adopt a target the controller accepts.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	FVector2D GetReachableExtent(bool bHeight, bool& bValid) const;
+
+	/** Slices taken across the other axis when computing an extent. More is
+	 *  a finer outline of a curved region and a longer scan. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "2"))
+	int32 ExtentScanSamples = 9;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D TranslationScanLimits = FVector2D(-100.0, 100.0);
 
@@ -168,6 +190,14 @@ public:
 private:
 	FName HeightControlId() const { return RammsControlIds::Linkage::Height(GetName()); }
 	FName TranslationControlId() const { return RammsControlIds::Linkage::Translation(GetName()); }
+
+	/** -1 when this leg is mounted mirrored; see FRamms5BarLinkageSpec. */
+	float Handedness() const;
+
+	/** Robot-frame (x forward) <-> this linkage's own frame. Every coordinate
+	 *  in this class's public surface is robot-frame; the kinematics are not. */
+	FVector2D ToLocal(FVector2D RobotXZ) const;
+	FVector2D ToRobot(FVector2D LocalXZ) const;
 
 	/** The X SetEndpointHeight keeps: the last target's, else the live endpoint's. */
 	float HeldX() const;
