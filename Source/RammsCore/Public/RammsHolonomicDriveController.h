@@ -71,7 +71,7 @@ public:
 	/** Height the linkages must hold for the centre wheels to clear the ground.
 	 *  Holonomic drive only works with the treaded centre tyres lifted off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
-	float LiftedLinkageHeightCm = 12.0f;
+	float LiftedLinkageHeightCm = 15.2f;
 
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("holonomic"); }

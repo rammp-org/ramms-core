@@ -374,7 +374,7 @@ public:
 	 *  are the treaded tyres, and they have to overcome the omni wheels'
 	 *  friction to steer the base, which they only do with weight on them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive")
-	float PlantedLinkageHeightCm = -8.0f;
+	float PlantedLinkageHeightCm = 12.7f;
 
 	virtual FName GetDriveModeId() const override { return FName("differential"); }
 	virtual FText GetDriveModeDisplayName() const override
