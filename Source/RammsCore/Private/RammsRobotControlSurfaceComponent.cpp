@@ -366,7 +366,16 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 		{
 			for (const FRammsControlAxis& Other : Surface.Axes)
 			{
-				if (Other.Id == Id || Other.IsAction() || ContributorFor(Other.Id) != C)
+				// Position and Velocity only. A false from ReadTarget is
+				// authoritative for those -- the contributor is saying it holds
+				// no target -- but it is also the default implementation, so a
+				// Continuous contributor that never overrode it would look like
+				// it had released everything. Releasing drive.forward would
+				// then drop the holds on strafe and turn while both are still
+				// being commanded.
+				const bool bServo = Other.Kind == ERammsControlKind::Position
+					|| Other.Kind == ERammsControlKind::Velocity;
+				if (Other.Id == Id || !bServo || ContributorFor(Other.Id) != C)
 				{
 					continue;
 				}

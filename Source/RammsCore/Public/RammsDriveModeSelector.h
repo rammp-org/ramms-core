@@ -74,6 +74,10 @@ private:
 	TArray<TObjectPtr<UActorComponent>> Modes;
 
 	void GatherModes();
+	/** The initial mode, run a tick after BeginPlay so every contributor has
+	 *  initialised and the stance has a surface to be commanded through. */
+	void SelectInitialMode();
+
 	void ApplyStanceFor(UActorComponent* Mode);
 
 	/** Command every linkage axis whose Id ends in IdSuffix; returns how many

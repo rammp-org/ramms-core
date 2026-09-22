@@ -5,6 +5,7 @@
 #include "GameFramework/Actor.h"
 #include "RammsDriveMode.h"
 #include "RammsRobotBaseComponent.h"
+#include "TimerManager.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
 namespace
@@ -30,6 +31,26 @@ void URammsDriveModeSelector::BeginPlay()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[DriveMode] '%s' found no drive modes on this robot; nothing to select."),
 			*GetNameSafe(GetOwner()));
+		return;
+	}
+
+	// Next tick, not now. Sibling contributors resolve their own dependencies
+	// in their BeginPlay in no guaranteed order relative to this one, and
+	// selecting a mode rebuilds the surface and commands a stance through it.
+	// Run first and the 5-bars have not resolved their kinematic specs yet, so
+	// they advertise no axes, the stance finds nothing to command, and nothing
+	// ever retries it -- the surface's own deferred rebuild brings the axes
+	// back but not the stance.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimerForNextTick(this, &URammsDriveModeSelector::SelectInitialMode);
+	}
+}
+
+void URammsDriveModeSelector::SelectInitialMode()
+{
+	if (Modes.Num() == 0)
+	{
 		return;
 	}
 

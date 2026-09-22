@@ -35,6 +35,19 @@ URammsRobotBaseComponent::~URammsRobotBaseComponent()
 void URammsRobotBaseComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// bCanEverTick is serialised on the Blueprint's component template, so a
+	// robot authored before this component ticked keeps the old false however
+	// the CDO is set -- and its velocity loop would never run, leaving every
+	// torque-actuated wheel with no command at all. Turn it on for this
+	// instance rather than asking everyone to re-save their Blueprints. (The
+	// 5-bar does the same for its jog axes.)
+	if (!PrimaryComponentTick.bCanEverTick)
+	{
+		PrimaryComponentTick.bCanEverTick = true;
+		PrimaryComponentTick.SetTickFunctionEnable(true);
+		PrimaryComponentTick.RegisterTickFunction(GetComponentLevel());
+	}
 	LoadMotorRegistry();
 	EnsureBackend();
 }
