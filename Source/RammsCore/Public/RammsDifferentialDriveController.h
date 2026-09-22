@@ -6,6 +6,7 @@
 #include "Components/ActorComponent.h"
 #include "RammsDifferentialDriveTypes.h"
 #include "RammsControlContributor.h"
+#include "RammsDriveMode.h"
 #include "RammsDifferentialDriveController.generated.h"
 
 class UPrimitiveComponent;
@@ -16,7 +17,7 @@ class URammsRobotBaseComponent;
  * Manages motor control, applies forces to wheels, tracks odometry
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent, public IRammsControlContributor
+class RAMMSCORE_API URammsDifferentialDriveController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
 {
 	GENERATED_BODY()
 
@@ -325,8 +326,8 @@ private:
 
 	/** Update wheel state from physics (base component by MotorId when present,
 	 *  else the Chaos wheel bone). */
-	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState);	/** The wheel's Chaos body: through the base's Chaos mesh / ChaosName when a
-	 *  base drives this robot, else the legacy mesh / bone name. */
+	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState); /** The wheel's Chaos body: through the base's Chaos mesh / ChaosName when a
+																				  *  base drives this robot, else the legacy mesh / bone name. */
 	FBodyInstance* GetWheelBody(FName MotorId, FName BoneName);
 
 	/** One-time notice that slip modeling has no Chaos contact body on this backend. */
@@ -366,6 +367,33 @@ private:
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 	virtual int32 GetControlOrder() const override { return 0; }
 
+public:
+	// --- IRammsDriveMode ------------------------------------------------------
+
+	/** Height the linkages must hold for the centre wheels to carry load. They
+	 *  are the treaded tyres, and they have to overcome the omni wheels'
+	 *  friction to steer the base, which they only do with weight on them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive")
+	float PlantedLinkageHeightCm = -8.0f;
+
+	virtual FName GetDriveModeId() const override { return FName("differential"); }
+	virtual FText GetDriveModeDisplayName() const override
+	{
+		return NSLOCTEXT("Ramms", "DriveModeDifferential", "Differential");
+	}
+	virtual bool IsDriveModeActive() const override { return bDriveModeActive; }
+	virtual void SetDriveModeActive(bool bActive) override;
+	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const override
+	{
+		OutHeightCm = PlantedLinkageHeightCm;
+		return true;
+	}
+
+private:
+	/** Inactive modes contribute nothing: no controls, no claims, no commands. */
+	bool bDriveModeActive = true;
+
+public:
 private:
 	/** The two drive axes as last set through the control surface. */
 	FVector2D ControlDriveInput = FVector2D::ZeroVector;

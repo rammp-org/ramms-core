@@ -63,6 +63,32 @@ bool URammsHolonomicDriveController::HasBase() const
 	return EnsureBase() != nullptr;
 }
 
+void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
+{
+	if (bDriveModeActive == bActive)
+	{
+		return;
+	}
+	bDriveModeActive = bActive;
+	if (!bActive)
+	{
+		// Stand down cleanly: zero the wheels once rather than leaving them
+		// spinning at whatever the last command was.
+		Command = FVector::ZeroVector;
+		if (URammsRobotBaseComponent* Base = EnsureBase())
+		{
+			for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
+			{
+				if (!Wheel.MotorId.IsNone())
+				{
+					Base->SetMotorCommand(Wheel.MotorId, 0.0f);
+				}
+			}
+		}
+		bDrivingMotors = false;
+	}
+}
+
 void URammsHolonomicDriveController::SetDriveCommand(FVector ForwardStrafeYaw)
 {
 	Command.X = FMath::Clamp(ForwardStrafeYaw.X, -1.0, 1.0);
@@ -106,7 +132,7 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	URammsRobotBaseComponent* Base = EnsureBase();
-	if (!Base || Resolved.Wheels.Num() == 0)
+	if (!Base || Resolved.Wheels.Num() == 0 || !bDriveModeActive)
 	{
 		return;
 	}
@@ -135,6 +161,11 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 
 void URammsHolonomicDriveController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
+	if (!bDriveModeActive)
+	{
+		// Another drive mode owns drive.forward / drive.turn right now.
+		return;
+	}
 	FRammsControlAxis Forward;
 	Forward.Id = RammsControlIds::Drive::Forward();
 	Forward.Group = RammsControlIds::Groups::Drive();
@@ -165,6 +196,10 @@ void URammsHolonomicDriveController::DescribeControls(FRammsControlSurface& OutS
 
 bool URammsHolonomicDriveController::ApplyControl(FName Id, float Value)
 {
+	if (!bDriveModeActive)
+	{
+		return false;
+	}
 	if (Id == RammsControlIds::Drive::Forward())
 	{
 		Command.X = FMath::Clamp(Value, -1.0f, 1.0f);
@@ -225,6 +260,11 @@ bool URammsHolonomicDriveController::ReadControl(FName Id, float& OutValue) cons
 
 void URammsHolonomicDriveController::GetClaimedMotorIds(TArray<FName>& OutIds) const
 {
+	if (!bDriveModeActive)
+	{
+		// Standing down: let the wheels show up as raw motor axes instead.
+		return;
+	}
 	for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
 	{
 		if (!Wheel.MotorId.IsNone())

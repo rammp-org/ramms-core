@@ -5,6 +5,7 @@
 #include "Components/ActorComponent.h"
 #include "CoreMinimal.h"
 #include "RammsControlContributor.h"
+#include "RammsDriveMode.h"
 #include "RammsControlIds.h"
 #include "RammsHolonomicDriveTypes.h"
 
@@ -28,7 +29,7 @@ class URammsRobotBaseComponent;
  * same controls.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsHolonomicDriveController : public UActorComponent, public IRammsControlContributor
+class RAMMSCORE_API URammsHolonomicDriveController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
 {
 	GENERATED_BODY()
 
@@ -67,6 +68,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Holonomic")
 	bool HasBase() const;
 
+	/** Height the linkages must hold for the centre wheels to clear the ground.
+	 *  Holonomic drive only works with the treaded centre tyres lifted off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
+	float LiftedLinkageHeightCm = 12.0f;
+
+	// --- IRammsDriveMode ------------------------------------------------------
+	virtual FName GetDriveModeId() const override { return FName("holonomic"); }
+	virtual FText GetDriveModeDisplayName() const override
+	{
+		return NSLOCTEXT("Ramms", "DriveModeHolonomic", "Holonomic");
+	}
+	virtual bool IsDriveModeActive() const override { return bDriveModeActive; }
+	virtual void SetDriveModeActive(bool bActive) override;
+	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const override
+	{
+		OutHeightCm = LiftedLinkageHeightCm;
+		return true;
+	}
+
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
 	virtual bool  ApplyControl(FName Id, float Value) override;
@@ -88,6 +108,9 @@ private:
 
 	/** Commanded body twist, normalised: X forward, Y strafe, Z yaw. */
 	FVector Command = FVector::ZeroVector;
+
+	/** Inactive modes contribute nothing: no controls, no claims, no commands. */
+	bool bDriveModeActive = true;
 
 	/** True once a non-zero command has been sent, so a released stick still
 	 *  writes one zero to the motors rather than leaving them spinning. */

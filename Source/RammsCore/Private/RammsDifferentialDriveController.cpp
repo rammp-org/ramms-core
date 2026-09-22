@@ -874,6 +874,20 @@ void URammsDifferentialDriveController::DebugLogState()
 
 // --- control surface -----------------------------------------------------------
 
+void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
+{
+	if (bDriveModeActive == bActive)
+	{
+		return;
+	}
+	bDriveModeActive = bActive;
+	if (!bActive)
+	{
+		// Stand down cleanly rather than leaving the last command driving.
+		SetDriveInput(FVector2D::ZeroVector);
+	}
+}
+
 void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
 	const FName		  DriveForwardId = RammsControlIds::Drive::Forward();
@@ -899,6 +913,10 @@ void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& O
 
 bool URammsDifferentialDriveController::ApplyControl(FName Id, float Value)
 {
+	if (!bDriveModeActive)
+	{
+		return false;
+	}
 	const FName DriveForwardId = RammsControlIds::Drive::Forward();
 	const FName DriveTurnId = RammsControlIds::Drive::Turn();
 	if (Id == DriveForwardId)
@@ -946,6 +964,11 @@ bool URammsDifferentialDriveController::ReadControl(FName Id, float& OutValue) c
 
 void URammsDifferentialDriveController::GetClaimedMotorIds(TArray<FName>& OutIds) const
 {
+	if (!bDriveModeActive)
+	{
+		// Standing down: let the wheels show as raw motor axes instead.
+		return;
+	}
 	OutIds.Add(LeftMotorId);
 	OutIds.Add(RightMotorId);
 }
