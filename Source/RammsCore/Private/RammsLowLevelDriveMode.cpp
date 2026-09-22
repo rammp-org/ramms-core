@@ -27,24 +27,17 @@ void URammsLowLevelDriveMode::SetDriveModeActive(bool bActive)
 	if (URammsRobotControlSurfaceComponent* Surface =
 			Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
 	{
+		// While a low-level mode exists on the robot, IT owns the raw motor
+		// exposure -- that gating is the mode's whole reason for existing, so
+		// it overrides the surface's authored flag rather than restoring it.
+		// (An earlier attempt to put the authored value back on stand-down
+		// ungated the robot completely: the flag defaults to true, so every
+		// mode showed every unclaimed motor and the gate did nothing.) The
+		// authored flag still decides for robots with no low-level mode.
+		Surface->bExposeUnclaimedMotors = bActive;
 		if (bActive)
 		{
-			// Remember what the robot was authored with, so standing down puts
-			// it back rather than leaving this mode's choice behind for good.
-			if (!bHasSavedExposure)
-			{
-				bHasSavedExposure = true;
-				bSavedExposeUnclaimedMotors = Surface->bExposeUnclaimedMotors;
-				SavedUnclaimedMotorGroup = Surface->UnclaimedMotorGroup;
-			}
-			Surface->bExposeUnclaimedMotors = true;
 			Surface->UnclaimedMotorGroup = MotorGroup;
-		}
-		else if (bHasSavedExposure)
-		{
-			bHasSavedExposure = false;
-			Surface->bExposeUnclaimedMotors = bSavedExposeUnclaimedMotors;
-			Surface->UnclaimedMotorGroup = SavedUnclaimedMotorGroup;
 		}
 	}
 
@@ -54,12 +47,48 @@ void URammsLowLevelDriveMode::SetDriveModeActive(bool bActive)
 	// turned off while this mode was live -- the robot would come back with no
 	// drive controls and its linkages limp, with no way to recover but
 	// restarting play.
-	const bool bSuspendOthers = bActive && bClaimAllActuators;
-	if (!bSuspendOthers && !bSuspendedOthers)
+	ApplyClaimAll(bActive && bClaimAllActuators);
+}
+
+void URammsLowLevelDriveMode::SetClaimAllActuators(bool bInClaimAll)
+{
+	if (bClaimAllActuators == bInClaimAll)
 	{
 		return;
 	}
-	bSuspendedOthers = bSuspendOthers;
+	bClaimAllActuators = bInClaimAll;
+	if (!bDriveModeActive)
+	{
+		// Takes effect when this mode next goes live.
+		return;
+	}
+	ApplyClaimAll(bInClaimAll);
+
+	// Unlike SetDriveModeActive, nothing rebuilds the surface after this: the
+	// selector is not involved, and the controls that just appeared or went
+	// away would not reach a panel until something else changed.
+	if (const AActor* Owner = GetOwner())
+	{
+		if (URammsRobotControlSurfaceComponent* Surface =
+				Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+		{
+			Surface->RebuildControlSurface();
+		}
+	}
+}
+
+void URammsLowLevelDriveMode::ApplyClaimAll(bool bClaimAll)
+{
+	if (!bClaimAll && !bSuspendedOthers)
+	{
+		return;
+	}
+	const AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+	bSuspendedOthers = bClaimAll;
 
 	// Opted in: stand the other contributors down so the actuators they claim
 	// -- the 5-bar hips above all -- come back as raw axes. Anything that says
@@ -72,6 +101,6 @@ void URammsLowLevelDriveMode::SetDriveModeActive(bool bActive)
 		{
 			continue;
 		}
-		Contributor->SetContributionSuspended(bSuspendOthers);
+		Contributor->SetContributionSuspended(bClaimAll);
 	}
 }

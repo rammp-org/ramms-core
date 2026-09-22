@@ -44,8 +44,18 @@ public:
 	 * drops it onto whatever the motors do next. Turn this on when the thing
 	 * being diagnosed IS a claimed actuator.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
+	UPROPERTY(EditAnywhere, Category = "Drive Mode")
 	bool bClaimAllActuators = false;
+
+	/**
+	 * Change bClaimAllActuators and have it take effect now.
+	 *
+	 * Writing the property directly only takes effect at the next mode switch,
+	 * which is a trap while this mode is the live one: the actuators you turned
+	 * the flag on to reach stay claimed until you switch away and back.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Drive Mode")
+	void SetClaimAllActuators(bool bInClaimAll);
 
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("low_level"); }
@@ -56,6 +66,11 @@ public:
 	virtual bool IsDriveModeActive() const override { return bDriveModeActive; }
 	virtual void SetDriveModeActive(bool bActive) override;
 
+private:
+	/** Suspend or release the other contributors, and rebuild the surface. */
+	void ApplyClaimAll(bool bClaimAll);
+
+public:
 	/** Deliberately none: leave the robot standing as it is. */
 	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const override { return false; }
 
@@ -65,9 +80,4 @@ private:
 	/** True while this mode holds other contributors suspended, so standing
 	 *  down releases them even if bClaimAllActuators changed meanwhile. */
 	bool bSuspendedOthers = false;
-
-	/** The surface's authored motor exposure, restored when this mode ends. */
-	bool  bHasSavedExposure = false;
-	bool  bSavedExposeUnclaimedMotors = true;
-	FName SavedUnclaimedMotorGroup = FName("Motors");
 };
