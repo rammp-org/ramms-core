@@ -71,8 +71,9 @@ private:
 	void ApplyClaimAll(bool bClaimAll);
 
 public:
-	/** Deliberately none: leave the robot standing as it is. */
-	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const override { return false; }
+	/** Deliberately none: leave the robot standing as it is. Moving the legs
+	 *  under someone who is debugging them is the opposite of helpful. */
+	virtual bool GetRequiredStance(FRammsDriveStance& OutStance) const override { return false; }
 
 private:
 	bool bDriveModeActive = false;

@@ -5,6 +5,7 @@
 #include "GameFramework/Actor.h"
 #include "Ramms5BarLinkageController.h"
 #include "RammsDriveMode.h"
+#include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
 namespace
@@ -106,8 +107,8 @@ FName URammsDriveModeSelector::GetActiveModeId() const
 void URammsDriveModeSelector::ApplyStanceFor(UActorComponent* ModeComponent)
 {
 	const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(ModeComponent);
-	float				   Height = 0.0f;
-	if (!bApplyLinkageStance || !Mode || !Mode->GetRequiredLinkageHeight(Height))
+	FRammsDriveStance	   Stance;
+	if (!bApplyLinkageStance || !Mode || !Mode->GetRequiredStance(Stance))
 	{
 		return;
 	}
@@ -116,19 +117,58 @@ void URammsDriveModeSelector::ApplyStanceFor(UActorComponent* ModeComponent)
 	{
 		return;
 	}
-	// Command the height rather than waiting for the linkage to be driven: the
-	// wheels this mode needs on the ground are only there once the 5-bars hold
-	// the right stance.
-	TArray<URamms5BarLinkageController*> Linkages;
-	Owner->GetComponents<URamms5BarLinkageController>(Linkages);
-	for (URamms5BarLinkageController* Linkage : Linkages)
+
+	// Command the stance rather than waiting for the robot to be driven into
+	// it: the wheels this mode needs on the ground are only there once the
+	// legs hold the right pose.
+	if (Stance.bHasLinkageHeight)
 	{
-		if (Linkage && !Linkage->SetEndpointHeight(Height))
+		TArray<URamms5BarLinkageController*> Linkages;
+		Owner->GetComponents<URamms5BarLinkageController>(Linkages);
+		for (URamms5BarLinkageController* Linkage : Linkages)
+		{
+			if (Linkage && !Linkage->SetEndpointHeight(Stance.LinkageHeightCm))
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[DriveMode] '%s' could not take the %.1f cm stance this mode needs; "
+						 "the wrong wheels may be on the ground."),
+					*Linkage->GetName(), Stance.LinkageHeightCm);
+			}
+		}
+	}
+
+	// The corner cranks and anything else the stance names. These go through
+	// the robot base by Id: they are ordinary registry motors, not something
+	// the mode claims, so the low-level mode can still reach them.
+	if (Stance.MotorTargets.Num() > 0)
+	{
+		URammsRobotBaseComponent* Base = Owner->FindComponentByClass<URammsRobotBaseComponent>();
+		if (!Base)
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("[DriveMode] '%s' could not take the %.1f cm stance this mode needs; "
-					 "the wrong wheels may be on the ground."),
-				*Linkage->GetName(), Height);
+				TEXT("[DriveMode] '%s' wants %d motors held for its stance but the robot has no "
+					 "RammsRobotBaseComponent to command them through."),
+				*GetNameSafe(ModeComponent), Stance.MotorTargets.Num());
+			return;
+		}
+		for (const FRammsStanceMotorTarget& Target : Stance.MotorTargets)
+		{
+			if (Target.MotorId.IsNone())
+			{
+				continue;
+			}
+			if (!Base->HasMotor(Target.MotorId))
+			{
+				// Naming a motor this robot does not have is an authoring
+				// mistake worth hearing about: the stance silently half-applies
+				// and the wrong wheels stay down.
+				UE_LOG(LogTemp, Warning,
+					TEXT("[DriveMode] stance for '%s' names motor '%s', which is not in this "
+						 "robot's registry; that part of the stance is not applied."),
+					*GetNameSafe(ModeComponent), *Target.MotorId.ToString());
+				continue;
+			}
+			Base->SetMotorCommand(Target.MotorId, Target.Target);
 		}
 	}
 }

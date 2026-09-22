@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
+#include "RammsDriveStance.h"
 
 #include "RammsDriveMode.generated.h"
 
@@ -26,8 +27,8 @@ class URammsDriveMode : public UInterface
  * Switching is not only a software matter on this hardware. The lift-drive
  * raises its centre wheels clear of the ground on the 5-bar linkages to run
  * holonomic, and lowers them to run differential -- so a mode also has a stance
- * it needs the robot in. That is why a mode reports a linkage height rather
- * than the selector guessing one.
+ * it needs the robot in. That is why a mode reports its own stance rather than
+ * the selector guessing one.
  */
 class RAMMSCORE_API IRammsDriveMode
 {
@@ -47,14 +48,16 @@ public:
 	virtual void SetDriveModeActive(bool bActive) = 0;
 
 	/**
-	 * Endpoint height (cm) the 5-bar linkages need for this mode's wheels to be
-	 * the ones on the ground, and false when the mode does not care.
+	 * The pose this mode needs the robot standing in, and false when it does
+	 * not care.
 	 *
-	 * Holonomic wants the centre wheels lifted; differential wants them down
-	 * and carrying load, because they are the treaded tyres that have to
-	 * overcome the omni wheels' friction.
+	 * Holonomic wants the centre wheels lifted clear; differential wants them
+	 * down and carrying load, because they are the treaded tyres that have to
+	 * overcome the omni wheels' friction. Which wheels touch depends on the
+	 * whole leg -- the 5-bar endpoint height and the corner cranks together --
+	 * so this is a stance rather than a single height. See FRammsDriveStance.
 	 */
-	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const
+	virtual bool GetRequiredStance(FRammsDriveStance& OutStance) const
 	{
 		return false;
 	}

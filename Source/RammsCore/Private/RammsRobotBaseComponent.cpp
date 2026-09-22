@@ -9,7 +9,17 @@
 
 URammsRobotBaseComponent::URammsRobotBaseComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	// Ticks only to close the velocity loop; see SetMotorVelocityCommand.
+	// PrePhysics, so the torque it writes is applied in the same step as the
+	// commands the drive controllers wrote a moment earlier.
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+
+	// Enough to hold a lift-drive omni wheel at its commanded speed against
+	// the other three, well inside the +/-30 N.m those actuators allow.
+	DefaultVelocityGains.Kp = 4.0f;
+	DefaultVelocityGains.Ki = 8.0f;
+	DefaultVelocityGains.MaxIntegralTorque = 15.0f;
 }
 
 URammsRobotBaseComponent::~URammsRobotBaseComponent()
@@ -151,8 +161,129 @@ bool URammsRobotBaseComponent::HasBackend() const
 
 bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 {
+	// Letting go means letting go: a loop still driving this motor would put
+	// it straight back under command on the next tick.
+	VelocityDrives.Remove(MotorId);
 	EnsureBackend();
 	return Backend_ && Backend_->ReleaseMotor(MotorId);
+}
+
+// --- velocity loop ------------------------------------------------------------
+
+void URammsRobotBaseComponent::SetMotorVelocityCommand(FName MotorId, float RadiansPerSecond)
+{
+	if (MotorId.IsNone())
+	{
+		return;
+	}
+	LoadMotorRegistry();
+	if (GetMotorType(MotorId) == ERammsActuatorType::Position)
+	{
+		// A position servo holds an angle; asking it for a speed would mean
+		// integrating one here and fighting whatever else is holding it.
+		if (!WarnedVelocityOnPosition.Contains(MotorId))
+		{
+			WarnedVelocityOnPosition.Add(MotorId);
+			UE_LOG(LogTemp, Warning,
+				TEXT("RammsRobotBaseComponent on '%s': motor '%s' is a Position actuator, so it "
+					 "cannot be velocity-driven; command it with SetMotorCommand instead."),
+				*GetNameSafe(GetOwner()), *MotorId.ToString());
+		}
+		return;
+	}
+	FVelocityDrive& Drive = VelocityDrives.FindOrAdd(MotorId);
+	Drive.Target = RadiansPerSecond;
+}
+
+void URammsRobotBaseComponent::ClearMotorVelocityCommand(FName MotorId)
+{
+	VelocityDrives.Remove(MotorId);
+}
+
+bool URammsRobotBaseComponent::GetMotorVelocityCommand(FName MotorId, float& OutRadiansPerSecond) const
+{
+	if (const FVelocityDrive* Drive = VelocityDrives.Find(MotorId))
+	{
+		OutRadiansPerSecond = Drive->Target;
+		return true;
+	}
+	OutRadiansPerSecond = 0.0f;
+	return false;
+}
+
+FRammsVelocityGains URammsRobotBaseComponent::GainsFor(FName MotorId) const
+{
+	FRammsMotorSpec Spec;
+	if (GetMotorSpec(MotorId, Spec) && Spec.VelocityGains.IsSet())
+	{
+		return Spec.VelocityGains;
+	}
+	return DefaultVelocityGains;
+}
+
+void URammsRobotBaseComponent::StepVelocityDrives(float DeltaTime)
+{
+	if (VelocityDrives.Num() == 0 || DeltaTime <= 0.0f)
+	{
+		return;
+	}
+	EnsureBackend();
+	if (!Backend_)
+	{
+		return;
+	}
+
+	for (TPair<FName, FVelocityDrive>& Pair : VelocityDrives)
+	{
+		const FName		MotorId = Pair.Key;
+		FVelocityDrive& Drive = Pair.Value;
+
+		if (GetMotorType(MotorId) == ERammsActuatorType::Velocity)
+		{
+			// The actuator closes its own loop; hand it the rate.
+			Backend_->SetCommand(MotorId, Drive.Target * DirectionOf(MotorId));
+			continue;
+		}
+
+		// Torque actuator: close the loop here. Everything is in the robot's
+		// sense -- GetMotorVelocity already un-applies Direction -- and the
+		// sign is put back on the way out.
+		const FRammsVelocityGains Gains = GainsFor(MotorId);
+		const float				  Error = Drive.Target - GetMotorVelocity(MotorId);
+
+		float Integral = Drive.Integral + Gains.Ki * Error * DeltaTime;
+		if (Gains.MaxIntegralTorque > 0.0f)
+		{
+			Integral = FMath::Clamp(Integral, -Gains.MaxIntegralTorque, Gains.MaxIntegralTorque);
+		}
+
+		float Torque = Gains.Kp * Error + Integral;
+
+		// Clamp to the motor's authored range, and stop integrating once there
+		// -- otherwise a wheel that cannot reach its target winds the integral
+		// up and lurches when the load comes off.
+		FRammsMotorSpec Spec;
+		if (GetMotorSpec(MotorId, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
+		{
+			const float Clamped = FMath::Clamp(Torque,
+				static_cast<float>(Spec.ControlRange.X), static_cast<float>(Spec.ControlRange.Y));
+			if (Clamped != Torque)
+			{
+				Integral = Drive.Integral; // saturated: hold, do not accumulate
+			}
+			Torque = Clamped;
+		}
+		Drive.Integral = Integral;
+
+		Backend_->SetCommand(MotorId, Torque * DirectionOf(MotorId));
+	}
+}
+
+void URammsRobotBaseComponent::TickComponent(float DeltaTime, ELevelTick TickType,
+	FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	StepVelocityDrives(DeltaTime);
 }
 
 USkeletalMeshComponent* URammsRobotBaseComponent::GetChaosSkeletalMesh() const
@@ -282,6 +413,10 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 			GetOwner() ? *GetOwner()->GetName() : TEXT("?"), *MotorId.ToString(),
 			MotorTable ? TEXT("") : TEXT(" (no MotorTable set)"));
 	}
+
+	// A direct command wins: whoever wrote this wants THIS value, not the
+	// output of a loop that would overwrite it on the next tick.
+	VelocityDrives.Remove(MotorId);
 
 	// Clamp in the robot's sense to the authored range when one is set (a
 	// range with min >= max means "no clamp here" — defer to the backend /

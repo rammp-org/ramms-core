@@ -370,11 +370,11 @@ private:
 public:
 	// --- IRammsDriveMode ------------------------------------------------------
 
-	/** Height the linkages must hold for the centre wheels to carry load. They
+	/** The stance this mode needs: centre wheels down and carrying load. They
 	 *  are the treaded tyres, and they have to overcome the omni wheels'
 	 *  friction to steer the base, which they only do with weight on them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive")
-	float PlantedLinkageHeightCm = 12.7f;
+	FRammsDriveStance PlantedStance;
 
 	virtual FName GetDriveModeId() const override { return FName("differential"); }
 	virtual FText GetDriveModeDisplayName() const override
@@ -383,10 +383,10 @@ public:
 	}
 	virtual bool IsDriveModeActive() const override { return bDriveModeActive; }
 	virtual void SetDriveModeActive(bool bActive) override;
-	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const override
+	virtual bool GetRequiredStance(FRammsDriveStance& OutStance) const override
 	{
-		OutHeightCm = PlantedLinkageHeightCm;
-		return true;
+		OutStance = PlantedStance;
+		return !OutStance.IsEmpty();
 	}
 
 private:

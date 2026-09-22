@@ -9,12 +9,26 @@ URammsHolonomicDriveController::URammsHolonomicDriveController()
 {
 	// Wheel rates are recomputed from the held command every frame.
 	PrimaryComponentTick.bCanEverTick = true;
+
+	// Enough on its own to lift the centre wheels clear. A robot that also
+	// drives its corner cranks down gets the same clearance lower -- see
+	// FRammsDriveStance -- but those motor Ids belong to the robot.
+	LiftedStance.bHasLinkageHeight = true;
+	LiftedStance.LinkageHeightCm = 13.0f;
 }
 
 void URammsHolonomicDriveController::BeginPlay()
 {
 	Super::BeginPlay();
 	ResolveSpec();
+
+	// The base closes the velocity loop in its own tick, in the same tick
+	// group as this one. Without an explicit order it may run first and use
+	// last frame's targets.
+	if (URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		Base->AddTickPrerequisiteComponent(this);
+	}
 
 	if (Resolved.Wheels.Num() < 3)
 	{
@@ -85,6 +99,8 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 			{
 				if (!Wheel.MotorId.IsNone())
 				{
+					Base->SetMotorVelocityCommand(Wheel.MotorId, 0.0f);
+					Base->ClearMotorVelocityCommand(Wheel.MotorId);
 					Base->SetMotorCommand(Wheel.MotorId, 0.0f);
 				}
 			}
@@ -149,12 +165,16 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 		return;
 	}
 
+	// Rates are rad/s, so they go out as a speed command. The base closes the
+	// loop when the actuator is a torque motor -- writing these numbers into
+	// SetMotorCommand applies them as newton-metres instead, which turned the
+	// wheels at about 3% of the commanded rate and moved the base 2 cm.
 	const TArray<float> Rates = SolveWheelRates();
 	for (int32 i = 0; i < Resolved.Wheels.Num() && i < Rates.Num(); ++i)
 	{
 		if (!Resolved.Wheels[i].MotorId.IsNone())
 		{
-			Base->SetMotorCommand(Resolved.Wheels[i].MotorId, Rates[i]);
+			Base->SetMotorVelocityCommand(Resolved.Wheels[i].MotorId, Rates[i]);
 		}
 	}
 	// One more pass of zeros after the stick centres, then stop writing.

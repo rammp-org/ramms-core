@@ -55,6 +55,8 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+		FActorComponentTickFunction* ThisTickFunction) override;
 
 	/** The robot's motor registry. Row struct: FRammsMotorSpec. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot")
@@ -83,12 +85,48 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
 	float ChaosPositionDriveForceLimit = 0.0f;
 
+	/** Gains for the velocity loop over Torque actuators, for motors whose own
+	 *  registry row does not set them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Velocity Loop")
+	FRammsVelocityGains DefaultVelocityGains;
+
 	// --- Motor command / read (by registry Id), routed to the backend --------
 
 	/** Command a motor by Id in the robot's sense (interpreted per its
 	 *  ERammsActuatorType; clamped to its ControlRange; Direction applied). */
 	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
 	void SetMotorCommand(FName MotorId, float Value);
+
+	/**
+	 * Drive a motor at a speed (rad/s in the robot's sense), whatever kind of
+	 * actuator it turns out to be.
+	 *
+	 * This is how a drive controller should command a wheel. A controller
+	 * solves a body twist into wheel rates; it has no business knowing whether
+	 * the backend gave that wheel a velocity servo or a torque motor. A
+	 * Velocity actuator gets the rate passed straight through. A Torque one
+	 * gets a loop closed over GetMotorVelocity each tick, using this motor's
+	 * VelocityGains or the base's defaults.
+	 *
+	 * Writing a rate into SetMotorCommand instead applies it as newton-metres,
+	 * which looks like a controller that almost works: the wheels turn, slowly,
+	 * and the robot does not go anywhere.
+	 *
+	 * The target is held until changed, cleared, or overridden -- a direct
+	 * SetMotorCommand or ReleaseMotor on the same motor drops it, so the loop
+	 * never fights something else driving the same actuator.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
+	void SetMotorVelocityCommand(FName MotorId, float RadiansPerSecond);
+
+	/** Stop velocity-driving a motor. Leaves whatever the loop last wrote; use
+	 *  ReleaseMotor or command zero to stop the motor itself. */
+	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
+	void ClearMotorVelocityCommand(FName MotorId);
+
+	/** The speed this motor is being driven at, if it is. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
+	bool GetMotorVelocityCommand(FName MotorId, float& OutRadiansPerSecond) const;
 
 	/** Stop actively driving a motor (a position servo lets go of its joint;
 	 *  see IRammsActuationBackend::ReleaseMotor). False if the backend cannot
@@ -197,4 +235,23 @@ private:
 
 	/** Ids commanded without a registry row (warned once each). */
 	mutable TSet<FName> WarnedUnregistered;
+
+	/** One motor being held at a speed by the loop below. */
+	struct FVelocityDrive
+	{
+		float Target = 0.0f;   // rad/s, robot sense
+		float Integral = 0.0f; // N.m accumulated by the Ki term
+	};
+
+	/** Motors under velocity command, by Id. */
+	TMap<FName, FVelocityDrive> VelocityDrives;
+
+	/** Velocity-commanded motors that are position servos (warned once each). */
+	TSet<FName> WarnedVelocityOnPosition;
+
+	/** Gains in force for a motor: its own row's, else the base's defaults. */
+	FRammsVelocityGains GainsFor(FName MotorId) const;
+
+	/** Run one step of the velocity loop over every motor under command. */
+	void StepVelocityDrives(float DeltaTime);
 };

@@ -13,6 +13,11 @@ URammsDifferentialDriveController::URammsDifferentialDriveController()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+
+	// Centre wheels down and carrying load, which is where the 5-bar sits when
+	// the robot is standing on them.
+	PlantedStance.bHasLinkageHeight = true;
+	PlantedStance.LinkageHeightCm = 12.7f;
 }
 
 void URammsDifferentialDriveController::BeginPlay()

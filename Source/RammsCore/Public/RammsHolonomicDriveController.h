@@ -68,10 +68,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Holonomic")
 	bool HasBase() const;
 
-	/** Height the linkages must hold for the centre wheels to clear the ground.
-	 *  Holonomic drive only works with the treaded centre tyres lifted off. */
+	/**
+	 * The stance this mode needs: centre wheels clear of the ground, so the
+	 * corner omni wheels are the ones carrying the robot.
+	 *
+	 * The default asks for a 13 cm 5-bar endpoint height and nothing else,
+	 * which clears the centre wheels on its own. Driving the corner cranks
+	 * down as well (about 1.15 rad on the lift-drive) clears them at 10 to
+	 * 11 cm instead -- further from the top of the 5-bar's travel, and a
+	 * better place to operate. Those motor Ids are the robot's geometry, not
+	 * this controller's, so they are authored on the robot's Blueprint.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
-	float LiftedLinkageHeightCm = 15.2f;
+	FRammsDriveStance LiftedStance;
 
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("holonomic"); }
@@ -81,10 +90,10 @@ public:
 	}
 	virtual bool IsDriveModeActive() const override { return bDriveModeActive; }
 	virtual void SetDriveModeActive(bool bActive) override;
-	virtual bool GetRequiredLinkageHeight(float& OutHeightCm) const override
+	virtual bool GetRequiredStance(FRammsDriveStance& OutStance) const override
 	{
-		OutHeightCm = LiftedLinkageHeightCm;
-		return true;
+		OutStance = LiftedStance;
+		return !OutStance.IsEmpty();
 	}
 
 	// --- IRammsControlContributor --------------------------------------------
