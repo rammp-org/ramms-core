@@ -42,6 +42,11 @@ void URammsRobotBaseComponent::BeginPlay()
 	// torque-actuated wheel with no command at all. Turn it on for this
 	// instance rather than asking everyone to re-save their Blueprints. (The
 	// 5-bar does the same for its jog axes.)
+	// TickGroup is serialised the same way, so an old template also keeps
+	// TG_DuringPhysics -- enabling its tick without this would run the
+	// velocity loop inside the physics phase. Set unconditionally, and before
+	// registering, since registration reads it.
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 	if (!PrimaryComponentTick.bCanEverTick)
 	{
 		PrimaryComponentTick.bCanEverTick = true;

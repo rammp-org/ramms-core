@@ -9,6 +9,12 @@ URammsHolonomicDriveController::URammsHolonomicDriveController()
 {
 	// Wheel rates are recomputed from the held command every frame.
 	PrimaryComponentTick.bCanEverTick = true;
+	// PrePhysics, matching the robot base. A UActorComponent defaults to
+	// TG_DuringPhysics, so without this the base -- which is a tick dependent
+	// of this one -- was dragged into the physics phase with it, and whether
+	// the torque the velocity loop writes reached the current step was down to
+	// timing.
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 
 	// Enough on its own to lift the centre wheels clear. A robot that also
 	// drives its corner cranks down gets the same clearance lower -- see
@@ -22,9 +28,14 @@ void URammsHolonomicDriveController::BeginPlay()
 	Super::BeginPlay();
 	ResolveSpec();
 
+	// TickGroup is serialised on the Blueprint's component template, so a
+	// controller authored before the line above keeps TG_DuringPhysics however
+	// the CDO is set. Put it back before anything depends on the order.
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+
 	// The base closes the velocity loop in its own tick, in the same tick
-	// group as this one. Without an explicit order it may run first and use
-	// last frame's targets.
+	// group. Without an explicit order it may run first and use last frame's
+	// targets.
 	if (URammsRobotBaseComponent* Base = EnsureBase())
 	{
 		Base->AddTickPrerequisiteComponent(this);

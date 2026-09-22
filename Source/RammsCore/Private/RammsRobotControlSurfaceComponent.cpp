@@ -78,6 +78,19 @@ void URammsRobotControlSurfaceComponent::EnsureBuilt() const
 
 void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 {
+	// Who owned each control before this rebuild. A drive mode switch keeps
+	// the Ids -- both modes offer drive.forward -- while changing the
+	// contributor behind them, and both modes come up at zero. Carrying the
+	// old hold and target across would have the surface report the previous
+	// mode's command and refuse a lower-priority source over a robot that is
+	// not moving.
+	TMap<FName, TWeakObjectPtr<UObject>> PreviousOwners;
+	PreviousOwners.Reserve(Routes.Num());
+	for (const TPair<FName, FRoute>& Pair : Routes)
+	{
+		PreviousOwners.Add(Pair.Key, Pair.Value.Contributor);
+	}
+
 	Surface = FRammsControlSurface();
 	Routes.Reset();
 	AActor* Owner = GetOwner();
@@ -177,17 +190,27 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 		}
 	}
 
-	// Anything held by (or targeted through) a control that no longer exists is forgotten.
+	// Anything held by (or targeted through) a control that no longer exists,
+	// or that has changed hands, is forgotten.
+	auto IsStale = [this, &PreviousOwners](FName Id) {
+		const FRoute* Route = Routes.Find(Id);
+		if (!Route)
+		{
+			return true;
+		}
+		const TWeakObjectPtr<UObject>* Before = PreviousOwners.Find(Id);
+		return Before != nullptr && Before->Get() != Route->Contributor.Get();
+	};
 	for (auto It = Holds.CreateIterator(); It; ++It)
 	{
-		if (!Routes.Contains(It.Key()))
+		if (IsStale(It.Key()))
 		{
 			It.RemoveCurrent();
 		}
 	}
 	for (auto It = Targets.CreateIterator(); It; ++It)
 	{
-		if (!Routes.Contains(It.Key()))
+		if (IsStale(It.Key()))
 		{
 			It.RemoveCurrent();
 		}
