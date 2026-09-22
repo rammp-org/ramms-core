@@ -134,6 +134,8 @@ void URammsKeyboardTeleopComponent::RefreshDiscovery()
 		}
 	}
 
+	bSurfaceHasDrive = bHasDrive;
+
 	if (!bHasDrive && LinkageControlIds.Num() == 0)
 	{
 		if (!bWarnedNothingToDrive)
@@ -164,17 +166,22 @@ void URammsKeyboardTeleopComponent::EndPlay(const EEndPlayReason::Type EndPlayRe
 
 void URammsKeyboardTeleopComponent::ReleaseDrive()
 {
-	// The drive controller latches the last SetDriveInput; without this the
-	// robot keeps driving after the player lets go of it (unpossess, drive
-	// disabled, end of play). Only our own command is released — the external
-	// input path (SetExternalDriveInput) is untouched.
-	if (bDriveCommandActive && Surface)
+	// A drive controller holds its last command, so without this the robot
+	// keeps driving after the player lets go of it (keys up, unpossess, drive
+	// disabled, end of play).
+	//
+	// Release rather than write zero. A zero written as Keyboard is still a
+	// Keyboard command, and the surface records a hold for it -- which locks
+	// out every lower-priority source until the hold ages out. ReleaseControl
+	// drops the hold and lets the contributor spring back, which is what
+	// letting go actually means.
+	if (bDriveCommandActive && Surface && bSurfaceHasDrive)
 	{
-		// The surface refuses a write while a higher-priority source holds the
-		// axis, so a false here means the release did not happen -- keep it
-		// pending (Tick retries every frame) rather than pretending it did.
-		const bool bF = Surface->SetControl(RammsControlIds::Drive::Forward(), 0.0f, ERammsControlSource::Keyboard);
-		const bool bT = Surface->SetControl(RammsControlIds::Drive::Turn(), 0.0f, ERammsControlSource::Keyboard);
+		// The surface refuses a release while a higher-priority source holds
+		// the axis, so a false here means it did not happen -- leave it
+		// pending (Tick retries) rather than pretending it did.
+		const bool bF = Surface->ReleaseControl(RammsControlIds::Drive::Forward(), ERammsControlSource::Keyboard);
+		const bool bT = Surface->ReleaseControl(RammsControlIds::Drive::Turn(), ERammsControlSource::Keyboard);
 		if (!bF && !bT)
 		{
 			return;
@@ -184,6 +191,8 @@ void URammsKeyboardTeleopComponent::ReleaseDrive()
 			UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] drive input released"));
 		}
 	}
+	// Nothing to release against (no surface, or the active drive mode offers
+	// no drive axes) counts as released: retrying forever would not help.
 	bDriveCommandActive = false;
 	LastDrive = FVector2D::ZeroVector;
 }

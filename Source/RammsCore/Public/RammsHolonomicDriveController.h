@@ -72,12 +72,14 @@ public:
 	 * The stance this mode needs: centre wheels clear of the ground, so the
 	 * corner omni wheels are the ones carrying the robot.
 	 *
-	 * The default asks for a 13 cm 5-bar endpoint height and nothing else,
-	 * which clears the centre wheels on its own. Driving the corner cranks
-	 * down as well (about 1.15 rad on the lift-drive) clears them at 10 to
-	 * 11 cm instead -- further from the top of the 5-bar's travel, and a
-	 * better place to operate. Those motor Ids are the robot's geometry, not
-	 * this controller's, so they are authored on the robot's Blueprint.
+	 * The default asks for a 13 cm 5-bar endpoint height and nothing else.
+	 * On the lift-drive that height only clears the centre wheels once the
+	 * corner cranks are also driven down (about 1.15 rad) -- with them left
+	 * where they are it takes nearer 15 cm, which is close enough to the top
+	 * of the 5-bar's travel to be a poor place to operate. So a robot that
+	 * needs the cranks says so in its stance; those motor Ids are the
+	 * robot's geometry rather than this controller's, and are authored on
+	 * its Blueprint.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
 	FRammsDriveStance LiftedStance;

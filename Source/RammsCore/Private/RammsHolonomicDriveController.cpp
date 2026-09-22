@@ -99,7 +99,6 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 			{
 				if (!Wheel.MotorId.IsNone())
 				{
-					Base->SetMotorVelocityCommand(Wheel.MotorId, 0.0f);
 					Base->ClearMotorVelocityCommand(Wheel.MotorId);
 					Base->SetMotorCommand(Wheel.MotorId, 0.0f);
 				}
@@ -177,7 +176,23 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 			Base->SetMotorVelocityCommand(Resolved.Wheels[i].MotorId, Rates[i]);
 		}
 	}
-	// One more pass of zeros after the stick centres, then stop writing.
+
+	if (bIdle)
+	{
+		// A velocity command persists in the base until something drops it, so
+		// "stop writing" is no longer enough to stop driving: the loop would
+		// go on holding these wheels at zero every tick, braking them and
+		// fighting anyone else who touches them. Hand them back instead, which
+		// is what this did when it was writing torque directly.
+		for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
+		{
+			if (!Wheel.MotorId.IsNone())
+			{
+				Base->ClearMotorVelocityCommand(Wheel.MotorId);
+				Base->SetMotorCommand(Wheel.MotorId, 0.0f);
+			}
+		}
+	}
 	bDrivingMotors = !bIdle;
 }
 

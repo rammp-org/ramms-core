@@ -169,6 +169,11 @@ private:
 	/** Surface version the discovery above was taken at; -1 = never. */
 	int32 DiscoveredVersion = -1;
 
+	/** The surface advertised drive axes at that version. A mode switch can
+	 *  take them away (low level drives nothing), and a release that retries
+	 *  against a control which no longer exists never succeeds. */
+	bool bSurfaceHasDrive = false;
+
 	/** Contributors this component made itself a tick prerequisite of, so the
 	 *  ones that go away when the surface changes can be let go again. */
 	TArray<TWeakObjectPtr<UActorComponent>> TickDependents;

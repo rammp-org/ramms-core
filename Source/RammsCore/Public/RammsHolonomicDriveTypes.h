@@ -50,7 +50,17 @@ struct RAMMSCORE_API FRammsHolonomicDriveSpec : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
 	TArray<FRammsOmniWheelSpec> Wheels;
 
-	/** Rolling radius, cm. Converts a ground speed into a wheel rate. */
+	/**
+	 * Rolling radius, cm: the height of the wheel's axle above the ground it
+	 * rests on, which for a simple wheel is its collision radius.
+	 *
+	 * SolveWheelRates divides every commanded ground speed by this, so a wrong
+	 * value scales every wheel rate and nothing anywhere can detect it -- the
+	 * velocity loop tracks the wrong target perfectly and the robot simply
+	 * moves at the wrong speed. This default is a placeholder; the lift-drive
+	 * ran on it at 7.5 against a real 10.7 and asked its wheels for 43% more
+	 * than the body twist needed. Measure it per robot.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic", meta = (ClampMin = "0.1"))
 	float WheelRadiusCm = 7.5f;
 
