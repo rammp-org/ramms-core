@@ -182,8 +182,19 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 		{
 			if (Routes.Contains(Axis.Id))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[ControlSurface] '%s': control '%s' contributed twice (second from %s) — first wins."),
-					*Owner->GetName(), *Axis.Id.ToString(), *Pair.Value->GetName());
+				// Naming the actor, not just the component. Ids already carry
+				// the contributor's component name, so a collision needs two
+				// contributors named alike -- which, now that carried actors
+				// are gathered too, most likely means two copies of the same
+				// child actor rather than a mistake on this one. Without the
+				// actor in the message the two are indistinguishable.
+				const AActor* From = Pair.Value->GetTypedOuter<AActor>();
+				UE_LOG(LogTemp, Warning,
+					TEXT("[ControlSurface] '%s': control '%s' contributed twice (second from '%s' on '%s') — first wins. ")
+						TEXT("Ids are per component name, so two identically named contributors collide; rename one, or give ")
+							TEXT("the carried actor its own control surface so it publishes separately."),
+					*Owner->GetName(), *Axis.Id.ToString(), *Pair.Value->GetName(),
+					From ? *From->GetName() : TEXT("?"));
 				continue;
 			}
 			FRammsControlAxis Normalized = Axis;
