@@ -92,7 +92,10 @@ void URammsRobotControlSurfaceComponent::GatherContributorComponents(AActor* Act
 	Actor->GetComponents(Own);
 	OutComponents.Append(Own);
 
-	if (!bGatherFromChildActors || Depth >= ChildActorGatherDepth)
+	// Clamped, not trusted: the depth is a serialized BlueprintReadWrite field
+	// and its ClampMax reaches only the details panel.
+	const int32 MaxDepth = FMath::Clamp(ChildActorGatherDepth, 0, MaxChildActorGatherDepth);
+	if (!bGatherFromChildActors || Depth >= MaxDepth)
 	{
 		return;
 	}

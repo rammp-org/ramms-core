@@ -83,6 +83,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0", ClampMax = "8"))
 	int32 ChildActorGatherDepth = 2;
 
+	/** The depth the walk will actually honour, whatever it was handed.
+	 *
+	 *  `ClampMax` above constrains a details panel and nothing else: the field
+	 *  is BlueprintReadWrite and serialized, so Blueprint, C++ or an older
+	 *  asset can carry any value at all. Since the recursion tests against it,
+	 *  an out-of-range one would quietly remove the bound rather than be
+	 *  rejected, so the walk clamps rather than trusts. */
+	static constexpr int32 MaxChildActorGatherDepth = 8;
+
 	/** How long a Remote / Autonomy command holds a control over local input. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.0"))
 	float ExternalHoldSeconds = 0.3f;
