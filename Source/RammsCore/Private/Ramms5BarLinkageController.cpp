@@ -701,14 +701,22 @@ bool URamms5BarLinkageController::ReleaseControl(FName Id)
 {
 	// Letting go of the stick stops the motion but keeps the endpoint held
 	// where it got to -- the motors are not released.
+	//
+	// A release also lifts the suppression a reset put on that axis, and it has
+	// to: axis-mode input binds Completed to ReleaseAxis rather than sending a
+	// neutral value, so waiting for a zero that never arrives would swallow
+	// every later deflection for the lifetime of the component. Release IS the
+	// neutral report for that path.
 	if (Id == JogUpControlId())
 	{
 		Jog.Y = 0.0f;
+		bSuppressJogY = false;
 		return true;
 	}
 	if (Id == JogForwardControlId())
 	{
 		Jog.X = 0.0f;
+		bSuppressJogX = false;
 		return true;
 	}
 
