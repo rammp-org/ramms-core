@@ -191,8 +191,10 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 				const AActor* From = Pair.Value->GetTypedOuter<AActor>();
 				UE_LOG(LogTemp, Warning,
 					TEXT("[ControlSurface] '%s': control '%s' contributed twice (second from '%s' on '%s') — first wins. ")
-						TEXT("Ids are per component name, so two identically named contributors collide; rename one, or give ")
-							TEXT("the carried actor its own control surface so it publishes separately."),
+						TEXT("Control ids must be unique across everything this surface gathers, including carried actors. ")
+							TEXT("Some contributors derive ids from their component name and can be renamed; others publish fixed ")
+								TEXT("ids (a differential drive always publishes drive.forward), and those need the carried actor to ")
+									TEXT("have its own control surface so it publishes separately."),
 					*Owner->GetName(), *Axis.Id.ToString(), *Pair.Value->GetName(),
 					From ? *From->GetName() : TEXT("?"));
 				continue;
