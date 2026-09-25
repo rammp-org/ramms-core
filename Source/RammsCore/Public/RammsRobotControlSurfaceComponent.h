@@ -53,6 +53,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface")
 	FName UnclaimedMotorGroup = FName("Motors");
 
+	/**
+	 * Also gather contributors from actors held by this actor's
+	 * UChildActorComponents.
+	 *
+	 * A child actor is how a robot is composed out of robots -- the Mebot
+	 * carries its arm that way -- and from the driver's side that arm is part
+	 * of the machine, not a separate one. Gathering only from the owner left
+	 * those controls with nowhere to be published: the arm simulated, carried
+	 * a teleop contributor, and could not be commanded by anything.
+	 *
+	 * A child actor with a control surface **of its own** is skipped, along
+	 * with everything below it. It publishes itself, and gathering it here too
+	 * would put every one of its controls on two surfaces, where releasing on
+	 * one would not release on the other.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface")
+	bool bGatherFromChildActors = true;
+
+	/**
+	 * How far to follow child actors. 1 is the arm on the base; deeper is an
+	 * arm carrying its own tool.
+	 *
+	 * Bounded because the walk is over spawned actors rather than a static
+	 * tree, and an actor that reaches itself through a chain of child actors
+	 * would otherwise be gathered until the stack ran out. Visited actors are
+	 * tracked as well, so this is a second line rather than the only one.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 ChildActorGatherDepth = 2;
+
 	/** How long a Remote / Autonomy command holds a control over local input. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.0"))
 	float ExternalHoldSeconds = 0.3f;
@@ -165,6 +195,11 @@ private:
 	mutable TMap<FName, FHold>	 Holds;
 	/** Last value commanded per control (any source); cleared when a Position / Velocity axis is released. */
 	TMap<FName, float> Targets;
-	mutable int32	   Version = 0;
-	mutable bool	   bBuilt = false;
+	/** Append Actor's contributor-bearing components, then those of its child
+	 *  actors, depth-first and bounded. */
+	void GatherContributorComponents(AActor* Actor, int32 Depth, TSet<AActor*>& Visited,
+		TArray<UActorComponent*>& OutComponents) const;
+
+	mutable int32 Version = 0;
+	mutable bool  bBuilt = false;
 };

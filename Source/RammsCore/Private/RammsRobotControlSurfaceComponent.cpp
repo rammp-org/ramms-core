@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsRobotControlSurfaceComponent.h"
+#include "Components/ChildActorComponent.h"
 #include "RammsControlContributor.h"
 #include "RammsRobotBaseComponent.h"
 #include "GameFramework/Actor.h"
@@ -76,6 +77,48 @@ void URammsRobotControlSurfaceComponent::EnsureBuilt() const
 	}
 }
 
+void URammsRobotControlSurfaceComponent::GatherContributorComponents(AActor* Actor, int32 Depth,
+	TSet<AActor*>& Visited, TArray<UActorComponent*>& OutComponents) const
+{
+	if (!Actor || Visited.Contains(Actor))
+	{
+		return;
+	}
+	Visited.Add(Actor);
+
+	// GetComponents empties what it is given, so this cannot gather straight
+	// into the caller's array.
+	TArray<UActorComponent*> Own;
+	Actor->GetComponents(Own);
+	OutComponents.Append(Own);
+
+	if (!bGatherFromChildActors || Depth >= ChildActorGatherDepth)
+	{
+		return;
+	}
+
+	for (UActorComponent* C : Own)
+	{
+		UChildActorComponent* AsChild = Cast<UChildActorComponent>(C);
+		AActor*				  Child = AsChild ? AsChild->GetChildActor() : nullptr;
+		if (!Child)
+		{
+			// Null before the child actor is created. The surface is built a
+			// tick after BeginPlay precisely so composition has settled, and
+			// RebuildControlSurface can be called again if one appears later.
+			continue;
+		}
+		if (Child->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+		{
+			// It publishes itself. Taking its controls as well would put each
+			// of them on two surfaces, where a release through one would leave
+			// the other still holding.
+			continue;
+		}
+		GatherContributorComponents(Child, Depth + 1, Visited, OutComponents);
+	}
+}
+
 void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 {
 	// Who owned each control before this rebuild. A drive mode switch keeps
@@ -100,9 +143,11 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 	}
 	Surface.RobotName = RobotDisplayName.IsEmpty() ? FText::FromString(Owner->GetActorNameOrLabel()) : RobotDisplayName;
 
-	// Every contributor on the actor, by interface — nothing wired by name.
+	// Every contributor on the actor, by interface — nothing wired by name —
+	// and, unless turned off, on the actors it carries as child actors.
 	TArray<UActorComponent*> Components;
-	Owner->GetComponents(Components);
+	TSet<AActor*>			 Visited;
+	GatherContributorComponents(Owner, 0, Visited, Components);
 	TArray<TPair<IRammsControlContributor*, UObject*>> Contributors;
 	for (UActorComponent* C : Components)
 	{
