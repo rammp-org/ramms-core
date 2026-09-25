@@ -301,6 +301,72 @@ FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bV
 	return bValid ? Extent : FVector2D::ZeroVector;
 }
 
+TArray<FVector2D> URamms5BarLinkageController::GetReachableOutline(bool& bValid) const
+{
+	bValid = false;
+	TArray<FVector2D> Outline;
+
+	// The height span to walk, seeded from where the endpoint is so the span
+	// followed is the one this mechanism is on -- the same seeding the extent
+	// does, and for the same reason: a 5-bar can have more than one assembly
+	// branch, and the reachable set is per branch.
+	const FVector2D Live = GetCurrentEndpoint();
+	bool			bSpan = false;
+	const FVector2D Span = GetReachableHeightRange(static_cast<float>(Live.X), bSpan);
+	if (!bSpan)
+	{
+		return Outline;
+	}
+
+	const int32 Samples = FMath::Max(3, OutlineScanSamples);
+
+	// Near edge going up, far edge coming back down, so the points are already
+	// in traversal order and the polygon closes on itself without a renderer
+	// having to sort anything.
+	TArray<FVector2D> Near;
+	TArray<FVector2D> Far;
+	Near.Reserve(Samples);
+	Far.Reserve(Samples);
+
+	for (int32 i = 0; i < Samples; ++i)
+	{
+		const float		T = static_cast<float>(i) / static_cast<float>(Samples - 1);
+		const float		Z = FMath::Lerp(static_cast<float>(Span.X), static_cast<float>(Span.Y), T);
+		bool			bSlice = false;
+		const FVector2D Slice = GetReachableTranslationRange(Z, bSlice);
+		if (!bSlice)
+		{
+			// A height with nothing reachable across it. Skipped rather than
+			// closed off: the scan walks a bounding span, so the ends of it can
+			// fall outside a region that is narrower than its own extremes.
+			continue;
+		}
+		Near.Emplace(Slice.X, Z);
+		Far.Emplace(Slice.Y, Z);
+	}
+
+	if (Near.Num() < 2)
+	{
+		// One slice, or none. A polygon cannot be made of that, and a renderer
+		// handed two points would draw a line and imply the mechanism is one.
+		return Outline;
+	}
+
+	Outline.Reserve(Near.Num() * 2);
+	Outline.Append(Near);
+	for (int32 i = Far.Num() - 1; i >= 0; --i)
+	{
+		Outline.Add(Far[i]);
+	}
+
+	bValid = Outline.Num() >= 3;
+	if (!bValid)
+	{
+		Outline.Reset();
+	}
+	return Outline;
+}
+
 void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
@@ -451,6 +517,28 @@ void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& Out
 	const FVector2D Now = GetCurrentEndpoint();
 	Axis.DefaultValue = FMath::Clamp(static_cast<float>(bHeight ? Now.Y : Now.X),
 		static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
+
+	// The two halves of one endpoint, so they are paired: a panel that knows
+	// they belong together can put the endpoint on a pad instead of on two
+	// sliders that each show a coordinate and neither of which shows a pose.
+	// Height is the lower Order, which is the vertical half by the pairing
+	// convention -- and is also the one that reads as vertical to anyone
+	// looking at the robot.
+	Axis.PairedAxis = bHeight ? TranslationControlId() : HeightControlId();
+
+	if (bHeight)
+	{
+		// Only on the vertical half, so there is one region per pair. Publishing
+		// it on both would mean two answers to the same question, and nothing
+		// keeps them agreeing once a mechanism is mid-move.
+		bool bOutline = false;
+		TArray<FVector2D> Outline = GetReachableOutline(bOutline);
+		if (bOutline)
+		{
+			Axis.RegionOutline = MoveTemp(Outline);
+		}
+	}
+
 	OutSurface.Add(Axis);
 }
 
@@ -512,6 +600,40 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	Fwd.Order = 3;
 	Fwd.PairedAxis = JogUpControlId();
 	OutSurface.Add(Fwd);
+
+	// And the one command pointing at a pad cannot express: go back. Offered
+	// only when the rest pose is actually reachable, because a button that
+	// always refuses is worse than no button.
+	bool bRestReachable = false;
+	SolveTarget(RestEndpoint, bRestReachable);
+	if (bRestReachable)
+	{
+		FRammsControlAxis Reset;
+		Reset.Id = ResetControlId();
+		Reset.Group = RammsControlIds::Groups::Linkage();
+		Reset.DisplayName = FText::FromString(Pretty + TEXT(" reset"));
+		Reset.Kind = ERammsControlKind::Action;
+		Reset.bReadback = false;
+		Reset.Order = 4;
+		OutSurface.Add(Reset);
+	}
+}
+
+bool URamms5BarLinkageController::TriggerControl(FName Id)
+{
+	if (bSuspended)
+	{
+		return false;
+	}
+	if (Id == ResetControlId())
+	{
+		// Through SetEndpointTarget like any other command, so an unreachable
+		// rest pose is refused rather than half-applied, and the jog stick is
+		// stopped so a held stick does not immediately undo the reset.
+		Jog = FVector2D::ZeroVector;
+		return SetEndpointTarget(RestEndpoint);
+	}
+	return false;
 }
 
 bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)

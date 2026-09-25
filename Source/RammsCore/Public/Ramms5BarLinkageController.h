@@ -160,6 +160,43 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
 	FVector2D GetReachableExtent(bool bHeight, bool& bValid) const;
 
+	/**
+	 * The outline of the reachable region, as a closed polygon in (fore/aft,
+	 * height) cm.
+	 *
+	 * The extent above is what a slider can advertise and is deliberately
+	 * generous: it is the bounding interval of a curved region, so a good half
+	 * of the box it describes with the other axis is not reachable at all. A
+	 * pad shows the endpoint's position *inside* the region, which needs the
+	 * region.
+	 *
+	 * Built from the same slice scan the extent uses -- heights sampled across
+	 * the reachable span, the fore/aft interval taken at each -- walking up the
+	 * near edge and back down the far one. Empty when nothing is reachable, or
+	 * when fewer than three points survive: a degenerate polygon is worse than
+	 * none, because a renderer would draw a sliver and imply the mechanism is
+	 * one.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
+	TArray<FVector2D> GetReachableOutline(bool& bValid) const;
+
+	/** Height slices taken when tracing the outline. More is a smoother region
+	 *  and a longer scan; each slice is its own reachability scan. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "3"))
+	int32 OutlineScanSamples = 17;
+
+	/**
+	 * Where `linkage.<name>.reset` sends the endpoint (local x-z, cm).
+	 *
+	 * Zero is the linkage's own origin, which for these mechanisms is the
+	 * neutral pose. It is settable because "rest" is a property of how a
+	 * particular linkage is mounted, not of the maths -- and because a reset
+	 * that commands somewhere unreachable would simply be refused, which is a
+	 * confusing button.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
+	FVector2D RestEndpoint = FVector2D::ZeroVector;
+
 	/** Slices taken across the other axis when computing an extent. More is
 	 *  a finer outline of a curved region and a longer scan. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "2"))
@@ -177,6 +214,7 @@ public:
 	// two degrees of freedom, both driven by the same pair of proximal motors.
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
 	virtual bool  ApplyControl(FName Id, float Value) override;
+	virtual bool  TriggerControl(FName Id) override;
 	virtual bool  ReleaseControl(FName Id) override;
 	virtual bool  ReadControl(FName Id, float& OutValue) const override;
 	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
@@ -215,6 +253,7 @@ private:
 
 	FName JogUpControlId() const { return RammsControlIds::Linkage::JogUp(GetName()); }
 	FName JogForwardControlId() const { return RammsControlIds::Linkage::JogForward(GetName()); }
+	FName ResetControlId() const { return RammsControlIds::Linkage::Reset(GetName()); }
 
 	/** Current jog deflection, -1..1 (X = fore/aft, Y = up). Held until
 	 *  changed or released, like a stick that stays where it is put. */
