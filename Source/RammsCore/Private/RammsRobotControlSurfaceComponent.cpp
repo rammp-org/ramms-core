@@ -77,6 +77,13 @@ void URammsRobotControlSurfaceComponent::EnsureBuilt() const
 	}
 }
 
+void URammsRobotControlSurfaceComponent::GetGatherScopeComponents(TArray<UActorComponent*>& OutComponents) const
+{
+	OutComponents.Reset();
+	TSet<AActor*> Visited;
+	GatherContributorComponents(GetOwner(), 0, Visited, OutComponents);
+}
+
 void URammsRobotControlSurfaceComponent::GatherContributorComponents(AActor* Actor, int32 Depth,
 	TSet<AActor*>& Visited, TArray<UActorComponent*>& OutComponents) const
 {

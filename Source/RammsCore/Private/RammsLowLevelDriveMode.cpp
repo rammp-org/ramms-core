@@ -94,7 +94,25 @@ void URammsLowLevelDriveMode::ApplyClaimAll(bool bClaimAll)
 	// -- the 5-bar hips above all -- come back as raw axes. Anything that says
 	// it cannot be suspended is left alone; the drive-mode selector says that,
 	// because suspending it would remove the control you switch back with.
-	for (UActorComponent* Component : Owner->GetComponents())
+	// Asked of the surface rather than of the actor, so the set stood down is
+	// exactly the set it gathers from. A surface reaching into carried actors
+	// while this enumerated the owner alone would leave a contributor claiming
+	// and writing motors the surface had already advertised as free.
+	//
+	// The gather SCOPE, not the published contributors: a contributor that is
+	// already suspended publishes nothing, so the published set cannot be used
+	// to bring it back.
+	TArray<UActorComponent*> Contributors;
+	if (const URammsRobotControlSurfaceComponent* Surface = Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+	{
+		Surface->GetGatherScopeComponents(Contributors);
+	}
+	else
+	{
+		Owner->GetComponents(Contributors);
+	}
+
+	for (UActorComponent* Component : Contributors)
 	{
 		IRammsControlContributor* Contributor = Cast<IRammsControlContributor>(Component);
 		if (!Contributor || Component == this || !Contributor->CanSuspendContribution())
