@@ -4,7 +4,6 @@
 
 #include "GameFramework/Actor.h"
 #include "RammsControlContributor.h"
-#include "RammsRobotControlSurfaceComponent.h"
 
 URammsLowLevelDriveMode::URammsLowLevelDriveMode()
 {
@@ -94,23 +93,23 @@ void URammsLowLevelDriveMode::ApplyClaimAll(bool bClaimAll)
 	// -- the 5-bar hips above all -- come back as raw axes. Anything that says
 	// it cannot be suspended is left alone; the drive-mode selector says that,
 	// because suspending it would remove the control you switch back with.
-	// Asked of the surface rather than of the actor, so the set stood down is
-	// exactly the set it gathers from. A surface reaching into carried actors
-	// while this enumerated the owner alone would leave a contributor claiming
-	// and writing motors the surface had already advertised as free.
+	// The OWNER's contributors only, deliberately, even though the surface now
+	// gathers from carried actors too.
 	//
-	// The gather SCOPE, not the published contributors: a contributor that is
-	// already suspended publishes nothing, so the published set cannot be used
-	// to bring it back.
+	// What this mode promises is that a suspended contributor's actuators come
+	// back as raw axes, and the raw axes below are built from this owner's
+	// base. A carried actor resolves its own base, so standing its contributor
+	// down removes its controls and puts nothing in their place: switching
+	// bClaimAllActuators on would make those actuators vanish from the surface
+	// rather than hand them to low-level control. Half the promise is worse
+	// than none of it, so the contributors this cannot deliver for are left
+	// running.
+	//
+	// Reaching them properly means carrying the owning base per gathered
+	// contributor and routing raw axes against it, which is a feature rather
+	// than a guard, and is tracked separately.
 	TArray<UActorComponent*> Contributors;
-	if (const URammsRobotControlSurfaceComponent* Surface = Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
-	{
-		Surface->GetGatherScopeComponents(Contributors);
-	}
-	else
-	{
-		Owner->GetComponents(Contributors);
-	}
+	Owner->GetComponents(Contributors);
 
 	for (UActorComponent* Component : Contributors)
 	{

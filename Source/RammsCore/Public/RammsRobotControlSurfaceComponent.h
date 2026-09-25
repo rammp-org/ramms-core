@@ -96,27 +96,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.0"))
 	float ExternalHoldSeconds = 0.3f;
 
-	/**
-	 * Every component this surface LOOKS IN for contributors: the owner's, and
-	 * those of the actors it carries.
-	 *
-	 * Distinct from GetContributorComponents below, which reports the
-	 * contributors that actually published something. Both are useful and they
-	 * are not interchangeable: a contributor that has been stood down publishes
-	 * nothing and so is absent from the published set, which means that set can
-	 * never be used to bring it back. Anything toggling suspension has to work
-	 * from the scope instead.
-	 *
-	 * Public because anything acting on "the contributors of this robot" has to
-	 * agree with the surface about who they are. The low-level drive mode is
-	 * the case that matters: it stands contributors down so their actuators
-	 * come back as raw axes, and enumerating the owner alone while the surface
-	 * reached into carried actors would leave one claiming and writing motors
-	 * the surface had already advertised as free.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Control Surface")
-	void GetGatherScopeComponents(TArray<UActorComponent*>& OutComponents) const;
-
 	/** Re-gather contributors and registry motors (also done on BeginPlay, on
 	 *  the next tick, and when the RobotBase loads its table). */
 	UFUNCTION(BlueprintCallable, Category = "Control Surface")
