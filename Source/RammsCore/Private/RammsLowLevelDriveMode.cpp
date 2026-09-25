@@ -4,6 +4,7 @@
 
 #include "GameFramework/Actor.h"
 #include "RammsControlContributor.h"
+#include "RammsRobotControlSurfaceComponent.h"
 
 URammsLowLevelDriveMode::URammsLowLevelDriveMode()
 {
