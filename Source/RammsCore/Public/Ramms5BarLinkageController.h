@@ -111,6 +111,11 @@ private:
 	/** The resolved spec (table row if present, else the inline Linkage). */
 	FRamms5BarLinkageSpec Resolved;
 
+	/** A jog axis held through a reset, swallowed until it reads neutral. One
+	 *  per axis, so releasing one stick does not re-arm the other. */
+	bool bSuppressJogX = false;
+	bool bSuppressJogY = false;
+
 	/** Last endpoint target commanded (local x-z, cm). */
 	FVector2D LastTarget = FVector2D::ZeroVector;
 	bool	  bHasTarget = false;
@@ -210,6 +215,11 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D TranslationScanLimits = FVector2D(-100.0, 100.0);
+
+	/** Below this deflection a jog axis counts as released, which is what lifts
+	 *  the suppression a reset puts on it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float JogNeutralThreshold = 0.05f;
 
 	/** How fast the jog axes move the endpoint at full deflection (cm/s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0.0"))

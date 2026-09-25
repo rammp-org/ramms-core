@@ -306,13 +306,16 @@ TArray<FVector2D> URamms5BarLinkageController::GetReachableOutline(bool& bValid)
 	bValid = false;
 	TArray<FVector2D> Outline;
 
-	// The height span to walk, seeded from where the endpoint is so the span
-	// followed is the one this mechanism is on -- the same seeding the extent
-	// does, and for the same reason: a 5-bar can have more than one assembly
-	// branch, and the reachable set is per branch.
-	const FVector2D Live = GetCurrentEndpoint();
+	// The whole height the mechanism reaches, not the slice above where the
+	// endpoint happens to be standing. The slice is what GetReachableHeightRange
+	// gives, and walking it made the published region CHANGE SHAPE as the
+	// endpoint moved fore/aft -- heights valid at other X were never sampled,
+	// so a pad drew a different region depending on the pose it was describing.
+	// GetReachableExtent unions the slices across X and keeps the same
+	// live-seeded branch selection, since a 5-bar's reachable set is per
+	// assembly branch.
 	bool			bSpan = false;
-	const FVector2D Span = GetReachableHeightRange(static_cast<float>(Live.X), bSpan);
+	const FVector2D Span = GetReachableExtent(/*bHeight=*/true, bSpan);
 	if (!bSpan)
 	{
 		return Outline;
@@ -611,9 +614,15 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	// And the one command pointing at a pad cannot express: go back. Offered
 	// only when the rest pose is actually reachable, because a button that
 	// always refuses is worse than no button.
+	// HasBase as well as reachability: SolveTarget leaves its flag alone when
+	// there is no base to check motor ranges against, so a geometrically valid
+	// rest point reads as reachable on a misconfigured actor -- while
+	// SetEndpointTarget refuses outright without one. That combination offers a
+	// button that can only ever refuse, which is the thing this gate exists to
+	// prevent.
 	bool bRestReachable = false;
 	SolveTarget(RestEndpoint, bRestReachable);
-	if (bRestReachable)
+	if (bRestReachable && HasBase())
 	{
 		FRammsControlAxis Reset;
 		Reset.Id = ResetControlId();
@@ -635,9 +644,17 @@ bool URamms5BarLinkageController::TriggerControl(FName Id)
 	if (Id == ResetControlId())
 	{
 		// Through SetEndpointTarget like any other command, so an unreachable
-		// rest pose is refused rather than half-applied, and the jog stick is
-		// stopped so a held stick does not immediately undo the reset.
+		// rest pose is refused rather than half-applied.
+		//
+		// Zeroing Jog is not enough on its own: an input source re-sends its
+		// axis every frame it is held, so a stick still deflected writes a
+		// nonzero rate straight back and the next tick walks off the rest pose
+		// again. Each axis is therefore suppressed until it reports neutral,
+		// which is the driver letting go rather than a timer guessing when they
+		// did.
 		Jog = FVector2D::ZeroVector;
+		bSuppressJogX = true;
+		bSuppressJogY = true;
 		return SetEndpointTarget(RestEndpoint);
 	}
 	return false;
@@ -657,14 +674,24 @@ bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
 	{
 		return SetEndpointTranslation(Value);
 	}
-	if (Id == JogUpControlId())
+	if (Id == JogUpControlId() || Id == JogForwardControlId())
 	{
-		Jog.Y = FMath::Clamp(Value, -1.0f, 1.0f);
-		return true;
-	}
-	if (Id == JogForwardControlId())
-	{
-		Jog.X = FMath::Clamp(Value, -1.0f, 1.0f);
+		const bool	bUp = Id == JogUpControlId();
+		const float Clamped = FMath::Clamp(Value, -1.0f, 1.0f);
+		bool&		bSuppressed = bUp ? bSuppressJogY : bSuppressJogX;
+
+		// Held through a reset: swallow it, and keep swallowing until it comes
+		// back to neutral. Accepted as soon as it does, so letting go and
+		// pushing again works immediately.
+		if (bSuppressed)
+		{
+			if (FMath::Abs(Clamped) > JogNeutralThreshold)
+			{
+				return true;
+			}
+			bSuppressed = false;
+		}
+		(bUp ? Jog.Y : Jog.X) = Clamped;
 		return true;
 	}
 	return false;
