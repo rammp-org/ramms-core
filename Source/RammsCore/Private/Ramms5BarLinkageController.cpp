@@ -518,27 +518,6 @@ void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& Out
 	Axis.DefaultValue = FMath::Clamp(static_cast<float>(bHeight ? Now.Y : Now.X),
 		static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
 
-	// The two halves of one endpoint, so they are paired: a panel that knows
-	// they belong together can put the endpoint on a pad instead of on two
-	// sliders that each show a coordinate and neither of which shows a pose.
-	// Height is the lower Order, which is the vertical half by the pairing
-	// convention -- and is also the one that reads as vertical to anyone
-	// looking at the robot.
-	Axis.PairedAxis = bHeight ? TranslationControlId() : HeightControlId();
-
-	if (bHeight)
-	{
-		// Only on the vertical half, so there is one region per pair. Publishing
-		// it on both would mean two answers to the same question, and nothing
-		// keeps them agreeing once a mechanism is mid-move.
-		bool bOutline = false;
-		TArray<FVector2D> Outline = GetReachableOutline(bOutline);
-		if (bOutline)
-		{
-			Axis.RegionOutline = MoveTemp(Outline);
-		}
-	}
-
 	OutSurface.Add(Axis);
 }
 
@@ -575,6 +554,34 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	// motors; which one a command changes depends only on which is held.
 	DescribeEndpointAxis(OutSurface, /*bHeight=*/true);
 	DescribeEndpointAxis(OutSurface, /*bHeight=*/false);
+
+	// Paired only once BOTH halves are on the surface. Either can be dropped --
+	// DescribeEndpointAxis offers nothing when that coordinate has no reachable
+	// range here -- and an axis naming a partner that was never published sends
+	// a panel hunting a control that does not exist.
+	const auto FindAxis = [&OutSurface](FName Id) -> FRammsControlAxis* {
+		return OutSurface.Axes.FindByPredicate([Id](const FRammsControlAxis& A) { return A.Id == Id; });
+	};
+	FRammsControlAxis* HeightAxis = FindAxis(HeightControlId());
+	FRammsControlAxis* TranslationAxis = FindAxis(TranslationControlId());
+	if (HeightAxis && TranslationAxis)
+	{
+		// Height is the lower Order, so it is the vertical half by the pairing
+		// convention -- and the one that reads as vertical on the robot too.
+		HeightAxis->PairedAxis = TranslationAxis->Id;
+		TranslationAxis->PairedAxis = HeightAxis->Id;
+
+		// The region goes on the vertical half alone, so there is one per pair
+		// rather than two answers nothing keeps agreeing. Published here rather
+		// than with the axis because a region describes a PAIR: with no second
+		// coordinate to plot against it means nothing.
+		bool			  bOutline = false;
+		TArray<FVector2D> Outline = GetReachableOutline(bOutline);
+		if (bOutline)
+		{
+			HeightAxis->RegionOutline = MoveTemp(Outline);
+		}
+	}
 
 	// And a rate pair. The position axes above are the honest representation of
 	// a 5-bar -- its reachable set is a curved region, and a slider per axis

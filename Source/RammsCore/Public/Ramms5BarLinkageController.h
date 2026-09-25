@@ -186,7 +186,13 @@ public:
 	int32 OutlineScanSamples = 17;
 
 	/**
-	 * Where `linkage.<name>.reset` sends the endpoint (local x-z, cm).
+	 * Where `linkage.<name>.reset` sends the endpoint (ROBOT-frame x-z, cm).
+	 *
+	 * Robot frame, not linkage-local, because that is what it is handed to:
+	 * SetEndpointTarget and SolveTarget convert through ToLocal like every
+	 * other controller-facing coordinate. Calling it local would read correctly
+	 * on an unmirrored linkage and silently flip X on a mirrored one -- for the
+	 * reachability check and the reset alike.
 	 *
 	 * Zero is the linkage's own origin, which for these mechanisms is the
 	 * neutral pose. It is settable because "rest" is a property of how a
