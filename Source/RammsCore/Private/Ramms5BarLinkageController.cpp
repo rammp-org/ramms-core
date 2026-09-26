@@ -44,6 +44,12 @@ void URamms5BarLinkageController::BeginPlay()
 		}
 	}
 
+	// The spec has just been resolved, so anything measured against an earlier
+	// one is stale.
+	bRegionMeasured = false;
+	bRegionValid = false;
+	CachedRegionRows.Reset();
+
 	// Prime the base-component cache (also resolved lazily if BeginPlay order
 	// hasn't reached the base component yet).
 	EnsureBase();
@@ -262,43 +268,144 @@ FVector2D URamms5BarLinkageController::GetReachableTranslationRange(float Z, boo
 		HeightScanStep, bValid);
 }
 
-FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bValid) const
+bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector2D>>& OutRows) const
 {
-	bValid = false;
-
-	// Walk the other axis across its own reachable span and union the slices.
-	// Seeded from where the endpoint is, so the span followed is the one this
-	// mechanism is actually on.
-	const FVector2D Live = GetCurrentEndpoint();
-	bool			bAcross = false;
-	const FVector2D Across = bHeight ? GetReachableTranslationRange(static_cast<float>(Live.Y), bAcross)
-									 : GetReachableHeightRange(static_cast<float>(Live.X), bAcross);
-	if (!bAcross)
+	if (bRegionMeasured)
 	{
-		// Nothing reachable across: fall back to the slice at the live pose so
-		// an axis is still offered if one exists there at all.
-		return bHeight ? GetReachableHeightRange(static_cast<float>(Live.X), bValid)
-					   : GetReachableTranslationRange(static_cast<float>(Live.Y), bValid);
+		OutRows = CachedRegionRows;
+		return bRegionValid;
 	}
 
-	const int32 Samples = FMath::Max(2, ExtentScanSamples);
-	FVector2D	Extent(TNumericLimits<float>::Max(), -TNumericLimits<float>::Max());
-	for (int32 i = 0; i < Samples; ++i)
+	OutRows.Reset();
+
+	const double XLo = FMath::Min(TranslationScanLimits.X, TranslationScanLimits.Y);
+	const double XHi = FMath::Max(TranslationScanLimits.X, TranslationScanLimits.Y);
+	const double ZLo = FMath::Min(HeightScanLimits.X, HeightScanLimits.Y);
+	const double ZHi = FMath::Max(HeightScanLimits.X, HeightScanLimits.Y);
+	const double Step = FMath::Max(0.01, static_cast<double>(RegionScanStep));
+
+	const auto Solves = [this](double X, double Z) {
+		bool bOk = false;
+		SolveTarget(FVector2D(X, Z), bOk);
+		return bOk;
+	};
+
+	// Where the boundary really is, between a sample that solves and one that
+	// does not. Without this every edge lands on a multiple of the step, so
+	// adjacent rows snap to different multiples and a smooth flank is drawn as
+	// a staircase -- and a mechanism symmetric about zero comes out lopsided,
+	// because the two sides round in opposite directions.
+	const auto Refine = [&](double Inside, double Outside, double Z) {
+		for (int32 i = 0; i < RegionEdgeRefineSteps; ++i)
+		{
+			const double Mid = 0.5 * (Inside + Outside);
+			(Solves(Mid, Z) ? Inside : Outside) = Mid;
+		}
+		return Inside;
+	};
+
+	// One row: the fore/aft interval that solves at this height, stepped at the
+	// mechanism's own resolution so a narrow band is not skipped, then placed
+	// exactly by bisection.
+	const auto RowAt = [&](double Z, FVector2D& OutSpan) -> bool {
+		double		FirstIn = 0.0;
+		double		LastIn = 0.0;
+		bool		bAny = false;
+		const int32 Samples = FMath::Max(2, FMath::CeilToInt((XHi - XLo) / Step) + 1);
+		for (int32 i = 0; i < Samples; ++i)
+		{
+			const double X = FMath::Min(XLo + i * Step, XHi);
+			if (!Solves(X, Z))
+			{
+				continue;
+			}
+			if (!bAny)
+			{
+				FirstIn = X;
+				bAny = true;
+			}
+			LastIn = X;
+		}
+		if (!bAny)
+		{
+			return false;
+		}
+		const double Left = Refine(FirstIn, FMath::Max(XLo, FirstIn - Step), Z);
+		const double Right = Refine(LastIn, FMath::Min(XHi, LastIn + Step), Z);
+		OutSpan = FVector2D(Left, Right);
+		return true;
+	};
+
+	// Bracket the height at the same resolution, for the same reason: the
+	// topmost rows are the narrow ones, and they are exactly what a coarse
+	// bracket drops.
+	const int32 BracketRows = FMath::Max(2, FMath::CeilToInt((ZHi - ZLo) / Step) + 1);
+	double		ZMin = 0.0;
+	double		ZMax = 0.0;
+	bool		bFound = false;
+	for (int32 i = 0; i < BracketRows; ++i)
 	{
-		const float		T = static_cast<float>(i) / static_cast<float>(Samples - 1);
-		const float		At = FMath::Lerp(static_cast<float>(Across.X), static_cast<float>(Across.Y), T);
-		bool			bSlice = false;
-		const FVector2D Slice = bHeight ? GetReachableHeightRange(At, bSlice)
-										: GetReachableTranslationRange(At, bSlice);
-		if (!bSlice)
+		const double Z = FMath::Min(ZLo + i * Step, ZHi);
+		FVector2D	 Span;
+		if (!RowAt(Z, Span))
 		{
 			continue;
 		}
-		Extent.X = FMath::Min(Extent.X, Slice.X);
-		Extent.Y = FMath::Max(Extent.Y, Slice.Y);
-		bValid = true;
+		ZMin = bFound ? FMath::Min(ZMin, Z) : Z;
+		ZMax = bFound ? FMath::Max(ZMax, Z) : Z;
+		bFound = true;
 	}
-	return bValid ? Extent : FVector2D::ZeroVector;
+	if (!bFound)
+	{
+		bRegionMeasured = true;
+		bRegionValid = false;
+		CachedRegionRows.Reset();
+		return false;
+	}
+
+	const int32 Rows = FMath::Max(3, OutlineScanSamples);
+	for (int32 i = 0; i < Rows; ++i)
+	{
+		const double Z = Rows == 1 ? ZMin : FMath::Lerp(ZMin, ZMax, static_cast<double>(i) / (Rows - 1));
+		FVector2D	 Span;
+		if (RowAt(Z, Span))
+		{
+			OutRows.Emplace(Z, Span);
+		}
+	}
+
+	bRegionMeasured = true;
+	bRegionValid = OutRows.Num() > 0;
+	CachedRegionRows = OutRows;
+	return bRegionValid;
+}
+
+FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bValid) const
+{
+	// Straight off the measured region, so the extent a slider advertises and
+	// the outline a pad draws can never describe different mechanisms.
+	TArray<TPair<double, FVector2D>> Rows;
+	bValid = ComputeRegionRows(Rows);
+	if (!bValid)
+	{
+		return FVector2D::ZeroVector;
+	}
+
+	FVector2D Extent(TNumericLimits<double>::Max(), -TNumericLimits<double>::Max());
+	for (const TPair<double, FVector2D>& Row : Rows)
+	{
+		if (bHeight)
+		{
+			Extent.X = FMath::Min(Extent.X, Row.Key);
+			Extent.Y = FMath::Max(Extent.Y, Row.Key);
+		}
+		else
+		{
+			Extent.X = FMath::Min(Extent.X, Row.Value.X);
+			Extent.Y = FMath::Max(Extent.Y, Row.Value.Y);
+		}
+	}
+	return Extent;
 }
 
 TArray<FVector2D> URamms5BarLinkageController::GetReachableOutline(bool& bValid) const
@@ -306,60 +413,24 @@ TArray<FVector2D> URamms5BarLinkageController::GetReachableOutline(bool& bValid)
 	bValid = false;
 	TArray<FVector2D> Outline;
 
-	// The whole height the mechanism reaches, not the slice above where the
-	// endpoint happens to be standing. The slice is what GetReachableHeightRange
-	// gives, and walking it made the published region CHANGE SHAPE as the
-	// endpoint moved fore/aft -- heights valid at other X were never sampled,
-	// so a pad drew a different region depending on the pose it was describing.
-	// GetReachableExtent unions the slices across X and keeps the same
-	// live-seeded branch selection, since a 5-bar's reachable set is per
-	// assembly branch.
-	bool			bSpan = false;
-	const FVector2D Span = GetReachableExtent(/*bHeight=*/true, bSpan);
-	if (!bSpan)
+	TArray<TPair<double, FVector2D>> Rows;
+	if (!ComputeRegionRows(Rows) || Rows.Num() < 2)
 	{
+		// One row or none. A polygon cannot be made of that, and a renderer
+		// handed two points would draw a sliver and imply the mechanism is one.
 		return Outline;
 	}
 
-	const int32 Samples = FMath::Max(3, OutlineScanSamples);
-
-	// Near edge going up, far edge coming back down, so the points are already
-	// in traversal order and the polygon closes on itself without a renderer
-	// having to sort anything.
-	TArray<FVector2D> Near;
-	TArray<FVector2D> Far;
-	Near.Reserve(Samples);
-	Far.Reserve(Samples);
-
-	for (int32 i = 0; i < Samples; ++i)
+	// Up the near edge and back down the far one, so the points are already in
+	// traversal order and close on themselves.
+	Outline.Reserve(Rows.Num() * 2);
+	for (const TPair<double, FVector2D>& Row : Rows)
 	{
-		const float		T = static_cast<float>(i) / static_cast<float>(Samples - 1);
-		const float		Z = FMath::Lerp(static_cast<float>(Span.X), static_cast<float>(Span.Y), T);
-		bool			bSlice = false;
-		const FVector2D Slice = GetReachableTranslationRange(Z, bSlice);
-		if (!bSlice)
-		{
-			// A height with nothing reachable across it. Skipped rather than
-			// closed off: the scan walks a bounding span, so the ends of it can
-			// fall outside a region that is narrower than its own extremes.
-			continue;
-		}
-		Near.Emplace(Slice.X, Z);
-		Far.Emplace(Slice.Y, Z);
+		Outline.Emplace(Row.Value.X, Row.Key);
 	}
-
-	if (Near.Num() < 2)
+	for (int32 i = Rows.Num() - 1; i >= 0; --i)
 	{
-		// One slice, or none. A polygon cannot be made of that, and a renderer
-		// handed two points would draw a line and imply the mechanism is one.
-		return Outline;
-	}
-
-	Outline.Reserve(Near.Num() * 2);
-	Outline.Append(Near);
-	for (int32 i = Far.Num() - 1; i >= 0; --i)
-	{
-		Outline.Add(Far[i]);
+		Outline.Emplace(Rows[i].Value.Y, Rows[i].Key);
 	}
 
 	bValid = Outline.Num() >= 3;

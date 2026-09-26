@@ -139,6 +139,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D HeightScanLimits = FVector2D(-100.0, 100.0);
 
+private:
+	/**
+	 * The reachable region as rows: each entry is a height and the fore/aft
+	 * interval reachable at it.
+	 *
+	 * Measured on a grid rather than by walking outward from the live pose.
+	 * Whether a point is reachable is pure IK plus the motors' authored
+	 * ranges -- nothing about where the linkage is standing enters into it --
+	 * but a scan seeded from the live endpoint can only find the interval
+	 * CONTAINING that endpoint, so rows far from the current pose were failing
+	 * to find their seed and being dropped. That made the region shrink and
+	 * change shape with the drive mode's stance: the lift-drive published a
+	 * region 8 cm shorter, with its peak cut off, in a raised stance than in a
+	 * low one. Both the outline and the advertised extent come from here, so
+	 * they cannot disagree either.
+	 */
+	bool ComputeRegionRows(TArray<TPair<double, FVector2D>>& OutRows) const;
+
+	/** The measured region, kept once it has been measured.
+	 *
+	 *  Reachability is the spec and the motors' authored ranges, neither of
+	 *  which changes while the game runs, so measuring is a one-off. It is
+	 *  asked for three times per surface rebuild -- once for each extent and
+	 *  once for the outline -- and each measurement is thousands of IK solves,
+	 *  which is what makes a finer scan affordable at all. */
+	mutable TArray<TPair<double, FVector2D>> CachedRegionRows;
+	mutable bool							 bRegionMeasured = false;
+	mutable bool							 bRegionValid = false;
+
+public:
 	/** Endpoint translations (cm) the control surface offers. Zero-width (the
 	 *  default) derives it from the mechanism, as EndpointHeightRange does. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
@@ -188,7 +218,7 @@ public:
 	/** Height slices taken when tracing the outline. More is a smoother region
 	 *  and a longer scan; each slice is its own reachability scan. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "3"))
-	int32 OutlineScanSamples = 17;
+	int32 OutlineScanSamples = 41;
 
 	/**
 	 * Where `linkage.<name>.reset` sends the endpoint (ROBOT-frame x-z, cm).
@@ -208,8 +238,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D RestEndpoint = FVector2D::ZeroVector;
 
-	/** Slices taken across the other axis when computing an extent. More is
-	 *  a finer outline of a curved region and a longer scan. */
+	/**
+	 * Step (cm) the region is measured at along fore/aft.
+	 *
+	 * It has to be finer than the narrowest part of the mechanism or that part
+	 * is stepped straight over: this linkage's fore/aft band closes to about
+	 * half a centimetre near the top of its travel, and a coarse grid simply
+	 * missed those rows and published a region with its peak cut off. Each edge
+	 * is then refined by bisection, so this sets what can be FOUND rather than
+	 * how precisely it is placed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0.01"))
+	float RegionScanStep = 0.25f;
+
+	/** Bisection steps used to place each edge once it has been bracketed.
+	 *  Twelve takes a 0.25 cm bracket below a thousandth of a centimetre, which
+	 *  is far past what a pad can draw -- the point is that the edge stops
+	 *  landing on grid multiples, which is what made it look like a staircase. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "0", ClampMax = "32"))
+	int32 RegionEdgeRefineSteps = 12;
+
+	/** Slices taken across the other axis when computing an extent. Retained
+	 *  for content that sets it; the extent now comes from the measured region,
+	 *  which samples at RegionScanStep. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar", meta = (ClampMin = "2"))
 	int32 ExtentScanSamples = 9;
 
