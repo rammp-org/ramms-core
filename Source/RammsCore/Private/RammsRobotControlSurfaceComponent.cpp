@@ -88,7 +88,19 @@ URammsRobotControlSurfaceComponent* URammsRobotControlSurfaceComponent::FindGove
 		if (URammsRobotControlSurfaceComponent* Surface =
 				Actor->FindComponentByClass<URammsRobotControlSurfaceComponent>())
 		{
-			return Surface;
+			// Only if that surface would actually gather from this far down.
+			// Answering with one that does not include the caller is worse than
+			// answering with nothing: its commands would reach a surface whose
+			// Routes never mention them, so they would quietly do nothing -- or,
+			// where an id collides, act on a different actor's control.
+			if (Depth == 0)
+			{
+				return Surface;
+			}
+			const int32 Reach = Surface->bGatherFromChildActors
+				? FMath::Clamp(Surface->ChildActorGatherDepth, 0, MaxChildActorGatherDepth)
+				: 0;
+			return Depth <= Reach ? Surface : nullptr;
 		}
 		Actor = Actor->GetParentActor();
 	}

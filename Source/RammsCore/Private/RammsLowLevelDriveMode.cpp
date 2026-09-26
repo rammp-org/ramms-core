@@ -6,6 +6,17 @@
 #include "RammsControlContributor.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
+// Surface-LOCAL, not the governing surface, unlike the selector and the
+// keyboard teleop beside it.
+//
+// What this mode does is gate raw motor axes, and those are built from the
+// surface owner's own RobotBase. Reaching up to a parent surface from a carried
+// actor would therefore toggle raw axes for the PARENT's motors -- exposing or
+// hiding actuators that have nothing to do with this mode -- while never
+// exposing the carried actor's own, because no route is built against its base.
+// On an actor with no surface of its own this mode simply does nothing, which
+// is the honest outcome until raw routing carries the child's base.
+
 URammsLowLevelDriveMode::URammsLowLevelDriveMode()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -25,7 +36,7 @@ void URammsLowLevelDriveMode::SetDriveModeActive(bool bActive)
 		return;
 	}
 	if (URammsRobotControlSurfaceComponent* Surface =
-			URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
+			Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
 	{
 		// While a low-level mode exists on the robot, IT owns the raw motor
 		// exposure -- that gating is the mode's whole reason for existing, so
@@ -70,7 +81,7 @@ void URammsLowLevelDriveMode::SetClaimAllActuators(bool bInClaimAll)
 	if (const AActor* Owner = GetOwner())
 	{
 		if (URammsRobotControlSurfaceComponent* Surface =
-				URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
+				Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
 		{
 			Surface->RebuildControlSurface();
 		}
