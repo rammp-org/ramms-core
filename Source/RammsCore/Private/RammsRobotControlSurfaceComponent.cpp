@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsRobotControlSurfaceComponent.h"
+#include "Components/ChildActorComponent.h"
 #include "RammsControlContributor.h"
 #include "RammsRobotBaseComponent.h"
 #include "GameFramework/Actor.h"
@@ -76,6 +77,81 @@ void URammsRobotControlSurfaceComponent::EnsureBuilt() const
 	}
 }
 
+URammsRobotControlSurfaceComponent* URammsRobotControlSurfaceComponent::FindGoverningSurface(
+	const UActorComponent* Component)
+{
+	const AActor* Actor = Component ? Component->GetOwner() : nullptr;
+	// Bounded as the gather is, and for the same reason: this walks spawned
+	// actors, so a chain that loops back has to stop somewhere.
+	for (int32 Depth = 0; Actor != nullptr && Depth <= MaxChildActorGatherDepth; ++Depth)
+	{
+		if (URammsRobotControlSurfaceComponent* Surface =
+				Actor->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+		{
+			// Only if that surface would actually gather from this far down.
+			// Answering with one that does not include the caller is worse than
+			// answering with nothing: its commands would reach a surface whose
+			// Routes never mention them, so they would quietly do nothing -- or,
+			// where an id collides, act on a different actor's control.
+			if (Depth == 0)
+			{
+				return Surface;
+			}
+			const int32 Reach = Surface->bGatherFromChildActors
+				? FMath::Clamp(Surface->ChildActorGatherDepth, 0, MaxChildActorGatherDepth)
+				: 0;
+			return Depth <= Reach ? Surface : nullptr;
+		}
+		Actor = Actor->GetParentActor();
+	}
+	return nullptr;
+}
+
+void URammsRobotControlSurfaceComponent::GatherContributorComponents(AActor* Actor, int32 Depth,
+	TSet<AActor*>& Visited, TArray<UActorComponent*>& OutComponents) const
+{
+	if (!Actor || Visited.Contains(Actor))
+	{
+		return;
+	}
+	Visited.Add(Actor);
+
+	// GetComponents empties what it is given, so this cannot gather straight
+	// into the caller's array.
+	TArray<UActorComponent*> Own;
+	Actor->GetComponents(Own);
+	OutComponents.Append(Own);
+
+	// Clamped, not trusted: the depth is a serialized BlueprintReadWrite field
+	// and its ClampMax reaches only the details panel.
+	const int32 MaxDepth = FMath::Clamp(ChildActorGatherDepth, 0, MaxChildActorGatherDepth);
+	if (!bGatherFromChildActors || Depth >= MaxDepth)
+	{
+		return;
+	}
+
+	for (UActorComponent* C : Own)
+	{
+		UChildActorComponent* AsChild = Cast<UChildActorComponent>(C);
+		AActor*				  Child = AsChild ? AsChild->GetChildActor() : nullptr;
+		if (!Child)
+		{
+			// Null before the child actor is created. The surface is built a
+			// tick after BeginPlay precisely so composition has settled, and
+			// RebuildControlSurface can be called again if one appears later.
+			continue;
+		}
+		if (Child->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+		{
+			// It publishes itself. Taking its controls as well would put each
+			// of them on two surfaces, where a release through one would leave
+			// the other still holding.
+			continue;
+		}
+		GatherContributorComponents(Child, Depth + 1, Visited, OutComponents);
+	}
+}
+
 void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 {
 	// Who owned each control before this rebuild. A drive mode switch keeps
@@ -100,9 +176,11 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 	}
 	Surface.RobotName = RobotDisplayName.IsEmpty() ? FText::FromString(Owner->GetActorNameOrLabel()) : RobotDisplayName;
 
-	// Every contributor on the actor, by interface — nothing wired by name.
+	// Every contributor on the actor, by interface — nothing wired by name —
+	// and, unless turned off, on the actors it carries as child actors.
 	TArray<UActorComponent*> Components;
-	Owner->GetComponents(Components);
+	TSet<AActor*>			 Visited;
+	GatherContributorComponents(Owner, 0, Visited, Components);
 	TArray<TPair<IRammsControlContributor*, UObject*>> Contributors;
 	for (UActorComponent* C : Components)
 	{
@@ -127,8 +205,21 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 		{
 			if (Routes.Contains(Axis.Id))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[ControlSurface] '%s': control '%s' contributed twice (second from %s) — first wins."),
-					*Owner->GetName(), *Axis.Id.ToString(), *Pair.Value->GetName());
+				// Naming the actor, not just the component. Ids already carry
+				// the contributor's component name, so a collision needs two
+				// contributors named alike -- which, now that carried actors
+				// are gathered too, most likely means two copies of the same
+				// child actor rather than a mistake on this one. Without the
+				// actor in the message the two are indistinguishable.
+				const AActor* From = Pair.Value->GetTypedOuter<AActor>();
+				UE_LOG(LogTemp, Warning,
+					TEXT("[ControlSurface] '%s': control '%s' contributed twice (second from '%s' on '%s') — first wins. ")
+						TEXT("Control ids must be unique across everything this surface gathers, including carried actors. ")
+							TEXT("Some contributors derive ids from their component name and can be renamed; others publish fixed ")
+								TEXT("ids (a differential drive always publishes drive.forward), and those need the carried actor to ")
+									TEXT("have its own control surface so it publishes separately."),
+					*Owner->GetName(), *Axis.Id.ToString(), *Pair.Value->GetName(),
+					From ? *From->GetName() : TEXT("?"));
 				continue;
 			}
 			FRammsControlAxis Normalized = Axis;

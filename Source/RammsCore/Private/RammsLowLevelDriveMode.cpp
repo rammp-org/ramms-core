@@ -6,6 +6,17 @@
 #include "RammsControlContributor.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
+// Surface-LOCAL, not the governing surface, unlike the selector and the
+// keyboard teleop beside it.
+//
+// What this mode does is gate raw motor axes, and those are built from the
+// surface owner's own RobotBase. Reaching up to a parent surface from a carried
+// actor would therefore toggle raw axes for the PARENT's motors -- exposing or
+// hiding actuators that have nothing to do with this mode -- while never
+// exposing the carried actor's own, because no route is built against its base.
+// On an actor with no surface of its own this mode simply does nothing, which
+// is the honest outcome until raw routing carries the child's base.
+
 URammsLowLevelDriveMode::URammsLowLevelDriveMode()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -94,7 +105,38 @@ void URammsLowLevelDriveMode::ApplyClaimAll(bool bClaimAll)
 	// -- the 5-bar hips above all -- come back as raw axes. Anything that says
 	// it cannot be suspended is left alone; the drive-mode selector says that,
 	// because suspending it would remove the control you switch back with.
-	for (UActorComponent* Component : Owner->GetComponents())
+	// The OWNER's contributors only, deliberately, even though the surface now
+	// gathers from carried actors too.
+	//
+	// What this mode promises is that a suspended contributor's actuators come
+	// back as raw axes, and the raw axes below are built from this owner's
+	// base. A carried actor resolves its own base, so standing its contributor
+	// down removes its controls and puts nothing in their place: switching
+	// bClaimAllActuators on would make those actuators vanish from the surface
+	// rather than hand them to low-level control. Half the promise is worse
+	// than none of it, so the contributors this cannot deliver for are left
+	// running.
+	//
+	// Reaching them properly means carrying the owning base per gathered
+	// contributor and routing raw axes against it, which is a feature rather
+	// than a guard, and is tracked separately.
+	// And nothing at all when this actor has no surface of its own -- which is
+	// what a low-level mode ON a carried actor looks like. It would otherwise
+	// stand down its own neighbours, whose controls are published by the
+	// PARENT's surface, while that surface builds raw axes from the parent's
+	// base and so offers nothing in their place. The carried actor's controls
+	// would simply disappear on claim-all. The same reasoning as above, one
+	// level further in: suspend only what this mode can hand back.
+	if (!Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+	{
+		bSuspendedOthers = false;
+		return;
+	}
+
+	TArray<UActorComponent*> Contributors;
+	Owner->GetComponents(Contributors);
+
+	for (UActorComponent* Component : Contributors)
 	{
 		IRammsControlContributor* Contributor = Cast<IRammsControlContributor>(Component);
 		if (!Contributor || Component == this || !Contributor->CanSuspendContribution())

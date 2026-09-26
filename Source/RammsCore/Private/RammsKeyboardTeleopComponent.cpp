@@ -45,7 +45,7 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 		return;
 	}
 	Base = Owner->FindComponentByClass<URammsRobotBaseComponent>();
-	Surface = Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
+	Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this);
 
 	if (!Surface)
 	{
