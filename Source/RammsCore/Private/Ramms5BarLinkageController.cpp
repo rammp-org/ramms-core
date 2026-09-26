@@ -44,6 +44,12 @@ void URamms5BarLinkageController::BeginPlay()
 		}
 	}
 
+	// The spec has just been resolved, so anything measured against an earlier
+	// one is stale.
+	bRegionMeasured = false;
+	bRegionValid = false;
+	CachedRegionRows.Reset();
+
 	// Prime the base-component cache (also resolved lazily if BeginPlay order
 	// hasn't reached the base component yet).
 	EnsureBase();
@@ -262,43 +268,269 @@ FVector2D URamms5BarLinkageController::GetReachableTranslationRange(float Z, boo
 		HeightScanStep, bValid);
 }
 
-FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bValid) const
+bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector2D>>& OutRows) const
 {
-	bValid = false;
-
-	// Walk the other axis across its own reachable span and union the slices.
-	// Seeded from where the endpoint is, so the span followed is the one this
-	// mechanism is actually on.
-	const FVector2D Live = GetCurrentEndpoint();
-	bool			bAcross = false;
-	const FVector2D Across = bHeight ? GetReachableTranslationRange(static_cast<float>(Live.Y), bAcross)
-									 : GetReachableHeightRange(static_cast<float>(Live.X), bAcross);
-	if (!bAcross)
+	if (bRegionMeasured)
 	{
-		// Nothing reachable across: fall back to the slice at the live pose so
-		// an axis is still offered if one exists there at all.
-		return bHeight ? GetReachableHeightRange(static_cast<float>(Live.X), bValid)
-					   : GetReachableTranslationRange(static_cast<float>(Live.Y), bValid);
+		OutRows = CachedRegionRows;
+		return bRegionValid;
 	}
 
-	const int32 Samples = FMath::Max(2, ExtentScanSamples);
-	FVector2D	Extent(TNumericLimits<float>::Max(), -TNumericLimits<float>::Max());
-	for (int32 i = 0; i < Samples; ++i)
+	OutRows.Reset();
+
+	double		 XLo = FMath::Min(TranslationScanLimits.X, TranslationScanLimits.Y);
+	double		 XHi = FMath::Max(TranslationScanLimits.X, TranslationScanLimits.Y);
+	double		 ZLo = FMath::Min(HeightScanLimits.X, HeightScanLimits.Y);
+	double		 ZHi = FMath::Max(HeightScanLimits.X, HeightScanLimits.Y);
+	const double Step = FMath::Max(0.01, static_cast<double>(RegionScanStep));
+
+	// Narrowed to where an endpoint could possibly be before any scanning
+	// happens. Each arm reaches only the annulus between |proximal - distal|
+	// and proximal + distal about its own pivot, so the region cannot leave the
+	// box those two annuli share -- and the authored limits are deliberately
+	// generous, typically a couple of metres against a mechanism spanning tens
+	// of centimetres. Without this the scan spends the overwhelming majority of
+	// its solves proving that empty space is empty: with the shipped limits and
+	// step that is some 641,000 IK solves per linkage, on the game thread,
+	// during a surface rebuild.
 	{
-		const float		T = static_cast<float>(i) / static_cast<float>(Samples - 1);
-		const float		At = FMath::Lerp(static_cast<float>(Across.X), static_cast<float>(Across.Y), T);
-		bool			bSlice = false;
-		const FVector2D Slice = bHeight ? GetReachableHeightRange(At, bSlice)
-										: GetReachableTranslationRange(At, bSlice);
-		if (!bSlice)
+		const double InnerA = FMath::Abs(Resolved.ProximalLengthA - Resolved.DistalLengthA);
+		const double OuterA = Resolved.ProximalLengthA + Resolved.DistalLengthA;
+		const double InnerB = FMath::Abs(Resolved.ProximalLengthB - Resolved.DistalLengthB);
+		const double OuterB = Resolved.ProximalLengthB + Resolved.DistalLengthB;
+		(void)InnerA;
+		(void)InnerB;
+
+		// The endpoint is shared, so it lies within BOTH outer radii; the inner
+		// radii carve holes rather than bound the extent, so they are not used
+		// here. Local frame, then back to the robot's -- the sign is its own
+		// inverse, so the box is just mirrored.
+		const double AxLo = Resolved.PivotA.X - OuterA;
+		const double AxHi = Resolved.PivotA.X + OuterA;
+		const double BxLo = Resolved.PivotB.X - OuterB;
+		const double BxHi = Resolved.PivotB.X + OuterB;
+		const double AzLo = Resolved.PivotA.Y - OuterA;
+		const double AzHi = Resolved.PivotA.Y + OuterA;
+		const double BzLo = Resolved.PivotB.Y - OuterB;
+		const double BzHi = Resolved.PivotB.Y + OuterB;
+
+		double LocalXLo = FMath::Max(AxLo, BxLo);
+		double LocalXHi = FMath::Min(AxHi, BxHi);
+		if (Handedness() < 0.0)
+		{
+			Swap(LocalXLo, LocalXHi);
+			LocalXLo *= -1.0;
+			LocalXHi *= -1.0;
+		}
+
+		XLo = FMath::Max(XLo, LocalXLo);
+		XHi = FMath::Min(XHi, LocalXHi);
+		ZLo = FMath::Max(ZLo, FMath::Max(AzLo, BzLo));
+		ZHi = FMath::Min(ZHi, FMath::Min(AzHi, BzHi));
+		if (XLo >= XHi || ZLo >= ZHi)
+		{
+			bRegionMeasured = true;
+			bRegionValid = false;
+			CachedRegionRows.Reset();
+			return false;
+		}
+	}
+
+	const auto Solves = [this](double X, double Z) {
+		bool bOk = false;
+		SolveTarget(FVector2D(X, Z), bOk);
+		return bOk;
+	};
+
+	// Where the boundary really is, between a sample that solves and one that
+	// does not. Without this every edge lands on a multiple of the step, so
+	// adjacent rows snap to different multiples and a smooth flank is drawn as
+	// a staircase -- and a mechanism symmetric about zero comes out lopsided,
+	// because the two sides round in opposite directions.
+	const auto Refine = [&](double Inside, double Outside, double Z) {
+		for (int32 i = 0; i < RegionEdgeRefineSteps; ++i)
+		{
+			const double Mid = 0.5 * (Inside + Outside);
+			(Solves(Mid, Z) ? Inside : Outside) = Mid;
+		}
+		return Inside;
+	};
+
+	// One row: the fore/aft interval that solves at this height, stepped at the
+	// mechanism's own resolution so a narrow band is not skipped, then placed
+	// exactly by bisection.
+	const auto RowAt = [&](double Z, FVector2D& OutSpan) -> bool {
+		double		FirstIn = 0.0;
+		double		LastIn = 0.0;
+		bool		bAny = false;
+		const int32 Samples = FMath::Max(2, FMath::CeilToInt((XHi - XLo) / Step) + 1);
+		for (int32 i = 0; i < Samples; ++i)
+		{
+			const double X = FMath::Min(XLo + i * Step, XHi);
+			if (!Solves(X, Z))
+			{
+				continue;
+			}
+			if (!bAny)
+			{
+				FirstIn = X;
+				bAny = true;
+			}
+			LastIn = X;
+		}
+		if (!bAny)
+		{
+			return false;
+		}
+		const double Left = Refine(FirstIn, FMath::Max(XLo, FirstIn - Step), Z);
+		const double Right = Refine(LastIn, FMath::Min(XHi, LastIn + Step), Z);
+		OutSpan = FVector2D(Left, Right);
+		return true;
+	};
+
+	// Bracket the height at the same resolution, for the same reason: the
+	// topmost rows are the narrow ones, and they are exactly what a coarse
+	// bracket drops.
+	// Bracketing only asks whether a height has anything at all, so it stops at
+	// the first solve rather than measuring the row.
+	const auto AnyAt = [&](double Z) {
+		const int32 Samples = FMath::Max(2, FMath::CeilToInt((XHi - XLo) / Step) + 1);
+		for (int32 i = 0; i < Samples; ++i)
+		{
+			if (Solves(FMath::Min(XLo + i * Step, XHi), Z))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	const int32 BracketRows = FMath::Max(2, FMath::CeilToInt((ZHi - ZLo) / Step) + 1);
+	double		ZMin = 0.0;
+	double		ZMax = 0.0;
+	bool		bFound = false;
+	for (int32 i = 0; i < BracketRows; ++i)
+	{
+		const double Z = FMath::Min(ZLo + i * Step, ZHi);
+		if (!AnyAt(Z))
 		{
 			continue;
 		}
-		Extent.X = FMath::Min(Extent.X, Slice.X);
-		Extent.Y = FMath::Max(Extent.Y, Slice.Y);
-		bValid = true;
+		ZMin = bFound ? FMath::Min(ZMin, Z) : Z;
+		ZMax = bFound ? FMath::Max(ZMax, Z) : Z;
+		bFound = true;
 	}
-	return bValid ? Extent : FVector2D::ZeroVector;
+	if (!bFound)
+	{
+		bRegionMeasured = true;
+		bRegionValid = false;
+		CachedRegionRows.Reset();
+		return false;
+	}
+
+	// Place the top and bottom the same way each row's edges are placed. They
+	// were being left on grid multiples while the X edges were bisected, so the
+	// region was cropped by up to a step at each end -- poses the mechanism can
+	// hold, missing from both the outline and the advertised extent, for no
+	// reason other than where the samples happened to fall.
+	{
+		const auto RefineZ = [&](double Inside, double Outside) {
+			for (int32 i = 0; i < RegionEdgeRefineSteps; ++i)
+			{
+				const double Mid = 0.5 * (Inside + Outside);
+				(AnyAt(Mid) ? Inside : Outside) = Mid;
+			}
+			return Inside;
+		};
+		ZMin = RefineZ(ZMin, FMath::Max(ZLo, ZMin - Step));
+		ZMax = RefineZ(ZMax, FMath::Min(ZHi, ZMax + Step));
+	}
+
+	// A single reachable height is a line, not a region. Emitting the requested
+	// number of rows at the same Z would hand back duplicated points and an
+	// outline of zero area that still passed the three-point check.
+	const bool	bDegenerate = FMath::IsNearlyEqual(ZMin, ZMax, UE_DOUBLE_SMALL_NUMBER);
+	const int32 Rows = bDegenerate ? 1 : FMath::Max(3, OutlineScanSamples);
+	for (int32 i = 0; i < Rows; ++i)
+	{
+		const double Z = Rows == 1 ? ZMin : FMath::Lerp(ZMin, ZMax, static_cast<double>(i) / (Rows - 1));
+		FVector2D	 Span;
+		if (RowAt(Z, Span))
+		{
+			OutRows.Emplace(Z, Span);
+		}
+	}
+
+	bRegionMeasured = true;
+	bRegionValid = OutRows.Num() > 0;
+	CachedRegionRows = OutRows;
+	return bRegionValid;
+}
+
+FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bValid) const
+{
+	// Straight off the measured region, so the extent a slider advertises and
+	// the outline a pad draws can never describe different mechanisms.
+	TArray<TPair<double, FVector2D>> Rows;
+	bValid = ComputeRegionRows(Rows);
+	if (!bValid)
+	{
+		return FVector2D::ZeroVector;
+	}
+
+	// Accumulated in plain doubles rather than through a vector's components:
+	// the rows are doubles, and mixing them with whatever FVector2D's component
+	// type happens to be under the build's coordinate settings is a question
+	// nobody should have to ask while reading this.
+	double Lo = TNumericLimits<double>::Max();
+	double Hi = -TNumericLimits<double>::Max();
+	for (const TPair<double, FVector2D>& Row : Rows)
+	{
+		if (bHeight)
+		{
+			Lo = FMath::Min(Lo, Row.Key);
+			Hi = FMath::Max(Hi, Row.Key);
+		}
+		else
+		{
+			Lo = FMath::Min(Lo, static_cast<double>(Row.Value.X));
+			Hi = FMath::Max(Hi, static_cast<double>(Row.Value.Y));
+		}
+	}
+	return FVector2D(Lo, Hi);
+}
+
+TArray<FVector2D> URamms5BarLinkageController::GetReachableOutline(bool& bValid) const
+{
+	bValid = false;
+	TArray<FVector2D> Outline;
+
+	TArray<TPair<double, FVector2D>> Rows;
+	if (!ComputeRegionRows(Rows) || Rows.Num() < 2)
+	{
+		// One row or none. A polygon cannot be made of that, and a renderer
+		// handed two points would draw a sliver and imply the mechanism is one.
+		return Outline;
+	}
+
+	// Up the near edge and back down the far one, so the points are already in
+	// traversal order and close on themselves.
+	Outline.Reserve(Rows.Num() * 2);
+	for (const TPair<double, FVector2D>& Row : Rows)
+	{
+		Outline.Emplace(Row.Value.X, Row.Key);
+	}
+	for (int32 i = Rows.Num() - 1; i >= 0; --i)
+	{
+		Outline.Emplace(Rows[i].Value.Y, Rows[i].Key);
+	}
+
+	bValid = Outline.Num() >= 3;
+	if (!bValid)
+	{
+		Outline.Reset();
+	}
+	return Outline;
 }
 
 void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
@@ -451,6 +683,7 @@ void URamms5BarLinkageController::DescribeEndpointAxis(FRammsControlSurface& Out
 	const FVector2D Now = GetCurrentEndpoint();
 	Axis.DefaultValue = FMath::Clamp(static_cast<float>(bHeight ? Now.Y : Now.X),
 		static_cast<float>(Axis.Range.X), static_cast<float>(Axis.Range.Y));
+
 	OutSurface.Add(Axis);
 }
 
@@ -488,6 +721,34 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	DescribeEndpointAxis(OutSurface, /*bHeight=*/true);
 	DescribeEndpointAxis(OutSurface, /*bHeight=*/false);
 
+	// Paired only once BOTH halves are on the surface. Either can be dropped --
+	// DescribeEndpointAxis offers nothing when that coordinate has no reachable
+	// range here -- and an axis naming a partner that was never published sends
+	// a panel hunting a control that does not exist.
+	const auto FindAxis = [&OutSurface](FName Id) -> FRammsControlAxis* {
+		return OutSurface.Axes.FindByPredicate([Id](const FRammsControlAxis& A) { return A.Id == Id; });
+	};
+	FRammsControlAxis* HeightAxis = FindAxis(HeightControlId());
+	FRammsControlAxis* TranslationAxis = FindAxis(TranslationControlId());
+	if (HeightAxis && TranslationAxis)
+	{
+		// Height is the lower Order, so it is the vertical half by the pairing
+		// convention -- and the one that reads as vertical on the robot too.
+		HeightAxis->PairedAxis = TranslationAxis->Id;
+		TranslationAxis->PairedAxis = HeightAxis->Id;
+
+		// The region goes on the vertical half alone, so there is one per pair
+		// rather than two answers nothing keeps agreeing. Published here rather
+		// than with the axis because a region describes a PAIR: with no second
+		// coordinate to plot against it means nothing.
+		bool			  bOutline = false;
+		TArray<FVector2D> Outline = GetReachableOutline(bOutline);
+		if (bOutline)
+		{
+			HeightAxis->RegionOutline = MoveTemp(Outline);
+		}
+	}
+
 	// And a rate pair. The position axes above are the honest representation of
 	// a 5-bar -- its reachable set is a curved region, and a slider per axis
 	// shows only the slice at the other axis's current value. A stick that
@@ -512,6 +773,54 @@ void URamms5BarLinkageController::DescribeControls(FRammsControlSurface& OutSurf
 	Fwd.Order = 3;
 	Fwd.PairedAxis = JogUpControlId();
 	OutSurface.Add(Fwd);
+
+	// And the one command pointing at a pad cannot express: go back. Offered
+	// only when the rest pose is actually reachable, because a button that
+	// always refuses is worse than no button.
+	// HasBase as well as reachability: SolveTarget leaves its flag alone when
+	// there is no base to check motor ranges against, so a geometrically valid
+	// rest point reads as reachable on a misconfigured actor -- while
+	// SetEndpointTarget refuses outright without one. That combination offers a
+	// button that can only ever refuse, which is the thing this gate exists to
+	// prevent.
+	bool bRestReachable = false;
+	SolveTarget(RestEndpoint, bRestReachable);
+	if (bRestReachable && HasBase())
+	{
+		FRammsControlAxis Reset;
+		Reset.Id = ResetControlId();
+		Reset.Group = RammsControlIds::Groups::Linkage();
+		Reset.DisplayName = FText::FromString(Pretty + TEXT(" reset"));
+		Reset.Kind = ERammsControlKind::Action;
+		Reset.bReadback = false;
+		Reset.Order = 4;
+		OutSurface.Add(Reset);
+	}
+}
+
+bool URamms5BarLinkageController::TriggerControl(FName Id)
+{
+	if (bSuspended)
+	{
+		return false;
+	}
+	if (Id == ResetControlId())
+	{
+		// Through SetEndpointTarget like any other command, so an unreachable
+		// rest pose is refused rather than half-applied.
+		//
+		// Zeroing Jog is not enough on its own: an input source re-sends its
+		// axis every frame it is held, so a stick still deflected writes a
+		// nonzero rate straight back and the next tick walks off the rest pose
+		// again. Each axis is therefore suppressed until it reports neutral,
+		// which is the driver letting go rather than a timer guessing when they
+		// did.
+		Jog = FVector2D::ZeroVector;
+		bSuppressJogX = true;
+		bSuppressJogY = true;
+		return SetEndpointTarget(RestEndpoint);
+	}
+	return false;
 }
 
 bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
@@ -528,14 +837,24 @@ bool URamms5BarLinkageController::ApplyControl(FName Id, float Value)
 	{
 		return SetEndpointTranslation(Value);
 	}
-	if (Id == JogUpControlId())
+	if (Id == JogUpControlId() || Id == JogForwardControlId())
 	{
-		Jog.Y = FMath::Clamp(Value, -1.0f, 1.0f);
-		return true;
-	}
-	if (Id == JogForwardControlId())
-	{
-		Jog.X = FMath::Clamp(Value, -1.0f, 1.0f);
+		const bool	bUp = Id == JogUpControlId();
+		const float Clamped = FMath::Clamp(Value, -1.0f, 1.0f);
+		bool&		bSuppressed = bUp ? bSuppressJogY : bSuppressJogX;
+
+		// Held through a reset: swallow it, and keep swallowing until it comes
+		// back to neutral. Accepted as soon as it does, so letting go and
+		// pushing again works immediately.
+		if (bSuppressed)
+		{
+			if (FMath::Abs(Clamped) > JogNeutralThreshold)
+			{
+				return true;
+			}
+			bSuppressed = false;
+		}
+		(bUp ? Jog.Y : Jog.X) = Clamped;
 		return true;
 	}
 	return false;
@@ -545,14 +864,22 @@ bool URamms5BarLinkageController::ReleaseControl(FName Id)
 {
 	// Letting go of the stick stops the motion but keeps the endpoint held
 	// where it got to -- the motors are not released.
+	//
+	// A release also lifts the suppression a reset put on that axis, and it has
+	// to: axis-mode input binds Completed to ReleaseAxis rather than sending a
+	// neutral value, so waiting for a zero that never arrives would swallow
+	// every later deflection for the lifetime of the component. Release IS the
+	// neutral report for that path.
 	if (Id == JogUpControlId())
 	{
 		Jog.Y = 0.0f;
+		bSuppressJogY = false;
 		return true;
 	}
 	if (Id == JogForwardControlId())
 	{
 		Jog.X = 0.0f;
+		bSuppressJogX = false;
 		return true;
 	}
 
