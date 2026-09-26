@@ -428,6 +428,24 @@ bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector
 		return false;
 	}
 
+	// Place the top and bottom the same way each row's edges are placed. They
+	// were being left on grid multiples while the X edges were bisected, so the
+	// region was cropped by up to a step at each end -- poses the mechanism can
+	// hold, missing from both the outline and the advertised extent, for no
+	// reason other than where the samples happened to fall.
+	{
+		const auto RefineZ = [&](double Inside, double Outside) {
+			for (int32 i = 0; i < RegionEdgeRefineSteps; ++i)
+			{
+				const double Mid = 0.5 * (Inside + Outside);
+				(AnyAt(Mid) ? Inside : Outside) = Mid;
+			}
+			return Inside;
+		};
+		ZMin = RefineZ(ZMin, FMath::Max(ZLo, ZMin - Step));
+		ZMax = RefineZ(ZMax, FMath::Min(ZHi, ZMax + Step));
+	}
+
 	// A single reachable height is a line, not a region. Emitting the requested
 	// number of rows at the same Z would hand back duplicated points and an
 	// outline of zero area that still passed the three-point check.
