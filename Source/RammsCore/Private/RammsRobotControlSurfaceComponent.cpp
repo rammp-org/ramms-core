@@ -77,6 +77,24 @@ void URammsRobotControlSurfaceComponent::EnsureBuilt() const
 	}
 }
 
+URammsRobotControlSurfaceComponent* URammsRobotControlSurfaceComponent::FindGoverningSurface(
+	const UActorComponent* Component)
+{
+	const AActor* Actor = Component ? Component->GetOwner() : nullptr;
+	// Bounded as the gather is, and for the same reason: this walks spawned
+	// actors, so a chain that loops back has to stop somewhere.
+	for (int32 Depth = 0; Actor != nullptr && Depth <= MaxChildActorGatherDepth; ++Depth)
+	{
+		if (URammsRobotControlSurfaceComponent* Surface =
+				Actor->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+		{
+			return Surface;
+		}
+		Actor = Actor->GetParentActor();
+	}
+	return nullptr;
+}
+
 void URammsRobotControlSurfaceComponent::GatherContributorComponents(AActor* Actor, int32 Depth,
 	TSet<AActor*>& Visited, TArray<UActorComponent*>& OutComponents) const
 {

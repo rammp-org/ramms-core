@@ -96,6 +96,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.0"))
 	float ExternalHoldSeconds = 0.3f;
 
+	/**
+	 * The surface that governs Component: the one on its own actor, or failing
+	 * that the one on the actor carrying it as a child actor, and so on up.
+	 *
+	 * A contributor could assume its surface sat beside it, which stopped being
+	 * true the moment surfaces began gathering from carried actors. Something
+	 * on a child actor now publishes into its PARENT's surface while looking
+	 * for its own on an actor that has none -- so a drive-mode switch would
+	 * change which controls a contributor describes without rebuilding the
+	 * surface those controls actually live on, and its stance commands would
+	 * find no surface to go through. Asking this rather than GetOwner keeps
+	 * both halves talking about the same surface.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Control Surface")
+	static URammsRobotControlSurfaceComponent* FindGoverningSurface(const UActorComponent* Component);
+
 	/** Re-gather contributors and registry motors (also done on BeginPlay, on
 	 *  the next tick, and when the RobotBase loads its table). */
 	UFUNCTION(BlueprintCallable, Category = "Control Surface")

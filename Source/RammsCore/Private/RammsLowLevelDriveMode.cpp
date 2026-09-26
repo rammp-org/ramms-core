@@ -25,7 +25,7 @@ void URammsLowLevelDriveMode::SetDriveModeActive(bool bActive)
 		return;
 	}
 	if (URammsRobotControlSurfaceComponent* Surface =
-			Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+			URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
 	{
 		// While a low-level mode exists on the robot, IT owns the raw motor
 		// exposure -- that gating is the mode's whole reason for existing, so
@@ -70,7 +70,7 @@ void URammsLowLevelDriveMode::SetClaimAllActuators(bool bInClaimAll)
 	if (const AActor* Owner = GetOwner())
 	{
 		if (URammsRobotControlSurfaceComponent* Surface =
-				Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+				URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
 		{
 			Surface->RebuildControlSurface();
 		}

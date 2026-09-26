@@ -179,7 +179,7 @@ void URammsDriveModeSelector::ApplyStanceFor(UActorComponent* ModeComponent)
 	// one kind of leg. Anything that advertises a linkage height can take a
 	// stance.
 	URammsRobotControlSurfaceComponent* Surface =
-		Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>();
+		URammsRobotControlSurfaceComponent::FindGoverningSurface(this);
 	if (Stance.bHasLinkageHeight || Stance.bHasLinkageTranslation)
 	{
 		if (!Surface)
@@ -308,7 +308,7 @@ bool URammsDriveModeSelector::SetActiveMode(FName ModeId)
 	if (AActor* Owner = GetOwner())
 	{
 		if (URammsRobotControlSurfaceComponent* Surface =
-				Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+				URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
 		{
 			Surface->RebuildControlSurface();
 		}
