@@ -478,21 +478,26 @@ FVector2D URamms5BarLinkageController::GetReachableExtent(bool bHeight, bool& bV
 		return FVector2D::ZeroVector;
 	}
 
-	FVector2D Extent(TNumericLimits<double>::Max(), -TNumericLimits<double>::Max());
+	// Accumulated in plain doubles rather than through a vector's components:
+	// the rows are doubles, and mixing them with whatever FVector2D's component
+	// type happens to be under the build's coordinate settings is a question
+	// nobody should have to ask while reading this.
+	double Lo = TNumericLimits<double>::Max();
+	double Hi = -TNumericLimits<double>::Max();
 	for (const TPair<double, FVector2D>& Row : Rows)
 	{
 		if (bHeight)
 		{
-			Extent.X = FMath::Min(Extent.X, Row.Key);
-			Extent.Y = FMath::Max(Extent.Y, Row.Key);
+			Lo = FMath::Min(Lo, Row.Key);
+			Hi = FMath::Max(Hi, Row.Key);
 		}
 		else
 		{
-			Extent.X = FMath::Min(Extent.X, Row.Value.X);
-			Extent.Y = FMath::Max(Extent.Y, Row.Value.Y);
+			Lo = FMath::Min(Lo, static_cast<double>(Row.Value.X));
+			Hi = FMath::Max(Hi, static_cast<double>(Row.Value.Y));
 		}
 	}
-	return Extent;
+	return FVector2D(Lo, Hi);
 }
 
 TArray<FVector2D> URamms5BarLinkageController::GetReachableOutline(bool& bValid) const
