@@ -120,6 +120,19 @@ void URammsLowLevelDriveMode::ApplyClaimAll(bool bClaimAll)
 	// Reaching them properly means carrying the owning base per gathered
 	// contributor and routing raw axes against it, which is a feature rather
 	// than a guard, and is tracked separately.
+	// And nothing at all when this actor has no surface of its own -- which is
+	// what a low-level mode ON a carried actor looks like. It would otherwise
+	// stand down its own neighbours, whose controls are published by the
+	// PARENT's surface, while that surface builds raw axes from the parent's
+	// base and so offers nothing in their place. The carried actor's controls
+	// would simply disappear on claim-all. The same reasoning as above, one
+	// level further in: suspend only what this mode can hand back.
+	if (!Owner->FindComponentByClass<URammsRobotControlSurfaceComponent>())
+	{
+		bSuspendedOthers = false;
+		return;
+	}
+
 	TArray<UActorComponent*> Contributors;
 	Owner->GetComponents(Contributors);
 
