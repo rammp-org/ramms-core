@@ -278,11 +278,63 @@ bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector
 
 	OutRows.Reset();
 
-	const double XLo = FMath::Min(TranslationScanLimits.X, TranslationScanLimits.Y);
-	const double XHi = FMath::Max(TranslationScanLimits.X, TranslationScanLimits.Y);
-	const double ZLo = FMath::Min(HeightScanLimits.X, HeightScanLimits.Y);
-	const double ZHi = FMath::Max(HeightScanLimits.X, HeightScanLimits.Y);
+	double		 XLo = FMath::Min(TranslationScanLimits.X, TranslationScanLimits.Y);
+	double		 XHi = FMath::Max(TranslationScanLimits.X, TranslationScanLimits.Y);
+	double		 ZLo = FMath::Min(HeightScanLimits.X, HeightScanLimits.Y);
+	double		 ZHi = FMath::Max(HeightScanLimits.X, HeightScanLimits.Y);
 	const double Step = FMath::Max(0.01, static_cast<double>(RegionScanStep));
+
+	// Narrowed to where an endpoint could possibly be before any scanning
+	// happens. Each arm reaches only the annulus between |proximal - distal|
+	// and proximal + distal about its own pivot, so the region cannot leave the
+	// box those two annuli share -- and the authored limits are deliberately
+	// generous, typically a couple of metres against a mechanism spanning tens
+	// of centimetres. Without this the scan spends the overwhelming majority of
+	// its solves proving that empty space is empty: with the shipped limits and
+	// step that is some 641,000 IK solves per linkage, on the game thread,
+	// during a surface rebuild.
+	{
+		const double InnerA = FMath::Abs(Resolved.ProximalLengthA - Resolved.DistalLengthA);
+		const double OuterA = Resolved.ProximalLengthA + Resolved.DistalLengthA;
+		const double InnerB = FMath::Abs(Resolved.ProximalLengthB - Resolved.DistalLengthB);
+		const double OuterB = Resolved.ProximalLengthB + Resolved.DistalLengthB;
+		(void)InnerA;
+		(void)InnerB;
+
+		// The endpoint is shared, so it lies within BOTH outer radii; the inner
+		// radii carve holes rather than bound the extent, so they are not used
+		// here. Local frame, then back to the robot's -- the sign is its own
+		// inverse, so the box is just mirrored.
+		const double AxLo = Resolved.PivotA.X - OuterA;
+		const double AxHi = Resolved.PivotA.X + OuterA;
+		const double BxLo = Resolved.PivotB.X - OuterB;
+		const double BxHi = Resolved.PivotB.X + OuterB;
+		const double AzLo = Resolved.PivotA.Y - OuterA;
+		const double AzHi = Resolved.PivotA.Y + OuterA;
+		const double BzLo = Resolved.PivotB.Y - OuterB;
+		const double BzHi = Resolved.PivotB.Y + OuterB;
+
+		double LocalXLo = FMath::Max(AxLo, BxLo);
+		double LocalXHi = FMath::Min(AxHi, BxHi);
+		if (Handedness() < 0.0)
+		{
+			Swap(LocalXLo, LocalXHi);
+			LocalXLo *= -1.0;
+			LocalXHi *= -1.0;
+		}
+
+		XLo = FMath::Max(XLo, LocalXLo);
+		XHi = FMath::Min(XHi, LocalXHi);
+		ZLo = FMath::Max(ZLo, FMath::Max(AzLo, BzLo));
+		ZHi = FMath::Min(ZHi, FMath::Min(AzHi, BzHi));
+		if (XLo >= XHi || ZLo >= ZHi)
+		{
+			bRegionMeasured = true;
+			bRegionValid = false;
+			CachedRegionRows.Reset();
+			return false;
+		}
+	}
 
 	const auto Solves = [this](double X, double Z) {
 		bool bOk = false;
@@ -339,6 +391,20 @@ bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector
 	// Bracket the height at the same resolution, for the same reason: the
 	// topmost rows are the narrow ones, and they are exactly what a coarse
 	// bracket drops.
+	// Bracketing only asks whether a height has anything at all, so it stops at
+	// the first solve rather than measuring the row.
+	const auto AnyAt = [&](double Z) {
+		const int32 Samples = FMath::Max(2, FMath::CeilToInt((XHi - XLo) / Step) + 1);
+		for (int32 i = 0; i < Samples; ++i)
+		{
+			if (Solves(FMath::Min(XLo + i * Step, XHi), Z))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
 	const int32 BracketRows = FMath::Max(2, FMath::CeilToInt((ZHi - ZLo) / Step) + 1);
 	double		ZMin = 0.0;
 	double		ZMax = 0.0;
@@ -346,8 +412,7 @@ bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector
 	for (int32 i = 0; i < BracketRows; ++i)
 	{
 		const double Z = FMath::Min(ZLo + i * Step, ZHi);
-		FVector2D	 Span;
-		if (!RowAt(Z, Span))
+		if (!AnyAt(Z))
 		{
 			continue;
 		}
@@ -363,7 +428,11 @@ bool URamms5BarLinkageController::ComputeRegionRows(TArray<TPair<double, FVector
 		return false;
 	}
 
-	const int32 Rows = FMath::Max(3, OutlineScanSamples);
+	// A single reachable height is a line, not a region. Emitting the requested
+	// number of rows at the same Z would hand back duplicated points and an
+	// outline of zero area that still passed the three-point check.
+	const bool	bDegenerate = FMath::IsNearlyEqual(ZMin, ZMax, UE_DOUBLE_SMALL_NUMBER);
+	const int32 Rows = bDegenerate ? 1 : FMath::Max(3, OutlineScanSamples);
 	for (int32 i = 0; i < Rows; ++i)
 	{
 		const double Z = Rows == 1 ? ZMin : FMath::Lerp(ZMin, ZMax, static_cast<double>(i) / (Rows - 1));
