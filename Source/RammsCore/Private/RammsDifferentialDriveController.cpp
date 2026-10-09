@@ -276,7 +276,7 @@ FBodyInstance* URammsDifferentialDriveController::GetBoneBodyInstance(FName Bone
 	return SkeletalMeshComponent->GetBodyInstance(BoneName);
 }
 
-void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState)
+void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName BoneName, FRammsWheelState& OutState)
 {
 	// The contact-dependent fields (lateral velocity, load, surface friction,
 	// slip) need the wheel's simulating Chaos body; the generic motor interface
@@ -559,7 +559,7 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 	FName					BoneName,
 	float					RequestedTorque,
 	const FMotorParameters& MotorParams,
-	FWheelState&			WheelState)
+	FRammsWheelState&		WheelState)
 {
 	// The direct Chaos path needs a simulating wheel body; the base-component
 	// path commands by motor Id and has no bone body to guard on.
@@ -746,7 +746,7 @@ void URammsDifferentialDriveController::ApplyBrakes()
 	// to the motor's range).
 	if (UsesBase())
 	{
-		auto BrakeMotor = [this, BrakeDeadband](FName MotorId, FWheelState& WheelState) {
+		auto BrakeMotor = [this, BrakeDeadband](FName MotorId, FRammsWheelState& WheelState) {
 			const float AngVel = WheelState.AngularVelocity;
 			if (FMath::Abs(AngVel) > BrakeDeadband)
 			{

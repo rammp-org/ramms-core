@@ -47,7 +47,7 @@ struct RAMMSCORE_API FMotorParameters
  * Wheel state information
  */
 USTRUCT(BlueprintType)
-struct RAMMSCORE_API FWheelState
+struct RAMMSCORE_API FRammsWheelState
 {
 	GENERATED_BODY()
 
@@ -87,7 +87,7 @@ struct RAMMSCORE_API FWheelState
 	UPROPERTY(BlueprintReadOnly, Category = "Wheel")
 	float LateralVelocity = 0.0f;
 
-	FWheelState()
+	FRammsWheelState()
 		: AngularVelocity(0.0f)
 		, TotalRotation(0.0f)
 		, LinearVelocity(0.0f)
