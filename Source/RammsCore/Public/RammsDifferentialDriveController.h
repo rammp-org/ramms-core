@@ -196,11 +196,11 @@ public:
 
 	/** Left wheel state */
 	UPROPERTY(BlueprintReadOnly, Category = "Drive|State")
-	FWheelState LeftWheelState;
+	FRammsWheelState LeftWheelState;
 
 	/** Right wheel state */
 	UPROPERTY(BlueprintReadOnly, Category = "Drive|State")
-	FWheelState RightWheelState;
+	FRammsWheelState RightWheelState;
 
 	/** Current odometry data */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Drive|State")
@@ -254,13 +254,13 @@ public:
 	 * Get left wheel state
 	 */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
-	FWheelState GetLeftWheelState() const { return LeftWheelState; }
+	FRammsWheelState GetLeftWheelState() const { return LeftWheelState; }
 
 	/**
 	 * Get right wheel state
 	 */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Differential Drive")
-	FWheelState GetRightWheelState() const { return RightWheelState; }
+	FRammsWheelState GetRightWheelState() const { return RightWheelState; }
 
 	/**
 	 * Set control mode
@@ -326,8 +326,8 @@ private:
 
 	/** Update wheel state from physics (base component by MotorId when present,
 	 *  else the Chaos wheel bone). */
-	void UpdateWheelState(FName MotorId, FName BoneName, FWheelState& OutState); /** The wheel's Chaos body: through the base's Chaos mesh / ChaosName when a
-																				  *  base drives this robot, else the legacy mesh / bone name. */
+	void UpdateWheelState(FName MotorId, FName BoneName, FRammsWheelState& OutState); /** The wheel's Chaos body: through the base's Chaos mesh / ChaosName when a
+																					   *  base drives this robot, else the legacy mesh / bone name. */
 	FBodyInstance* GetWheelBody(FName MotorId, FName BoneName);
 
 	/** One-time notice that slip modeling has no Chaos contact body on this backend. */
@@ -344,7 +344,7 @@ private:
 
 	/** Apply torque to wheel with motor and slip modeling (commanded through the
 	 *  base component by MotorId when present, else the Chaos wheel bone). */
-	void ApplyWheelTorque(FName MotorId, FName BoneName, float RequestedTorque, const FMotorParameters& MotorParams, FWheelState& WheelState);
+	void ApplyWheelTorque(FName MotorId, FName BoneName, float RequestedTorque, const FMotorParameters& MotorParams, FRammsWheelState& WheelState);
 
 	/** Update odometry from wheel movements */
 	void UpdateOdometry(float DeltaTime);
