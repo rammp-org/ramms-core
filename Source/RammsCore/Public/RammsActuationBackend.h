@@ -77,6 +77,9 @@ public:
 		return false;
 	}
 
-	/** Stop a loop SetVelocityDrive started. Its last output is not held. */
+	/** Stop a loop SetVelocityDrive started, integral and all; a later
+	 *  SetVelocityDrive starts a new one from zero. Like the base's own loop
+	 *  (ClearMotorVelocityCommand), this leaves whatever the loop last wrote
+	 *  until the motor is commanded again. */
 	virtual void ClearVelocityDrive(FName MotorId) {}
 };

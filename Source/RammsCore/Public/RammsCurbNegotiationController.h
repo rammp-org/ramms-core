@@ -60,10 +60,13 @@ class URamms5BarLinkageController;
  * It is a drive mode ("curb"): while it runs, the other modes stand down and
  * it owns the wheels and cranks. Starting a manoeuvre selects it through the
  * robot's URammsDriveModeSelector and finishing one hands back to the mode
- * that was active, which puts the robot back in that mode's stance. One that
- * aborts or faults keeps the robot held in this mode; a retry that succeeds
- * still hands back to the mode from before. Selected by hand with nothing to
- * cross, it hands straight back -- there is nothing to drive in it.
+ * that was active, which puts the robot back in that mode's stance. One
+ * stopped by Abort, or by a tilt, step-timeout or measurement fault, keeps
+ * the robot held in this mode; a retry that succeeds still hands back to the
+ * mode from before. A simulation reset faults it too, but hands back as well:
+ * the robot is at its start pose, with nothing across a step to hold.
+ * Selected by hand with nothing to cross, it hands straight back -- there is
+ * nothing to drive in it.
  *
  * Like the other controllers it holds only configuration, and commands motors
  * by Id through the sibling URammsRobotBaseComponent; nothing here is MuJoCo-
@@ -247,6 +250,7 @@ private:
 		float						 CmdX = 0.0f;
 		float						 ModelX = 0.0f;
 		float						 ModelXVelocity = 0.0f;
+		float						 MeasuredX = 0.0f;
 		float						 MeasuredZ = 0.0f;
 		float						 Progress = 0.0f;
 		float						 WheelBottom = 0.0f;
@@ -282,9 +286,10 @@ private:
 		float PreferredHeight, float PreferredCenterX, float MinShift, float& OutHeight, TArray<float>& OutLegX,
 		FString& OutReason) const;
 
-	/** Measure the chassis and every wheel; false when the robot cannot be
-	 *  measured (no transforms yet). */
-	bool Measure();
+	/** Measure the chassis and every wheel; false, with why, when the robot
+	 *  cannot be measured: no transforms yet, or a 4-bar crank reading where
+	 *  its linkage does not close. */
+	bool Measure(FString& OutReason);
 
 	/** World height of the surface under At, tracing down from AboveZ to
 	 *  BelowZ past the robot itself; false when nothing is there. */
@@ -302,7 +307,9 @@ private:
 	bool  LegsSettled() const;
 	bool  StepComplete() const;
 	float ComputeDriveSpeed(float DeltaTime) const;
-	void  CommandLegs(float DeltaTime);
+	/** Ramp every leg towards the step's goals by at most RampStep's worth;
+	 *  DeltaTime is the whole tick, over which the wheels roll with them. */
+	void CommandLegs(float RampStep, float DeltaTime);
 	/** True while every Main wheel is planted on the surface the current step
 	 *  wants it on. */
 	bool  MainDriveCarrying() const;

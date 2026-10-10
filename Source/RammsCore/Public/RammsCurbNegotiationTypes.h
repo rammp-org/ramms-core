@@ -166,9 +166,13 @@ enum class ERammsCurbPhase : uint8
 	 *  robot in its own stance. */
 	Settle UMETA(DisplayName = "Settle"),
 	Done   UMETA(DisplayName = "Done"),
-	/** Stopped by Abort; the robot holds where it is. */
+	/** Stopped on request: by Abort, after which the robot holds where it is,
+	 *  or by selecting another drive mode, which takes the robot over. */
 	Aborted UMETA(DisplayName = "Aborted"),
-	/** Stopped by a safety check; see GetStatusText. */
+	/** Stopped by one of its own checks: a tilt past MaxTiltDeg, a step that
+	 *  overran its timeout, or a robot it can no longer measure, after which
+	 *  the robot holds where it is; or a simulation reset, after which the mode
+	 *  from before takes it back. See GetStatusText. */
 	Faulted UMETA(DisplayName = "Faulted"),
 };
 
@@ -213,7 +217,8 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.1"))
 	float CenterShiftSpeed = 20.0f;
 
-	/** A leg is where it was sent when its measured height is within this. */
+	/** A leg is where it was sent when its measured height -- and a 5-bar's
+	 *  fore/aft position -- is within this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.05"))
 	float SettleTolerance = 1.0f;
 

@@ -77,6 +77,29 @@ namespace
 	{
 		return FVector(V.X, V.Y, 0.0);
 	}
+
+	/** The most one tick moves a ramp. Commands reach the physics once a tick,
+	 *  so a longer gap -- a hitch, a coarse external step -- is time the robot
+	 *  spent on the commands it already had, and ramping across all of it at
+	 *  once would be the jump the ramp is there to prevent. */
+	constexpr float MaxRampStep = 0.1f;
+
+	/** A 4-bar leg's wheel centre (chassis x-z, cm) from its live crank angle.
+	 *  False, with why, when the authored linkage cannot close at that angle:
+	 *  the leg is then somewhere its spec does not describe, and has no height
+	 *  to plan or check against. */
+	bool MeasureFourBar(const URammsRobotBaseComponent& Base, const FRammsCurbLeg& Leg, FVector2D& OutWheelCenter, FString& OutReason)
+	{
+		bool		bValid = false;
+		const float Crank = Base.GetMotorValue(Leg.FourBar.CrankMotor);
+		OutWheelCenter = URamms4BarKinematics::ComputeWheelCenter(Leg.FourBar, Crank, bValid);
+		if (!bValid)
+		{
+			OutReason = FString::Printf(TEXT("leg '%s': its crank reads %.3f rad, where its 4-bar does not close (crank range %.3f..%.3f)"),
+				*Leg.Name.ToString(), Crank, Leg.FourBar.CrankRange.X, Leg.FourBar.CrankRange.Y);
+		}
+		return bValid;
+	}
 } // namespace
 
 URammsCurbNegotiationController::URammsCurbNegotiationController()
@@ -276,11 +299,14 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 
 // --- measurement ---------------------------------------------------------------
 
-bool URammsCurbNegotiationController::Measure()
+bool URammsCurbNegotiationController::Measure(FString& OutReason)
 {
+	const TCHAR* const Unlocated = TEXT("the robot's wheels and pivots cannot be located (is the simulation running?)");
+
 	URammsRobotBaseComponent* Base = EnsureBase();
 	if (!Base || LegState.Num() != Legs.Num())
 	{
+		OutReason = Unlocated;
 		return false;
 	}
 
@@ -299,6 +325,7 @@ bool URammsCurbNegotiationController::Measure()
 		FTransform Pivot;
 		if (!Base->GetMotorTransform(Leg.FourBar.CrankMotor, Pivot))
 		{
+			OutReason = Unlocated;
 			return false;
 		}
 		const FVector P = Pivot.GetLocation();
@@ -330,6 +357,7 @@ bool URammsCurbNegotiationController::Measure()
 	}
 	if (NFront == 0 || NRear == 0)
 	{
+		OutReason = Unlocated;
 		return false;
 	}
 	FrontW /= NFront;
@@ -373,13 +401,18 @@ bool URammsCurbNegotiationController::Measure()
 		FLegState&			 State = LegState[i];
 		if (Leg.Kind == ERammsCurbLegKind::FourBar)
 		{
-			bool bValid = false;
-			State.MeasuredZ = static_cast<float>(
-				URamms4BarKinematics::ComputeWheelCenter(Leg.FourBar, Base->GetMotorValue(Leg.FourBar.CrankMotor), bValid).Y);
+			FVector2D WheelCenter = FVector2D::ZeroVector;
+			if (!MeasureFourBar(*Base, Leg, WheelCenter, OutReason))
+			{
+				return false;
+			}
+			State.MeasuredZ = static_cast<float>(WheelCenter.Y);
 		}
 		else if (State.FiveBar)
 		{
-			State.MeasuredZ = static_cast<float>(State.FiveBar->GetCurrentEndpoint().Y);
+			const FVector2D Endpoint = State.FiveBar->GetCurrentEndpoint();
+			State.MeasuredX = static_cast<float>(Endpoint.X);
+			State.MeasuredZ = static_cast<float>(Endpoint.Y);
 		}
 		FTransform Wheel;
 		State.bHasWorld = Base->GetMotorTransform(Leg.Wheel.MotorId, Wheel);
@@ -652,14 +685,28 @@ bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<c
 
 bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile, FString& OutReason)
 {
-	if (!ResolveLegs(OutReason))
+	// The profile first, before anything is resolved or measured. ClampMin
+	// binds only the editor: a profile built in C++, Blueprint or Python can
+	// carry anything, and an edge behind the front wheels would end the
+	// approach at once and lift for a step that is not there.
+	const float StepHeight = Profile.StepHeightCm;
+	if (!FMath::IsFinite(StepHeight) || !FMath::IsFinite(Profile.EdgeDistanceCm) || !FMath::IsFinite(Profile.EdgeSkewCm))
 	{
+		OutReason = TEXT("the step profile is not a number");
 		return false;
 	}
-	const float StepHeight = Profile.StepHeightCm;
+	if (Profile.EdgeDistanceCm < 0.0f)
+	{
+		OutReason = TEXT("EdgeDistanceCm cannot be negative: the edge must be ahead of the front wheels");
+		return false;
+	}
 	if (Profile.EdgeSkewCm < 0.0f)
 	{
 		OutReason = TEXT("EdgeSkewCm cannot be negative");
+		return false;
+	}
+	if (!ResolveLegs(OutReason))
+	{
 		return false;
 	}
 	if (FMath::Abs(StepHeight) < Tuning.MinStepHeight)
@@ -678,9 +725,8 @@ bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile
 	GroundZ = 0.0;
 	EdgePoint = FVector::ZeroVector;
 	Phase = ERammsCurbPhase::Idle;
-	if (!Measure())
+	if (!Measure(OutReason))
 	{
-		OutReason = TEXT("the robot's wheels and pivots cannot be located yet (is the simulation running?)");
 		return false;
 	}
 	double Lowest = TNumericLimits<double>::Max();
@@ -692,7 +738,10 @@ bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile
 		}
 	}
 	GroundZ = Lowest;
-	Measure();
+	if (!Measure(OutReason))
+	{
+		return false;
+	}
 
 	// The gait starts with every wheel over one surface. A robot already
 	// standing across a step -- a retry after a crossing stopped halfway --
@@ -733,17 +782,18 @@ bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile
 		State.CmdZ = State.MeasuredZ;
 		if (State.FiveBar)
 		{
-			State.InitialX = static_cast<float>(State.FiveBar->GetCurrentEndpoint().X);
+			State.InitialX = State.MeasuredX;
 			State.CmdX = State.InitialX;
 			State.ModelX = State.InitialX;
 		}
 		else
 		{
-			bool bValid = false;
-			State.ModelX = static_cast<float>(
-				URamms4BarKinematics::ComputeWheelCenter(Legs[i].FourBar,
-					EnsureBase()->GetMotorValue(Legs[i].FourBar.CrankMotor), bValid)
-					.X);
+			FVector2D WheelCenter = FVector2D::ZeroVector;
+			if (!MeasureFourBar(*EnsureBase(), Legs[i], WheelCenter, OutReason))
+			{
+				return false;
+			}
+			State.ModelX = static_cast<float>(WheelCenter.X);
 		}
 		if (State.WheelBottom < 1.5f)
 		{
@@ -1252,15 +1302,22 @@ bool URammsCurbNegotiationController::LegsSettled() const
 		{
 			return false;
 		}
+		// A 5-bar's fore/aft offset is what keeps the centre of mass between
+		// the two axles that will carry the robot, so it too has to be measured
+		// where it was sent before the next step lifts an axle or drives on it.
+		if (State.FiveBar && FMath::Abs(State.MeasuredX - State.CmdX) > Tuning.SettleTolerance)
+		{
+			return false;
+		}
 	}
 	return true;
 }
 
-void URammsCurbNegotiationController::CommandLegs(float DeltaTime)
+void URammsCurbNegotiationController::CommandLegs(float RampStep, float DeltaTime)
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
 	const FStep&			  S = Steps[StepIndex];
-	BaseHeightCmd = StepToward(BaseHeightCmd, S.BaseHeight, Tuning.BaseHeightSpeed * DeltaTime);
+	BaseHeightCmd = StepToward(BaseHeightCmd, S.BaseHeight, Tuning.BaseHeightSpeed * RampStep);
 
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
@@ -1270,7 +1327,7 @@ void URammsCurbNegotiationController::CommandLegs(float DeltaTime)
 		const float			 GoalZ = CommandedGoalHeight(i, Goal);
 		const float			 PrevX = State.ModelX;
 		const float			 PrevZ = State.CmdZ;
-		State.CmdZ = StepToward(State.CmdZ, GoalZ, Tuning.LegSpeed * DeltaTime);
+		State.CmdZ = StepToward(State.CmdZ, GoalZ, Tuning.LegSpeed * RampStep);
 
 		if (Leg.Kind == ERammsCurbLegKind::FourBar)
 		{
@@ -1283,7 +1340,7 @@ void URammsCurbNegotiationController::CommandLegs(float DeltaTime)
 		else if (State.FiveBar)
 		{
 			const float TargetX = S.LegX.IsValidIndex(i) ? S.LegX[i] : State.InitialX;
-			const float GoalX = StepToward(State.CmdX, TargetX, Tuning.CenterShiftSpeed * DeltaTime);
+			const float GoalX = StepToward(State.CmdX, TargetX, Tuning.CenterShiftSpeed * RampStep);
 			const float PrevCmdX = State.CmdX;
 			// A 5-bar's region is curved, so a straight move between two
 			// reachable points can cross an unreachable corner. Take whichever
@@ -1306,6 +1363,8 @@ void URammsCurbNegotiationController::CommandLegs(float DeltaTime)
 			}
 			State.ModelX = State.CmdX;
 		}
+		// Over the whole tick, not the ramp's share of it: the wheel loops hold
+		// this speed until the next command, however long that is.
 		State.ModelXVelocity = DeltaTime > 0.0f ? (State.ModelX - PrevX) / DeltaTime : 0.0f;
 	}
 }
@@ -1508,10 +1567,20 @@ bool URammsCurbNegotiationController::StepComplete() const
 
 void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 {
+	// The clocks and the pitch filter take every simulated second, so elapsed
+	// time and the timeouts stay the physics' own; only the ramps are held to
+	// MaxRampStep.
 	Elapsed += DeltaTime;
 	StepElapsed += DeltaTime;
-	if (!Measure())
+	const float RampStep = FMath::Min(DeltaTime, MaxRampStep);
+	FString		Unmeasured;
+	if (!Measure(Unmeasured))
 	{
+		// Every check below reads the measurement -- tilt, the step timeout,
+		// where each leg is -- and skipping them would leave the wheels rolling
+		// on at their last speed with nothing watching. Stop and hold, as a
+		// tilt does.
+		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("cannot measure the robot during %s: %s"), *Status, *Unmeasured));
 		return;
 	}
 	const float PitchRad = FMath::DegreesToRadians(MeasuredPitchDeg);
@@ -1535,6 +1604,10 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 			{
 				Lagging += FString::Printf(TEXT(" %s(%.1f vs %.1f)"), *Legs[i].Name.ToString(), State.MeasuredZ, State.CmdZ);
 			}
+			if (State.FiveBar && FMath::Abs(State.MeasuredX - State.CmdX) > Tuning.SettleTolerance)
+			{
+				Lagging += FString::Printf(TEXT(" %s(fore/aft %.1f vs %.1f)"), *Legs[i].Name.ToString(), State.MeasuredX, State.CmdX);
+			}
 		}
 		Finish(ERammsCurbPhase::Faulted,
 			FString::Printf(TEXT("%s took longer than %.0f s%s%s"), *Status, Timeout,
@@ -1542,8 +1615,8 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 		return;
 	}
 
-	CommandLegs(DeltaTime);
-	DriveSpeed = ComputeDriveSpeed(DeltaTime);
+	CommandLegs(RampStep, DeltaTime);
+	DriveSpeed = ComputeDriveSpeed(RampStep);
 	CommandWheels(DriveSpeed, Tuning.HeadingGain * HeadingErrorRad);
 
 	if (StepComplete())
@@ -1601,9 +1674,10 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 		{
 			// The physics was reset: the robot is back at its start pose and
 			// the plan -- edge, ground, every leg target -- no longer applies.
-			// Nothing is left standing across a step to hold, so the mode from
-			// before takes the robot back too.
-			Finish(ERammsCurbPhase::Aborted, TEXT("the simulation was reset"));
+			// No one asked for the stop, so it is a fault rather than an
+			// Abort; but nothing is left standing across a step to hold, so
+			// the mode from before takes the robot back too.
+			Finish(ERammsCurbPhase::Faulted, TEXT("the simulation was reset"));
 			LastSimTime = -1.0;
 			bHandBackPending = true;
 			return;
@@ -1616,7 +1690,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	}
 	if (Step > 0.0f)
 	{
-		StepPlan(FMath::Min(Step, 0.1f));
+		StepPlan(Step);
 	}
 }
 
@@ -1795,8 +1869,11 @@ bool URammsCurbNegotiationController::DetectStepAhead(FRammsCurbProfile& OutProf
 
 void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& OutSurface) const
 {
-	// Offered whatever mode is active: starting a manoeuvre is what switches
-	// the robot into this one.
+	// Offered whatever mode is active, which the drive-mode contract allows
+	// for Ids no other mode uses. Starting a manoeuvre is what switches the
+	// robot into this mode, and the mode selected by hand hands straight back,
+	// so gating this on bDriveModeActive would leave the action unreachable.
+	// Nothing moves until the mode is live: the claims and the gait wait.
 	const FName Group(TEXT("Curb"));
 
 	FRammsControlAxis Negotiate;

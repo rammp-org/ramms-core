@@ -227,10 +227,17 @@ void URammsRobotBaseComponent::SetDefaultVelocityGains(float Kp, float Ki, float
 	DefaultVelocityGains.Kp = FMath::Max(0.0f, Kp);
 	DefaultVelocityGains.Ki = FMath::Max(0.0f, Ki);
 	DefaultVelocityGains.MaxIntegralTorque = FMath::Max(0.0f, MaxIntegralTorque);
-	// Whatever the old gains had accumulated means nothing under new ones.
+	// Whatever the old gains had accumulated means nothing under new ones. A
+	// loop the backend runs keeps its integral where this cannot zero it, so
+	// stop that loop instead; the next tick starts it again from zero, with
+	// the gains now in force.
 	for (TPair<FName, FVelocityDrive>& Pair : VelocityDrives)
 	{
 		Pair.Value.Integral = 0.0f;
+		if (Backend_)
+		{
+			Backend_->ClearVelocityDrive(Pair.Key);
+		}
 	}
 	PeakVelocityError = 0.0f;
 }
