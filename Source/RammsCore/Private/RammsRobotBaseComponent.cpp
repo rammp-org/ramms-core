@@ -180,12 +180,18 @@ bool URammsRobotBaseComponent::HasBackend() const
 	return Backend_ != nullptr;
 }
 
+double URammsRobotBaseComponent::GetSimulationTime() const
+{
+	EnsureBackend();
+	return Backend_ ? Backend_->GetSimulationTime() : -1.0;
+}
+
 bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 {
 	// Letting go means letting go: a loop still driving this motor would put
 	// it straight back under command on the next tick.
-	VelocityDrives.Remove(MotorId);
 	EnsureBackend();
+	DropVelocityDrive(MotorId);
 	return Backend_ && Backend_->ReleaseMotor(MotorId);
 }
 
@@ -231,7 +237,15 @@ void URammsRobotBaseComponent::SetDefaultVelocityGains(float Kp, float Ki, float
 
 void URammsRobotBaseComponent::ClearMotorVelocityCommand(FName MotorId)
 {
-	VelocityDrives.Remove(MotorId);
+	DropVelocityDrive(MotorId);
+}
+
+void URammsRobotBaseComponent::DropVelocityDrive(FName MotorId)
+{
+	if (VelocityDrives.Remove(MotorId) > 0 && Backend_)
+	{
+		Backend_->ClearVelocityDrive(MotorId);
+	}
 }
 
 bool URammsRobotBaseComponent::GetMotorVelocityCommand(FName MotorId, float& OutRadiansPerSecond) const
@@ -292,12 +306,30 @@ void URammsRobotBaseComponent::StepVelocityDrives(float DeltaTime)
 			continue;
 		}
 
-		// Torque actuator: close the loop here. Everything is in the robot's
-		// sense -- GetMotorVelocity already un-applies Direction -- and the
-		// sign is put back on the way out.
+		// Torque actuator. Everything here is in the robot's sense --
+		// GetMotorVelocity already un-applies Direction -- and the sign is put
+		// back on the way out.
 		const FRammsVelocityGains Gains = GainsFor(MotorId);
 		const float				  Error = Drive.Target - GetMotorVelocity(MotorId);
 		PeakVelocityError = FMath::Max(PeakVelocityError, FMath::Abs(Error));
+
+		// A backend that can run the loop at the physics rate does; it gets
+		// the target and the torque range in the joint's sense.
+		{
+			const float Sign = DirectionOf(MotorId);
+			float		Lo = 0.0f, Hi = 0.0f;
+			if (bBounded)
+			{
+				Lo = FMath::Min(Spec.ControlRange.X * Sign, Spec.ControlRange.Y * Sign);
+				Hi = FMath::Max(Spec.ControlRange.X * Sign, Spec.ControlRange.Y * Sign);
+			}
+			if (Backend_->SetVelocityDrive(MotorId, Drive.Target * Sign, Gains, Lo, Hi))
+			{
+				continue;
+			}
+		}
+
+		// Otherwise close it here, once per tick.
 
 		float Integral = Drive.Integral + Gains.Ki * Error * DeltaTime;
 		if (Gains.MaxIntegralTorque > 0.0f)
@@ -463,7 +495,7 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 
 	// A direct command wins: whoever wrote this wants THIS value, not the
 	// output of a loop that would overwrite it on the next tick.
-	VelocityDrives.Remove(MotorId);
+	DropVelocityDrive(MotorId);
 
 	// Clamp in the robot's sense to the authored range when one is set (a
 	// range with min >= max means "no clamp here" — defer to the backend /
