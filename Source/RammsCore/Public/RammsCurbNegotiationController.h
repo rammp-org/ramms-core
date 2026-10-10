@@ -287,8 +287,8 @@ private:
 		FString& OutReason) const;
 
 	/** Measure the chassis and every wheel; false, with why, when the robot
-	 *  cannot be measured: no transforms yet, or a 4-bar crank reading where
-	 *  its linkage does not close. */
+	 *  cannot be measured: a wheel or pivot with no transform (none yet), or
+	 *  joint readings where a 4-bar or 5-bar linkage does not close. */
 	bool Measure(FString& OutReason);
 
 	/** World height of the surface under At, tracing down from AboveZ to

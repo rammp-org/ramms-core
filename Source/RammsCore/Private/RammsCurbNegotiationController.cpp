@@ -410,18 +410,33 @@ bool URammsCurbNegotiationController::Measure(FString& OutReason)
 		}
 		else if (State.FiveBar)
 		{
-			const FVector2D Endpoint = State.FiveBar->GetCurrentEndpoint();
+			// As for a 4-bar: joint angles that do not close the linkage put
+			// the wheel nowhere, and an estimate of where is no basis for
+			// settling a step or checking a limit.
+			bool			bClosed = false;
+			const FVector2D Endpoint = State.FiveBar->GetCurrentEndpointChecked(bClosed);
+			if (!bClosed)
+			{
+				OutReason = FString::Printf(TEXT("leg '%s': its 5-bar's joint angles do not close the linkage"),
+					*Leg.Name.ToString());
+				return false;
+			}
 			State.MeasuredX = static_cast<float>(Endpoint.X);
 			State.MeasuredZ = static_cast<float>(Endpoint.Y);
 		}
+		// Every wheel, not most of them: the braking limits and each axle's
+		// progress are taken over the wheels that were measured, so one that
+		// drops out would leave its mate to finish the axle alone.
 		FTransform Wheel;
-		State.bHasWorld = Base->GetMotorTransform(Leg.Wheel.MotorId, Wheel);
-		if (State.bHasWorld)
+		if (!Base->GetMotorTransform(Leg.Wheel.MotorId, Wheel))
 		{
-			const FVector W = Wheel.GetLocation();
-			State.Progress = static_cast<float>(FVector::DotProduct(Horizontal(W - EdgePoint), Heading));
-			State.WheelBottom = static_cast<float>(W.Z - Leg.WheelRadiusCm - GroundZ);
+			OutReason = FString::Printf(TEXT("the '%s' wheel cannot be located"), *Leg.Name.ToString());
+			return false;
 		}
+		State.bHasWorld = true;
+		const FVector W = Wheel.GetLocation();
+		State.Progress = static_cast<float>(FVector::DotProduct(Horizontal(W - EdgePoint), Heading));
+		State.WheelBottom = static_cast<float>(W.Z - Leg.WheelRadiusCm - GroundZ);
 	}
 	return true;
 }
@@ -1733,22 +1748,31 @@ bool URammsCurbNegotiationController::DetectStepAhead(FRammsCurbProfile& OutProf
 	int32			NF = 0, NR = 0;
 	TArray<FVector> FrontWheels;
 	double			Ground = TNumericLimits<double>::Max();
+	// Every configured wheel and corner pivot, or no answer: a front wheel
+	// that cannot be located would leave the other's track to define the step
+	// alone, with no second track to check the edge against.
 	for (const FRammsCurbLeg& Leg : Legs)
 	{
 		FTransform Xf;
-		if (Leg.Kind == ERammsCurbLegKind::FourBar && Leg.Axle != ERammsCurbAxle::Center
-			&& Base->GetMotorTransform(Leg.FourBar.CrankMotor, Xf))
+		if (Leg.Kind == ERammsCurbLegKind::FourBar && Leg.Axle != ERammsCurbAxle::Center)
 		{
+			if (!Base->GetMotorTransform(Leg.FourBar.CrankMotor, Xf))
+			{
+				OutReason = FString::Printf(TEXT("the '%s' crank pivot cannot be located"), *Leg.Name.ToString());
+				return false;
+			}
 			(Leg.Axle == ERammsCurbAxle::Front ? FrontPivots : RearPivots) += Xf.GetLocation();
 			++(Leg.Axle == ERammsCurbAxle::Front ? NF : NR);
 		}
-		if (Base->GetMotorTransform(Leg.Wheel.MotorId, Xf))
+		if (!Base->GetMotorTransform(Leg.Wheel.MotorId, Xf))
 		{
-			Ground = FMath::Min(Ground, Xf.GetLocation().Z - Leg.WheelRadiusCm);
-			if (Leg.Axle == ERammsCurbAxle::Front)
-			{
-				FrontWheels.Add(Xf.GetLocation());
-			}
+			OutReason = FString::Printf(TEXT("the '%s' wheel cannot be located"), *Leg.Name.ToString());
+			return false;
+		}
+		Ground = FMath::Min(Ground, Xf.GetLocation().Z - Leg.WheelRadiusCm);
+		if (Leg.Axle == ERammsCurbAxle::Front)
+		{
+			FrontWheels.Add(Xf.GetLocation());
 		}
 	}
 	if (NF == 0 || NR == 0 || FrontWheels.Num() == 0)
