@@ -21,8 +21,13 @@ class URammsDriveMode : public UInterface
  * They cannot all be live at once: they advertise the same control Ids
  * (drive.forward, drive.turn) and would claim the same motors, so the surface
  * would see duplicates and the motors would be written by two controllers in
- * the same frame. An inactive mode therefore contributes nothing: no controls,
- * no motor claims, no commands.
+ * the same frame. An inactive mode therefore offers none of the controls the
+ * modes share, claims no motors and sends no commands.
+ *
+ * It may keep offering controls under Ids no other mode uses, so long as none
+ * of them moves the robot without first selecting the mode. The curb mode's
+ * curb.negotiate is one: firing it is how that mode is entered, because the
+ * curb mode selected by hand, with no crossing to run, hands straight back.
  *
  * Switching is not only a software matter on this hardware. The lift-drive
  * raises its centre wheels clear of the ground on the 5-bar linkages to run
@@ -44,7 +49,8 @@ public:
 	virtual bool IsDriveModeActive() const = 0;
 
 	/** Take over, or stand down. A mode standing down must stop writing motors
-	 *  and stop advertising controls; the surface is rebuilt around it. */
+	 *  and stop advertising the controls modes share (see above); the surface
+	 *  is rebuilt around it. */
 	virtual void SetDriveModeActive(bool bActive) = 0;
 
 	/**

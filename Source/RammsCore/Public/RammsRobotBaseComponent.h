@@ -222,6 +222,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot")
 	bool HasBackend() const;
 
+	/** Simulated seconds the physics backend has advanced, or negative when it
+	 *  keeps no clock of its own (time then is the game's). See
+	 *  IRammsActuationBackend::GetSimulationTime. */
+	UFUNCTION(BlueprintPure, Category = "Robot")
+	double GetSimulationTime() const;
+
 private:
 	/** Load MotorTable into Motors once (idempotent; safe from any accessor, so
 	 *  callers that arrive before BeginPlay still see the configured specs). */
@@ -268,6 +274,9 @@ private:
 
 	/** Run one step of the velocity loop over every motor under command. */
 	void StepVelocityDrives(float DeltaTime);
+
+	/** Stop velocity-driving a motor, here and in the backend's own loop. */
+	void DropVelocityDrive(FName MotorId);
 
 	/** Worst tracking error seen since the last reset, for tuning. */
 	float PeakVelocityError = 0.0f;

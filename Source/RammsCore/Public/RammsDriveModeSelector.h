@@ -18,7 +18,8 @@ class URammsRobotBaseComponent;
  * on the robot and exactly one is live. This finds every IRammsDriveMode on the
  * actor -- naming no controller class, the way the control surface names no
  * contributor -- and activates one, rebuilding the surface so the inactive
- * mode's controls disappear from the panel rather than sitting there inert.
+ * modes' shared drive controls disappear from the panel rather than sitting
+ * there inert. A mode may keep an entry point of its own; see IRammsDriveMode.
  *
  * Switching is physical as well as logical. The centre wheels are large treaded
  * tyres: holonomic needs them lifted clear on the 5-bar linkages, differential

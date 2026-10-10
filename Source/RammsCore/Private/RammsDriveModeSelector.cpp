@@ -298,8 +298,8 @@ bool URammsDriveModeSelector::SetActiveMode(FName ModeId)
 	ActiveIndex = Wanted;
 
 	// Rebuild before applying the stance, not after. The surface is built from
-	// what the contributors describe, and the inactive mode now describes
-	// nothing -- so its controls leave the panel. It also has to be current
+	// what the contributors describe, and the inactive mode has dropped the
+	// shared controls -- so they leave the panel. It also has to be current
 	// *before* the stance goes out, because the stance is commanded through it
 	// by Id: coming back from the low-level mode the 5-bars have just been
 	// un-suspended, and against a stale surface they still advertise nothing,
