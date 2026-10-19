@@ -196,10 +196,10 @@ bool URamms5BarLinkageController::SetEndpointTranslation(float X)
 FVector2D URamms5BarLinkageController::ScanReachable(TFunctionRef<bool(float)> Reachable,
 	float Start, float Lo, float Hi, float Step, bool& bValid) const
 {
-	// Walk out from Start until the IK (with the motors' ControlRanges) first
-	// refuses; the mechanism's reach is contiguous there. Starting at the live
-	// value rather than the scan floor also keeps a disconnected reachable
-	// island elsewhere from being reported.
+	// Walk out from Start until the IK (with its knee ranges and the motors'
+	// ControlRanges) first refuses; the mechanism's reach is contiguous there.
+	// Starting at the live value rather than the scan floor also keeps a
+	// disconnected reachable island elsewhere from being reported.
 	bValid = false;
 	Step = FMath::Max(Step, 0.05f);
 	const float S0 = FMath::Clamp(Start, Lo, Hi);

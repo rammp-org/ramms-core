@@ -7,11 +7,17 @@
 #include "RammsControlContributor.h"
 #include "RammsCurbNegotiationTypes.h"
 #include "RammsDriveMode.h"
+#include "Templates/PimplPtr.h"
 
 #include "RammsCurbNegotiationController.generated.h"
 
 class URammsRobotBaseComponent;
 class URamms5BarLinkageController;
+
+namespace RammsCurb
+{
+	struct FRunTelemetry;
+}
 
 /**
  * Climbs or descends a curb by coordinating every leg and wheel on a
@@ -182,6 +188,28 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	TArray<float> GetWheelClearance() const;
 
+	/** How the current crossing is going, or how the last one went: speeds,
+	 *  stops, attitude, margins and timing, counted on every controller tick
+	 *  to Done -- the speeds once the robot is moving. See FRammsCurbRunStats. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	FRammsCurbRunStats GetRunStats() const;
+
+	/** Chassis ground speed (cm/s): X the drive speed the crossing commands
+	 *  (0 when none runs), Y the speed measured along the chassis heading over
+	 *  the last 0.3 s of simulated time -- measured whether or not a crossing
+	 *  runs. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	FVector2D GetDriveSpeed() const;
+
+	/** Each wheel's part in the crossing, in Legs order, as last measured: its
+	 *  state, the surface it is on or headed for, where it is against the
+	 *  edge, and how high it is over the ground under it (traced on each
+	 *  call). The per-axle gait moves a wheel with its axle, so both wheels of
+	 *  an axle share a state. Empty until a crossing has begun, and after a
+	 *  plan made without crossing (CheckFeasibility). */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	TArray<FRammsCurbWheelStatus> GetWheelStatus() const;
+
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("curb"); }
 	virtual FText GetDriveModeDisplayName() const override
@@ -250,11 +278,18 @@ private:
 		float						 CmdX = 0.0f;
 		float						 ModelX = 0.0f;
 		float						 ModelXVelocity = 0.0f;
-		float						 MeasuredX = 0.0f;
-		float						 MeasuredZ = 0.0f;
-		float						 Progress = 0.0f;
-		float						 WheelBottom = 0.0f;
-		bool						 bHasWorld = false;
+		/** Measured wheel centre (cm, chassis frame): a 5-bar's fore/aft
+		 *  position, a 4-bar's from its crank. */
+		float MeasuredX = 0.0f;
+		float MeasuredZ = 0.0f;
+		float Progress = 0.0f;
+		float WheelBottom = 0.0f;
+		/** Measured wheel centre, world. */
+		FVector WheelWorld = FVector::ZeroVector;
+		/** Where the servo lag model puts the wheel centre (chassis frame). */
+		float LagX = 0.0f;
+		float LagZ = 0.0f;
+		bool  bHasWorld = false;
 	};
 
 	URammsRobotBaseComponent* EnsureBase() const;
@@ -284,7 +319,7 @@ private:
 	 *  MinShift past the centre of mass towards PreferredCenterX. */
 	bool PlanLift(ERammsCurbAxle Axle, TArrayView<const FAxleGoal* const> Configs, float ChassisFloor,
 		float PreferredHeight, float PreferredCenterX, float MinShift, float& OutHeight, TArray<float>& OutLegX,
-		FString& OutReason) const;
+		float& OutShift, FString& OutReason) const;
 
 	/** Measure the chassis and every wheel; false, with why, when the robot
 	 *  cannot be measured: a wheel or pivot with no transform (none yet), or
@@ -318,6 +353,24 @@ private:
 	void  Finish(ERammsCurbPhase EndPhase, const FString& Why);
 	void  SetActiveModeThroughSelector(FName ModeId);
 	float AxleProgress(ERammsCurbAxle Axle) const;
+
+	// --- telemetry ---
+	/** The chassis' horizontal centre and heading (world) from its corner
+	 *  crank pivots; false when they cannot be located. */
+	bool LocateChassis(FVector2D& OutCentre, FVector2D& OutForward) const;
+	/** Feed the chassis-speed window: every tick, crossing or not. */
+	void TrackChassisMotion();
+	/** Run each leg's servo lag model on over DeltaTime under the commands
+	 *  still standing, and return the largest leg error against it. */
+	float AdvanceLegLag(float DeltaTime);
+	/** Count this tick in the run stats. */
+	void RecordRunTick(float DeltaTime, float LegErrorCm);
+	/** The least gap between a lifted, clear wheel and the terrain under it,
+	 *  when one is being carried across; false when none is. */
+	bool MeasureSwingClearance(float& OutCm) const;
+	/** The per-axle gait's stability margin along the chassis while an axle
+	 *  is lifted; false when none is. */
+	bool MeasureStabilityMargin(float& OutCm) const;
 
 	UPROPERTY(Transient)
 	mutable TObjectPtr<URammsRobotBaseComponent> BaseComponent = nullptr;
@@ -363,4 +416,16 @@ private:
 	/** Selected without a manoeuvre to run (picked from the mode list): hand
 	 *  the robot back on the next tick, outside the selector's switch. */
 	bool bHandBackPending = false;
+
+	/** What the last plan called for, for the run stats: its slowest step,
+	 *  and the least stability margin it allowed (when it planned one). */
+	float PlannedMinSpeed = 0.0f;
+	float PlannedMinMargin = 0.0f;
+	bool  bPlannedMargin = false;
+	/** The one axle the stance the robot drove up in holds off the ground,
+	 *  which the approach keeps up (ERammsCurbAxle as int), or INDEX_NONE. */
+	int32 ApproachLiftedAxle = INDEX_NONE;
+
+	/** The measured chassis speed and the run stats (Private/Curb). */
+	TPimplPtr<RammsCurb::FRunTelemetry> Telemetry;
 };
