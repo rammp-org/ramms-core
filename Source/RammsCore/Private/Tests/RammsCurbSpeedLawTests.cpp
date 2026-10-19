@@ -1011,4 +1011,121 @@ bool FRammsCurbSpeedLawAwaitingPlanCap::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawAwaitingLevelInRoom,
+	"Ramms.Curb.SpeedLaw.AwaitingLevelInRoom",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSpeedLawAwaitingLevelInRoom::RunTest(const FString& Parameters)
+{
+	// A robot rolling at 60 cm/s down a slope, 90 cm short of the line its
+	// level-in must be done by, its stance 7 deg off level (a 3 s level-in at
+	// 3 deg/s and 4 deg/s^2, the corners set down first), its plan coming
+	// 0.8 s after the ask. Slowed from the ask on towards the speed that does
+	// the level-in in the room left, it has that room in hand when the plan
+	// comes: the level-in can then be made at more than the 8.75 cm/s floor.
+	// Braked only on the line's own curve (AwaitingPlanCap), it reaches the
+	// plan's arrival with too little room to level in on the move at that
+	// speed -- it would stop to.
+	const float Dec = 60.0f, Floor = 8.75f, Lag = 0.1f;
+	const float LevelIn = RammsCurb::AwaitingLevelInSeconds(7.0f, 3.0f, 4.0f, Lag, RammsCurb::LevelInCornersDownSeconds);
+	TestTrue(FString::Printf(TEXT("the level-in's time from a 7 deg stance is the S-curve's 3.08 s and more (%.2f s)"), LevelIn),
+		LevelIn > 3.08f + Lag + 0.3f && LevelIn < 3.08f + Lag + 0.3f + RammsCurb::LevelInCornersDownSeconds + 0.01f);
+	TestEqual(TEXT("level already: the lag, the spare and the corners only"), RammsCurb::AwaitingLevelInSeconds(0.0f, 3.0f, 4.0f, Lag, 0.0f), Lag + 0.3f,
+		1e-4f);
+	TestEqual(TEXT("never faster than it goes"), RammsCurb::AwaitingLevelInStep(10.0f, 200.0f, 1.0f, Dec, 0.01f), 10.0f, 1e-6f);
+	TestEqual(TEXT("slowed no faster than Deceleration"), RammsCurb::AwaitingLevelInStep(60.0f, 10.0f, 3.0f, Dec, 0.01f), 59.4f, 1e-4f);
+	for (const bool bRoom : { true, false })
+	{
+		const float Dt = 0.01f;
+		float		Command = 60.0f, Speed = 60.0f, ToLine = 90.0f;
+		for (float t = 0.0f; t < 0.8f; t += Dt)
+		{
+			if (bRoom)
+			{
+				Command = RammsCurb::AwaitingLevelInStep(Command, ToLine, LevelIn, Dec, Dt);
+			}
+			Command = FMath::Min(Command, RammsCurb::AwaitingPlanCap(ToLine + 30.0f, 30.0f, Speed, Dec));
+			Speed += (Command - Speed) * Dt / RammsCurb::DriveLagSeconds;
+			ToLine -= Speed * Dt;
+		}
+		// What the level-in then has: to cover no more than the room left in its
+		// time, it goes at most ToLine / LevelIn, braked there from where it is.
+		const float Braking = FMath::Max(0.0f, Speed * Speed - FMath::Square(ToLine / LevelIn)) / (2.0f * Dec);
+		const float Steady = FMath::Max(0.0f, ToLine - Braking) / LevelIn;
+		if (bRoom)
+		{
+			TestTrue(FString::Printf(TEXT("slowed from the ask: %.1f cm/s with %.1f cm left, a level-in at %.1f cm/s, over the floor"), Speed, ToLine, Steady),
+				Steady > Floor);
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("the line's curve alone: %.1f cm/s with %.1f cm left, a level-in at %.1f cm/s, under the floor"), Speed, ToLine,
+						 Steady),
+				Steady < Floor);
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawRestHold,
+	"Ramms.Curb.SpeedLaw.RestHold",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSpeedLawRestHold::RunTest(const FString& Parameters)
+{
+	// A robot held still in a crossing on a slope: its wheels' speed loops let
+	// it creep downhill at 4 cm/s, fading over a second (they hold no load
+	// without an error), then its legs move the base over the wheels (a
+	// level-in: the chassis carried back at 3 cm/s for 1.5 s). Driven at 0 it
+	// creeps 3 cm away and then back past where it was; held with
+	// RestHoldSpeed it stays within a centimetre of where it was, and its
+	// speed (over a 0.3 s window) stays under a made-up 5 cm/s -- at a slow
+	// tick (62.5 ms) and a fast one (20 ms), without ringing.
+	TestEqual(TEXT("held where it was: no speed"), RammsCurb::RestHoldSpeed(0.0), 0.0, 1e-12);
+	TestTrue(TEXT("past where it was: back"), RammsCurb::RestHoldSpeed(1.0) < 0.0 && RammsCurb::RestHoldSpeed(-1.0) > 0.0);
+	TestEqual(TEXT("bounded"), RammsCurb::RestHoldSpeed(100.0), -RammsCurb::RestHoldMaxCmS, 1e-12);
+	for (const double Dt : { 0.0625, 0.02 })
+	{
+		for (const bool bHold : { true, false })
+		{
+			double		   X = 0.0, V = 0.0, MaxOff = 0.0, MaxWindow = 0.0;
+			TArray<double> Xs;
+			int32		   Reversals = 0;
+			double		   LastV = 0.0;
+			for (double T = 0.0; T < 4.0; T += Dt)
+			{
+				const double Command = bHold ? RammsCurb::RestHoldSpeed(X) : 0.0;
+				// The wheels follow the command a lag behind; the creep fades as the
+				// speed loops wind up (1 s), the legs carry the chassis back over
+				// 0.5..2 s.
+				V += (Command - V) * (1.0 - FMath::Exp(-Dt / RammsCurb::DriveLagSeconds));
+				const double Creep = 4.0 * FMath::Exp(-T / 1.0);
+				const double Legs = (T > 2.0 && T < 3.5) ? -3.0 : 0.0;
+				X += (V + Creep + Legs) * Dt;
+				MaxOff = FMath::Max(MaxOff, FMath::Abs(X));
+				Xs.Add(X);
+				const int32 Back = FMath::RoundToInt(0.3 / Dt);
+				if (Xs.Num() > Back)
+				{
+					MaxWindow = FMath::Max(MaxWindow, FMath::Abs(X - Xs[Xs.Num() - 1 - Back]) / (Back * Dt));
+				}
+				Reversals += (V > 0.05 && LastV < -0.05) || (V < -0.05 && LastV > 0.05) ? 1 : 0;
+				LastV = FMath::Abs(V) > 0.05 ? V : LastV;
+			}
+			if (bHold)
+			{
+				TestTrue(FString::Printf(TEXT("held at %.1f ms ticks: within %.2f cm (1 at most), %.2f cm/s over 0.3 s (under 5)"), 1000.0 * Dt, MaxOff,
+							 MaxWindow),
+					MaxOff <= 1.0 && MaxWindow < 5.0);
+				TestTrue(FString::Printf(TEXT("held at %.1f ms ticks: no ringing (%d reversals)"), 1000.0 * Dt, Reversals), Reversals <= 3);
+			}
+			else
+			{
+				TestTrue(FString::Printf(TEXT("driven at 0 at %.1f ms ticks: %.2f cm away (more than 2)"), 1000.0 * Dt, MaxOff), MaxOff > 2.0);
+			}
+		}
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

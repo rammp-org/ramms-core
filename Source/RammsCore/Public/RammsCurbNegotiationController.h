@@ -1206,6 +1206,12 @@ private:
 	 *  speed loops hold no load without an error, which on a grade is the
 	 *  robot rolling away (RammsCurb::SpeedTrimStep). */
 	double SpeedTrim = 0.0;
+	/** The per-wheel crossing holding the robot still (the executor's command
+	 *  and target at rest: a level-in standing still, a planned stop, a hold):
+	 *  the chassis held where it was when that began (world xy, the measured
+	 *  crank pivots' midpoint), RammsCurb::RestHoldSpeed. */
+	bool	  bRestHold = false;
+	FVector2D RestHoldAt = FVector2D::ZeroVector;
 	/** The command as the measured speed follows it (two lag stages), started
 	 *  at the chassis' signed measured speed. */
 	double TrimFollowA = 0.0;
@@ -1285,8 +1291,9 @@ private:
 	/** The executor's measurement from the controller's. */
 	void GatherExecMeasure(float DeltaTime, RammsCurb::FExecMeasure& Out) const;
 	/** While the plan of a crossing begun on the move is being made: each
-	 *  wheel's braking cap short of its window (cm/s). */
-	float AwaitingBrakingCap() const;
+	 *  wheel's braking cap short of its window (cm/s); and, where asked, the
+	 *  room (cm, along the heading) to the line the level-in must be done by. */
+	float AwaitingBrakingCap(double* OutLevelRoomCm = nullptr) const;
 	/** The per-wheel crossing's plan arrived off the game thread: run it, or
 	 *  end with the plan's refusal (Faulted: at rest handing the robot back,
 	 *  on the move braking it to rest). */

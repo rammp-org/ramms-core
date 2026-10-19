@@ -33,6 +33,20 @@ namespace RammsCurb
 		Refused,
 	};
 
+	/** The planner's stage a plan came from, in the order the planner tries
+	 *  them, the best last: refused, level with planned stops (or a tilt and
+	 *  stops), tilted, level once slowed where it failed at its own speeds,
+	 *  level at its own speeds. Of two plans of one crossing the later stage
+	 *  ranks first (RammsCurb::IsBetterPlan). */
+	enum class EPlanStage : uint8
+	{
+		Refused,
+		Stops,
+		Tilt,
+		LevelSlowed,
+		Level,
+	};
+
 	/** One wheel's crossing. Distances are its centre's distance past the
 	 *  edge (cm, along the edge normal); S the chassis travel (cm). */
 	struct FWheelPlan
@@ -169,6 +183,11 @@ namespace RammsCurb
 		FString Summary;
 		/** How long the plan took (ms, wall time). */
 		double PlanMs = 0.0;
+		/** The planner's stage it came from (Refused for a refusal), and its work
+		 *  (instants of the robot model evaluated: the same for the same input,
+		 *  unlike its time). */
+		EPlanStage Stage = EPlanStage::Refused;
+		int64	   PlanWork = 0;
 
 		bool IsValid() const { return Class != EPlanClass::Refused; }
 

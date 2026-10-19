@@ -55,7 +55,9 @@ namespace RammsCurb
 			Out.Notes.Add(TEXT("no plan to run"));
 			return Out;
 		}
-		const FPlanModel		M(In);
+		FPlannerInput AtPlan = In;
+		AtPlanOrigin(AtPlan, Plan);
+		const FPlanModel		M(AtPlan);
 		const FRammsCurbTuning& T = In.Tuning;
 		const int32				N = M.NumLegs();
 		const double			Dt = FMath::Max(1e-4, Options.Dt);

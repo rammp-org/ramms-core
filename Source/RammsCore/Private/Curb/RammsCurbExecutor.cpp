@@ -4,11 +4,54 @@
 
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbTerrainFit.h"
+#include "HAL/IConsoleManager.h"
 
 namespace RammsCurb
 {
 	namespace
 	{
+		TAutoConsoleVariable<int32> CVarCurbLiftWalk(TEXT("Ramms.Curb.LiftWalk"), 1,
+			TEXT("Development: 1 (the default) a rising centre wheel's deadline takes the walk the plan has it make while it rises; 0 "
+				 "the wheel taken to move with the chassis, as before. Kept for comparison."),
+			ECVF_Default);
+
+		bool LiftWalkOn()
+		{
+			return CVarCurbLiftWalk.GetValueOnAnyThread() != 0;
+		}
+
+		TAutoConsoleVariable<int32> CVarCurbBrakeWalk(TEXT("Ramms.Curb.BrakeWalk"), 1,
+			TEXT("Development: 1 (the default) a planted centre wheel's hard braking cap takes the walk the plan has it make with the "
+				 "travel (WalkedDistance), only the walk it is sure to make (WalkAheadCm: none aft for a leg not following its command); "
+				 "0 the wheel taken to move with the chassis, as before. Kept for comparison."),
+			ECVF_Default);
+
+		bool BrakeWalkOn()
+		{
+			return CVarCurbBrakeWalk.GetValueOnAnyThread() != 0;
+		}
+
+		TAutoConsoleVariable<int32> CVarCurbEarlyLiftWaits(TEXT("Ramms.Curb.EarlyLiftWaits"), 1,
+			TEXT("Development: 1 (the default) a lift due by the time left but short of the plan's position whose permit does not hold "
+				 "waits for that position, unblocked; 0 it is blocked (its deadline slowing the robot), as before. Kept for comparison."),
+			ECVF_Default);
+
+		bool EarlyLiftWaitsOn()
+		{
+			return CVarCurbEarlyLiftWaits.GetValueOnAnyThread() != 0;
+		}
+
+		TAutoConsoleVariable<int32> CVarCurbTakeOverHeldLegs(TEXT("Ramms.Curb.TakeOverHeldLegs"), 1,
+			TEXT("Development: 1 (the default) a crossing begins with each leg's command where the controller held it while the plan was "
+				 "made (its servo lag model); 0 where the leg measures, as before (a leg settled off its command under load moves the "
+				 "stance by that much as the crossing begins). Kept for comparison."),
+			ECVF_Default);
+
+		bool TakeOverHeldLegsOn()
+		{
+			return CVarCurbTakeOverHeldLegs.GetValueOnAnyThread() != 0;
+		}
+
 		/** A trapezoid tracker: the command C moving at Cv toward Target, at most
 		 *  Speed, its speed changing by at most Accel. */
 		void TrackTrapezoid(double& C, double& Cv, double Target, double Speed, double Accel, double Dt)
@@ -171,6 +214,7 @@ namespace RammsCurb
 		}
 		M.Reset();
 		In = InInput;
+		AtPlanOrigin(In, InPlan);
 		M = MakeUnique<FPlanModel>(In);
 		Plan = InPlan;
 		Counts = FExecCounts();
@@ -186,15 +230,23 @@ namespace RammsCurb
 		}
 		Wheels.Reset();
 		Wheels.SetNum(N);
+		const bool bTakeOver = TakeOverHeldLegsOn();
 		for (int32 i = 0; i < N; ++i)
 		{
-			FExecWheel& W = Wheels[i];
+			FExecWheel&		W = Wheels[i];
+			const FExecLeg& L = Measure.Legs[i];
 			W.State = In.Legs[i].bOffGround ? ERammsCurbWheelState::Held : ERammsCurbWheelState::Planted;
 			W.Plane = 0;
 			W.bLower = In.Legs[i].bOffGround && !Plan.Wheels[i].bHeldFromStart;
-			W.CmdZ = W.TargetZ = Measure.Legs[i].XZ.Y;
+			// Each leg's command taken over where the controller holds it (its
+			// servo lag model), not where it measures: a leg held under load
+			// settles a little off its command, the further the longer the plan
+			// took, and taken from the measurement the stance would sink by that
+			// much as the crossing begins -- the approach stance, and with it the
+			// level-in, would turn on how long the plan took.
+			W.CmdZ = W.TargetZ = bTakeOver && L.bValid ? L.LagZ : L.XZ.Y;
 			W.CmdVz = 0.0;
-			W.CmdX = Measure.Legs[i].XZ.X;
+			W.CmdX = bTakeOver && L.bValid && L.bLagX ? L.LagX : L.XZ.X;
 		}
 		Phase = EExecPhase::Approach;
 		Status = TEXT("Approach");
@@ -245,6 +297,8 @@ namespace RammsCurb
 		Replan = FReplanAsk();
 		ReplanAskedAt = -TNumericLimits<double>::Max();
 		SwingRaise = 0.0;
+		SettledAt = -1.0;
+		bLoggedBaseWait = false;
 		Diag = FExecDiag();
 		Prepare();
 		bRunning = true;
@@ -279,6 +333,7 @@ namespace RammsCurb
 		const FVector2D Was = Plan.Origin + Plan.Heading * S;
 		M.Reset();
 		In = InInput;
+		AtPlanOrigin(In, InPlan);
 		M = MakeUnique<FPlanModel>(In);
 		Plan = InPlan;
 		S = FVector2D::DotProduct(Was - Plan.Origin, Plan.Heading);
@@ -597,7 +652,10 @@ namespace RammsCurb
 		for (int32 k = FMath::Clamp(FMath::CeilToInt(LastLoaded / Ds), 0, Plan.Samples.Num() - 1); k < Plan.Samples.Num(); ++k)
 		{
 			const FScheduleSample& Sm = Plan.Samples[k];
-			bool				   bHome = true;
+			// The plan's tilt eased back to level there (a tilted plan eases out
+			// over its last samples: done short of that, the base was still
+			// inclined as the crossing ended).
+			bool bHome = InclinationDeg(Sm.PitchDeg, Sm.RollDeg) <= DonePlanTiltDeg;
 			for (int32 Side = 0; Side < 2 && bHome; ++Side)
 			{
 				if (Centre[Side] != INDEX_NONE)
@@ -908,6 +966,13 @@ namespace RammsCurb
 		const FVector2D XY(L.WheelWorld.X, L.WheelWorld.Y);
 		const double	Frame = L.WheelWorld.Z - L.XZ.Y - Measure.OriginZ;
 		const double	Off = Measure.OriginZ - BCmd;
+		// A centre wheel walks as the plan has it while it rises (unless the
+		// centre wheels hold their fore/aft for a landing late): aft, it reaches
+		// each point of its profile that much more travel on, which the planner
+		// timed its lift with -- taken 1:1 with the chassis, the deadline held the
+		// robot under the plan's speed at every such lift. Only the walk it is
+		// sure to make (WalkAhead: none aft for a leg not following its command).
+		const bool bWalks = M->IsCentre(Leg) && !bCentresHeld && LiftWalkOn();
 		// The leg height (chassis frame) the profile asks at each point ahead from
 		// its window on (short of it the wheel may still be rising from the ground,
 		// as the plan has it), the chassis as the plan has it there; no height
@@ -916,12 +981,13 @@ namespace RammsCurb
 		TArray<double, TInlineAllocator<128>> Need;
 		for (double X = 0.0; X <= Span + 1e-6 && Need.Num() < 128; X += StepCm)
 		{
-			if (W.PastEdgeCm + X * Cos < P.DUp)
+			const double Along = X + (bWalks ? WalkAhead(Leg, Measure, X) : 0.0);
+			if (W.PastEdgeCm + Along * Cos < P.DUp)
 			{
 				Need.Add(-TNumericLimits<double>::Max());
 				continue;
 			}
-			const double World = M->ClearanceZ(Leg, XY + Plan.Heading * X) + SwingRaise - ExecProfileToleranceCm;
+			const double World = M->ClearanceZ(Leg, XY + Plan.Heading * Along) + SwingRaise - ExecProfileToleranceCm;
 			Need.Add(World - (Between(S + X).B + Off) - Frame);
 		}
 		// The leg's height in time: its command a trapezoid towards its target,
@@ -1226,6 +1292,41 @@ namespace RammsCurb
 		return TNumericLimits<double>::Max();
 	}
 
+	double FExecutor::WalkedDistance(int32 Leg, const FExecMeasure& Measure, double OneToOneCm) const
+	{
+		if (!M->IsCentre(Leg) || bCentresHeld || !BrakeWalkOn() || !Measure.Legs.IsValidIndex(Leg))
+		{
+			return OneToOneCm;
+		}
+		// The plan's fore/aft is a function of the travel, so the walk goes on as
+		// the robot brakes: the travel at which the wheel, walking so from where
+		// it stands (WalkAhead: only the walk it is sure to make), comes to its
+		// window -- TouchMarginCm kept for the leg's lag.
+		return WalkedRoomCm(Wheels[Leg].PastEdgeCm, Plan.Wheels[Leg].DUp, FMath::Max(0.1, M->NormalShare()), OneToOneCm,
+			[&](double A) { return WalkAhead(Leg, Measure, A); });
+	}
+
+	double WalkedRoomCm(double PastEdgeCm, double WindowCm, double Cos, double OneToOneCm, TFunctionRef<double(double)> Walk)
+	{
+		const double Most = OneToOneCm + WalkedSearchCm;
+		for (double A = 0.0; A <= Most; A += TouchStepCm)
+		{
+			if (PastEdgeCm + (A + Walk(A)) * Cos >= WindowCm)
+			{
+				return FMath::Max(0.0, A - (A > OneToOneCm ? TouchMarginCm : 0.0));
+			}
+		}
+		return Most;
+	}
+
+	double FExecutor::WalkAhead(int32 Leg, const FExecMeasure& Measure, double AheadCm) const
+	{
+		const int32		Side = M->Side(Leg);
+		const FExecLeg& L = Measure.Legs[Leg];
+		const double	XHere = Between(S).X[Side];
+		return WalkAheadCm(L.XZ.X, XHere, Between(S + AheadCm).X[Side], WalkTracking(L.XZ.X, XHere, L.bLagX, L.LagX));
+	}
+
 	double FExecutor::BrakingCap(const FExecMeasure& Measure, int32& OutLeg) const
 	{
 		const FRammsCurbTuning& T = In.Tuning;
@@ -1291,6 +1392,10 @@ namespace RammsCurb
 			if (Distance == TNumericLimits<double>::Max())
 			{
 				continue;
+			}
+			if (M->IsCentre(i) && Distance > 0.0 && (W.State == ERammsCurbWheelState::Planted || W.State == ERammsCurbWheelState::Loading))
+			{
+				Distance = WalkedDistance(i, Measure, Distance);
 			}
 			const double V = BrakingSpeed(LagBrakingDistance(static_cast<float>(Distance), static_cast<float>(VHat), DriveLagSeconds),
 				T.Deceleration);
@@ -1828,6 +1933,19 @@ namespace RammsCurb
 							bOnPosition ? FString::Printf(TEXT("on the plan's position (%.1f)"), P.SLiftStart)
 										: FString::Printf(TEXT("ahead of the plan's position (%.1f): %.2f s to its window"), P.SLiftStart,
 											  SecondsTo(S + ToWindow)));
+					}
+					else if (!bOnPosition && EarlyLiftWaitsOn())
+					{
+						// Due only by the time left (short of the plan's position): its
+						// lift may begin sooner where its permit holds, but where it does
+						// not the wheel is not blocked yet -- the plan's own position is
+						// still ahead, where the plan has the set it leaves off the ground
+						// stand. Blocked there, its deadline would slow the robot for a
+						// lift the plan has a little further on (to a crawl, at a set
+						// whose predicted margin falls away just short of where the plan
+						// lifts it).
+						W.bBlocked = false;
+						W.BlockedWhy.Reset();
 					}
 					else
 					{
@@ -2509,15 +2627,17 @@ namespace RammsCurb
 			  return FString(ExecTermName(By));
 		};
 		// Under the plan's speed by more than 2 cm/s: what holds it there, logged
-		// when that changes (at most every 0.25 s).
-		if (Phase == EExecPhase::Cross && VCmd < PlanHereV - 2.0 && Elapsed - SlowAt >= 0.25)
+		// when that changes (at most every 0.25 s) -- crossing, and levelling in
+		// on the way.
+		if ((Phase == EExecPhase::Cross || (Phase == EExecPhase::Prepare && PlanHereV > 0.0)) && VCmd < PlanHereV - 2.0 && Elapsed - SlowAt >= 0.25)
 		{
 			const FString Why = bBrakingBinds || By != EExecTerm::Plan ? Binding() : FString(TEXT("the ramp"));
 			if (Why != SlowBy)
 			{
 				SlowBy = Why;
 				SlowAt = Elapsed;
-				Log(FString::Printf(TEXT("under the plan's %.1f cm/s: held by %s"), PlanHereV, *Why));
+				Log(FString::Printf(TEXT("under the plan's %.1f cm/s%s: held by %s (%.1f)"), PlanHereV, Phase == EExecPhase::Prepare ? TEXT(", levelling in") : TEXT(""),
+					*Why, VCmd));
 			}
 		}
 		Diag.ChassisOffCm = Level.bLevelled ? Measure.OriginZ - BCmdLag - BOffset : 0.0;
@@ -2585,10 +2705,32 @@ namespace RammsCurb
 				bSettled = FMath::Abs(Measure.Legs[i].XZ.Y - Wheels[i].CmdZ) <= T.SettleTolerance + (IsSupport(i) ? M->Preload(i) : 0.0)
 					&& (!M->IsCentre(i) || FMath::Abs(Measure.Legs[i].XZ.X - Wheels[i].CmdX) <= T.SettleTolerance);
 			}
+			// And the base back at the plan's attitude (level by SEnd): the legs
+			// carry it round behind the plan, most of all at the end of a tilted
+			// plan's easing out. Rolling on in Settle until it is, for a while.
+			if (SettledAt < 0.0)
+			{
+				SettledAt = Elapsed;
+			}
+			const FPlanAt End = Between(S);
+			const bool	  bBaseBack = FMath::Abs(Measure.AttitudeDeg.X - End.Pitch) <= DoneAttitudeToleranceDeg
+				&& FMath::Abs(Measure.AttitudeDeg.Y - End.Roll) <= DoneAttitudeToleranceDeg;
+			if (bSettled && !bBaseBack && Elapsed - SettledAt < DoneAttitudeWaitSeconds)
+			{
+				bSettled = false;
+				if (!bLoggedBaseWait)
+				{
+					bLoggedBaseWait = true;
+					Log(FString::Printf(TEXT("settled, the base %+.2f / %+.2f deg off the plan's attitude: rolling on until it is within %.2f"),
+						Measure.AttitudeDeg.X - End.Pitch, Measure.AttitudeDeg.Y - End.Roll, DoneAttitudeToleranceDeg));
+				}
+			}
 			if (bSettled)
 			{
 				Phase = EExecPhase::Done;
-				Log(TEXT("done"));
+				Log(bLoggedBaseWait ? FString::Printf(TEXT("done (the base %+.2f / %+.2f deg off the plan's attitude, %.2f s past the end)"),
+										  Measure.AttitudeDeg.X - End.Pitch, Measure.AttitudeDeg.Y - End.Roll, Elapsed - SettledAt)
+									: FString(TEXT("done")));
 			}
 		}
 
@@ -2903,15 +3045,19 @@ namespace RammsCurb
 		{
 			Leg[i] = In.Legs[i].Measured;
 			LagZ[i] = Leg[i].Y;
+			// (Settled off its held command: the leg itself there, as measured.)
+			Leg[i].Y += Options.BeginOffCm;
 			Shown[i] = Leg[i].Y;
 		}
-		double			Travel = Options.StartTravelCm, Speed = FMath::Max(0.0, In.EntrySpeedCmS), Time = 0.0;
-		double			OriginZ = In.OriginZ + Options.TrueOffsetCm.X;
-		FVector2D		Attitude = In.AttitudeDeg;
-		const FVector2D H = In.Heading.GetSafeNormal();
-		auto			FrameOf = [&](double Z, const FVector2D& Att) {
-			   return ChassisFrameFrom(FVector(H.X, H.Y, 0.0), FMath::DegreesToRadians(Att.X), FMath::DegreesToRadians(Att.Y),
-						   FVector(In.Origin.X + H.X * Travel, In.Origin.Y + H.Y * Travel, Z), FVector::ZeroVector);
+		const TArray<double> HeldZ = LagZ;
+		bool				 bFirstTick = true;
+		double				 Travel = Options.StartTravelCm, Speed = FMath::Max(0.0, In.EntrySpeedCmS), Time = 0.0;
+		double				 OriginZ = In.OriginZ + Options.TrueOffsetCm.X;
+		FVector2D			 Attitude = In.AttitudeDeg;
+		const FVector2D		 H = In.Heading.GetSafeNormal();
+		auto				 FrameOf = [&](double Z, const FVector2D& Att) {
+			return ChassisFrameFrom(FVector(H.X, H.Y, 0.0), FMath::DegreesToRadians(Att.X), FMath::DegreesToRadians(Att.Y),
+								FVector(In.Origin.X + H.X * Travel, In.Origin.Y + H.Y * Travel, Z), FVector::ZeroVector);
 		};
 		auto WheelAt = [&](const FChassisFrame& F, int32 i, double Z) {
 			const double X = M.IsCentre(i) ? Leg[i].X : M.CornerX(i, Z);
@@ -2969,6 +3115,8 @@ namespace RammsCurb
 		double Peak = Speed, StopFor = 0.0;
 		Out.MinSpeedCmS = TNumericLimits<double>::Max();
 		TArray<double> StallFrom;
+		double		   MostForwardX = -TNumericLimits<double>::Max();
+		bool		   bStalledX = false;
 		Out.MaxNearCarryPastEdgeCm.Init(-TNumericLimits<double>::Max(), N);
 		// The base's attitude over the last 0.3 s (time, pitch, roll) while levelling in.
 		TArray<FVector> TurnHistory;
@@ -3006,6 +3154,14 @@ namespace RammsCurb
 			else
 			{
 				E.Tick(Meas, Level, Cmd);
+				if (bFirstTick)
+				{
+					bFirstTick = false;
+					for (int32 i = 0; i < N && i < Cmd.LegZ.Num(); ++i)
+					{
+						Out.BeginLegJumpCm = FMath::Max(Out.BeginLegJumpCm, FMath::Abs(Cmd.LegZ[i] - HeldZ[i]));
+					}
+				}
 			}
 			Time += Dt;
 			if (E.IsHalted() && HaltedFrom < 0.0)
@@ -3123,7 +3279,19 @@ namespace RammsCurb
 				Leg[i].Y = Z;
 				if (M.IsCentre(i))
 				{
-					Leg[i].X += (Cmd.LegX[i] - Leg[i].X) * FMath::Min(1.0, Dt / Tau);
+					if (i == Options.StallXLeg && !bStalledX)
+					{
+						MostForwardX = FMath::Max(MostForwardX, Cmd.LegX[i]);
+						bStalledX = Cmd.LegX[i] < MostForwardX - Options.StallXAfterCm;
+						if (bStalledX)
+						{
+							Note(FString::Printf(TEXT("%.2f s: '%s' fore/aft stalled at %+.2f cm"), Time, *In.Legs[i].Name.ToString(), Leg[i].X));
+						}
+					}
+					if (i != Options.StallXLeg || !bStalledX)
+					{
+						Leg[i].X += (Cmd.LegX[i] - Leg[i].X) * FMath::Min(1.0, Dt / Tau);
+					}
 				}
 				LagZ[i] += (Cmd.LegZ[i] - LagZ[i]) * FMath::Min(1.0, Dt / FMath::Max(1e-3, static_cast<double>(T.ServoLagSeconds)));
 			}
@@ -3318,6 +3486,13 @@ namespace RammsCurb
 					++Out.Stops;
 				}
 			}
+			{
+				const FExecDiag& Dg = E.GetDiag();
+				if ((E.GetPhase() == EExecPhase::Cross || E.GetPhase() == EExecPhase::Hold) && Dg.TargetBy == EExecTerm::Deadline && HaltedFrom < 0.0)
+				{
+					Out.MaxDeadlineUnderPlanCmS = FMath::Max(Out.MaxDeadlineUnderPlanCmS, Dg.Plan - Dg.Target);
+				}
+			}
 			if (Options.TraceEvery > 0 && (Out.Trace.Num() == 0 || FMath::RoundToInt(Time / Dt) % Options.TraceEvery == 0))
 			{
 				const FExecDiag& Dg = E.GetDiag();
@@ -3351,6 +3526,8 @@ namespace RammsCurb
 			}
 		}
 		Out.EndPhase = E.GetPhase();
+		Out.FinalAttitudeDeg = Attitude;
+		Out.FinalPlannedAttitudeDeg = E.GetPlannedAttitude();
 		Out.Counts = E.GetCounts();
 		Out.Seconds = Time;
 		Out.FinalSpeedCmS = Speed;

@@ -170,7 +170,12 @@ namespace RammsCurb
 		/** The base's attitude now (deg): pitch nose up, roll +Y side up. */
 		FVector2D AttitudeDeg = FVector2D::ZeroVector;
 		/** The chassis' speed now (cm/s): where the plan's speed starts. */
-		double			 EntrySpeedCmS = 0.0;
+		double EntrySpeedCmS = 0.0;
+		/** The robot moving as it asks (rolling on, or back: EntrySpeedCmS is
+		 *  never under 0): the robot does not wait at rest for the plan
+		 *  (PlanCrossing's work budget). An entry speed over StopSpeedCmS is
+		 *  taken as moving too. */
+		bool			 bOnTheMove = false;
 		FRammsCurbTuning Tuning;
 		/** Which centre-wheel paths the level search tries (for tests): no walk,
 		 *  the walking knots, the grid search. */
@@ -568,9 +573,50 @@ namespace RammsCurb
 	 * planned stops (Tuning.bAllowPlannedStop; at a stop the robot rests while
 	 * the centre wheels and the chassis re-pose); else a refusal (Class
 	 * Refused, Summary saying where, which wheels and why; a tilt refusal names
-	 * MaxPlannedTiltDeg). Pure: the same input gives the same plan.
+	 * MaxPlannedTiltDeg). Its samples lie on the terrain (AnchorPlanOrigin;
+	 * Ramms.Curb.AnchorGrid): the crossing is planned on two grids, side by
+	 * side on two threads -- the edge on a sample and half a sample past one
+	 * -- and the better plan kept (IsBetterPlan), so the schedule's Origin may
+	 * be up to a sample behind In.Origin, the robot that far into its plan as
+	 * it begins. A grid stops early once the other's finished plan outranks
+	 * anything its own stages left can give, and, on the move (In.bOnTheMove,
+	 * or an entry speed over StopSpeedCmS), once its work (instants evaluated) is over
+	 * OverGridBudget of the other's finished valid plan -- and a plan whose
+	 * work is so over is not kept even where it finished: which grid stopped
+	 * when depends on the threads' timing, which plan is kept does not.
+	 * Pure: the same input gives the same plan (its lines may say how far the
+	 * other grid got).
 	 */
 	FCurbSchedule PlanCrossing(const FPlannerInput& In);
+
+	/** Whether a grid whose work so far is Mine is over its budget against the
+	 *  other grid's finished plan of work Theirs (PlanCrossing, on the move):
+	 *  Mine over Ramms.Curb.GridBudget's share (at least 1) of Theirs and
+	 *  Ramms.Curb.GridBudgetWork more; never with the share 0. At most one of
+	 *  two grids is ever over against the other. */
+	bool OverGridBudget(int64 Mine, int64 Theirs);
+
+	/** The plan's origin moved back along In.Heading (under SampleCm, at the
+	 *  near surface's height) so that the travel from it to the edge is a whole
+	 *  number of samples and PhaseShare of one: the samples then lie at the
+	 *  same places on the terrain from every start. False (In unchanged) with
+	 *  no terrain, the heading not towards the edge, the origin past it, or
+	 *  already so. */
+	bool AnchorPlanOrigin(FPlannerInput& In, double SampleCm, double PhaseShare);
+
+	/** In with Plan's origin (and the near surface's height there): a plan's
+	 *  samples are laid on the terrain, its origin up to a sample behind the
+	 *  input's (PlanCrossing). A model that places the robot at the plan's
+	 *  travel S (FPlanModel) is built from this. */
+	void AtPlanOrigin(FPlannerInput& In, const FCurbSchedule& Plan);
+
+	/** Of two plans of the same crossing, whether A is the better: the later
+	 *  planner stage (EPlanStage: level at its own speeds, level slowed, tilt,
+	 *  planned stops, refused -- the class, with a level plan that had to be
+	 *  slowed ranked under one that did not), then the less inclined, the
+	 *  fewer planned stops, the higher floor speed. A plan that does not say
+	 *  its stage is ranked by its class. */
+	bool IsBetterPlan(const FCurbSchedule& A, const FCurbSchedule& B);
 
 	/**
 	 * A planner input to a file and back (development: a plan made in the

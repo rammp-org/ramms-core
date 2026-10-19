@@ -6,7 +6,10 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 #include "Hash/CityHash.h"
+#include "Async/ParallelFor.h"
 #include "Misc/ScopeExit.h"
+
+#include <atomic>
 
 namespace
 {
@@ -61,6 +64,118 @@ namespace
 		const int32 V = CVarCurbMaxTiltPlans.GetValueOnAnyThread();
 		return V > 0 ? V : TNumericLimits<int32>::Max();
 	}
+
+	TAutoConsoleVariable<float> CVarCurbPreferFloor(TEXT("Ramms.Curb.PreferFloor"), 1.3f,
+		TEXT("Development: over 0 (the default 1.3) the level search keeps trying the walking knots while its best "
+			 "level plan's floor is under this share of the floor speed, and of level plans keeps the one with the most floor up to that, "
+			 "then the widest corridor, then the most margin; 0 the first level plan found, as before. Kept for comparison."),
+		ECVF_Default);
+
+	bool PreferFloorOn()
+	{
+		return CVarCurbPreferFloor.GetValueOnAnyThread() > 0.0f;
+	}
+
+	double PreferFloorShare()
+	{
+		return FMath::Max(1.0, static_cast<double>(CVarCurbPreferFloor.GetValueOnAnyThread()));
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbGentleTilt(TEXT("Ramms.Curb.GentleTilt"), 1,
+		TEXT("Development: 1 (the default) a tilted plan that verifies is made again with its easings at GentleTiltShare of "
+			 "TiltRateDegPerSec where its speeds give them the time, and kept so where it still verifies; 0 the whole rate always, "
+			 "as before. Kept for comparison."),
+		ECVF_Default);
+
+	bool GentleTiltOn()
+	{
+		return CVarCurbGentleTilt.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbSlowBeforeTilt(TEXT("Ramms.Curb.SlowBeforeTilt"), 1,
+		TEXT("Development: 1 (the default) a tilted plan whose samples fail at its own speeds is made again slower over them (never "
+			 "under the floor) before the tilt search makes its tilt larger; 0 not, as before. Kept for comparison."),
+		ECVF_Default);
+
+	bool SlowBeforeTiltOn()
+	{
+		return CVarCurbSlowBeforeTilt.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<float> CVarCurbLandingApproach(TEXT("Ramms.Curb.LandingApproach"), 0.0f,
+		TEXT("Development: the planned chassis height moves at only LandingHeightShare of BaseHeightSpeed from this long (s) before a "
+			 "wheel's touchdown (as it does from the touchdown until LandingSettleSeconds after it has taken load); 0 (the default) "
+			 "from the touchdown, as before."),
+		ECVF_Default);
+
+	double LandingApproachSeconds()
+	{
+		return FMath::Max(0.0, static_cast<double>(CVarCurbLandingApproach.GetValueOnAnyThread()));
+	}
+
+	TAutoConsoleVariable<float> CVarCurbLiftHeightShare(TEXT("Ramms.Curb.LiftHeightShare"), 0.0f,
+		TEXT("Development: while a wheel lifts (from where its lift begins until it is clear) the planned chassis height moves at only "
+			 "this share of BaseHeightSpeed; 0 (the default) at all of it, as before."),
+		ECVF_Default);
+
+	double LiftHeightShare()
+	{
+		return FMath::Clamp(static_cast<double>(CVarCurbLiftHeightShare.GetValueOnAnyThread()), 0.0, 1.0);
+	}
+
+	TAutoConsoleVariable<float> CVarCurbLevelInAtRestShare(TEXT("Ramms.Curb.LevelInAtRestShare"), 1.3f,
+		TEXT("Development: over 0 (the default 1.3) a robot standing still whose level-in on the way would leave it under this share "
+			 "of the floor speed (its room too short for the level-in's time at that speed) levels in standing still instead, before it "
+			 "moves; 0 it levels in on the way, the plan's speed held at the floor there, as before. Kept for comparison."),
+		ECVF_Default);
+
+	double LevelInAtRestShare()
+	{
+		return static_cast<double>(CVarCurbLevelInAtRestShare.GetValueOnAnyThread());
+	}
+
+	/** A grid stopped early (PlanCrossing): its summary begins so. */
+	const TCHAR* const GridStoppedPrefix = TEXT("stopped: ");
+
+	TAutoConsoleVariable<float> CVarCurbGridBudget(TEXT("Ramms.Curb.GridBudget"), 1.5f,
+		TEXT("Development: over 0 (the default 1.5), on the move the crossing's two grids stop the one whose work (instants evaluated) "
+			 "is over this share of the other's finished valid plan's and GridBudgetWork more, and a plan so over is not kept (the "
+			 "robot does not wait seconds for the slower grid); 0 no budget, both grids' plans compared whatever they cost. "
+			 "Kept for comparison."),
+		ECVF_Default);
+
+	/** The CVar's share, or 0 for no budget. */
+	double GridBudgetShare()
+	{
+		const double V = static_cast<double>(CVarCurbGridBudget.GetValueOnAnyThread());
+		return V > 0.0 ? FMath::Max(1.0, V) : 0.0;
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbGridBudgetWork(TEXT("Ramms.Curb.GridBudgetWork"), 60000,
+		TEXT("Development: with Ramms.Curb.GridBudget, the instants a grid's work may run over that share of the other grid's finished "
+			 "plan's before it is over its budget on the move (60000, the default: a few hundred milliseconds' worth)."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarCurbSlowTiltWhenNone(TEXT("Ramms.Curb.SlowTiltWhenNone"), 1,
+		TEXT("Development: 1 (the default) where the tilt search finds no tilt within MaxPlannedTiltDeg at the plans' speeds, it is run "
+			 "again with the plans made slower where they fail (never under the floor), up to the limit, before the planned stops; 0 "
+			 "only where it found one (for a tilt a degree less), as before. Kept for comparison."),
+		ECVF_Default);
+
+	bool SlowTiltWhenNoneOn()
+	{
+		return CVarCurbSlowTiltWhenNone.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<float> CVarCurbAnchorPhase(TEXT("Ramms.Curb.AnchorPhase"), 0.0f,
+		TEXT("Development: with Ramms.Curb.AnchorGrid, the edge falls this share of a sample (0..1) past a sample rather than on one."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarCurbAnchorGrid(TEXT("Ramms.Curb.AnchorGrid"), 2,
+		TEXT("Development: 2 (the default) the crossing is planned twice, side by side, its samples laid on the terrain with the edge on "
+			 "a sample and half a sample past one (the plan's origin moved back along the heading), and the better plan kept; 1 once, the "
+			 "edge on a sample (Ramms.Curb.AnchorPhase past it); 0 from wherever the robot stands, as before. Kept for comparison."),
+		ECVF_Default);
 
 } // namespace
 
@@ -1141,6 +1256,28 @@ namespace RammsCurb
 		constexpr int32 CapAfterLevelIn = 200;
 		/** Rounds of the speed envelope (each may add caps). */
 		constexpr int32 MaxSpeedRounds = 24;
+		/** A tilted plan's easings are made at this share of TiltRateDegPerSec
+		 *  where its speeds give them the time (and the plan still verifies),
+		 *  else at the whole rate. */
+		constexpr double GentleTiltShare = 2.0 / 3.0;
+		/** A tilted plan whose samples fail at its own speeds (but stand still)
+		 *  is made again slower over them -- this share of its speed there, this
+		 *  far (cm) either side, never under the floor -- at most this many times
+		 *  before its tilt is made larger (TiltPlan). */
+		constexpr double SlowTiltShare = 0.7;
+		constexpr double SlowTiltPadCm = 20.0;
+		constexpr int32	 MaxSlowTiltRounds = 3;
+		constexpr int32	 MaxSlowTiltAttempts = 12;
+		/** The slowed tilt search looks only for a tilt at least this much (deg of
+		 *  inclination) less than the one found at the plans' speeds: a degree is
+		 *  worth the floor speed the slowing costs; a fraction of one is not. */
+		constexpr double SlowTiltGainDeg = 1.0;
+		constexpr int32	 SlowTiltLargerTries = 4;
+		/** Slowed where the search at the plans' speeds found no tilt within the
+		 *  limit: the candidates' least tilts, and this many larger tries; its
+		 *  work at most this share of the planner's before it (OverSlowWork). */
+		constexpr int32	 SlowTiltWhenNoneLargerTries = 0;
+		constexpr double SlowTiltWhenNoneWorkShare = 0.5;
 		/** Up to this many planned stops. */
 		constexpr int32 MaxStops = 4;
 		/** Each fallback (tilt; tilt and stops; stops) is planned on at most this
@@ -1309,15 +1446,42 @@ namespace RammsCurb
 			mutable TMap<int32, double> Lift;
 			mutable TMap<int32, double> Plant;
 		};
+
+		/** One crossing planned on two grids side by side (PlanCrossing): each
+		 *  grid's plan once made -- its stage and its work, then bDone -- for
+		 *  the other to read at its checks (FPlanner::Stopped). */
+		struct FGridRace
+		{
+			std::atomic<bool> bDone[2];
+			EPlanStage		  Stage[2] = { EPlanStage::Refused, EPlanStage::Refused };
+			int64			  Work[2] = { 0, 0 };
+			/** On the move: the work budget applies (OverGridBudget). */
+			bool bBudget = false;
+
+			FGridRace()
+			{
+				bDone[0].store(false);
+				bDone[1].store(false);
+			}
+
+			void Publish(int32 Slot, const FCurbSchedule& Plan)
+			{
+				Stage[Slot] = Plan.IsValid() ? Plan.Stage : EPlanStage::Refused;
+				Work[Slot] = Plan.PlanWork;
+				bDone[Slot].store(true, std::memory_order_release);
+			}
+		};
 	} // namespace
 
 	class FPlanner
 	{
 	public:
-		explicit FPlanner(const FPlannerInput& InInput)
+		explicit FPlanner(const FPlannerInput& InInput, FGridRace* InRace = nullptr, int32 InSlot = 0)
 			: In(InInput)
 			, M(InInput)
 			, T(InInput.Tuning)
+			, Race(InRace)
+			, Slot(InSlot)
 		{
 		}
 
@@ -1528,6 +1692,30 @@ namespace RammsCurb
 
 		TArray<FIntPoint> FailRanges(const FPlan& P) const;
 		bool			  TryTilt(TConstArrayView<const FPlan*> Bases, FPlan& Out, FString& OutWhy) const;
+		/** A tilt search's candidate plan (TryTilt): its stretches and their
+		 *  least tilts. */
+		struct FBaseTilt
+		{
+			const FPlan*	  Base = nullptr;
+			TArray<FIntPoint> Ranges;
+			/** Each stretch's least tilt by the ring and by the square, and
+			 *  whether each pick has one for every stretch within the limit. */
+			TArray<FVector2D> Ring, Square;
+			bool			  bRing = false, bSquare = false;
+			TArray<uint8>	  Has;
+			/** The most a stretch needs by the ring, within the limit or not
+			 *  (LeastTilt), and the least inclination either pick comes to. */
+			double	Need = 0.0;
+			double	Least = TNumericLimits<double>::Max();
+			FString Why;
+			/** The plan the least tilts were searched on. */
+			FPlan Floor;
+		};
+		/** The candidate plans' least tilts up to MaxPlannedTiltDeg, as the
+		 *  first tilt search found them: a second search up to the same limit
+		 *  (slowed, where the first found none) takes them as they are. */
+		mutable TArray<FBaseTilt> TiltBasesAtLimit;
+		mutable bool			  bTiltBasesAtLimit = false;
 		/** The samples of Base that do not stand level at the floor speed, in
 		 *  stretches, and for each the least tilt -- the least inclination of
 		 *  the base -- that keeps a pose there (Has[r]: one within
@@ -1568,7 +1756,7 @@ namespace RammsCurb
 		/** The planned tilt over P's samples at P's speeds (TiltProfile); the
 		 *  easings that do not fit, in OutTight. */
 		bool ApplyTilt(FPlan& P, TConstArrayView<FIntPoint> Ranges, TConstArrayView<FVector2D> Tilts, TArray<FTiltGap>* OutTight = nullptr,
-			TConstArrayView<uint8> Modes = {}) const;
+			TConstArrayView<uint8> Modes = {}, double RateShare = 1.0) const;
 		/** The drive stance as measured, and how it levels in: its margin, and
 		 *  whether the robot must level in standing still. False, with why,
 		 *  when it cannot drive off in it at all. */
@@ -1576,6 +1764,10 @@ namespace RammsCurb
 		/** Where a level-in that begins at once, driving off or rolling on, is
 		 *  done (S, cm). */
 		double EarlyLevelFrom() const;
+		/** Standing still, a level-in on the way that would leave the robot under
+		 *  Ramms.Curb.LevelInAtRestShare of the floor speed is made standing
+		 *  still instead (bLevelInAtRest), where the stance stands still. */
+		void LevelInAtRestIfSlow();
 		/** The level-in's least margin, by a straight move from the drive stance
 		 *  to the plan's first level pose (LevelInMarginCm; reported). */
 		void	MeasureLevelIn(const FPlan& P) const;
@@ -1619,11 +1811,45 @@ namespace RammsCurb
 		/** For the plan lines: how long each part took (s). */
 		mutable double TimeGeometry = 0.0, TimeSpeed = 0.0, TimeDp = 0.0, TimeHeight = 0.0, TimeVerify = 0.0, TimeTilt = 0.0;
 		mutable int32  CountFeasible = 0;
+		/** The plan's work: instants of the robot model evaluated (the same for
+		 *  the same input; FCurbSchedule::PlanWork). */
+		mutable int64 Work = 0;
 		/** One line per candidate tried, for the plan lines. */
 		mutable TArray<FString> Tried;
 		/** Said in the plan's summary line when the tilt planned is more than
 		 *  the least (its least did not verify at the plan's speeds). */
 		mutable FString TiltNote;
+		/** The two grids a crossing is planned on side by side (PlanCrossing),
+		 *  and which this is; the stage this grid is in (no plan it can still
+		 *  make ranks above it); and once it has stopped early, why. */
+		FGridRace*		   Race = nullptr;
+		int32			   Slot = 0;
+		mutable EPlanStage Stage = EPlanStage::Level;
+		mutable FString	   StoppedWhy;
+		/** Whether to stop: the other grid has finished with a plan that ranks
+		 *  above anything left to this one (its stage later than this one's
+		 *  now -- and, on the move, sure to be kept against this one's work),
+		 *  or, on the move, this one's work is over its budget against it.
+		 *  Either way the plan this grid would make is not the one kept, so
+		 *  stopping changes nothing but the time. Sticky. */
+		bool Stopped() const;
+		/** A grid stopped early: a refusal saying why. */
+		FCurbSchedule& StoppedPlan(FCurbSchedule& Out) const;
+		/** The tilted plans' attempts made slower (TiltPlan) left for this
+		 *  crossing: each costs a plan, so a crossing every tilt of which fails
+		 *  does not spend MaxSlowTiltRounds on each. */
+		mutable int32 SlowAttemptsLeft = MaxSlowTiltAttempts;
+		/** The slowed tilt search where none was found at the plans' speeds
+		 *  makes no plan once the planner's work is past this (instants; under 0
+		 *  no limit): SlowTiltWhenNoneWorkShare of the work before it. */
+		mutable int64 SlowWorkLimit = -1;
+		bool		  OverSlowWork() const { return SlowWorkLimit >= 0 && Work > SlowWorkLimit; }
+		/** The tilt search's second pass: its plans may be made slower over the
+		 *  samples that fail at their speeds (TiltPlan), and it looks only for a
+		 *  tilt under TiltCeilingDeg (deg of inclination; under 0 none: up to
+		 *  MaxPlannedTiltDeg). */
+		mutable bool   bSlowTilt = false;
+		mutable double TiltCeilingDeg = -1.0;
 	};
 
 	// --- setup -----------------------------------------------------------------------------
@@ -1715,7 +1941,50 @@ namespace RammsCurb
 		// begins as soon as the crossing does (the drive stance is least stable
 		// there); elsewhere it ends 30 cm short of the first window.
 		LevelFromS = In.Terrain.Near.SlopeDeg() > EarlyLevelInSlopeDeg ? EarlyLevelFrom() : LevelInLatest;
-		return ApproachStance(OutWhy);
+		if (!ApproachStance(OutWhy))
+		{
+			return false;
+		}
+		LevelInAtRestIfSlow();
+		return true;
+	}
+
+	void FPlanner::LevelInAtRestIfSlow()
+	{
+		// A robot standing still whose level-in on the way would be made under
+		// the floor speed -- the plan holds its speed at the floor there
+		// (ApplyLevelInCap: a late level-in is a slower start, not a refusal),
+		// but its room is too short for the level-in's time at that speed, and
+		// the executor's late level-in cap crawls under it -- levels in standing
+		// still instead, before it moves, where its stance stands still: the
+		// same level-in, then the crossing from rest at the plan's own speeds.
+		// A slower start, not a crawl once under way. (LevelInAtRestShare of the
+		// floor, 1.3: a level-in can run over its planned time, which the
+		// executor's late level-in cap then takes off the speed, and the
+		// measured speed lags the command.)
+		const double Share = LevelInAtRestShare();
+		if (Share <= 0.0 || bLevelInAtRest || bHoldThroughLevelIn || LevelFromS <= 0.0 || LevelInSeconds <= 0.0)
+		{
+			return;
+		}
+		const double E = FMath::Max(0.0, In.EntrySpeedCmS);
+		if (E >= StopSpeedCmS || StanceStaticMargin < Req - 1e-9)
+		{
+			return;
+		}
+		// The time to LevelFromS rising from E at Acceleration to C, then held at C.
+		const double C = FMath::Max(E + 1e-3, FMath::Min(Cruise, Share * Floor));
+		const double Acc = FMath::Max(1.0, static_cast<double>(T.Acceleration));
+		const double TRise = (C - E) / Acc;
+		const double DRise = E * TRise + 0.5 * Acc * TRise * TRise;
+		const double Time = LevelFromS <= DRise ? (FMath::Sqrt(E * E + 2.0 * Acc * LevelFromS) - E) / Acc : TRise + (LevelFromS - DRise) / C;
+		if (Time >= LevelInSeconds)
+		{
+			return;
+		}
+		bLevelInAtRest = true;
+		bLevelInAtOnce = false;
+		LevelFromS = 0.0;
 	}
 
 	double FPlanner::EarlyLevelFrom() const
@@ -2387,6 +2656,7 @@ namespace RammsCurb
 	bool FPlanner::Feasible(const FInstantQuery& Q, double BGuess, FInstantResult* Out) const
 	{
 		++CountFeasible;
+		++Work;
 		FInstantResult R = M.Evaluate(Q, BGuess);
 		// The corners' fore/aft were taken at the guess; where the corridor that
 		// gives sits well away from it, take them again at its middle.
@@ -2398,6 +2668,7 @@ namespace RammsCurb
 				break;
 			}
 			BGuess = R.B;
+			++Work;
 			const FInstantResult R2 = M.Evaluate(Q, BGuess);
 			if (R2.Hi - R2.Lo < R.Hi - R.Lo - 1e-9)
 			{
@@ -2917,6 +3188,7 @@ namespace RammsCurb
 		// What an instant keeps: its margin over the requirement and its
 		// corridor over the least, whichever is less; a pose that does not
 		// reach, or a set never lifted together, is no pose.
+		++Work;
 		const FInstantResult R = M.Evaluate(Q, BGuess);
 		++CountFeasible;
 		return R.Lo > R.Hi || !R.bReach || IsForbiddenSet(In.Model, Q.Airborne) ? -1e6 : FMath::Min(R.Margin - Req, R.Width() - T.MinCorridorCm);
@@ -3390,12 +3662,19 @@ namespace RammsCurb
 				if (!IsDwell(P, k))
 				{
 					const double S = SAt(k);
+					const double Lift = LiftHeightShare();
 					for (const FWheelPlan& W : P.Wheels)
 					{
-						if (S >= W.SDown - 0.5 * Ds && S <= W.SLoaded + V * LandingSettleSeconds)
+						if (S >= W.SDown - V * LandingApproachSeconds() - 0.5 * Ds && S <= W.SLoaded + V * LandingSettleSeconds)
 						{
 							Up[c] = Down[c] = Ds * BH * LandingHeightShare / V;
 							break;
+						}
+						if (Lift > 0.0 && !W.bHeldFromStart && S >= W.SLiftStart - 0.5 * Ds && S <= W.SClear)
+						{
+							// (Development, LiftHeightShare: while a wheel unloads the
+							// chassis moves slower too.)
+							Up[c] = Down[c] = FMath::Min(Up[c], Ds * BH * Lift / V);
 						}
 					}
 				}
@@ -3404,6 +3683,7 @@ namespace RammsCurb
 			{
 				// Known to fail already: carried through on the legs' reach alone,
 				// so that the rest of the path is still planned.
+				++Work;
 				const FInstantResult R0 = M.Evaluate(Q, BGuessAt(P, k));
 				const bool			 bBand = R0.Lo <= R0.Hi;
 				Bands[c] = bBand ? FVector2D(R0.Lo, FMath::Min(R0.Hi, R0.Lo + 80.0)) : FVector2D(-1e6, 1e6);
@@ -3471,6 +3751,7 @@ namespace RammsCurb
 				// must reach: the path aims where it would without it, kept inside.
 				FInstantQuery Q0 = Q;
 				Q0.Touching = 0;
+				++Work;
 				const FInstantResult R0 = M.Evaluate(Q0, BGuessAt(P, k));
 				if (R0.Lo <= R0.Hi)
 				{
@@ -3575,6 +3856,7 @@ namespace RammsCurb
 		};
 		// A pose: reaching, inside its margin and its corridor.
 		auto CheckPose = [&](int32 k, const FInstantQuery& Q, double B, const TCHAR* What) {
+			++Work;
 			const FInstantResult R = M.Evaluate(Q, B, true);
 			if (!R.bReach)
 			{
@@ -3593,7 +3875,8 @@ namespace RammsCurb
 		const TArray<uint8> AtStop = StopRuns(P);
 		for (int32 k = K0; k < NumS; ++k)
 		{
-			const FInstantQuery	 Q = Query(P, k, P.Air[k], P.Far[k]);
+			const FInstantQuery Q = Query(P, k, P.Air[k], P.Far[k]);
+			++Work;
 			const FInstantResult R = M.Evaluate(Q, P.B[k], true);
 			P.Margin[k] = R.Margin;
 			if (!R.bReach)
@@ -3781,7 +4064,8 @@ namespace RammsCurb
 		// its speed, or standing still: without). Reported, not required: how
 		// the legs are ordered through it is the executor's (its Prepare), and
 		// a straight move is the worst of them for a wheel coming down.
-		const int32										 K0 = Index(LevelFromS);
+		const int32 K0 = Index(LevelFromS);
+		++Work;
 		const FInstantResult							 R = M.Evaluate(Query(P, K0, P.Air[K0], P.Far[K0]), P.B[K0], true);
 		TArray<FVector2D, TInlineAllocator<MaxPlanLegs>> From, To, XZ;
 		uint32											 Down = 0, Lowered = 0;
@@ -3892,7 +4176,7 @@ namespace RammsCurb
 	}
 
 	bool FPlanner::ApplyTilt(FPlan& P, TConstArrayView<FIntPoint> Ranges, TConstArrayView<FVector2D> Tilts, TArray<FTiltGap>* OutTight,
-		TConstArrayView<uint8> Modes) const
+		TConstArrayView<uint8> Modes, double RateShare) const
 	{
 		// Each stretch's tilt held over it, eased between stretches and from and
 		// back to level on S-curves in time at the planned speed (TiltProfile):
@@ -3915,7 +4199,7 @@ namespace RammsCurb
 			Holds.Add({ Ranges[r].X, Ranges[r].Y, Tilts[r] });
 		}
 		TArray<FVector2D> Tilt;
-		const bool		  bFits = TiltProfile(Seconds, S, Holds, FMath::Max(0.1, static_cast<double>(T.TiltRateDegPerSec)),
+		const bool		  bFits = TiltProfile(Seconds, S, Holds, FMath::Max(0.1, RateShare * static_cast<double>(T.TiltRateDegPerSec)),
 				   FMath::Max(0.1, static_cast<double>(T.TiltAccelDegPerSec2)), Tilt, OutTight, Modes);
 		for (int32 k = 0; k < NumS; ++k)
 		{
@@ -4175,7 +4459,8 @@ namespace RammsCurb
 			   TArray<uint8> Modes;
 			   Modes.Init(Mode, Hold.Num() + 1);
 			   OutTightPairs.Reset();
-			   for (int32 Attempt = 0; Attempt < (Mode == 0 ? 4 : 3); ++Attempt)
+			   int32 SlowRounds = 0;
+			   for (int32 Attempt = 0; Attempt < (Mode == 0 ? 4 : 3) + (bSlowTilt ? MaxSlowTiltRounds : 0); ++Attempt)
 			   {
 				   FPlan Q = Base;
 				   for (int32 k = 0; k < NumS; ++k)
@@ -4223,6 +4508,30 @@ namespace RammsCurb
 				   Last = Q;
 				   if (IsOk(Q))
 				   {
+					   // Gentler easings where the plan's own speeds give them the
+					   // time (GentleTiltShare of TiltRateDegPerSec): the same plan,
+					   // its base turning slower, kept where it verifies so -- the
+					   // limit is a bound, and a plan easing at it leaves nothing for
+					   // the legs' lag and the landings' jolts.
+					   if (GentleTiltOn())
+					   {
+						   FPlan			G = Q;
+						   TArray<FTiltGap> GentleGaps;
+						   if (ApplyTilt(G, Hold, TiltsV, &GentleGaps, Modes, GentleTiltShare) && GentleGaps.Num() == 0)
+						   {
+							   for (int32 k = 0; k < NumS; ++k)
+							   {
+								   G.Fail[k] = G.Fail[k] == EFail::Height || G.Fail[k] == EFail::Verify ? EFail::None : G.Fail[k];
+							   }
+							   G.bHeightOk = HeightPath(G);
+							   Verify(G);
+							   G.FirstFail = FirstFailOf(G);
+							   if (IsOk(G))
+							   {
+								   Last = G;
+							   }
+						   }
+					   }
 					   return true;
 				   }
 				   bool bChanged = false;
@@ -4276,13 +4585,49 @@ namespace RammsCurb
 						   }
 					   }
 				   }
-				   if (!bChanged)
+				   if (!bChanged && bSlowTilt && SlowRounds < MaxSlowTiltRounds && SlowAttemptsLeft > 0)
+				   {
+					   --SlowAttemptsLeft;
+					   // Samples that fail at the plan's speeds but stand still (the
+					   // least tilt is taken where they stand at the floor): slower
+					   // over them, never under the floor -- a tilt is not made
+					   // larger for want of time the robot can take by slowing.
+					   ++SlowRounds;
+					   const int32 Pad = FMath::RoundToInt(SlowTiltPadCm / Ds);
+					   for (int32 k = Index(LevelFromS); k < NumS; ++k)
+					   {
+						   if (Q.Fail[k] == EFail::None || Q.Fail[k] == EFail::Static)
+						   {
+							   continue;
+						   }
+						   for (int32 j = FMath::Max(0, k - Pad); j <= FMath::Min(NumS - 1, k + Pad); ++j)
+						   {
+							   const double Want = FMath::Max(Floor, SlowTiltShare * FMath::Max(Q.V[j], Floor));
+							   if (TiltCap[j] > Want + 1e-6 && Q.V[j] > Floor + 1e-6)
+							   {
+								   TiltCap[j] = Want;
+								   bChanged = true;
+							   }
+						   }
+					   }
+				   }
+				   if (!bChanged || Stopped() || OverSlowWork())
 				   {
 					   break;
 				   }
 			   }
 			   return false;
 		};
+		if (Stopped())
+		{
+			// (Another grid's plan is kept: no attempt made.)
+			OutWhy = GridStoppedPrefix + StoppedWhy;
+			if (OutFailing)
+			{
+				OutFailing->Reset();
+			}
+			return false;
+		}
 		TArray<int32>			TightPairs;
 		FPlan					Last;
 		const TArray<FIntPoint> Holds(Ranges.GetData(), Ranges.Num());
@@ -4399,7 +4744,8 @@ namespace RammsCurb
 		// they do), each stretch's least by both picks, then planned, least
 		// inclined first (SearchTilts).
 		const double Started = FPlatformTime::Seconds();
-		const double MaxTilt = FMath::Max(0.0, static_cast<double>(T.MaxPlannedTiltDeg));
+		const double Limit = FMath::Max(0.0, static_cast<double>(T.MaxPlannedTiltDeg));
+		const double MaxTilt = TiltCeilingDeg >= 0.0 ? FMath::Min(Limit, TiltCeilingDeg) : Limit;
 		ON_SCOPE_EXIT
 		{
 			TimeTilt += FPlatformTime::Seconds() - Started;
@@ -4410,30 +4756,13 @@ namespace RammsCurb
 			return false;
 		}
 		const int32 Picks = TiltPicksMode();
-		struct FBaseTilt
-		{
-			const FPlan*	  Base = nullptr;
-			TArray<FIntPoint> Ranges;
-			/** Each stretch's least tilt by the ring and by the square, and
-			 *  whether each pick has one for every stretch within the limit. */
-			TArray<FVector2D> Ring, Square;
-			bool			  bRing = false, bSquare = false;
-			TArray<uint8>	  Has;
-			/** The most a stretch needs by the ring, within the limit or not
-			 *  (LeastTilt), and the least inclination either pick comes to. */
-			double	Need = 0.0;
-			double	Least = TNumericLimits<double>::Max();
-			FString Why;
-			/** The plan the least tilts were searched on. */
-			FPlan Floor;
-		};
-		auto SizeOf = [](TConstArrayView<FVector2D> Tilts) {
-			double Most = 0.0;
-			for (const FVector2D& Tlt : Tilts)
-			{
-				Most = FMath::Max(Most, InclinationDeg(Tlt.X, Tlt.Y));
-			}
-			return Most;
+		auto		SizeOf = [](TConstArrayView<FVector2D> Tilts) {
+			   double Most = 0.0;
+			   for (const FVector2D& Tlt : Tilts)
+			   {
+				   Most = FMath::Max(Most, InclinationDeg(Tlt.X, Tlt.Y));
+			   }
+			   return Most;
 		};
 		auto Describe = [&](const FBaseTilt& C, TConstArrayView<FVector2D> Tilts) {
 			FString Stretches;
@@ -4445,9 +4774,26 @@ namespace RammsCurb
 			return FString::Printf(TEXT("%.2f deg over %d stretch%s (%s)"), SizeOf(Tilts), C.Ranges.Num(), C.Ranges.Num() == 1 ? TEXT("") : TEXT("es"),
 				*Stretches);
 		};
+		// The candidates' least tilts: as a search up to the same limit found
+		// them, or searched now (and kept, searched up to the limit).
+		const bool		  bAtLimit = MaxTilt >= Limit - 1e-9;
+		const bool		  bCached = bAtLimit && bTiltBasesAtLimit && TiltBasesAtLimit.Num() == Bases.Num();
 		TArray<FBaseTilt> Found;
+		if (bCached)
+		{
+			Found = TiltBasesAtLimit;
+			Tried.Add(TEXT("tilt: the candidates' least tilts as the search up to the same limit found them"));
+		}
 		for (const FPlan* B : Bases)
 		{
+			if (bCached)
+			{
+				break;
+			}
+			if (Stopped())
+			{
+				return false;
+			}
 			FBaseTilt& C = Found.AddDefaulted_GetRef();
 			C.Base = B;
 			C.bRing = LeastTilt(*B, C.Ranges, C.Ring, C.Has, C.Need, C.Why, &C.Floor);
@@ -4485,6 +4831,11 @@ namespace RammsCurb
 			const double LA = TiltStep(A.Least, TiltOrderDeg), LB = TiltStep(B.Least, TiltOrderDeg);
 			return bA != bB ? bA : (bA ? LA < LB - 1e-9 : A.Need < B.Need);
 		});
+		if (bAtLimit && !bCached)
+		{
+			TiltBasesAtLimit = Found;
+			bTiltBasesAtLimit = true;
+		}
 		if (Found.Num() == 0)
 		{
 			OutWhy = TEXT("nothing to tilt for");
@@ -4534,12 +4885,20 @@ namespace RammsCurb
 			return FString::Printf(TEXT("%.2f deg larger at %s (%s, %s)"), Try.More, *Which, *Dirs, HowOf(Try, Cands[Try.Candidate].Pick));
 		};
 		const FTiltSearchResult R = SearchTilts(
-			Cands, MaxTilt, TiltGridDeg, MakeArrayView(TiltEscalationDeg), MaxTiltPlans(),
+			Cands, MaxTilt, TiltGridDeg, MakeArrayView(TiltEscalationDeg),
+			// (Slowed for a tilt less than one found, a few larger tries; slowed
+			// where none was found, the candidates' least tilts only.)
+			bSlowTilt ? (TiltCeilingDeg >= 0.0 ? FMath::Min(MaxTiltPlans(), SlowTiltLargerTries) : SlowTiltWhenNoneLargerTries) : MaxTiltPlans(),
 			[&](int32 c, int32 r, const FVector2D& D) {
 				const FBaseTilt& C = Found[Cands[c].Base];
 				return C.Ranges.IsValidIndex(r) && StandsOver(C.Floor, C.Ranges[r], D);
 			},
 			[&](const FTiltTry& Try, TArray<int32>& OutFailing) {
+				if (Stopped() || OverSlowWork())
+				{
+					// (No failing stretches: the search runs out at once.)
+					return false;
+				}
 				const FTiltSearchCandidate& SC = Cands[Try.Candidate];
 				const FBaseTilt&			C = Found[SC.Base];
 				// (The other placements of a tight easing on each pick's first
@@ -4619,7 +4978,7 @@ namespace RammsCurb
 		OutWhy = TEXT("no stretch has a tilt within MaxPlannedTiltDeg where another needs a stop");
 		const double MaxTilt = FMath::Max(0.0, static_cast<double>(T.MaxPlannedTiltDeg));
 		bool		 bFirst = true;
-		for (int32 c = 0; c < FMath::Min(MaxFallbackCandidates, Order.Num()); ++c)
+		for (int32 c = 0; c < FMath::Min(MaxFallbackCandidates, Order.Num()) && !Stopped(); ++c)
 		{
 			TArray<FIntPoint> Ranges;
 			TArray<FVector2D> Tilts;
@@ -4722,7 +5081,7 @@ namespace RammsCurb
 		TArray<const FPlan*> Order(Bases.GetData(), Bases.Num());
 		Order.StableSort([](const FPlan& A, const FPlan& B) { return A.CountStatic() < B.CountStatic(); });
 		FString First;
-		for (int32 c = 0; c < FMath::Min(MaxFallbackCandidates, Order.Num()); ++c)
+		for (int32 c = 0; c < FMath::Min(MaxFallbackCandidates, Order.Num()) && !Stopped(); ++c)
 		{
 			FString Why;
 			if (TryStops(*Order[c], Out, Why))
@@ -5191,12 +5550,13 @@ namespace RammsCurb
 							   S.PlannedTiltDeg.Y, S.PlannedStops, S.PlannedStops == 1 ? TEXT("") : TEXT("s"), S.PlannedCrossingSeconds, S.PlanMs)
 						 : FString::Printf(TEXT("per-wheel plan refused: %s (planned in %.1f ms)"), *S.Summary, S.PlanMs);
 			 const FString Note = S.IsValid() && !TiltNote.IsEmpty() ? TEXT("; ") + TiltNote : FString();
+			 S.PlanWork = Work;
 			 S.Lines.Add(Head + Note);
 			 S.Lines.Append(Tried);
 			 S.Lines.Add(FString::Printf(TEXT("plan time: geometry %.1f ms, speed %.1f, paths %.1f, heights %.1f, verify %.1f, tilt %.1f; %d "
-															   "instants"),
+															   "instants feasible, work %lld"),
 						 1000.0 * TimeGeometry, 1000.0 * TimeSpeed, 1000.0 * TimeDp, 1000.0 * TimeHeight, 1000.0 * TimeVerify, 1000.0 * TimeTilt,
-						 CountFeasible));
+						 CountFeasible, static_cast<long long>(Work)));
 			 if (S.IsValid())
 			 {
 				 S.Summary = Head + Note;
@@ -5221,40 +5581,77 @@ namespace RammsCurb
 		FPlan		  Best;
 		bool		  bHaveBest = false;
 		TArray<FPlan> Candidates;
-		auto		  Offer = [&](FPlan& P) {
-			 Candidates.Add(P);
-			 int32 Kinds[5] = { 0, 0, 0, 0, 0 };
-			 for (EFail F : P.Fail)
-			 {
-				 ++Kinds[static_cast<int32>(F)];
-			 }
-			 FString HeightNote;
-			 for (int32 k = 0; k < NumS && HeightNote.IsEmpty(); ++k)
-			 {
-				 if (P.Fail[k] == EFail::Height)
-				 {
-					 HeightNote = FString::Printf(TEXT("; height fails first at %.0f cm:"), SAt(k));
-					 for (int32 j = FMath::Max(0, k - 3); j <= FMath::Min(NumS - 1, k + 3); ++j)
-					 {
-						 HeightNote += FString::Printf(TEXT(" [%.1f..%.1f v%.0f]"), P.BLo[j] - B0, P.BHi[j] - B0, P.V[j]);
-					 }
-				 }
-			 }
-			 Tried.Add(FString::Printf(TEXT("tried %s: %s, floor %.1f cm/s; failing samples: %d standing, %d slow, %d height, %d verify%s%s%s"),
-						 *P.Name, IsOk(P) ? TEXT("level") : TEXT("not level"), P.VFloor, Kinds[1], Kinds[2], Kinds[3], Kinds[4],
-				 P.FirstFail != INDEX_NONE ? TEXT("; first: ") : TEXT(""),
-				 P.FirstFail != INDEX_NONE ? *DescribeFail(P, P.FirstFail) : TEXT(""), *HeightNote));
-			 bool bBetter = !bHaveBest;
-			 if (!bBetter)
-			 {
-				 const bool bA = IsOk(P), bB = IsOk(Best);
-				 bBetter = bA != bB ? bA : (bA ? P.VFloor > Best.VFloor + 0.05 : P.FailsLessThan(Best));
-			 }
-			 if (bBetter)
-			 {
-				 Best = P;
-				 bHaveBest = true;
-			 }
+		// Of two level plans the better: more floor up to the preferred one (to a
+		// quarter of a cm/s), then the wider narrowest corridor, then the more
+		// margin -- the plan furthest from its limits, so that a start a little
+		// different draws the same. A level plan whose floor reaches the
+		// preferred one ends the search for a faster one.
+		// The level search keeps looking (the walking knots) while its best level
+		// plan's floor is under PreferFloorShare of the floor speed (1.3: about
+		// 11.4 cm/s at the default 8.75): a plan's floor is what the drive's lag
+		// and the executor's caps then take from, and one close to the floor is
+		// not kept in a crossing that has a faster one.
+		const double PreferredFloor = FMath::Min(Cruise, PreferFloorShare() * Floor);
+		auto		 Headroom = [&](const FPlan& P) {
+			double Corridor = TNumericLimits<double>::Max(), Margin = TNumericLimits<double>::Max();
+			for (int32 k = Index(LevelFromS); k < NumS && P.BLo.IsValidIndex(k); ++k)
+			{
+				Corridor = FMath::Min(Corridor, P.BHi[k] - P.BLo[k]);
+				Margin = FMath::Min(Margin, P.Margin[k]);
+			}
+			return FVector(FMath::FloorToDouble(FMath::Min(P.VFloor, PreferredFloor) * 4.0) / 4.0, Corridor, Margin);
+		};
+		auto LevelBetter = [&](const FPlan& A, const FPlan& B) {
+			if (!PreferFloorOn())
+			{
+				return A.VFloor > B.VFloor + 0.05;
+			}
+			const FVector HA = Headroom(A), HB = Headroom(B);
+			if (HA.X != HB.X)
+			{
+				return HA.X > HB.X;
+			}
+			if (FMath::Abs(HA.Y - HB.Y) > 0.05)
+			{
+				return HA.Y > HB.Y;
+			}
+			return HA.Z > HB.Z + 0.05;
+		};
+		auto Enough = [&](const FPlan& P) { return IsOk(P) && (!PreferFloorOn() || P.VFloor >= PreferredFloor - 0.05); };
+		auto Offer = [&](FPlan& P) {
+			Candidates.Add(P);
+			int32 Kinds[5] = { 0, 0, 0, 0, 0 };
+			for (EFail F : P.Fail)
+			{
+				++Kinds[static_cast<int32>(F)];
+			}
+			FString HeightNote;
+			for (int32 k = 0; k < NumS && HeightNote.IsEmpty(); ++k)
+			{
+				if (P.Fail[k] == EFail::Height)
+				{
+					HeightNote = FString::Printf(TEXT("; height fails first at %.0f cm:"), SAt(k));
+					for (int32 j = FMath::Max(0, k - 3); j <= FMath::Min(NumS - 1, k + 3); ++j)
+					{
+						HeightNote += FString::Printf(TEXT(" [%.1f..%.1f v%.0f]"), P.BLo[j] - B0, P.BHi[j] - B0, P.V[j]);
+					}
+				}
+			}
+			Tried.Add(FString::Printf(TEXT("tried %s: %s, floor %.1f cm/s; failing samples: %d standing, %d slow, %d height, %d verify%s%s%s"),
+				*P.Name, IsOk(P) ? TEXT("level") : TEXT("not level"), P.VFloor, Kinds[1], Kinds[2], Kinds[3], Kinds[4],
+				P.FirstFail != INDEX_NONE ? TEXT("; first: ") : TEXT(""),
+				P.FirstFail != INDEX_NONE ? *DescribeFail(P, P.FirstFail) : TEXT(""), *HeightNote));
+			bool bBetter = !bHaveBest;
+			if (!bBetter)
+			{
+				const bool bA = IsOk(P), bB = IsOk(Best);
+				bBetter = bA != bB ? bA : (bA ? LevelBetter(P, Best) : P.FailsLessThan(Best));
+			}
+			if (bBetter)
+			{
+				Best = P;
+				bHaveBest = true;
+			}
 		};
 		if (In.bTryNoWalk)
 		{
@@ -5264,10 +5661,14 @@ namespace RammsCurb
 			Offer(P);
 		}
 		const bool bWalk = Centre[0] != INDEX_NONE || Centre[1] != INDEX_NONE;
-		if (bWalk && In.bTryKnots && !IsOk(Best))
+		if (bWalk && In.bTryKnots && !Enough(Best))
 		{
 			for (const FKnot& K : Knots)
 			{
+				if (Stopped())
+				{
+					break;
+				}
 				FPlan P;
 				InitPlan(P, TEXT("knots"));
 				bool bOk = true;
@@ -5283,6 +5684,7 @@ namespace RammsCurb
 				}
 				if (!bOk)
 				{
+					Tried.Add(FString::Printf(TEXT("tried knots %+.0f/%+.0f/%+.0f/%+.0f: no paths: %s"), K.XF, K.XLift, K.XLand, K.XR, *P.FailWhy));
 					continue;
 				}
 				SpeedEnvelope(P);
@@ -5291,13 +5693,13 @@ namespace RammsCurb
 				P.FirstFail = FirstFailOf(P);
 				P.Name = FString::Printf(TEXT("knots %+.0f/%+.0f/%+.0f/%+.0f"), K.XF, K.XLift, K.XLand, K.XR);
 				Offer(P);
-				if (IsOk(Best))
+				if (Enough(Best))
 				{
 					break;
 				}
 			}
 		}
-		if (bWalk && In.bTrySearch && !IsOk(Best))
+		if (bWalk && In.bTrySearch && !IsOk(Best) && !Stopped())
 		{
 			FPlan P;
 			if (bHaveBest)
@@ -5327,15 +5729,113 @@ namespace RammsCurb
 			Evaluate(P, false);
 			Offer(P);
 		}
+		if (Stopped())
+		{
+			return StoppedPlan(Out);
+		}
 		if (IsOk(Best))
 		{
 			Output(Best, EPlanClass::Level, Out);
+			Out.Stage = EPlanStage::Level;
 			Out.Lines.Add(FString::Printf(TEXT("centre wheels: %s, from %+.1f / %+.1f cm"), *Best.Name, CentreX0(0), CentreX0(1)));
 			return Done(Out);
 		}
 		const FString LevelWhy = DescribeFail(Best, Best.FirstFail);
+		// From here on no plan is level at its own speeds: where the other grid
+		// has one, this one stops (Stopped).
+		Stage = EPlanStage::LevelSlowed;
+		if (Stopped())
+		{
+			return StoppedPlan(Out);
+		}
+
+		// Then level, slower: a candidate whose samples fail at its own speeds
+		// but stand still -- the corridor of chassis heights moving faster than
+		// the chassis may follow, an easing or a walk short of time -- planned
+		// again slower over them, never under the floor (SlowTiltShare of its
+		// speed there, SlowTiltPadCm either side, at most MaxSlowTiltRounds
+		// times), before anything is tilted: level first, and slower rather than
+		// tilted. The best few candidates (as the fallbacks take them).
+		if (SlowBeforeTiltOn())
+		{
+			TArray<const FPlan*> Order;
+			Order.Add(&Best);
+			for (const FPlan& C : Candidates)
+			{
+				if (C.Name != Best.Name && Order.Num() < MaxFallbackCandidates)
+				{
+					Order.Add(&C);
+				}
+			}
+			for (const FPlan* C : Order)
+			{
+				if (Stopped())
+				{
+					return StoppedPlan(Out);
+				}
+				bool bStatic = false;
+				for (int32 k = Index(LevelFromS); k < NumS && !bStatic; ++k)
+				{
+					bStatic = C->Fail[k] == EFail::Static;
+				}
+				if (bStatic || !C->bBuilt)
+				{
+					continue;
+				}
+				FPlan		S = *C;
+				const int32 Pad = FMath::RoundToInt(SlowTiltPadCm / Ds);
+				for (int32 Round = 0; Round < MaxSlowTiltRounds && !IsOk(S) && !Stopped(); ++Round)
+				{
+					bool bSlowed = false;
+					for (int32 k = Index(LevelFromS); k < NumS; ++k)
+					{
+						if (S.Fail[k] == EFail::None)
+						{
+							continue;
+						}
+						for (int32 j = FMath::Max(0, k - Pad); j <= FMath::Min(NumS - 1, k + Pad); ++j)
+						{
+							const double Want = FMath::Max(Floor, SlowTiltShare * FMath::Max(S.V[j], Floor));
+							if (S.TiltCap[j] > Want + 1e-6 && S.V[j] > Floor + 1e-6)
+							{
+								S.TiltCap[j] = Want;
+								bSlowed = true;
+							}
+						}
+					}
+					if (!bSlowed)
+					{
+						break;
+					}
+					for (int32 k = 0; k < NumS; ++k)
+					{
+						S.Fail[k] = EFail::None;
+					}
+					Evaluate(S, false);
+				}
+				Tried.Add(FString::Printf(TEXT("tried %s slower where it failed: %s, floor %.1f cm/s"), *C->Name, IsOk(S) ? TEXT("level") : TEXT("not level"),
+					S.VFloor));
+				if (Stopped())
+				{
+					return StoppedPlan(Out);
+				}
+				if (IsOk(S))
+				{
+					S.Name = C->Name + TEXT(", slower");
+					Output(S, EPlanClass::Level, Out);
+					Out.Stage = EPlanStage::LevelSlowed;
+					Out.Lines.Add(FString::Printf(TEXT("centre wheels: %s, from %+.1f / %+.1f cm"), *S.Name, CentreX0(0), CentreX0(1)));
+					return Done(Out);
+				}
+			}
+		}
 
 		// Then the least tilt, over every candidate's centre-wheel paths.
+		Stage = EPlanStage::Tilt;
+		if (Stopped())
+		{
+			return StoppedPlan(Out);
+		}
 		TArray<const FPlan*> Bases;
 		Bases.Add(&Best);
 		for (const FPlan& C : Candidates)
@@ -5345,39 +5845,317 @@ namespace RammsCurb
 				Bases.Add(&C);
 			}
 		}
-		FPlan	Tilted;
-		FString TiltWhy;
-		if (TryTilt(Bases, Tilted, TiltWhy))
+		FPlan	   Tilted;
+		FString	   TiltWhy;
+		const bool bTilted = TryTilt(Bases, Tilted, TiltWhy);
+		if (Stopped())
+		{
+			return StoppedPlan(Out);
+		}
+		// Then the least tilt again, its plans made slower over the samples that
+		// fail at their own speeds (never under the floor; at most
+		// SlowTiltLargerTries tries made larger, MaxSlowTiltAttempts slowed
+		// attempts in all): for a tilt less than the one found at the plans'
+		// speeds (by SlowTiltGainDeg) -- a stretch is not tilted more for want of
+		// time the robot can take by slowing, level first, and a plan is not
+		// slowed where that does not take its tilt down -- and, where none was
+		// found within MaxPlannedTiltDeg at the plans' speeds, for any up to it
+		// (Ramms.Curb.SlowTiltWhenNone) before the planned stops: a tilt the
+		// limit allows is not left for want of the time slowing gives.
+		if (SlowBeforeTiltOn())
+		{
+			double Most = 0.0;
+			for (int32 k = 0; bTilted && k < NumS; ++k)
+			{
+				Most = FMath::Max(Most, InclinationDeg(Tilted.Pitch[k], Tilted.Roll[k]));
+			}
+			const bool bLess = bTilted && Most - SlowTiltGainDeg >= TiltGridDeg - 1e-9;
+			const bool bAny = !bTilted && SlowTiltWhenNoneOn();
+			if (bLess || bAny)
+			{
+				bSlowTilt = true;
+				TiltCeilingDeg = bLess ? Most - SlowTiltGainDeg : -1.0;
+				SlowWorkLimit = bAny ? Work + static_cast<int64>(SlowTiltWhenNoneWorkShare * static_cast<double>(Work)) : -1;
+				FPlan		  Slow;
+				FString		  SlowWhy;
+				const FString FastNote = TiltNote;
+				const bool	  bSlowFound = TryTilt(Bases, Slow, SlowWhy);
+				if (OverSlowWork())
+				{
+					SlowWhy += TEXT("; its work spent (SlowTiltWhenNoneWorkShare)");
+				}
+				bSlowTilt = false;
+				TiltCeilingDeg = -1.0;
+				SlowWorkLimit = -1;
+				if (Stopped())
+				{
+					return StoppedPlan(Out);
+				}
+				if (bSlowFound)
+				{
+					Output(Slow, EPlanClass::Tilt, Out);
+					Out.Stage = EPlanStage::Tilt;
+					Out.Lines.Add(bTilted ? FString::Printf(TEXT("slowed where its least tilt did not verify at its speeds: %.2f deg of inclination, where "
+																 "the plan at its speeds tilted %.2f"),
+												Out.PlannedMaxTiltDeg, Most)
+										  : FString::Printf(TEXT("slowed where its least tilt did not verify at its speeds: %.2f deg of inclination, where "
+																 "the plans at their speeds found no tilt within %.2f"),
+												Out.PlannedMaxTiltDeg, static_cast<double>(T.MaxPlannedTiltDeg)));
+					return Done(Out);
+				}
+				TiltNote = FastNote;
+				if (bAny)
+				{
+					TiltWhy += FString::Printf(TEXT("; slowed where they failed, none either: %s"), *SlowWhy);
+				}
+			}
+		}
+		if (bTilted)
 		{
 			Output(Tilted, EPlanClass::Tilt, Out);
+			Out.Stage = EPlanStage::Tilt;
 			return Done(Out);
 		}
 		// Then, where a stretch has no tilt within the limit, a planned stop
 		// there (and the least tilt elsewhere); then level with planned stops.
+		Stage = EPlanStage::Stops;
+		if (Stopped())
+		{
+			return StoppedPlan(Out);
+		}
 		FString StopWhy = TEXT("planned stops are not allowed (bAllowPlannedStop)");
 		if (T.bAllowPlannedStop)
 		{
-			FPlan	Stopped;
+			FPlan	WithStops;
 			FString MixedWhy;
-			if (TryMixed(Bases, Stopped, MixedWhy))
+			if (TryMixed(Bases, WithStops, MixedWhy))
 			{
-				Output(Stopped, EPlanClass::PlannedStop, Out);
+				Output(WithStops, EPlanClass::PlannedStop, Out);
+				Out.Stage = EPlanStage::Stops;
 				return Done(Out);
 			}
-			if (TryStopsOver(Bases, Stopped, StopWhy))
+			if (Stopped())
 			{
-				Output(Stopped, EPlanClass::PlannedStop, Out);
+				return StoppedPlan(Out);
+			}
+			if (TryStopsOver(Bases, WithStops, StopWhy))
+			{
+				Output(WithStops, EPlanClass::PlannedStop, Out);
+				Out.Stage = EPlanStage::Stops;
 				return Done(Out);
 			}
 		}
+		Stage = EPlanStage::Refused;
+		if (Stopped())
+		{
+			return StoppedPlan(Out);
+		}
 		Output(Best, EPlanClass::Refused, Out);
 		Out.Class = EPlanClass::Refused;
+		Out.Stage = EPlanStage::Refused;
 		Out.Summary = FString::Printf(TEXT("no level plan: %s; %s; and no planned stop: %s"), *LevelWhy, *TiltWhy, *StopWhy);
 		return Done(Out);
 	}
 
+	bool FPlanner::Stopped() const
+	{
+		if (!StoppedWhy.IsEmpty())
+		{
+			return true;
+		}
+		if (!Race || !Race->bDone[1 - Slot].load(std::memory_order_acquire))
+		{
+			return false;
+		}
+		const int32		 Other = 1 - Slot;
+		const EPlanStage Theirs = Race->Stage[Other];
+		if (Theirs == EPlanStage::Refused)
+		{
+			// Refused: nothing this grid makes loses to it.
+			return false;
+		}
+		// Their plan outranks anything left to this grid -- and is kept against
+		// it whatever this grid's work comes to (off the move always; on it,
+		// once this grid's work is enough that theirs can no longer be over its
+		// budget against it: it only grows).
+		if (static_cast<uint8>(Theirs) > static_cast<uint8>(Stage) && (!Race->bBudget || !OverGridBudget(Race->Work[Other], Work)))
+		{
+			StoppedWhy = FString::Printf(TEXT("the other grid's plan (%s) ranks above anything left to this one"),
+				Theirs == EPlanStage::Level ? TEXT("level") : (Theirs == EPlanStage::LevelSlowed ? TEXT("level, slowed") : (Theirs == EPlanStage::Tilt ? TEXT("tilt") : TEXT("planned stops"))));
+			return true;
+		}
+		if (Race->bBudget && OverGridBudget(Work, Race->Work[Other]))
+		{
+			StoppedWhy = FString::Printf(TEXT("its work (%lld) over the budget on the move against the other grid's plan (%lld)"), static_cast<long long>(Work),
+				static_cast<long long>(Race->Work[Other]));
+			return true;
+		}
+		return false;
+	}
+
+	FCurbSchedule& FPlanner::StoppedPlan(FCurbSchedule& Out) const
+	{
+		Out = FCurbSchedule();
+		Out.Class = EPlanClass::Refused;
+		Out.Stage = EPlanStage::Refused;
+		Out.Summary = GridStoppedPrefix + StoppedWhy;
+		Out.PlanWork = Work;
+		return Out;
+	}
+
+	bool AnchorPlanOrigin(FPlannerInput& In, double SampleCm, double PhaseShare)
+	{
+		// The travel from the chassis origin to the edge along the heading; the
+		// origin moved back by what that falls short of a whole number of
+		// samples (under one), at the near surface's height there. The plan's
+		// samples then lie at the same places on the terrain from every start --
+		// a start a fraction of a sample further on no longer moves every
+		// sample against the terrain, which made a crossing's plan (its class,
+		// tilt and floor) turn on a fraction of a centimetre -- and the robot
+		// begins under one sample into its plan.
+		const FVector2D H = In.Heading.GetSafeNormal();
+		const double	Cos = FVector2D::DotProduct(H, In.Terrain.EdgeNormal);
+		if (!In.Terrain.bValid || H.IsNearlyZero() || Cos < 1e-3 || SampleCm <= 0.0)
+		{
+			return false;
+		}
+		const double ToEdge = -In.Terrain.DistancePastEdge(In.Origin) / Cos;
+		if (ToEdge <= 0.0)
+		{
+			return false;
+		}
+		const double Phase = FMath::Clamp(PhaseShare, 0.0, 1.0) * SampleCm;
+		const double Back = SampleCm * FMath::CeilToDouble((ToEdge - Phase) / SampleCm - 1e-9) - (ToEdge - Phase);
+		if (Back <= 1e-9)
+		{
+			return false;
+		}
+		const FVector2D Was = In.Origin;
+		In.Origin -= H * Back;
+		In.OriginZ += In.Terrain.Near.HeightAt(In.Origin) - In.Terrain.Near.HeightAt(Was);
+		return true;
+	}
+
+	void AtPlanOrigin(FPlannerInput& In, const FCurbSchedule& Plan)
+	{
+		In.OriginZ += In.Terrain.Near.HeightAt(Plan.Origin) - In.Terrain.Near.HeightAt(In.Origin);
+		In.Origin = Plan.Origin;
+	}
+
+	bool OverGridBudget(int64 Mine, int64 Theirs)
+	{
+		const double Share = GridBudgetShare();
+		const double Over = static_cast<double>(FMath::Max(0, CVarCurbGridBudgetWork.GetValueOnAnyThread()));
+		return Share > 0.0 && static_cast<double>(Mine) > Share * static_cast<double>(FMath::Max<int64>(0, Theirs)) + Over;
+	}
+
+	bool IsBetterPlan(const FCurbSchedule& A, const FCurbSchedule& B)
+	{
+		auto Rank = [](const FCurbSchedule& S) {
+			if (!S.IsValid())
+			{
+				return 0;
+			}
+			if (S.Stage != EPlanStage::Refused)
+			{
+				return static_cast<int32>(S.Stage);
+			}
+			// A plan that does not say its stage: its class's.
+			return S.Class == EPlanClass::Level ? static_cast<int32>(EPlanStage::Level)
+												: static_cast<int32>(S.Class == EPlanClass::Tilt ? EPlanStage::Tilt : EPlanStage::Stops);
+		};
+		if (Rank(A) != Rank(B))
+		{
+			return Rank(A) > Rank(B);
+		}
+		if (!A.IsValid())
+		{
+			return false;
+		}
+		if (FMath::Abs(A.PlannedMaxTiltDeg - B.PlannedMaxTiltDeg) > 0.05)
+		{
+			return A.PlannedMaxTiltDeg < B.PlannedMaxTiltDeg;
+		}
+		if (A.PlannedStops != B.PlannedStops)
+		{
+			return A.PlannedStops < B.PlannedStops;
+		}
+		return A.VFloor > B.VFloor + 0.05;
+	}
+
 	FCurbSchedule PlanCrossing(const FPlannerInput& In)
 	{
+		// The plan's samples laid on the terrain (AnchorPlanOrigin): where the
+		// robot stands no longer decides where they fall against the edge. A
+		// plan sampled every centimetre still turns on where its samples fall,
+		// so it is made twice, side by side -- the edge on a sample, and half a
+		// sample past one -- and the better kept (IsBetterPlan): the same two
+		// grids from every start, and a crossing planned on either of them.
+		const int32 Anchor = CVarCurbAnchorGrid.GetValueOnAnyThread();
+		if (Anchor >= 2)
+		{
+			FPlannerInput Inputs[2] = { In, In };
+			const bool	  bAnchored[2] = { AnchorPlanOrigin(Inputs[0], 1.0, 0.0), AnchorPlanOrigin(Inputs[1], 1.0, 0.5) };
+			if (bAnchored[0] || bAnchored[1] || In.Terrain.bValid)
+			{
+				// Each grid stops once the other's finished plan is sure to be kept
+				// over anything it can still make (FPlanner::Stopped), and on the
+				// move once its work is over its budget against that plan: the
+				// robot does not wait seconds for the slower grid. Which grid stops
+				// when depends on the threads; the plan kept does not -- a plan
+				// over its budget is not kept even where it finished.
+				FCurbSchedule Plans[2];
+				FGridRace	  Race;
+				Race.bBudget = GridBudgetShare() > 0.0 && (In.bOnTheMove || In.EntrySpeedCmS > StopSpeedCmS);
+				const double Started = FPlatformTime::Seconds();
+				ParallelFor(2, [&](int32 i) {
+					FPlanner P(Inputs[i], &Race, i);
+					Plans[i] = P.Run();
+					Race.Publish(i, Plans[i]);
+				});
+				const double Wall = 1000.0 * (FPlatformTime::Seconds() - Started);
+				bool		 bKeepable[2];
+				for (int32 i = 0; i < 2; ++i)
+				{
+					const FCurbSchedule& Other = Plans[1 - i];
+					bKeepable[i] = Plans[i].IsValid() && !(Race.bBudget && Other.IsValid() && OverGridBudget(Plans[i].PlanWork, Other.PlanWork));
+				}
+				const int32			 Keep = bKeepable[0] != bKeepable[1] ? (bKeepable[1] ? 1 : 0) : (IsBetterPlan(Plans[1], Plans[0]) ? 1 : 0);
+				FCurbSchedule		 Out = MoveTemp(Plans[Keep]);
+				const FCurbSchedule& Other = Plans[1 - Keep];
+				FString				 OtherWhat;
+				if (Other.Summary.StartsWith(GridStoppedPrefix))
+				{
+					OtherWhat = Other.Summary;
+				}
+				else if (!Other.IsValid())
+				{
+					OtherWhat = TEXT("refused");
+				}
+				else
+				{
+					OtherWhat = FString::Printf(TEXT("%s, %.2f deg, floor %.1f cm/s%s"), PlanClassName(Other.Class), Other.PlannedMaxTiltDeg, Other.VFloor,
+						bKeepable[1 - Keep] ? TEXT("") : TEXT(", over its budget on the move: not kept"));
+				}
+				Out.Lines.Add(FString::Printf(TEXT("sampled with the edge %s a sample (the other grid: %s; work %lld / %lld; both planned in %.0f ms)"),
+					Keep == 0 ? TEXT("on") : TEXT("half way past"), *OtherWhat, static_cast<long long>(Out.PlanWork), static_cast<long long>(Other.PlanWork),
+					Wall));
+				if (Out.IsValid())
+				{
+					Out.Summary += FString::Printf(TEXT("; both grids in %.0f ms"), Wall);
+				}
+				return Out;
+			}
+		}
+		else if (Anchor == 1)
+		{
+			FPlannerInput Anchored = In;
+			if (AnchorPlanOrigin(Anchored, 1.0, CVarCurbAnchorPhase.GetValueOnAnyThread()))
+			{
+				FPlanner P(Anchored);
+				return P.Run();
+			}
+		}
 		FPlanner P(In);
 		return P.Run();
 	}

@@ -79,6 +79,49 @@ namespace RammsCurb
 	float AwaitingPlanCap(float ToWindowCm, float LevelInCm, float SpeedCmS, float Deceleration);
 
 	/**
+	 * The drive command one tick on while a plan made on the move is pending:
+	 * from Current, slowed (at Deceleration, never faster) towards the speed
+	 * that would cover RoomCm -- from here to the line the level-in must be
+	 * done by -- in LevelInSeconds, the level-in's time from the stance the
+	 * robot rolls in (AwaitingLevelInSeconds). AwaitingPlanCap alone keeps the
+	 * speed until the line's braking curve, so a plan that comes late finds
+	 * the robot at the line with no room left to level in on the move, and it
+	 * stops to level in; slowed so from the ask on, it keeps the level-in's
+	 * room in hand at a speed that does it -- slower, not stopped. Never
+	 * faster than Current.
+	 */
+	float AwaitingLevelInStep(float Current, float RoomCm, float LevelInSeconds, float Deceleration, float Dt);
+
+	/**
+	 * The level-in's time (s) from a drive stance inclined TurnDeg from level:
+	 * the base turned to level on an S-curve within RateDegS and AccelDegS2,
+	 * the legs' servo lag, a spare 0.3 s (as the planner times it), and
+	 * CornersDownSeconds first where the stance holds corners up to set down.
+	 */
+	float AwaitingLevelInSeconds(float TurnDeg, float RateDegS, float AccelDegS2, float LagSeconds, float CornersDownSeconds);
+
+	/** Holding the robot still in a crossing: the chassis' drive speed back
+	 *  towards where it was held from (OffCm along the heading past it), at
+	 *  RestHoldGainPerSecond, at most RestHoldMaxCmS either way -- a creep:
+	 *  a robot knocked off its place (a corner set down on a slope) is brought
+	 *  back slowly, not driven back at speed. */
+	constexpr double RestHoldGainPerSecond = 6.0;
+	constexpr double RestHoldMaxCmS = 3.0;
+
+	/**
+	 * The drive speed (cm/s) that holds the chassis still: RestHoldGainPerSecond
+	 * of how far (cm, along the heading) it has moved from where it was held,
+	 * back, at most RestHoldMaxCmS. A speed of 0 alone leaves only the wheels'
+	 * speed loops: on a slope the robot creeps until they wind up, and as the
+	 * legs move the base (setting corners down, levelling in) its chassis moves
+	 * over the wheels; held so, the wheels roll to keep it where it was.
+	 */
+	double RestHoldSpeed(double OffCm);
+	/** The level-in's first stage, the corners the stance holds up set down
+	 *  (s): what AwaitingLevelInSeconds adds for them. */
+	constexpr float LevelInCornersDownSeconds = 0.6f;
+
+	/**
 	 * The deadline speed: held for Seconds (at least MinDeadlineSeconds), it
 	 * leaves the chassis able to brake at Deceleration to a stop within
 	 * RoomCm -- v * T + v^2 / (2 * Deceleration) = RoomCm. So the work ends
@@ -357,6 +400,9 @@ namespace RammsCurb
 	 *  scrubbing), which more drive would only fight, slewing the robot. */
 	constexpr double SpeedTrimGradeDeg = 2.0;
 	constexpr double SpeedTrimFadeSeconds = 1.0;
+	/** On level ground (development, ramms.Curb.SpeedTrimLevel) the trim is
+	 *  bounded to this either way (cm/s). */
+	constexpr double SpeedTrimLevelMaxCmS = 6.0;
 	/** The most of the measured speed's shortfall (cm/s, either way) the trim
 	 *  integrates on one tick: a large one is a transient the chassis' own lag
 	 *  is still taking out (coming out of a roll back, say), not the steady

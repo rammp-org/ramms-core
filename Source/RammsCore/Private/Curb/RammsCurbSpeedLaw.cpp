@@ -24,6 +24,32 @@ namespace RammsCurb
 		return FMath::Min(Window, Line);
 	}
 
+	float AwaitingLevelInStep(float Current, float RoomCm, float LevelInSeconds, float Deceleration, float Dt)
+	{
+		const float Want = FMath::Max(0.0f, RoomCm) / FMath::Max(LevelInSeconds, 0.1f);
+		if (Current <= Want)
+		{
+			return FMath::Max(0.0f, Current);
+		}
+		return FMath::Max(Want, Current - FMath::Max(0.0f, Deceleration) * FMath::Max(0.0f, Dt));
+	}
+
+	float AwaitingLevelInSeconds(float TurnDeg, float RateDegS, float AccelDegS2, float LagSeconds, float CornersDownSeconds)
+	{
+		// The S-curve's time (as the planner's SCurveSeconds): a trapezoid in the
+		// turn rate, or a triangle when the turn is short.
+		const double D = FMath::Abs(static_cast<double>(TurnDeg));
+		const double R = FMath::Max(0.1, static_cast<double>(RateDegS));
+		const double A = FMath::Max(0.1, static_cast<double>(AccelDegS2));
+		const double Turn = D <= R * R / A ? 2.0 * FMath::Sqrt(D / A) : D / R + R / A;
+		return static_cast<float>(Turn) + FMath::Max(0.0f, LagSeconds) + 0.3f + FMath::Max(0.0f, CornersDownSeconds);
+	}
+
+	double RestHoldSpeed(double OffCm)
+	{
+		return FMath::Clamp(-RestHoldGainPerSecond * OffCm, -RestHoldMaxCmS, RestHoldMaxCmS);
+	}
+
 	float DeadlineSpeed(float RoomCm, float Seconds, float Deceleration)
 	{
 		const float Room = FMath::Max(0.0f, RoomCm);

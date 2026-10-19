@@ -9,6 +9,7 @@
 
 #include "Curb/RammsCurbPlanner.h"
 
+#include "Curb/RammsCurbExecutor.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
@@ -30,7 +31,9 @@ namespace RammsCurb
 	namespace
 	{
 		constexpr uint32 PlanInputMagic = 0x49504352; // "RCPI"
-		constexpr int32	 PlanInputVersion = 1;
+		/** 2: the robot moving as it asked (FPlannerInput::bOnTheMove); a version-1
+		 *  file reads with it false. */
+		constexpr int32 PlanInputVersion = 2;
 
 		/** A reflected struct by property name (tagged), so that a file written
 		 *  before a field was added still reads, the field at its default. */
@@ -46,7 +49,7 @@ namespace RammsCurb
 			uint32 Magic = PlanInputMagic;
 			int32  Version = PlanInputVersion;
 			Ar << Magic << Version;
-			if (Magic != PlanInputMagic || Version != PlanInputVersion)
+			if (Magic != PlanInputMagic || Version < 1 || Version > PlanInputVersion)
 			{
 				return false;
 			}
@@ -88,6 +91,10 @@ namespace RammsCurb
 			SerializeTagged(Ar, In.Terrain);
 			SerializeTagged(Ar, In.Tuning);
 			Ar << In.Origin << In.OriginZ << In.Heading << In.AttitudeDeg << In.EntrySpeedCmS << In.bTryNoWalk << In.bTryKnots << In.bTrySearch;
+			if (Version >= 2)
+			{
+				Ar << In.bOnTheMove;
+			}
 			return !Ar.IsError();
 		}
 	} // namespace
@@ -134,6 +141,19 @@ namespace RammsCurb
 		TAutoConsoleVariable<FString> CVarCurbPlanDumpPath(TEXT("Ramms.Curb.PlanDumpPath"), TEXT(""),
 			TEXT("Development: the curb controller writes the next per-wheel plan's input to this file (ramms.Curb.PlanReplay plans it again "
 				 "off the game), then clears it."),
+			ECVF_Default);
+
+		TAutoConsoleVariable<float> CVarCurbReplayExecDt(TEXT("Ramms.Curb.ReplayExecDt"), 0.0f,
+			TEXT("Development: with a tick (s) over 0, ramms.Curb.PlanReplay also runs the executor closed round its kinematic robot "
+				 "(ExecDryRun) on each plan at that tick, and writes what it did (the least commanded speed, holds, the log and a trace)."),
+			ECVF_Default);
+
+		TAutoConsoleVariable<int32> CVarCurbReplayExecTrace(TEXT("Ramms.Curb.ReplayExecTrace"), 1,
+			TEXT("Development: the executor replay's trace takes a line every this many ticks (0: none)."), ECVF_Default);
+
+		TAutoConsoleVariable<float> CVarCurbReplayShiftCm(TEXT("Ramms.Curb.ReplayShiftCm"), 0.0f,
+			TEXT("Development: ramms.Curb.PlanReplay plans each input with the robot this far (cm) further back along its heading -- the "
+				 "same pose, its chassis origin on the near surface there -- to see how a plan depends on where it starts."),
 			ECVF_Default);
 
 		/**
@@ -198,9 +218,41 @@ namespace RammsCurb
 						Row->SetStringField(TEXT("error"), FString::Printf(TEXT("cannot set %s to '%s'"), *O.Key->GetName(), *O.Value));
 					}
 				}
+				const double Shift = CVarCurbReplayShiftCm.GetValueOnGameThread();
+				if (Shift != 0.0)
+				{
+					// Further back along the heading by Shift, at the near surface's
+					// height there; the pose, the attitude and the terrain as recorded.
+					const FVector2D Was = In.Origin;
+					In.Origin -= In.Heading.GetSafeNormal() * Shift;
+					In.OriginZ += In.Terrain.Near.HeightAt(In.Origin) - In.Terrain.Near.HeightAt(Was);
+					Row->SetNumberField(TEXT("shift_cm"), Shift);
+				}
 				const double		Started = FPlatformTime::Seconds();
 				const FCurbSchedule S = PlanCrossing(In);
 				Row->SetNumberField(TEXT("wall_ms"), 1000.0 * (FPlatformTime::Seconds() - Started));
+				{
+					// What the input held (the start the plan was made from), to tell two
+					// starts apart.
+					TSharedRef<FJsonObject> Start = MakeShared<FJsonObject>();
+					Start->SetNumberField(TEXT("to_edge_cm"),
+						-In.Terrain.DistancePastEdge(In.Origin) / FMath::Max(1e-3, FVector2D::DotProduct(In.Heading.GetSafeNormal(), In.Terrain.EdgeNormal)));
+					Start->SetNumberField(TEXT("origin_z"), In.OriginZ);
+					Start->SetNumberField(TEXT("pitch"), In.AttitudeDeg.X);
+					Start->SetNumberField(TEXT("roll"), In.AttitudeDeg.Y);
+					Start->SetNumberField(TEXT("entry_speed"), In.EntrySpeedCmS);
+					Start->SetNumberField(TEXT("heading_deg"), FMath::RadiansToDegrees(FMath::Atan2(In.Heading.Y, In.Heading.X)));
+					Start->SetNumberField(TEXT("step_cm"), In.Terrain.StepHeightCm);
+					Start->SetNumberField(TEXT("approach_deg"), In.Terrain.ApproachAngleDeg);
+					TArray<TSharedPtr<FJsonValue>> Legs;
+					for (const FPlannerLeg& L : In.Legs)
+					{
+						Legs.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("%s %.2f %.2f%s"), *L.Name.ToString(), L.Measured.X, L.Measured.Y,
+							L.bOffGround ? TEXT(" off") : TEXT(""))));
+					}
+					Start->SetArrayField(TEXT("legs"), Legs);
+					Row->SetObjectField(TEXT("start"), Start);
+				}
 				Row->SetStringField(TEXT("class"), PlanClassName(S.Class));
 				Row->SetStringField(TEXT("summary"), S.Summary);
 				Row->SetNumberField(TEXT("floor"), S.VFloor);
@@ -220,6 +272,43 @@ namespace RammsCurb
 					Lines.Add(MakeShared<FJsonValueString>(L));
 				}
 				Row->SetArrayField(TEXT("schedule"), Lines);
+				const double ExecDt = CVarCurbReplayExecDt.GetValueOnGameThread();
+				if (ExecDt > 0.0 && S.IsValid())
+				{
+					// The executor on this plan, closed round its kinematic robot at the
+					// tick asked (the controller ticks once per frame).
+					FExecDryRunOptions Options;
+					Options.Dt = ExecDt;
+					Options.TraceEvery = FMath::Max(0, CVarCurbReplayExecTrace.GetValueOnGameThread());
+					const FExecDryRunResult R = ExecDryRun(In, S, Options);
+					TSharedRef<FJsonObject> Exec = MakeShared<FJsonObject>();
+					Exec->SetBoolField(TEXT("done"), R.bDone);
+					Exec->SetNumberField(TEXT("seconds"), R.Seconds);
+					Exec->SetNumberField(TEXT("min_speed"), R.MinSpeedCmS);
+					Exec->SetNumberField(TEXT("stops"), R.Stops);
+					Exec->SetNumberField(TEXT("holds"), R.Counts.Holds);
+					Exec->SetNumberField(TEXT("deadline_legs"), R.Counts.DeadlineLegs);
+					Exec->SetNumberField(TEXT("braking_ticks"), R.Counts.BrakingTicks);
+					Exec->SetNumberField(TEXT("max_tilt"), R.MaxTiltDeg);
+					Exec->SetNumberField(TEXT("deadline_under_plan"), R.MaxDeadlineUnderPlanCmS);
+					Exec->SetNumberField(TEXT("final_pitch"), R.FinalAttitudeDeg.X);
+					Exec->SetNumberField(TEXT("final_roll"), R.FinalAttitudeDeg.Y);
+					Exec->SetNumberField(TEXT("min_margin"), R.MinMarginCm);
+					Exec->SetBoolField(TEXT("faulted"), R.bFaulted);
+					Exec->SetStringField(TEXT("fault"), R.FaultWhy);
+					auto Strings = [](const TArray<FString>& In) {
+						TArray<TSharedPtr<FJsonValue>> Out;
+						for (const FString& L : In)
+						{
+							Out.Add(MakeShared<FJsonValueString>(L));
+						}
+						return Out;
+					};
+					Exec->SetArrayField(TEXT("notes"), Strings(R.Notes));
+					Exec->SetArrayField(TEXT("log"), Strings(R.Log));
+					Exec->SetArrayField(TEXT("trace"), Strings(R.Trace));
+					Row->SetObjectField(TEXT("exec"), Exec);
+				}
 				Rows.Add(MakeShared<FJsonValueObject>(Row));
 				Ar.Logf(TEXT("ramms.Curb.PlanReplay: %s: %s (%.1f ms)"), *FPaths::GetCleanFilename(File), *S.Summary, S.PlanMs);
 			}

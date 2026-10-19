@@ -220,6 +220,9 @@ namespace RammsCurb
 	 *  would meet the terrain, which is marched for every this far (cm). */
 	constexpr double TouchMarginCm = 0.5;
 	constexpr double TouchStepCm = 0.5;
+	/** A walking centre wheel's room for its braking cap is looked for this far
+	 *  (cm of travel) past where the wheel would meet its window 1:1. */
+	constexpr double WalkedSearchCm = 40.0;
 	/** A rising leg further than this (cm) from where the servo lag model has
 	 *  it is not taken to rise as the model does (a lifted leg carries nothing,
 	 *  so it follows the model closely): its cap is its window, as on the
@@ -230,6 +233,16 @@ namespace RammsCurb
 	/** A late level-in brakes the robot to rest this far (cm) short of the
 	 *  first lift's start. */
 	constexpr double LevelInStopShortCm = 1.0;
+	/** The crossing is done no sooner than where the plan's base is back within
+	 *  this (deg, its inclination) of level: a tilted plan eases out over its
+	 *  last samples, and done short of that the base was still inclined. */
+	constexpr double DonePlanTiltDeg = 0.05;
+	/** And no sooner than the base measured within this (deg, pitch and roll
+	 *  each) of the plan's attitude there -- the legs carry the base round a
+	 *  servo lag and more behind the plan -- waiting for that, rolling on in
+	 *  Settle, at most DoneAttitudeWaitSeconds. */
+	constexpr double DoneAttitudeToleranceDeg = 0.75;
+	constexpr double DoneAttitudeWaitSeconds = 1.5;
 
 	/** The time it takes a loaded wheel to come off the ground once its lift
 	 *  begins (s): a descent's deadline. A lift still on the ground after
@@ -288,6 +301,35 @@ namespace RammsCurb
 	constexpr double LagSlowCm = 4.0;
 	/** The least speed (cm/s) v_track slows to, as a fraction of the plan's. */
 	constexpr double LagSlowFraction = 0.25;
+
+	/** Whether a centre leg follows its command, for WalkAheadCm: its fore/aft
+	 *  XNow within TrackingErrorCm of its servo lag model's (LagX, where it has
+	 *  one: bLagX) and within LagFreeCm of the plan's here (XHere). */
+	inline bool WalkTracking(double XNow, double XHere, bool bLagX, double LagX)
+	{
+		return (!bLagX || FMath::Abs(XNow - LagX) <= TrackingErrorCm) && FMath::Abs(XNow - XHere) <= LagFreeCm;
+	}
+
+	/** A centre wheel's fore/aft (chassis frame, cm; + forward) some travel on,
+	 *  less where it is now (XNow) -- at most what it can be, so the wheel is
+	 *  taken to reach any point ahead no later than it can -- with the plan's
+	 *  fore/aft here XHere and there XThere. Following its command (bTracking,
+	 *  WalkTracking): the walk the plan has from its own point here on (a lag
+	 *  behind the plan's walk holds or shrinks as the robot brakes, so it is
+	 *  not walk to come; a wheel ahead of the plan's aft walk may stay so), and
+	 *  forward as far as the plan's there. Not following it (stalled): no walk
+	 *  aft at all, and forward as far as the plan's there. */
+	inline double WalkAheadCm(double XNow, double XHere, double XThere, bool bTracking)
+	{
+		return bTracking ? XThere - FMath::Min(XNow, XHere) : FMath::Max(0.0, XThere - XNow);
+	}
+
+	/** A walking wheel's room to its window (cm of travel): the least travel A
+	 *  (every TouchStepCm, up to OneToOneCm + WalkedSearchCm) at which it,
+	 *  PastEdgeCm past the edge now and Walk(A) further forward then, comes to
+	 *  WindowCm (Cos the heading's share along the edge normal); TouchMarginCm
+	 *  less where that is past OneToOneCm (the room taken 1:1). */
+	double WalkedRoomCm(double PastEdgeCm, double WindowCm, double Cos, double OneToOneCm, TFunctionRef<double(double)> Walk);
 
 	/** Where the executor is: the controller's phase. */
 	enum class EExecPhase : uint8
@@ -714,6 +756,23 @@ namespace RammsCurb
 		 *  it has, and none while the centre wheels hold their fore/aft for a
 		 *  late landing. 0 for any other wheel. */
 		double WalkCredit(int32 Leg, const FExecMeasure& Measure, double RoomCm) const;
+		/** A planted centre wheel's room to its window (cm of travel along the
+		 *  heading) for its hard braking cap: OneToOneCm (taken 1:1 with the
+		 *  chassis) made the travel at which the wheel, walking as WalkAhead has
+		 *  it -- a function of the travel, so on as the robot brakes -- reaches
+		 *  its window (aft, more room, less TouchMarginCm; forward, less). The
+		 *  1:1 room while the centre wheels hold their fore/aft. */
+		double WalkedDistance(int32 Leg, const FExecMeasure& Measure, double OneToOneCm) const;
+		/** Centre wheel Leg's fore/aft (chassis frame, cm; + forward) AheadCm
+		 *  more travel on, less where it is now -- at most what it can be, so the
+		 *  wheel is taken to reach any point ahead no later than it can: the walk
+		 *  the plan has from its own point here on (a lag behind the plan's walk
+		 *  is not walk to come; a wheel ahead of the plan's aft walk is taken to
+		 *  stay so), and forward at least to the plan's fore/aft there. A leg off
+		 *  its servo lag model's fore/aft (by TrackingErrorCm), or more than
+		 *  LagFreeCm off the plan's, is taken not to walk aft at all (stalled, it
+		 *  would not). */
+		double WalkAhead(int32 Leg, const FExecMeasure& Measure, double AheadCm) const;
 		/** The highest the chassis origin may be commanded (world, cm) for
 		 *  support leg Leg to still reach its wheel's ground with its preload,
 		 *  LegRangeMargin kept, in the attitude Ahead; the largest double when
@@ -804,8 +863,13 @@ namespace RammsCurb
 		double RampAccel = 1.0;
 		double RampSpan = 0.0;
 		/** Where the crossing is done (S, cm): every wheel loaded on the far side,
-		 *  the rear tyres FinishClearance past the edge, the centre wheels home. */
+		 *  the rear tyres FinishClearance past the edge, the centre wheels home,
+		 *  the plan's base back to level. And when (s since Begin) the robot was
+		 *  first in Settle past it (-1 not yet): done once the base too is back
+		 *  at the plan's attitude, or DoneAttitudeWaitSeconds on. */
 		double SEnd = 0.0;
+		double SettledAt = -1.0;
+		bool   bLoggedBaseWait = false;
 		/** The next planned stop (sample), and whether the robot is resting at it
 		 *  (and since when). */
 		int32  NextStop = INDEX_NONE;
@@ -879,6 +943,9 @@ namespace RammsCurb
 	{
 		bool   bDone = false;
 		double Seconds = 0.0;
+		/** The most a leg's command on the executor's first tick is off where
+		 *  the leg's command was held before it began (cm). */
+		double BeginLegJumpCm = 0.0;
 		/** The least commanded speed once risen from rest, and the stops (2 cm/s
 		 *  or less for 0.2 s) after first motion. */
 		double		MinSpeedCmS = 0.0;
@@ -943,6 +1010,13 @@ namespace RammsCurb
 		 *  the world's surface under it (cm; negative pressed in). */
 		TArray<double> HaltHeldPressCm;
 		TArray<double> FinalBottomCm;
+		/** The base's attitude (deg; pitch, roll) when the run ended (at Done,
+		 *  for a run that got there), and the plan's there. */
+		FVector2D FinalAttitudeDeg = FVector2D::ZeroVector;
+		FVector2D FinalPlannedAttitudeDeg = FVector2D::ZeroVector;
+		/** The most (cm/s) a wheel's deadline held the target under the plan's own
+		 *  speed there, crossing (Cross or Hold). */
+		double MaxDeadlineUnderPlanCmS = 0.0;
 	};
 
 	/**
@@ -972,6 +1046,14 @@ namespace RammsCurb
 		/** Leg StallLeg's lift stops this far up (cm) from where it began. */
 		int32  StallLeg = INDEX_NONE;
 		double StallAtCm = 0.0;
+		/** Centre leg StallXLeg's fore/aft stops where it is once its command has
+		 *  walked StallXAfterCm (cm) aft of the most forward it has been. */
+		int32  StallXLeg = INDEX_NONE;
+		double StallXAfterCm = 0.5;
+		/** As the crossing begins every leg's height measures this much (cm)
+		 *  off where its command holds it -- settled under load while the plan
+		 *  was made -- its servo lag model on the command. */
+		double BeginOffCm = 0.0;
 		/** The legs (bit per leg) whose plant -- going down onto the far surface --
 		 *  lags SlowPlantScale times as much as the rest. */
 		uint32 SlowPlantLegs = 0;

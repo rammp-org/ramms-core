@@ -50,6 +50,13 @@ static TAutoConsoleVariable<int32> CVarRammsCurbSpeedTrim(
 		TEXT("command, on a grade -- to the carrying driven wheels (1, the default), or not (0)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRammsCurbSpeedTrimLevel(
+	TEXT("ramms.Curb.SpeedTrimLevel"),
+	0,
+	TEXT("Curb crossing (per-wheel gait): the speed trim on level ground too, at most RammsCurb::SpeedTrimLevelMaxCmS\n")
+		TEXT("either way (1), or on a grade only (0, the default)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarRammsCurbSideways(
 	TEXT("ramms.Curb.SidewaysDrive"),
 	1,
@@ -57,6 +64,26 @@ static TAutoConsoleVariable<int32> CVarRammsCurbSideways(
 		TEXT("partly sideways, while they carry on both sides and no main wheel does (1, the default; also off with\n")
 			TEXT("CrossTrackGainDegPerCm 0), or not (0)."),
 	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRammsCurbAwaitLevelRoom(
+	TEXT("ramms.Curb.AwaitLevelRoom"),
+	1,
+	TEXT("Curb crossing (per-wheel gait): while a plan made on the move is pending, slow the robot from the ask on to the\n")
+		TEXT("speed that leaves its level-in room to be made on the move (1, the default), or keep its speed until the\n")
+			TEXT("level-in line's braking curve (0, as before)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRammsCurbRestHold(
+	TEXT("ramms.Curb.RestHold"),
+	1,
+	TEXT("Curb crossing (per-wheel gait): while the executor holds the robot still (a level-in standing still, a planned\n")
+		TEXT("stop, a hold: its command at 0), hold the chassis where it was (1, the default: RammsCurb::RestHoldSpeed), or\n")
+			TEXT("drive the wheels at 0 (0, as before: their speed loops only)."),
+	ECVF_Default);
+
+/** A corner whose wheel stands this far (cm) over the near surface is held up
+ *  by the drive stance: its level-in begins by setting it down. */
+static constexpr float LevelInCornerUpCm = 2.0f;
 
 static TAutoConsoleVariable<int32> CVarRammsCurbSlopeFallbackDrive(
 	TEXT("ramms.Curb.SlopeFallbackDrive"),
@@ -1863,6 +1890,9 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 		W.RollForward = FMath::Cos(FMath::DegreesToRadians(Leg.Wheel.RollDirectionDeg));
 	}
 	In.EntrySpeedCmS = RammsCurb::EntrySpeed(Entry, Telemetry && Telemetry->Motion.IsFull(), Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f);
+	// Moving (rolling on, or back on a slope the stance does not hold).
+	const float Moving = Telemetry && Telemetry->Motion.IsFull() ? Telemetry->Motion.GetSpeed() : 0.0f;
+	In.bOnTheMove = In.EntrySpeedCmS > RammsCurb::StopSpeedCmS || Moving < -RammsCurb::StopSpeedCmS;
 }
 
 bool URammsCurbNegotiationController::PerAxleAccepts(const FRammsCurbProfile& Profile, FString& OutReason) const
@@ -3233,6 +3263,7 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	SpeedTrim = 0.0;
 	MaxAbsSpeedTrim = 0.0;
 	MaxAbsCrossTrackCm = 0.0;
+	bRestHold = false;
 	// A crossing before this one stopped: nothing of it runs on.
 	bStopping = false;
 	StopElapsed = 0.0;
@@ -4287,7 +4318,16 @@ float URammsCurbNegotiationController::PerWheelSteering(float DeltaTime, double 
 	if (CVarRammsCurbSpeedTrim.GetValueOnGameThread() != 0)
 	{
 		const double Measured = bValid ? Telemetry->Motion.GetSpeed() : 0.0;
-		SpeedTrim = RammsCurb::SpeedTrimStep(SpeedTrim, DriveSpeed, Followed, Measured, bValid, bOnGrade, DeltaTime);
+		// (Development, ramms.Curb.SpeedTrimLevel: on level ground too, where the
+		// chassis also runs short of its command at low speeds; bounded there,
+		// a larger trim from a grade fading down to the bound.)
+		const bool bTrimLevel = CVarRammsCurbSpeedTrimLevel.GetValueOnGameThread() != 0;
+		SpeedTrim = RammsCurb::SpeedTrimStep(SpeedTrim, DriveSpeed, Followed, Measured, bValid, bOnGrade || bTrimLevel, DeltaTime);
+		if (bTrimLevel && !bOnGrade && FMath::Abs(SpeedTrim) > RammsCurb::SpeedTrimLevelMaxCmS)
+		{
+			SpeedTrim = FMath::Sign(SpeedTrim)
+				* FMath::Max(RammsCurb::SpeedTrimLevelMaxCmS, FMath::Abs(SpeedTrim) * FMath::Exp(-DeltaTime / RammsCurb::SpeedTrimFadeSeconds));
+		}
 		// The trim carries a grade's load at the speed asked; it does not take the
 		// chassis past the hard braking cap: running faster than that, the trim
 		// forward goes.
@@ -4895,7 +4935,7 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 	}
 }
 
-float URammsCurbNegotiationController::AwaitingBrakingCap() const
+float URammsCurbNegotiationController::AwaitingBrakingCap(double* OutLevelRoomCm) const
 {
 	// Before the plan: no wheel goes into its window -- each braked, allowing
 	// for the chassis running a lag behind its command, short of where a
@@ -4925,6 +4965,12 @@ float URammsCurbNegotiationController::AwaitingBrakingCap() const
 	if (ToFirst < TNumericLimits<double>::Max())
 	{
 		Cap = FMath::Min(Cap, RammsCurb::AwaitingPlanCap(static_cast<float>(ToFirst), static_cast<float>(RammsCurb::LevelBeforeEdgeCm / Cos), Speed, Tuning.Deceleration));
+	}
+	if (OutLevelRoomCm)
+	{
+		*OutLevelRoomCm = ToFirst < TNumericLimits<double>::Max()
+			? ToFirst - RammsCurb::LevelBeforeEdgeCm / Cos - RammsCurb::LevelCapMarginCm
+			: TNumericLimits<double>::Max();
 	}
 	return Cap;
 }
@@ -5250,7 +5296,23 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 			}
 			CommandPerWheelLegs(Z, X);
 			PredictLegRates(DeltaTime);
-			const float Cap = AwaitingBrakingCap();
+			double		LevelRoom = TNumericLimits<double>::Max();
+			const float Cap = AwaitingBrakingCap(&LevelRoom);
+			// Slowed from the ask on to the speed that leaves the level-in, from the
+			// stance it rolls in, its room in hand: a plan that comes late then
+			// finds the robot slower but still with room to level in on the move,
+			// rather than at the line, where it must stop to.
+			if (LevelRoom < TNumericLimits<double>::Max() && CVarRammsCurbAwaitLevelRoom.GetValueOnGameThread() != 0)
+			{
+				bool bCornersUp = false;
+				for (const FLegState& State : LegState)
+				{
+					bCornersUp = bCornersUp || (!State.FiveBar && State.bHasWorld && State.WheelBottom > LevelInCornerUpCm);
+				}
+				const float LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(), Tuning.TiltRateDegPerSec,
+					Tuning.TiltAccelDegPerSec2, Tuning.ServoLagSeconds, bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
+				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Tuning.Deceleration, DeltaTime);
+			}
 			DriveSpeed = FMath::Max(0.0f, FMath::Min(DriveSpeed, Cap));
 			const float YawRate = PerWheelSteering(DeltaTime, Cap);
 			CommandWheels(DriveSpeed, YawRate, static_cast<float>(SpeedTrim), static_cast<float>(LateralCmd));
@@ -5414,7 +5476,28 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	PredictLegRates(DeltaTime);
 	DriveSpeed = static_cast<float>(Cmd.DriveSpeed);
 	const float YawRate = PerWheelSteering(DeltaTime, FMath::Min(Executor->GetDiag().Braking, CommitCap));
-	CommandWheels(DriveSpeed, YawRate, static_cast<float>(SpeedTrim), static_cast<float>(LateralCmd));
+	// Held still (the command at rest: a level-in standing still, a planned
+	// stop, a hold, a cap at zero): the chassis held where it was when that
+	// began, the wheels rolling as the legs move the base over them.
+	float	   WheelSpeed = DriveSpeed;
+	const auto ExecPhase = Executor->GetPhase();
+	const bool bStill = CVarRammsCurbRestHold.GetValueOnGameThread() != 0 && Telemetry && Telemetry->Motion.HasSample() && Cmd.DriveSpeed <= 0.0
+		&& (ExecPhase == RammsCurb::EExecPhase::Prepare || ExecPhase == RammsCurb::EExecPhase::Cross || ExecPhase == RammsCurb::EExecPhase::Hold);
+	if (bStill)
+	{
+		const FVector2D At = Telemetry->Motion.GetPosition();
+		if (!bRestHold)
+		{
+			bRestHold = true;
+			RestHoldAt = At;
+		}
+		WheelSpeed = static_cast<float>(RammsCurb::RestHoldSpeed(FVector2D::DotProduct(At - RestHoldAt, FVector2D(Heading.X, Heading.Y).GetSafeNormal())));
+	}
+	else
+	{
+		bRestHold = false;
+	}
+	CommandWheels(WheelSpeed, YawRate, static_cast<float>(SpeedTrim), static_cast<float>(LateralCmd));
 	RecordRunTick(DeltaTime, LegError);
 	if (Executor->HasFault())
 	{
