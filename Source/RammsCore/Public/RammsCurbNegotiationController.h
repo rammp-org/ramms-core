@@ -22,6 +22,7 @@ namespace RammsCurb
 	struct FTerrainFitInput;
 	struct FTerrainWheel;
 	struct FFarDepthNeed;
+	struct FRobotModel;
 } // namespace RammsCurb
 
 /**
@@ -75,6 +76,23 @@ namespace RammsCurb
  * waits for it. A level-in that runs late slows the robot (it comes to rest
  * no nearer the edge than that line, allowing for the chassis running a lag
  * behind its command) rather than faulting.
+ *
+ * Every plan keeps the robot standing well inside its wheels. The robot's
+ * centre of mass (Tuning.CenterOfMass, moved by the mass each leg carries with
+ * its wheel, FRammsCurbLeg::MovingMassKg against Tuning.RobotMassKg) must stay
+ * at least Tuning.MinStabilityMargin inside the contacts of the wheels on the
+ * ground in every pose a lift holds while driving, allowing for the shift of
+ * braking at Deceleration or speeding up at Acceleration (h a / g, its height h
+ * over the contacts): a two-dimensional margin, so a lift is checked across the
+ * robot as well as along it. (A lift that must start standing still keeps at
+ * least the smaller of Tuning.LiftOffMargin and MinStabilityMargin standing
+ * still.) Each wheel touches where its tread meets the surface: on a slope
+ * across it, at its uphill rim. The stance the robot drives up in, which is
+ * the drive mode's, is not checked: its margin, evaluated as if level, is
+ * recorded with the lifts' (the run stats' MinPlannedMarginCm), and on a
+ * sloped approach, where the chassis drives it tilted, it can be the least of
+ * the crossing. The same margin is measured on every tick of a crossing
+ * (GetStabilityMargin, and the run stats).
  *
  * Speed comes from overlapping the steps rather than from moving any one leg
  * fast: the robot keeps rolling while legs reposition and lift. It slows
@@ -323,6 +341,17 @@ public:
 	 *  plan made without crossing (CheckFeasibility). */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	TArray<FRammsCurbWheelStatus> GetWheelStatus() const;
+
+	/** The robot's stability margin as last measured in a crossing (cm): how
+	 *  far inside the contacts of its wheels on the ground (their convex hull)
+	 *  its centre of mass stands, projected straight down, less the shift of
+	 *  braking at Tuning.Deceleration or speeding up at Tuning.Acceleration
+	 *  (whichever leaves less); negative outside. The centre of mass is the
+	 *  robot model's (Tuning.CenterOfMass, each leg's MovingMassKg) at the
+	 *  measured legs. It keeps the last crossing's value once that ends; 0
+	 *  before any. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	float GetStabilityMargin() const { return LiveMarginCm; }
 
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("curb"); }
@@ -674,7 +703,8 @@ private:
 	 * begins.
 	 */
 	bool PlanLiftCorridor(ERammsCurbAxle Axle, TArrayView<const FGoalSet> Sets, float PreferredHeight, float PreferredCenterX,
-		float MinShift, float& OutHeight, TArray<float>& OutLegX, float& OutShift, FCorridorPath& OutPath, FString& OutReason) const;
+		float MinMargin, float& OutHeight, TArray<float>& OutLegX, float& OutShift, float& OutMargin, FCorridorPath& OutPath,
+		FString& OutReason) const;
 
 	/** For a step that follows its corridor: the chassis' offset from its
 	 *  plan height (CorridorShiftCmd) moved towards its planned path a servo
@@ -683,11 +713,38 @@ private:
 	void UpdateCorridor(float DeltaTime);
 
 	/** Pick the chassis height and centre-wheel offsets that hold every one
-	 *  of Sets while Axle is lifted, with the centre wheels' mean at least
-	 *  MinShift past the centre of mass towards PreferredCenterX. */
+	 *  of Sets while Axle is lifted, each 5-bar as near PreferredCenterX as it
+	 *  reaches, with the robot's stability margin (PlannedMargin) at least
+	 *  MinMargin in each: braking or speeding up as it drives, or standing
+	 *  still (bStanding). OutShift: the centre wheels' mean past the centre of
+	 *  mass towards PreferredCenterX; OutMargin: the least margin. */
 	bool PlanLift(ERammsCurbAxle Axle, TArrayView<const FGoalSet> Sets, float ChassisFloor, float PreferredHeight,
-		float PreferredCenterX, float MinShift, float& OutHeight, TArray<float>& OutLegX, float& OutShift,
-		FString& OutReason) const;
+		float PreferredCenterX, float MinMargin, bool bStanding, float& OutHeight, TArray<float>& OutLegX, float& OutShift,
+		float& OutMargin, FString& OutReason) const;
+
+	/**
+	 * The robot's stability margin (cm, RammsCurb::PoseMargin) in a planned
+	 * pose: the chassis level at plan height BaseHeight, each leg at its goal
+	 * in Goals over the middle of its terrain offsets -- SampleOffset's (one
+	 * per leg: a corridor sample's, FGoalSpan::SampleOffset) where that has a
+	 * range for it, else the whole stretch's Span gives it -- (a lifted leg at
+	 * its carry height, a held one where it began), each 5-bar at its LegX;
+	 * the support legs those whose goal is Support, or Hold for an axle that
+	 * began on the ground. With the shift of braking or speeding up unless
+	 * bStanding.
+	 */
+	float PlannedMargin(const FAxleGoal Goals[3], float BaseHeight, const TArray<float>& LegX, const FGoalSpan* Span,
+		bool bStanding, TConstArrayView<FVector2D> SampleOffset = TConstArrayView<FVector2D>()) const;
+
+	/**
+	 * The least shift (cm) of the centre wheels past Tuning.CenterOfMassX,
+	 * towards the axle Axle lifts, that the robot model needs for a margin of
+	 * MinMargin (PlannedMargin) in every one of Sets at plan height
+	 * BaseHeight, whatever the legs reach; NaN when no shift up to 30 cm
+	 * gives it, 0 for the centre axle (the robot then stands on its corners).
+	 * For refusal reasons that say what a placement would need.
+	 */
+	float RequiredCentreShift(ERammsCurbAxle Axle, TArrayView<const FGoalSet> Sets, float BaseHeight, float MinMargin, bool bStanding) const;
 
 	/** Measure the chassis and every wheel; false, with why, when the robot
 	 *  cannot be measured: a wheel or pivot with no transform (none yet), or
@@ -765,8 +822,10 @@ private:
 	/** The least gap between a lifted, clear wheel and the terrain under it,
 	 *  when one is being carried across; false when none is. */
 	bool MeasureSwingClearance(float& OutCm) const;
-	/** The per-axle gait's stability margin along the chassis while an axle
-	 *  is lifted; false when none is. */
+	/** The robot's stability margin as measured this tick (GetStabilityMargin):
+	 *  the robot model's centre of mass at the measured legs, through the
+	 *  measured chassis pose, against the contacts of the wheels planted
+	 *  (IsLegPlanted); false when none is. */
 	bool MeasureStabilityMargin(float& OutCm) const;
 
 	UPROPERTY(Transient)
@@ -794,6 +853,12 @@ private:
 	/** The chassis' own horizontal forward, as last measured (Heading is the
 	 *  one it holds). */
 	FVector ChassisForward = FVector::ForwardVector;
+	/** The chassis' origin and axes in the world, as last measured (X forward,
+	 *  Y towards +Y, Z up out of the belly). */
+	FVector ChassisOriginWorld = FVector::ZeroVector;
+	FVector ChassisAxisX = FVector::ForwardVector;
+	FVector ChassisAxisY = FVector::RightVector;
+	FVector ChassisAxisZ = FVector::UpVector;
 	/** World height of the ground the manoeuvre started on: the lowest wheel
 	 *  bottom. The plan's chassis heights are reckoned from it, plus the
 	 *  terrain reference (TerrainReferenceCmd). */
@@ -847,6 +912,9 @@ private:
 	 *  the robot back on the next tick, outside the selector's switch. */
 	bool bHandBackPending = false;
 
+	/** The stability margin last measured in a crossing (GetStabilityMargin). */
+	float LiveMarginCm = 0.0f;
+
 	/** What the last plan called for, for the run stats: its slowest step,
 	 *  and the least stability margin it allowed (when it planned one). */
 	float PlannedMinSpeed = 0.0f;
@@ -896,4 +964,8 @@ private:
 	/** The level base: the attitude loop, the surfaces' biases and whether
 	 *  the level-in is done (Private/Curb). */
 	TPimplPtr<RammsCurb::FLevelState> Level;
+
+	/** The robot model: each 4-bar's table, the centre of mass and the legs'
+	 *  moving masses, the belly (Private/Curb); built with the legs. */
+	TPimplPtr<RammsCurb::FRobotModel> Model;
 };

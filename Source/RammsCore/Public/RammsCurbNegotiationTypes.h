@@ -126,6 +126,23 @@ struct RAMMSCORE_API FRammsCurbLeg
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	ERammsCurbWheelDrive Drive = ERammsCurbWheelDrive::Fallback;
+
+	/**
+	 * The mass (kg) that moves with this leg's wheel, lumped at its centre:
+	 * the wheel and the share of the leg's links that follows it. As the leg
+	 * moves its wheel away from where it is at the leg's zero pose (a 4-bar's
+	 * crank at 0, a 5-bar's hips at 0), the robot's centre of mass moves by
+	 * this over FRammsCurbTuning::RobotMassKg of that. 0, the default, moves
+	 * nothing: the centre of mass stays where the tuning puts it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
+	float MovingMassKg = 0.0f;
+
+	/** The fastest the leg's crank may turn (rad/s), for planning how long
+	 *  its moves take; 0, the default, sets no limit. (For the per-wheel
+	 *  planner; the per-axle gait times its legs by LegSpeed alone.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
+	float MaxCrankRateRadS = 0.0f;
 };
 
 /** The step the robot is to cross. */
@@ -309,8 +326,8 @@ struct RAMMSCORE_API FRammsCurbWheelStatus
  * Speeds are cm/s, along the chassis heading (negative rolling back);
  * attitudes deg (pitch positive nose up, roll positive +Y side up); lengths
  * cm. A value the gait does not measure stays 0; each field says which. The
- * per-axle gait plans a level chassis, no tilt and no timing, measures its
- * stability along the chassis only (1-D), and never holds or re-plans.
+ * per-axle gait plans a level chassis, no tilt and no timing, and never
+ * holds.
  */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbRunStats
@@ -371,17 +388,23 @@ struct RAMMSCORE_API FRammsCurbRunStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Attitude")
 	float FinalRollDeg = 0.0f;
 
-	/** Least stability margin the plan allowed. Per-axle: the least shift of
-	 *  the centre wheels past the centre of mass in a stance planned with a
-	 *  corner axle up: each corner axle's lift, and the stance the robot
-	 *  drove up in when that carries a corner axle up through the approach. */
+	/** Least stability margin the plan allowed: how far inside the contacts
+	 *  of the wheels on the ground the centre of mass stands, less the shift
+	 *  of braking at Tuning.Deceleration or speeding up at Tuning.Acceleration
+	 *  (whichever leaves less), in each pose the plan holds while driving.
+	 *  Per-axle: each axle's lift (a lift made standing still, without the
+	 *  shift), and the stance the robot drove up in when that carries an axle
+	 *  up through the approach -- that one recorded, not checked against
+	 *  Tuning.MinStabilityMargin: it is the drive mode's, and it is evaluated
+	 *  as if level although on a slope the robot drives it tilted. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
 	float MinPlannedMarginCm = 0.0f;
 
-	/** Least stability margin measured while an axle was up, in the approach
-	 *  too when its stance carries one. Per-axle: along the chassis, from the
-	 *  measured wheel positions to the centre of mass (the same 1-D margin
-	 *  it plans). */
+	/** Least stability margin measured, the same measure as
+	 *  MinPlannedMarginCm, on every tick: the centre of mass from the measured
+	 *  legs (FRammsCurbLeg::MovingMassKg, Tuning.CenterOfMass), projected
+	 *  straight down, against the contacts of the wheels measured on the
+	 *  ground. See URammsCurbNegotiationController::GetStabilityMargin. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
 	float MinMeasuredMarginCm = 0.0f;
 
@@ -416,7 +439,8 @@ struct RAMMSCORE_API FRammsCurbRunStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Plan")
 	float CrossingSeconds = 0.0f;
 
-	/** Times the plan was rebuilt mid-crossing (per-axle: never). */
+	/** Times the plan was rebuilt mid-crossing (per-axle: on the approach,
+	 *  when a look again found the terrain moved). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Plan")
 	int32 Replans = 0;
 
@@ -579,27 +603,50 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry", meta = (ClampMin = "0.0"))
 	FVector2D ChassisHalfExtent = FVector2D::ZeroVector;
 
-	/** Centre of mass, fore/aft, in the chassis frame (cm). */
+	/**
+	 * The robot's centre of mass (cm, chassis frame) with every leg at its
+	 * zero pose -- each 4-bar's crank at 0, each 5-bar's hips at 0. The legs'
+	 * moving masses (FRammsCurbLeg::MovingMassKg) move it from there as the
+	 * legs move (RobotMassKg). The crossing stays stable by keeping it, with
+	 * the shift of braking or speeding up, inside the wheels on the ground.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability")
+	FVector CenterOfMass = FVector::ZeroVector;
+
+	/** The whole robot's mass (kg), against which each leg's MovingMassKg
+	 *  moves the centre of mass. 0, the default, keeps the centre of mass
+	 *  fixed at CenterOfMass whatever the legs do. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
+	float RobotMassKg = 0.0f;
+
+	/** Deprecated: CenterOfMass's X, used for it while CenterOfMass.X is 0.
+	 *  The per-axle gait still places its centre wheels StabilityMargin
+	 *  either side of this, its own fore/aft reference. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability")
 	float CenterOfMassX = 0.0f;
 
-	/** How far the centre wheels shift past the centre of mass, towards the
-	 *  axle still on the ground, while a corner axle is lifted -- the robot
-	 *  stands on two axles then, and must not tip onto the lifted one. */
+	/** Per-axle gait only. How far the per-axle gait prefers to stand the
+	 *  centre wheels past CenterOfMassX, towards the axle still on the
+	 *  ground, while a corner axle is lifted -- the robot stands on two axles
+	 *  then, and must not tip onto the lifted one (MinStabilityMargin says by
+	 *  how much it must not). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
 	float StabilityMargin = 8.0f;
 
-	/** The least shift the planner accepts when the leg cannot reach the
-	 *  full StabilityMargin at the height it has to hold. */
+	/** The least stability margin (cm) a plan accepts: how far inside the
+	 *  wheels on the ground the centre of mass must stay with an axle lifted,
+	 *  allowing for the shift of braking at Deceleration or speeding up at
+	 *  Acceleration. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
 	float MinStabilityMargin = 3.0f;
 
 	/**
-	 * The least shift accepted for the instant a corner axle leaves the
-	 * ground, when no pose gives MinStabilityMargin both with that axle still
-	 * down and with it lifted.
+	 * Per-axle gait only. The least stability margin accepted for the instant
+	 * a corner axle leaves the ground with the robot standing still, when no
+	 * pose gives MinStabilityMargin both with that axle still down and with it
+	 * lifted.
 	 *
-	 * The linkage chassis meets this lifting its rear axle onto a 6 in curb:
+	 * The linkage chassis met this lifting its rear axle onto a 6 in curb:
 	 * with the rear wheels still on the road the chassis cannot rise far
 	 * enough for the centre wheels to reach well behind the centre of mass.
 	 * So the axle lifts with the robot stopped and a small margin, then the

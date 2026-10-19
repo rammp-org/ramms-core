@@ -3,6 +3,7 @@
 #include "RammsCurbNegotiationController.h"
 
 #include "Curb/RammsCurbLevel.h"
+#include "Curb/RammsCurbRobotModel.h"
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "Curb/RammsCurbTerrainFit.h"
@@ -251,6 +252,7 @@ URammsCurbNegotiationController::URammsCurbNegotiationController()
 	: Telemetry(MakePimpl<RammsCurb::FRunTelemetry>())
 	, Drive(MakePimpl<RammsCurb::FDriveState>())
 	, Level(MakePimpl<RammsCurb::FLevelState>())
+	, Model(MakePimpl<RammsCurb::FRobotModel>())
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	// Same group as the robot base, and ahead of it: the base closes the wheel
@@ -528,7 +530,23 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 		OutReason = TEXT("need corner 4-bar legs on both sides (Wheel.Position.Y > 0 and < 0) to measure roll");
 		return false;
 	}
-	return true;
+
+	// The robot model: each 4-bar's table, each 5-bar's zero pose, where the
+	// centre of mass is with the legs where they are, the belly.
+	TArray<FVector2D> ZeroPoses;
+	ZeroPoses.Init(FVector2D::ZeroVector, Legs.Num());
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		if (LegState[i].FiveBar && !RammsCurb::FiveBarZeroPose(*LegState[i].FiveBar, ZeroPoses[i]) && Legs[i].MovingMassKg > 0.0f
+			&& Tuning.RobotMassKg > 0.0f)
+		{
+			OutReason = FString::Printf(TEXT("leg '%s': its 5-bar does not close with both hips at 0, the zero pose its MovingMassKg "
+											 "is reckoned from"),
+				*Legs[i].Name.ToString());
+			return false;
+		}
+	}
+	return Model && RammsCurb::BuildRobotModel(Legs, Tuning, ZeroPoses, *Model, OutReason);
 }
 
 // --- measurement ---------------------------------------------------------------
@@ -618,6 +636,17 @@ bool URammsCurbNegotiationController::Measure(FString& OutReason)
 	}
 	MeasuredPitchDeg = static_cast<float>(FMath::RadiansToDegrees(Pitch));
 	MeasuredRollDeg = static_cast<float>(FMath::RadiansToDegrees(Roll));
+	// The whole chassis frame, for where its centre of mass is: the pivots'
+	// mean placed where it sits on the chassis (fore/aft and up from their
+	// crank pivots, across from their wheels, which share their side).
+	{
+		const RammsCurb::FChassisFrame Frame = RammsCurb::ChassisFrameFrom(Forward, Pitch, Roll, AllW / NAll,
+			FVector(AllL.X, AllY / NAll, AllL.Y));
+		ChassisOriginWorld = Frame.Origin;
+		ChassisAxisX = Frame.X;
+		ChassisAxisY = Frame.Y;
+		ChassisAxisZ = Frame.Z;
+	}
 	const double OriginZ = AllZ - (AllL.X * FMath::Sin(Pitch) + AllL.Y * FMath::Cos(Pitch));
 	MeasuredOriginZ = OriginZ;
 	MeasuredBaseHeight = static_cast<float>(OriginZ - GroundZ - TerrainReferenceCmd);
@@ -906,22 +935,110 @@ bool URammsCurbNegotiationController::IsReachable(const FAxleGoal Axles[3], floa
 	return true;
 }
 
+float URammsCurbNegotiationController::PlannedMargin(const FAxleGoal Goals[3], float BaseHeight, const TArray<float>& LegX,
+	const FGoalSpan* Span, bool bStanding, TConstArrayView<FVector2D> SampleOffset) const
+{
+	if (!Model || Model->Legs.Num() != Legs.Num() || LegState.Num() != Legs.Num())
+	{
+		return TNumericLimits<float>::Max();
+	}
+	// Level, in the chassis frame: each surface's gradient along and across
+	// the heading.
+	const FVector2D H(Heading.X, Heading.Y);
+	const FVector2D Right(-H.Y, H.X);
+	auto			Local = [&](const FRammsCurbPlane& Plane) {
+		   return FVector2D(FVector2D::DotProduct(Plane.Gradient, H), FVector2D::DotProduct(Plane.Gradient, Right));
+	};
+	TArray<RammsCurb::FPoseLeg, TInlineAllocator<8>> Pose;
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		const FRammsCurbLeg& Leg = Legs[i];
+		const FLegState&	 State = LegState[i];
+		const int32			 A = static_cast<int32>(Leg.Axle);
+		const FAxleGoal&	 Goal = Goals[A];
+		// The terrain under the wheel where the pose is held: the sample's
+		// own offsets where given, else the whole stretch's.
+		auto			Usable = [](const FVector2D& O) { return IsFinite(O) && O.X <= O.Y; };
+		const bool		bSample = SampleOffset.IsValidIndex(i) && Usable(SampleOffset[i]);
+		const bool		bOffset = bSample || (Span && Span->Offset.IsValidIndex(i) && Usable(Span->Offset[i]));
+		const FVector2D Offset = bSample ? SampleOffset[i] : (bOffset ? Span->Offset[i] : FVector2D::ZeroVector);
+		float			Z = GoalHeight(i, Goal, BaseHeight, static_cast<float>(0.5 * (Offset.X + Offset.Y)));
+		const float		X = State.FiveBar ? (LegX.IsValidIndex(i) ? LegX[i] : State.InitialX) : 0.0f;
+		if (Goal.Goal == ELegGoal::Swing)
+		{
+			// Carried no lower than the leg reaches (CommandedGoalHeight).
+			const FVector2D Reach = State.FiveBar ? FiveBarReachAt(i, X) : State.HeightRange;
+			if (Reach.X <= Reach.Y)
+			{
+				Z = FMath::Max(Z, static_cast<float>(Reach.X) + Tuning.LegRangeMargin);
+			}
+		}
+		RammsCurb::FPoseLeg& P = Pose.AddDefaulted_GetRef();
+		P.XZ = FVector2D(State.FiveBar ? X : Model->Legs[i].FourBar.XAt(Z), Z);
+		P.bSupport = Goal.Goal == ELegGoal::Support || (Goal.Goal == ELegGoal::Hold && !bStartsLifted[A]);
+		P.Gradient = Local(Goal.bFar ? ActiveTerrain.Far : ActiveTerrain.Near);
+	}
+	const RammsCurb::FPoseMargin M = RammsCurb::PoseMargin(*Model, Pose, Tuning.Acceleration, Tuning.Deceleration);
+	return static_cast<float>(bStanding ? M.StaticCm : M.DynamicCm);
+}
+
+float URammsCurbNegotiationController::RequiredCentreShift(ERammsCurbAxle Axle, TArrayView<const FGoalSet> Sets, float BaseHeight,
+	float MinMargin, bool bStanding) const
+{
+	if (Axle == ERammsCurbAxle::Center)
+	{
+		return 0.0f;
+	}
+	// Both centre wheels walked together towards the lifted axle, a quarter
+	// centimetre at a time, until the model's margin is enough in every set.
+	const float	  Sign = Axle == ERammsCurbAxle::Front ? 1.0f : -1.0f;
+	TArray<float> LegX;
+	for (int32 Step = 0; Step <= 120; ++Step)
+	{
+		const float Shift = 0.25f * Step;
+		LegX.Init(Tuning.CenterOfMassX + Sign * Shift, Legs.Num());
+		float Least = TNumericLimits<float>::Max();
+		for (const FGoalSet& Set : Sets)
+		{
+			Least = FMath::Min(Least, PlannedMargin(Set.Goals, BaseHeight, LegX, Set.Span, bStanding));
+		}
+		if (Least >= MinMargin - KINDA_SMALL_NUMBER)
+		{
+			return Shift;
+		}
+	}
+	return NAN;
+}
+
 bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<const FGoalSet> Sets, float ChassisFloor,
-	float PreferredHeight, float PreferredCenterX, float MinShift, float& OutHeight, TArray<float>& OutLegX, float& OutShift,
-	FString& OutReason) const
+	float PreferredHeight, float PreferredCenterX, float MinMargin, bool bStanding, float& OutHeight, TArray<float>& OutLegX,
+	float& OutShift, float& OutMargin, FString& OutReason) const
 {
 	auto OffsetOf = [](const FGoalSet& Set, int32 i) {
 		return Set.Span && Set.Span->Offset.IsValidIndex(i) ? Set.Span->Offset[i] : FVector2D::ZeroVector;
 	};
-	const TArray<float> Candidates = CentreCandidates(Axle, PreferredCenterX, Tuning.CenterOfMassX);
-	const float			Required = Axle == ERammsCurbAxle::Center ? 0.0f : MinShift;
-	const float			Wanted = Axle == ERammsCurbAxle::Center ? 0.0f : FMath::Abs(PreferredCenterX - Tuning.CenterOfMassX);
+	// Where the centre wheels are placed from: the per-axle gait's own reference
+	// (see BuildSteps); the margin they are checked on is the robot model's.
+	const float			CenterOfMassX = Tuning.CenterOfMassX;
+	const TArray<float> Candidates = CentreCandidates(Axle, PreferredCenterX, CenterOfMassX);
+	const float			Wanted = Axle == ERammsCurbAxle::Center ? 0.0f : FMath::Abs(PreferredCenterX - CenterOfMassX);
 
-	// Each centre wheel is placed on its own. The two 5-bars need not reach the
-	// same offsets -- on the linkage chassis they are mirror images, one
-	// reaching far forward and the other far aft -- and stability only asks
-	// that the line between their contacts passes the centre of mass on the
-	// side away from the lifted axle: that their MEAN does.
+	// The robot's stability margin with the legs placed: the least over the
+	// sets, each held while it drives (or standing still, bStanding).
+	auto MarginOf = [&](float H, const TArray<float>& LegX) {
+		float Least = TNumericLimits<float>::Max();
+		for (const FGoalSet& Set : Sets)
+		{
+			Least = FMath::Min(Least, PlannedMargin(Set.Goals, H, LegX, Set.Span, bStanding));
+		}
+		return Least;
+	};
+
+	// Each centre wheel is placed on its own, as near the preferred offset as
+	// it reaches. The two 5-bars need not reach the same offsets -- on the
+	// linkage chassis they are mirror images, one reaching far forward and the
+	// other far aft -- and stability asks only that the robot's centre of mass
+	// stays inside the contacts of the wheels on the ground (MarginOf).
 	auto Place = [&](float H, TArray<float>& LegX, float& Shift) {
 		LegX.Init(0.0f, Legs.Num());
 		float Sum = 0.0f;
@@ -962,24 +1079,32 @@ bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<c
 				return false;
 			}
 		}
-		const float Mean = Count ? Sum / Count : Tuning.CenterOfMassX;
+		const float Mean = Count ? Sum / Count : CenterOfMassX;
 		// Signed shift towards the side the robot must not tip away from.
-		Shift = Axle == ERammsCurbAxle::Front ? Mean - Tuning.CenterOfMassX
-			: Axle == ERammsCurbAxle::Rear	  ? Tuning.CenterOfMassX - Mean
+		Shift = Axle == ERammsCurbAxle::Front ? Mean - CenterOfMassX
+			: Axle == ERammsCurbAxle::Rear	  ? CenterOfMassX - Mean
 											  : 0.0f;
-		return Shift >= Required - KINDA_SMALL_NUMBER;
+		return true;
 	};
 
 	const float Step = 0.25f;
 	const float Top = ChassisFloor + 60.0f;
 	const float Keep = 1.0f; // stay this far from the edge of the feasible band when there is room
 	float		BestCost = TNumericLimits<float>::Max();
+	// The most margin any placement the legs reach left, when none left enough.
+	float BestShort = -TNumericLimits<float>::Max();
 	for (float H = ChassisFloor; H <= Top; H += Step)
 	{
 		TArray<float> LegX;
 		float		  Shift = 0.0f;
 		if (!Place(H, LegX, Shift))
 		{
+			continue;
+		}
+		const float Margin = MarginOf(H, LegX);
+		if (Margin < MinMargin - KINDA_SMALL_NUMBER)
+		{
+			BestShort = FMath::Max(BestShort, Margin);
 			continue;
 		}
 		// Prefer the chassis height nearest the last one, the full stability
@@ -995,18 +1120,31 @@ bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<c
 			OutHeight = H;
 			OutLegX = LegX;
 			OutShift = Shift;
+			OutMargin = Margin;
 		}
 	}
 	if (BestCost < TNumericLimits<float>::Max())
 	{
 		return true;
 	}
+	if (BestShort > -TNumericLimits<float>::Max())
+	{
+		OutReason = FString::Printf(TEXT("no chassis height lets the %s axle cross: wherever the legs reach, the robot stands at most "
+										 "%.1f cm inside its wheels with it up (%.1f at least, %s)"),
+			AxleName(Axle), BestShort, MinMargin, bStanding ? TEXT("standing still") : TEXT("braking or speeding up included"));
+		return false;
+	}
 
-	// Say what stopped it, at the least shift the stability tuning accepts.
+	// Say what stopped it: the legs' reach, the centre wheels the least shift
+	// past the centre of mass that the robot model needs for the margin
+	// (RequiredCentreShift: a 2-D margin, braking or speeding up included, is
+	// not that many centimetres of shift).
 	FString		  Why;
 	const float	  H = FMath::Max(PreferredHeight, ChassisFloor);
+	const float	  Needed = RequiredCentreShift(Axle, Sets, H, MinMargin, bStanding);
+	const float	  Required = FMath::IsNaN(Needed) ? 0.0f : Needed;
 	TArray<float> LegX;
-	LegX.Init(Tuning.CenterOfMassX + FMath::Sign(PreferredCenterX - Tuning.CenterOfMassX) * Required, Legs.Num());
+	LegX.Init(CenterOfMassX + (Axle == ERammsCurbAxle::Rear ? -1.0f : 1.0f) * Required, Legs.Num());
 	bool bAllReachable = true;
 	for (const FGoalSet& Set : Sets)
 	{
@@ -1014,7 +1152,12 @@ bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<c
 	}
 	if (bAllReachable)
 	{
-		Why = FString::Printf(TEXT("the centre wheels cannot shift %.1f cm past the centre of mass"), Required);
+		const TCHAR* How = bStanding ? TEXT("standing still") : TEXT("braking or speeding up included");
+		Why = FMath::IsNaN(Needed)
+			? FString::Printf(TEXT("no shift of the centre wheels stands the robot %.1f cm inside its wheels (%s)"), MinMargin, How)
+			: FString::Printf(TEXT("the centre wheels cannot stand %.1f cm past the centre of mass, which standing the robot %.1f cm inside "
+								   "its wheels needs (%s)"),
+				  Required, MinMargin, How);
 	}
 
 	// What binds: the chassis heights (plan) each leg allows over the stretch
@@ -1409,21 +1552,7 @@ FVector2D URammsCurbNegotiationController::BellyHalfExtent() const
 {
 	// As tuned, or the corner crank pivots fore/aft and the corner wheels
 	// across.
-	FVector2D Half = Tuning.ChassisHalfExtent;
-	if (Half.X <= 0.0 || Half.Y <= 0.0)
-	{
-		double X = 0.0, Y = 0.0;
-		for (const FRammsCurbLeg& Leg : Legs)
-		{
-			if (Leg.Kind == ERammsCurbLegKind::FourBar && Leg.Axle != ERammsCurbAxle::Center)
-			{
-				X = FMath::Max(X, FMath::Abs(static_cast<double>(Leg.FourBar.CrankPivot.X)));
-				Y = FMath::Max(Y, FMath::Abs(static_cast<double>(Leg.Wheel.Position.Y)));
-			}
-		}
-		Half = FVector2D(Half.X > 0.0 ? Half.X : X, Half.Y > 0.0 ? Half.Y : Y);
-	}
-	return Half;
+	return RammsCurb::BellyHalfExtentOf(Legs, Tuning);
 }
 
 double URammsCurbNegotiationController::BellyTopAt(const FVector2D& Origin) const
@@ -1688,14 +1817,16 @@ float URammsCurbNegotiationController::FCorridorPath::At(float Travel) const
 }
 
 bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArrayView<const FGoalSet> Sets, float PreferredHeight,
-	float PreferredCenterX, float MinShift, float& OutHeight, TArray<float>& OutLegX, float& OutShift, FCorridorPath& OutPath,
-	FString& OutReason) const
+	float PreferredCenterX, float MinMargin, float& OutHeight, TArray<float>& OutLegX, float& OutShift, float& OutMargin,
+	FCorridorPath& OutPath, FString& OutReason) const
 {
 	// The centre wheels' offsets, best first, as PlanLift tries them; both at
 	// one offset here.
-	const TArray<float> Candidates = CentreCandidates(Axle, PreferredCenterX, Tuning.CenterOfMassX);
-	const float			Required = Axle == ERammsCurbAxle::Center ? 0.0f : MinShift;
-	const float			Wanted = Axle == ERammsCurbAxle::Center ? 0.0f : FMath::Abs(PreferredCenterX - Tuning.CenterOfMassX);
+	// Where the centre wheels are placed from: the per-axle gait's own reference
+	// (see BuildSteps); the margin they are checked on is the robot model's.
+	const float			CenterOfMassX = Tuning.CenterOfMassX;
+	const TArray<float> Candidates = CentreCandidates(Axle, PreferredCenterX, CenterOfMassX);
+	const float			Wanted = Axle == ERammsCurbAxle::Center ? 0.0f : FMath::Abs(PreferredCenterX - CenterOfMassX);
 	const int32			NumLegs = Legs.Num();
 	auto				Name = [this](int32 Leg) {
 		   return Legs.IsValidIndex(Leg) ? FString::Printf(TEXT("leg '%s'"), *Legs[Leg].Name.ToString()) : FString(TEXT("the belly"));
@@ -1737,13 +1868,9 @@ bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArr
 				LegX[i] = X;
 			}
 		}
-		const float Shift = Axle == ERammsCurbAxle::Front ? X - Tuning.CenterOfMassX
-			: Axle == ERammsCurbAxle::Rear				  ? Tuning.CenterOfMassX - X
+		const float Shift = Axle == ERammsCurbAxle::Front ? X - CenterOfMassX
+			: Axle == ERammsCurbAxle::Rear				  ? CenterOfMassX - X
 														  : 0.0f;
-		if (Shift < Required - KINDA_SMALL_NUMBER)
-		{
-			continue;
-		}
 
 		// At each sample, the heights (world, over GroundZ) every set that
 		// may be in force there allows.
@@ -1834,6 +1961,41 @@ bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArr
 			continue;
 		}
 
+		// The robot's stability margin along the path: each set, at each
+		// sample its stretch reaches, at the path's height there over that
+		// set's terrain reference, each leg over the terrain at that sample
+		// (as CorridorAt bounds it), not the middle of its whole stretch's.
+		float Margin = TNumericLimits<float>::Max();
+		for (const FGoalSet& Set : Sets)
+		{
+			const FGoalSpan* Span = Set.Span;
+			const int32		 M = Span ? Span->SampleFloor.Num() : 0;
+			if (M < 2)
+			{
+				continue;
+			}
+			for (int32 k = 0; k < N; ++k)
+			{
+				const float S = From + Ds * k;
+				if (S < Span->SampleFrom - 1e-3f || S > Span->SampleTo + 1e-3f)
+				{
+					continue;
+				}
+				const int32 J = FMath::Clamp(FMath::RoundToInt((S - Span->SampleFrom) / (Span->SampleTo - Span->SampleFrom) * (M - 1)), 0, M - 1);
+				Margin = FMath::Min(Margin, PlannedMargin(Set.Goals, Path[k] - Span->SampleReference[J], LegX, Span, false, TConstArrayView<FVector2D>(Span->SampleOffset.GetData() + J * NumLegs, NumLegs)));
+			}
+		}
+		if (Margin < MinMargin - KINDA_SMALL_NUMBER)
+		{
+			if (FirstWhy.IsEmpty())
+			{
+				FirstWhy = FString::Printf(TEXT("with its centre wheels %+.1f cm fore/aft the robot stands only %.1f cm inside its wheels "
+												"(%.1f at least, braking or speeding up included)"),
+					X, Margin, MinMargin);
+			}
+			continue;
+		}
+
 		// The full stability margin first, then the widest corridor.
 		const float Cost = 2.0f * FMath::Max(0.0f, Wanted - Shift) - 0.01f * static_cast<float>(Narrowest);
 		if (Cost >= BestCost)
@@ -1843,6 +2005,7 @@ bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArr
 		BestCost = Cost;
 		OutLegX = LegX;
 		OutShift = Shift;
+		OutMargin = Margin;
 		OutPath.From = From;
 		OutPath.Step = Ds;
 		OutPath.Heights = MoveTemp(Path);
@@ -1899,16 +2062,19 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	PlanLines.Reset();
 	bPlannedMargin = false;
 	PlannedMinMargin = 0.0f;
-	// The least centre-wheel shift past the centre of mass planned for a
-	// corner axle's lift: the margin this gait plans. A centre axle's lift
-	// leaves the robot on both corner axles and plans none.
-	auto NotePlannedMargin = [this](ERammsCurbAxle Axle, float Shift) {
-		if (Axle != ERammsCurbAxle::Center)
-		{
-			PlannedMinMargin = bPlannedMargin ? FMath::Min(PlannedMinMargin, Shift) : Shift;
-			bPlannedMargin = true;
-		}
+	// The least stability margin a pose the plan holds leaves (PlannedMargin):
+	// each axle's lift, and the stance the robot drove up in with an axle up.
+	auto NotePlannedMargin = [this](float Margin) {
+		PlannedMinMargin = bPlannedMargin ? FMath::Min(PlannedMinMargin, Margin) : Margin;
+		bPlannedMargin = true;
 	};
+	// The per-axle gait places its centre wheels StabilityMargin either side
+	// of its own 1-D reference, CenterOfMassX (deprecated with the gait), as
+	// it always has: the placement is a preference its timing was tuned on.
+	// Moved by the robot model's few millimetres of centre of mass, the plans
+	// moved with it and were no steadier for it. What a placement must pass
+	// is the robot model's 2-D margin (PlanLift, PlannedMargin).
+	const float CenterOfMassX = Tuning.CenterOfMassX;
 
 	// Where along the chassis' travel from here (s, cm along the heading)
 	// each axle's steps can come: its wheels' braking points, which its lift
@@ -2000,12 +2166,11 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	}
 
 	// The approach carries the stance's lifted axle up all the way to the
-	// edge, standing on the other two: when that is one corner axle, the
-	// stance is planned like a lift of it, and its margin -- the centre wheels
-	// where they started -- counts with the lifts'. A front axle kept up into
-	// its own crossing then has its centre wheels moved from there to the
-	// lift's offsets, past no margin below either end. Two axles up leave no
-	// 1-D margin to speak of.
+	// edge, standing on the other two: the stance is planned like a lift of
+	// it, and its margin -- the legs where they started -- counts with the
+	// lifts'. A front axle kept up into its own crossing then has its centre
+	// wheels moved from there to the lift's offsets, past no margin below
+	// either end.
 	ApproachLiftedAxle = INDEX_NONE;
 	int32 LiftedAxles = 0;
 	for (int32 a = 0; a < 3; ++a)
@@ -2020,24 +2185,9 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	{
 		ApproachLiftedAxle = INDEX_NONE;
 	}
-	if (ApproachLiftedAxle != INDEX_NONE && ApproachLiftedAxle != static_cast<int32>(ERammsCurbAxle::Center))
+	if (LiftedAxles > 0)
 	{
-		float Sum = 0.0f;
-		int32 Count = 0;
-		for (int32 i = 0; i < Legs.Num(); ++i)
-		{
-			if (Legs[i].Kind == ERammsCurbLegKind::FiveBar)
-			{
-				Sum += InitialLegX[i];
-				++Count;
-			}
-		}
-		if (Count > 0)
-		{
-			const ERammsCurbAxle Up = static_cast<ERammsCurbAxle>(ApproachLiftedAxle);
-			const float			 Mean = Sum / Count;
-			NotePlannedMargin(Up, Up == ERammsCurbAxle::Front ? Mean - Tuning.CenterOfMassX : Tuning.CenterOfMassX - Mean);
-		}
+		NotePlannedMargin(PlannedMargin(Approach.Axles, Approach.BaseHeight, InitialLegX, &Approach.Span, /*bStanding=*/false));
 	}
 	Approach.ApproachTo = PrepareFrom;
 	Approach.SpeedFraction = 1.0f;
@@ -2064,7 +2214,7 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 		// While a corner axle is up the robot stands on the centre wheels and
 		// the other corner, so the centre wheels go past the centre of mass
 		// towards that corner.
-		float Preferred = Tuning.CenterOfMassX;
+		float Preferred = CenterOfMassX;
 		if (Axle == ERammsCurbAxle::Front)
 		{
 			Preferred += Tuning.StabilityMargin;
@@ -2081,14 +2231,15 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 		// lower surface with the landed wheels just past the edge while its
 		// belly is still over the high side behind.
 		const bool	  bCentreLift = Axle == ERammsCurbAxle::Center;
-		const float	  SpanX = bCentreLift ? Preferred : 0.5f * (Preferred + Tuning.CenterOfMassX);
-		const float	  Spread = bCentreLift ? 10.5f : 0.5f * FMath::Abs(Preferred - Tuning.CenterOfMassX) + 0.5f;
+		const float	  SpanX = bCentreLift ? Preferred : 0.5f * (Preferred + CenterOfMassX);
+		const float	  Spread = bCentreLift ? 10.5f : 0.5f * FMath::Abs(Preferred - CenterOfMassX) + 0.5f;
 		TArray<float> SpanLegX;
 		SpanLegX.Init(SpanX, Legs.Num());
 		const float	  SFromA = SFromNext;
 		FGoalSpan	  BeforeSpan, SwingSpan, AfterSpan;
 		float		  LiftHeight = 0.0f, DriveHeight = 0.0f;
 		float		  LiftShift = 0.0f, DriveShift = 0.0f;
+		float		  LiftMargin = 0.0f, DriveMargin = 0.0f;
 		TArray<float> LiftLegX, DriveLegX;
 		bool		  bOnePose = false, bPlanned = false, bCorridor = false;
 		FCorridorPath CorridorPath;
@@ -2118,19 +2269,21 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 			bCorridor = false;
 			if (!bByCorridor)
 			{
-				bOnePose = PlanLift(Axle, All, ChassisFloor, Height, Preferred, Tuning.MinStabilityMargin, LiftHeight, LiftLegX, LiftShift,
-					OutWhy);
+				bOnePose = PlanLift(Axle, All, ChassisFloor, Height, Preferred, Tuning.MinStabilityMargin, /*bStanding=*/false, LiftHeight,
+					LiftLegX, LiftShift, LiftMargin, OutWhy);
 				if (bOnePose)
 				{
 					DriveHeight = LiftHeight;
 					DriveLegX = LiftLegX;
+					DriveMargin = LiftMargin;
 					return true;
 				}
+				// Lifted standing still, on the smaller margin; then driven on.
 				FString Why;
 				return PlanLift(Axle, Off, ChassisFloor, Height, Preferred, FMath::Min(Tuning.LiftOffMargin, Tuning.MinStabilityMargin),
-						   LiftHeight, LiftLegX, LiftShift, Why)
-					&& PlanLift(Axle, On, ChassisFloor, LiftHeight, Preferred, Tuning.MinStabilityMargin, DriveHeight, DriveLegX, DriveShift,
-						Why);
+						   /*bStanding=*/true, LiftHeight, LiftLegX, LiftShift, LiftMargin, Why)
+					&& PlanLift(Axle, On, ChassisFloor, LiftHeight, Preferred, Tuning.MinStabilityMargin, /*bStanding=*/false, DriveHeight,
+						DriveLegX, DriveShift, DriveMargin, Why);
 			}
 			// No one height over the terrain reference serves the whole of a
 			// set's stretch: a path for the chassis inside the corridor of
@@ -2138,11 +2291,12 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 			// at least Tuning.MinCorridorCm wide everywhere, with the robot
 			// moving on throughout.
 			bOnePose = bCorridor = PlanLiftCorridor(Axle, All, Height, Preferred, Tuning.MinStabilityMargin, LiftHeight, LiftLegX,
-				LiftShift, CorridorPath, OutWhy);
+				LiftShift, LiftMargin, CorridorPath, OutWhy);
 			if (bCorridor)
 			{
 				DriveHeight = LiftHeight;
 				DriveLegX = LiftLegX;
+				DriveMargin = LiftMargin;
 			}
 			return bCorridor;
 		};
@@ -2250,13 +2404,18 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 				{
 					// The front axle's centre wheels stand forward of the centre
 					// of mass while it is up; say what standing them as far aft
-					// as MinStabilityMargin lets them would leave.
-					const float Aft = AxleIndex == 0 ? FMath::Max(0.0f, CentresAt() - (Tuning.CenterOfMassX + Tuning.MinStabilityMargin)) : 0.0f;
+					// as the robot model's MinStabilityMargin lets them would
+					// leave.
+					const FGoalSet Held[] = { { Before, &BeforeSpan }, { Swing, &SwingSpan }, { After, &AfterSpan } };
+					const float	   Need = AxleIndex == 0 ? RequiredCentreShift(Axle, Held, DriveHeight, Tuning.MinStabilityMargin, false) : NAN;
+					const float	   Aft = FMath::IsNaN(Need) ? 0.0f : FMath::Max(0.0f, CentresAt() - (CenterOfMassX + Need));
 					LaterReason = FString::Printf(TEXT("landing %s, the %s wheels would reach their braking point %.1f cm before the %s axle "
 													   "has landed%s"),
 						Extra > 0.0f ? *FString::Printf(TEXT("%.0f cm further on"), Extra) : TEXT("where it should"),
 						AxleName(static_cast<ERammsCurbAxle>(AxleIndex + 1)), Short, AxleName(Axle),
-						Aft > 0.0f ? *FString::Printf(TEXT(" (%.1f cm with them as far aft as MinStabilityMargin lets them stand)"), Short - Aft)
+						Aft > 0.0f ? *FString::Printf(TEXT(" (%.1f cm with them %.1f cm past the centre of mass, as far aft as a %.1f cm "
+														   "margin lets them stand)"),
+										 Short - Aft, Need, Tuning.MinStabilityMargin)
 								   : TEXT(""));
 				}
 			}
@@ -2272,10 +2431,10 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 			}
 			return false;
 		}
-		NotePlannedMargin(Axle, LiftShift);
+		NotePlannedMargin(LiftMargin);
 		if (!bOnePose)
 		{
-			NotePlannedMargin(Axle, DriveShift);
+			NotePlannedMargin(DriveMargin);
 		}
 		SFromNext = SAdv[AxleIndex] + Extra;
 		Height = DriveHeight;
@@ -2583,6 +2742,7 @@ bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile
 	// on the move carries on at it, and the ramp takes it from there.
 	DriveSpeed = MeasuredWheelSpeed();
 	Elapsed = 0.0;
+	LiveMarginCm = 0.0f;
 	StepLog.Reset();
 	if (Telemetry)
 	{
@@ -3975,57 +4135,38 @@ bool URammsCurbNegotiationController::MeasureSwingClearance(float& OutCm) const
 
 bool URammsCurbNegotiationController::MeasureStabilityMargin(float& OutCm) const
 {
-	// The model the per-axle gait plans with: along the chassis only, the
-	// robot stands on the two axles not lifted, and the margin is how far the
-	// centre of mass is inside the span between them. Each axle is placed at
-	// its wheels' mean measured fore/aft position. The approach holds the
-	// stance the robot drove up in, and with it any axle that stance carries
-	// up; every other step says which axle it has up.
-	if (!Steps.IsValidIndex(StepIndex) || LegState.Num() != Legs.Num())
+	// Two-dimensional, in the world: the robot model's centre of mass at the
+	// legs as measured, through the chassis as measured, straight down; the
+	// contacts of the wheels planted, each where its tread, as the chassis
+	// tilts it, meets the surface it stands on; braking or speeding up along
+	// the chassis' heading.
+	if (!Model || Model->Legs.Num() != Legs.Num() || LegState.Num() != Legs.Num())
 	{
 		return false;
 	}
-	const FStep& S = Steps[StepIndex];
-	int32		 Lifted = S.Phase == ERammsCurbPhase::Approach ? ApproachLiftedAxle : INDEX_NONE;
-	for (int32 a = 0; a < 3; ++a)
-	{
-		if (S.Axles[a].Goal == ELegGoal::Swing)
-		{
-			if (Lifted != INDEX_NONE)
-			{
-				return false;
-			}
-			Lifted = a;
-		}
-	}
-	if (Lifted == INDEX_NONE)
-	{
-		return false;
-	}
-	float SumX[3] = { 0.0f, 0.0f, 0.0f };
-	int32 Count[3] = { 0, 0, 0 };
+	RammsCurb::FChassisFrame Frame;
+	Frame.Origin = ChassisOriginWorld;
+	Frame.X = ChassisAxisX;
+	Frame.Y = ChassisAxisY;
+	Frame.Z = ChassisAxisZ;
+	TArray<FVector2D, TInlineAllocator<8>>				   XZ;
+	TArray<RammsCurb::FMeasuredWheel, TInlineAllocator<8>> Wheels;
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
-		const int32 a = static_cast<int32>(Legs[i].Axle);
-		SumX[a] += LegState[i].MeasuredX;
-		++Count[a];
+		const FLegState& State = LegState[i];
+		XZ.Add(FVector2D(State.MeasuredX, State.MeasuredZ));
+		RammsCurb::FMeasuredWheel& W = Wheels.AddDefaulted_GetRef();
+		W.Centre = State.WheelWorld;
+		W.bSupport = State.bHasWorld && IsLegPlanted(i);
+		W.Gradient = (State.bOnFar ? ActiveTerrain.Far : ActiveTerrain.Near).Gradient;
 	}
-	float Lo = TNumericLimits<float>::Max(), Hi = -TNumericLimits<float>::Max();
-	for (int32 a = 0; a < 3; ++a)
+	const RammsCurb::FPoseMargin M = RammsCurb::MeasuredMargin(*Model, Frame, XZ, Wheels, FVector2D(ChassisForward.X, ChassisForward.Y),
+		Tuning.Acceleration, Tuning.Deceleration);
+	if (M.Support == 0)
 	{
-		if (a == Lifted)
-		{
-			continue;
-		}
-		if (Count[a] == 0)
-		{
-			return false;
-		}
-		const float X = SumX[a] / Count[a];
-		Lo = FMath::Min(Lo, X);
-		Hi = FMath::Max(Hi, X);
+		return false;
 	}
-	OutCm = FMath::Min(Tuning.CenterOfMassX - Lo, Hi - Tuning.CenterOfMassX);
+	OutCm = static_cast<float>(M.DynamicCm);
 	return true;
 }
 
@@ -4066,6 +4207,7 @@ void URammsCurbNegotiationController::RecordRunTick(float DeltaTime, float LegEr
 	if (MeasureStabilityMargin(Cm))
 	{
 		T.MeasuredMarginCm = Cm;
+		LiveMarginCm = Cm;
 	}
 	if (Telemetry->Motion.HasSample())
 	{
