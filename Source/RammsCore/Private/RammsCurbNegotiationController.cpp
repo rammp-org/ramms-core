@@ -16,6 +16,7 @@
 #include "HAL/PlatformTime.h"
 #include "Ramms4BarKinematics.h"
 #include "Ramms5BarLinkageController.h"
+#include "RammsDriveHandOver.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
@@ -2987,17 +2988,37 @@ void URammsCurbNegotiationController::SetActiveModeThroughSelector(FName ModeId)
 		}
 		return;
 	}
-	// No selector: switch the modes directly, the way it would.
+	// No selector: switch the modes directly, the way it would -- standing the
+	// others down first, then the one asked for -- and hand it the robot's
+	// speed, as the selector would, so that a robot rolling on at Done keeps
+	// rolling. (No stance ramp here: that is the selector's.)
+	IRammsDriveMode* Incoming = nullptr;
 	for (UActorComponent* Component : Owner->GetComponents())
 	{
 		if (IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component))
 		{
-			Mode->SetDriveModeActive(Mode->GetDriveModeId() == ModeId);
+			if (Mode->GetDriveModeId() == ModeId)
+			{
+				Incoming = Mode;
+			}
+			else
+			{
+				Mode->SetDriveModeActive(false);
+			}
 		}
+	}
+	if (Incoming)
+	{
+		Incoming->SetDriveModeActive(true);
 	}
 	if (URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
 	{
 		Surface->RebuildControlSurface();
+	}
+	if (Incoming && Incoming != this && Telemetry && Telemetry->Motion.IsFull())
+	{
+		const FRammsDriveMotion Measured(Telemetry->Motion.GetSpeed(), 0.0f, 0.0f);
+		Incoming->SeedMotion(Incoming->GetCarriableMotion(Measured), 0.0f);
 	}
 }
 
@@ -3057,12 +3078,71 @@ FName URammsCurbNegotiationController::FallbackModeId() const
 	return NAME_None;
 }
 
+FRammsDriveMotion URammsCurbNegotiationController::GetCarriableMotion(const FRammsDriveMotion& Motion) const
+{
+	return RammsDrive::DifferentialCarriable(Motion, /*MaxYawDegS=*/0.0);
+}
+
+bool URammsCurbNegotiationController::MovingSidewaysIntoCrossing(FString& OutWhy) const
+{
+	const AActor*				   Owner = GetOwner();
+	const URammsDriveModeSelector* Selector = Owner ? Owner->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
+	if (!Selector)
+	{
+		return false;
+	}
+	// As the selector would judge a switch to this mode: only a motion the
+	// active mode drives and this one cannot carry. A slide the active mode
+	// cannot carry either (the differential's, on a cross slope) is not
+	// sideways driving, and its main wheels are already down.
+	const FRammsDriveMotion Measured = Selector->GetMeasuredMotion();
+	if (RammsDrive::IsAtRest(Measured))
+	{
+		return false;
+	}
+	const FName			   ActiveId = Selector->GetActiveModeId();
+	const IRammsDriveMode* Active = nullptr;
+	for (UActorComponent* Component : Owner->GetComponents())
+	{
+		const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component);
+		if (Mode && Mode != this && Mode->GetDriveModeId() == ActiveId)
+		{
+			Active = Mode;
+			break;
+		}
+	}
+	if (!Active)
+	{
+		return false;
+	}
+	RammsDrive::FHandOverLimits Limits;
+	Limits.MaxSidewaysCmS = Selector->HandOverMaxSidewaysSpeed;
+	if (!RammsDrive::NeedsHandOverBetween(Measured, Active->GetCarriableMotion(Measured), GetCarriableMotion(Measured), Limits))
+	{
+		return false;
+	}
+	OutWhy = FString::Printf(TEXT("moving sideways %.1f cm/s in %s, over the %.1f cm/s a hand-over allows (HandOverMaxSidewaysSpeed): a crossing "
+								  "drives on the main wheels, which cannot move sideways; stop the sideways motion first"),
+		FMath::Abs(Measured.RightCmPerSecond), *ActiveId.ToString(), Limits.MaxSidewaysCmS);
+	return true;
+}
+
 bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile, FString& OutReason)
 {
 	if (IsNegotiating())
 	{
 		OutReason = TEXT("a manoeuvre is already running");
 		return false;
+	}
+	{
+		FString Sideways;
+		if (MovingSidewaysIntoCrossing(Sideways))
+		{
+			OutReason = Sideways;
+			UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
+			Status = OutReason;
+			return false;
+		}
 	}
 	if (Tuning.Gait == ERammsCurbGait::PerWheel)
 	{

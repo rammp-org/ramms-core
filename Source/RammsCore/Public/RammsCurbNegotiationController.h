@@ -166,8 +166,11 @@ namespace RammsCurb
  *
  * It is a drive mode ("curb"): while it runs, the other modes stand down and
  * it owns the wheels and cranks. Starting a manoeuvre selects it through the
- * robot's URammsDriveModeSelector and finishing one hands back to the mode
- * that was active, which puts the robot back in that mode's stance. One
+ * robot's URammsDriveModeSelector -- on the move too: the crossing carries on
+ * at the speed the robot has -- and finishing one hands back to the mode that
+ * was active without stopping: the robot rolls on, the mode it returns to is
+ * handed its motion (IRammsDriveMode::SeedMotion), and the selector ramps the
+ * legs from where the crossing left them to that mode's stance. One
  * stopped by Abort, or by a tilt, step-timeout, stall or measurement fault, keeps
  * the robot held in this mode; a retry that succeeds still hands back to the
  * mode from before. A simulation reset faults it too, but hands back as well:
@@ -217,7 +220,8 @@ public:
 	bool CheckFeasibility(FRammsCurbProfile Profile, FString& OutReason);
 
 	/** Plan and start. False, with a reason, when the step cannot be crossed
-	 *  from here; nothing moves then. */
+	 *  from here -- or the active drive mode is moving the robot sideways (see
+	 *  GetCarriableMotion); nothing moves then. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool BeginNegotiation(FRammsCurbProfile Profile, FString& OutReason);
 
@@ -386,6 +390,12 @@ public:
 	}
 	virtual bool IsDriveModeActive() const override { return bDriveModeActive; }
 	virtual void SetDriveModeActive(bool bActive) override;
+	/** Its forward speed and any yaw rate, no sideways speed: a crossing
+	 *  drives on the main wheels, which cannot move sideways. A crossing asked
+	 *  for while the active drive mode moves the robot sideways faster than
+	 *  the selector's HandOverMaxSidewaysSpeed is refused, and a mode handed
+	 *  back to is held to this until its stance is in place. */
+	virtual FRammsDriveMotion GetCarriableMotion(const FRammsDriveMotion& Motion) const override;
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
@@ -815,6 +825,11 @@ private:
 
 	/** The active drive mode when it is not this one, else None. */
 	FName OtherActiveModeId() const;
+
+	/** True, with why, when the active drive mode is moving the robot sideways
+	 *  (as the selector measures it) more than this mode carries: a crossing
+	 *  would put the main wheels down sliding. */
+	bool MovingSidewaysIntoCrossing(FString& OutWhy) const;
 
 	void EnterStep(int32 Index);
 	void StepPlan(float DeltaTime);

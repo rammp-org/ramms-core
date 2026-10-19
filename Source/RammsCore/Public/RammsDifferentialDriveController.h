@@ -7,10 +7,16 @@
 #include "RammsDifferentialDriveTypes.h"
 #include "RammsControlContributor.h"
 #include "RammsDriveMode.h"
+#include "Templates/PimplPtr.h"
 #include "RammsDifferentialDriveController.generated.h"
 
 class UPrimitiveComponent;
 class URammsRobotBaseComponent;
+
+namespace RammsDrive
+{
+	struct FCarry;
+} // namespace RammsDrive
 
 /**
  * Differential drive controller component for powered wheelchair simulation
@@ -388,10 +394,66 @@ public:
 		OutStance = PlantedStance;
 		return !OutStance.IsEmpty();
 	}
+	/** Its forward speed and its yaw rate up to MaxTurningSpeed: a
+	 *  differential drive cannot move sideways. */
+	virtual FRammsDriveMotion GetCarriableMotion(const FRammsDriveMotion& Motion) const override;
+	/**
+	 * For HoldSeconds while its operator holds the stick where it was when
+	 * the mode took over, adds to its control mode's torque a pull towards
+	 * the wheel speeds Motion needs (half the motor's stall torque per rad/s
+	 * of error), then fades that out over half a second, leaving the
+	 * operator's command -- which in torque control is a torque, an
+	 * acceleration from the speed the robot has, not a speed. Moving the stick
+	 * by more than a tenth of its travel either way ends the hold (into the
+	 * fade); letting it go to centre ends the carry at once, the mode braking
+	 * as it would. An input not yet heard on the first tick after the switch
+	 * is given that tick (no auto-brake on it): its operator may write it on
+	 * its own tick.
+	 */
+	virtual void SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds) override;
+	/** Drives on as it is (it has nothing to take off: no mode it hands over
+	 *  to carries less than forward and turning) until the selector hands
+	 *  over; bounded by a mode that carries more, there is nothing to keep
+	 *  within either. */
+	virtual bool BeginHandOver(const IRammsDriveMode& Other) override { return bDriveModeActive; }
+	/** While held, drives nothing: no torque, no brake (its wheels are still
+	 *  going down). */
+	virtual void HoldForStance(bool bHold) override { bHeldForStance = bHold && bDriveModeActive; }
 
 private:
 	/** Inactive modes contribute nothing: no controls, no claims, no commands. */
 	bool bDriveModeActive = true;
+	/** HoldForStance: its wheels are still going down. */
+	bool bHeldForStance = false;
+
+	/** A motion handed over by the selector, pulled towards (SeedMotion). */
+	TPimplPtr<RammsDrive::FCarry> Carry;
+	/** The first tick of a carry: its operator may not have been heard yet. */
+	bool bFirstCarryTick = false;
+	/** The input the operator held when the carry began (once heard), and
+	 *  whether it has been. */
+	FVector2D CarryInput = FVector2D::ZeroVector;
+	bool	  bCarryInputSet = false;
+	/** How far (normalised, either axis) the input may move from CarryInput
+	 *  before the hold ends. */
+	static constexpr double CarryInputTolerance = 0.1;
+	/** The wheel rates (rad/s) the carried motion needs, left and right. */
+	FVector2D CarryWheelRates = FVector2D::ZeroVector;
+	/** How much of the carried motion's pull this tick applies (1 holding,
+	 *  falling to 0 as it fades). */
+	float CarryWeight = 0.0f;
+	/** How long the pull takes to fade after the hold (s). */
+	static constexpr double CarryFadeSeconds = 0.5;
+	/** Add the carried motion's pull to the control mode's wheel torques. */
+	void AddCarryTorque(float& LeftTorque, float& RightTorque) const;
+	/** The clock (simulated where there is one) of the last tick. */
+	double LastTickTime = -1.0;
+	/** The physics clock, or the world's when there is none. */
+	double Now() const;
+	/** True while the operator's input is off centre (past InputDeadZone). */
+	bool IsOperatorCommanding() const;
+	/** Stop holding a carried motion and leave the wheels to the control mode. */
+	void EndCarry();
 
 public:
 private:

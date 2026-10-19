@@ -4,6 +4,7 @@
 
 #include "RammsControlIds.h"
 #include "RammsDifferentialDriveLibrary.h"
+#include "RammsDriveHandOver.h"
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
@@ -18,6 +19,8 @@ URammsDifferentialDriveController::URammsDifferentialDriveController()
 	// the robot is standing on them.
 	PlantedStance.bHasLinkageHeight = true;
 	PlantedStance.LinkageHeightCm = 12.7f;
+
+	Carry = MakePimpl<RammsDrive::FCarry>();
 }
 
 void URammsDifferentialDriveController::BeginPlay()
@@ -153,6 +156,42 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	UpdateWheelState(LeftMotorId, LeftWheelBoneName, LeftWheelState);
 	UpdateWheelState(RightMotorId, RightWheelBoneName, RightWheelState);
 
+	const double T = Now();
+	const double Dt = (LastTickTime >= 0.0 && T >= LastTickTime) ? T - LastTickTime : 0.0;
+	LastTickTime = T;
+	CarryWeight = 0.0f;
+	bool bCarryGrace = false;
+	if (bDriveModeActive && Carry && Carry->bActive)
+	{
+		// A motion handed over on a switch: held while the stance changes and
+		// the operator holds the stick where it was, then faded out (see
+		// AddCarryTorque). The first tick is the operator's to be heard on.
+		bCarryGrace = bFirstCarryTick;
+		bFirstCarryTick = false;
+		const bool bCommanding = IsOperatorCommanding();
+		if (bCommanding && !bCarryInputSet)
+		{
+			CarryInput = DriveInput;
+			bCarryInputSet = true;
+		}
+		if (!bCommanding && !bCarryGrace)
+		{
+			// Nobody driving: speed carries across a switch, it does not keep
+			// a robot moving that nobody is driving.
+			EndCarry();
+		}
+		else
+		{
+			const bool bAsBefore = !bCarryInputSet || (DriveInput - CarryInput).GetAbsMax() <= CarryInputTolerance;
+			Carry->Step(Dt, bCarryGrace || bAsBefore);
+			CarryWeight = Carry->bHolding ? 1.0f : static_cast<float>(1.0 - RammsDrive::CarryBlend(Carry->SinceHold, CarryFadeSeconds));
+			if (CarryWeight <= 0.0f)
+			{
+				EndCarry();
+			}
+		}
+	}
+
 	// Actuate only while this is the live drive mode. Zeroing the input on
 	// stand-down is not enough on its own: the braking and control paths run
 	// every frame regardless of what was commanded, so an inactive controller
@@ -160,10 +199,19 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	// the raw per-motor axes the low-level mode hands out. Wheel state and
 	// odometry above and below this still update, so the estimate stays live
 	// while another mode drives.
-	if (bDriveModeActive)
+	if (bDriveModeActive && bHeldForStance)
 	{
-		// Check for braking
-		bIsBraking = ShouldApplyBrakes();
+		// Its wheels are still going down (HoldForStance): drive nothing. A
+		// tread spun up in the air touches down spinning.
+		bIsBraking = false;
+		ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, 0.0f, LeftMotorParams, LeftWheelState);
+		ApplyWheelTorque(RightMotorId, RightWheelBoneName, 0.0f, RightMotorParams, RightWheelState);
+	}
+	else if (bDriveModeActive)
+	{
+		// Check for braking -- not on a carry's first tick, which is its
+		// operator's to be heard on.
+		bIsBraking = !bCarryGrace && ShouldApplyBrakes();
 
 		if (bIsBraking)
 		{
@@ -478,6 +526,7 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 	RightWheelState.TargetAngularVelocity = Command.RightCommand;
 
 	// Apply torques to wheels
+	AddCarryTorque(LeftTorque, RightTorque);
 	ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
 	ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
 }
@@ -521,8 +570,29 @@ void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
 	}
 
 	// Apply torques to wheels
+	AddCarryTorque(LeftTorque, RightTorque);
 	ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
 	ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+}
+
+void URammsDifferentialDriveController::AddCarryTorque(float& LeftTorque, float& RightTorque) const
+{
+	if (CarryWeight <= 0.0f)
+	{
+		return;
+	}
+	// On top of the operator's command, a pull towards the wheel speeds of the
+	// motion handed over: the operator's torque is what holds the robot at the
+	// operator's speed, so near it this asks little, and it fades out to the
+	// operator's command alone with no step. Proportional only, half the
+	// motor's stall torque per rad/s of error: the wheels are on the ground
+	// by the time a mode is handed the robot (the selector puts them down
+	// first), and on a loaded wheel that is far slower than a game tick.
+	const auto Pull = [this](float Target, const FRammsWheelState& Wheel, const FMotorParameters& Motor) {
+		return CarryWeight * 0.5f * Motor.MaxTorque * TorqueMultiplier * (Target - Wheel.AngularVelocity);
+	};
+	LeftTorque += Pull(static_cast<float>(CarryWheelRates.X), LeftWheelState, LeftMotorParams);
+	RightTorque += Pull(static_cast<float>(CarryWheelRates.Y), RightWheelState, RightMotorParams);
 }
 
 float URammsDifferentialDriveController::CalculatePID(
@@ -900,6 +970,8 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 		return;
 	}
 	bDriveModeActive = bActive;
+	bHeldForStance = false;
+	EndCarry();
 	if (!bActive)
 	{
 		// Straight to ApplyDriveInputInternal, not SetDriveInput: that one
@@ -907,7 +979,77 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 		// stand-down would be a no-op exactly when something else is driving.
 		// A mode being switched away from stops, whoever was commanding it.
 		ApplyDriveInputInternal(FVector2D::ZeroVector, TEXT("SetDriveModeActive"));
+		// And lets go of its wheels. A torque written last stays in the
+		// actuator until something writes over it, so a wheel the next mode
+		// lifts clear would go on spinning up in the air, and one it rolls on
+		// would be dragged or pushed by this mode's last command.
+		if (UsesBase())
+		{
+			for (const FName MotorId : { LeftMotorId, RightMotorId })
+			{
+				BaseComponent->ClearMotorVelocityCommand(MotorId);
+				BaseComponent->SetMotorCommand(MotorId, 0.0f);
+			}
+		}
 	}
+}
+
+FRammsDriveMotion URammsDifferentialDriveController::GetCarriableMotion(const FRammsDriveMotion& Motion) const
+{
+	return RammsDrive::DifferentialCarriable(Motion, MaxTurningSpeed);
+}
+
+void URammsDifferentialDriveController::SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds)
+{
+	EndCarry();
+	if (!bDriveModeActive || !Carry || HoldSeconds <= 0.0f)
+	{
+		// Nothing to hold: the control mode carries on from the speed the
+		// robot has.
+		return;
+	}
+	const FRammsDriveMotion Carriable = GetCarriableMotion(Motion);
+	const FVector2D			Ground = RammsDrive::DifferentialWheelSpeeds(Carriable, TrackWidth);
+	CarryWheelRates = Ground / FMath::Max(WheelRadius, 1.0f);
+	// Begun whether or not the input is off centre yet: an operator whose
+	// stick reaches this mode on its own tick, or through the control surface
+	// after the switch rebuilt it, is heard on the first tick; one who is not
+	// driving by then ends it there (TickComponent).
+	Carry->Begin(Carriable, HoldSeconds, /*bOperatorCommanding=*/true);
+	bFirstCarryTick = true;
+	bCarryInputSet = IsOperatorCommanding();
+	CarryInput = DriveInput;
+}
+
+void URammsDifferentialDriveController::EndCarry()
+{
+	bFirstCarryTick = false;
+	bCarryInputSet = false;
+	if (!Carry || !Carry->bActive)
+	{
+		return;
+	}
+	Carry->End();
+	CarryWeight = 0.0f;
+}
+
+bool URammsDifferentialDriveController::IsOperatorCommanding() const
+{
+	return !URammsDifferentialDriveLibrary::ApplyDeadZone2D(DriveInput, InputDeadZone).IsNearlyZero();
+}
+
+double URammsDifferentialDriveController::Now() const
+{
+	if (UsesBase())
+	{
+		const double Sim = BaseComponent->GetSimulationTime();
+		if (Sim >= 0.0)
+		{
+			return Sim;
+		}
+	}
+	const UWorld* World = GetWorld();
+	return World ? World->GetTimeSeconds() : 0.0;
 }
 
 void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const

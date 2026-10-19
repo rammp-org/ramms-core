@@ -52,8 +52,9 @@ public:
 	FRammsHolonomicDriveSpec Drive;
 
 	/**
-	 * Body-frame command, each -1..1: X forward, Y left (strafe), Z yaw.
-	 * Held until changed, like a stick that stays where it is put.
+	 * Body-frame command, each -1..1: X forward, Y strafe (to the robot's
+	 * right: the wheel table's +Y, Unreal's sense), Z yaw (positive turns
+	 * right). Held until changed, like a stick that stays where it is put.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Holonomic")
 	void SetDriveCommand(FVector ForwardStrafeYaw);
@@ -84,6 +85,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
 	FRammsDriveStance LiftedStance;
 
+	/**
+	 * How fast (cm/s^2) the body velocity this mode drives may change while
+	 * it changes mode: taking off a sideways motion the mode it hands over to
+	 * cannot carry, keeping within what the wheels still on the ground carry
+	 * while the stance changes, and going from a motion it was handed to its
+	 * operator's command (IRammsDriveMode). The rest of the time a command
+	 * still applies at once, as it always has.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic|Switching", meta = (ClampMin = "1.0"))
+	float HandOverAcceleration = 60.0f;
+
+	/** The same for the yaw rate, deg/s^2. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic|Switching", meta = (ClampMin = "1.0"))
+	float HandOverYawAcceleration = 90.0f;
+
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("holonomic"); }
 	virtual FText GetDriveModeDisplayName() const override
@@ -97,6 +113,19 @@ public:
 		OutStance = LiftedStance;
 		return !OutStance.IsEmpty();
 	}
+	/** Brings the body velocity it drives within what Other carries, at
+	 *  HandOverAcceleration, the operator's command projected onto it. */
+	virtual bool BeginHandOver(const IRammsDriveMode& Other) override;
+	virtual void EndHandOver() override;
+	/** While held, drives towards rest at HandOverAcceleration whatever is
+	 *  commanded (at rest: nothing); released, goes to the command at that
+	 *  rate. */
+	virtual void HoldForStance(bool bHold) override;
+	/** Starts from Motion (unclamped: it is what the robot is doing) and goes
+	 *  to its operator's command -- within any BeginHandOver bound -- at
+	 *  HandOverAcceleration; to rest, with no command. Its speed loop holds
+	 *  what it is told, so it needs no hold: HoldSeconds is not used. */
+	virtual void SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds) override;
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
@@ -126,4 +155,24 @@ private:
 	/** True once a non-zero command has been sent, so a released stick still
 	 *  writes one zero to the motors rather than leaving them spinning. */
 	bool bDrivingMotors = false;
+
+	/** Wheel rates (rad/s) for a body motion (cm/s, deg/s). */
+	TArray<float> SolveWheelRatesFor(const FRammsDriveMotion& Motion) const;
+	/** Back to rest and to the operator's command alone: no carried motion,
+	 *  no hand-over bound, no hold, no ramp. */
+	void ResetSwitching();
+	/** The physics clock, or the world's when there is none. */
+	double Now() const;
+
+	/** The body motion driven last tick (cm/s, deg/s): the command's, or on
+	 *  the way to it during a switch. */
+	FRammsDriveMotion Output;
+	/** The mode whose carriable motion bounds this one's, while BeginHandOver
+	 *  holds. */
+	TWeakObjectPtr<const UObject> HandOverTarget;
+	/** Ramping Output to the command after a switch, until it gets there. */
+	bool bOutputRamping = false;
+	/** HoldForStance: its wheels are still going down. */
+	bool   bHeldForStance = false;
+	double LastTickTime = -1.0;
 };
