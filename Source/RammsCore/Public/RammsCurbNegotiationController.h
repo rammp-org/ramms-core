@@ -32,95 +32,115 @@ namespace RammsCurb
 } // namespace RammsCurb
 
 /**
- * Climbs or descends a curb by coordinating every leg and wheel on a
- * three-axle lift-drive: the corner wheels on crank-driven 4-bars, the centre
- * wheels on 5-bars, and the drive motors on all six.
+ * Climbs or descends a curb by coordinating every leg and wheel of a robot
+ * whose wheels each hang on a leg that can lift it: three axles, the corner
+ * wheels on crank-driven 4-bars and the centre wheels on 5-bars, with drive
+ * motors on the wheels (FRammsCurbLeg). The crossing keeps the robot rolling
+ * and its base level wherever the legs can span the terrain, and refuses,
+ * before anything moves, a crossing they cannot.
  *
- * The gait. Two axles carry the robot while the third crosses the step, one
- * axle at a time, front to rear. For each axle:
+ * The gait (Tuning.Gait PerWheel, the default). Every wheel crosses on its
+ * own. Before anything moves the whole crossing is planned in the chassis'
+ * travel along its heading (the per-wheel planner): from the terrain -- the
+ * plane the robot stands on, the plane past the edge and a straight edge at
+ * any angle between them -- and from what each leg can reach, how fast it
+ * moves (Tuning.LegSpeed, LegAcceleration, each crank's
+ * FRammsCurbLeg::MaxCrankRateRadS) and how far its servo runs behind its
+ * command (ServoLagSeconds), it places each wheel's lift, carry and landing
+ * windows, the chassis height and the centre wheels' fore/aft path over the
+ * whole crossing, and the speed at every point, so that every lifted wheel
+ * clears the terrain under it (SwingClearance), the belly clears the higher
+ * surface (ChassisClearance), every carrying leg stays inside its reach
+ * (LegRangeMargin) and the robot stays inside its wheels at every instant
+ * (below). Its speed envelope never drops under a floor, MinSpeedFraction of
+ * DriveSpeed: legs move while the robot rolls, and their moves overlap one
+ * another. The planner's fallbacks are, in order: a level crossing at the
+ * floor or faster; a slower level crossing (never under the floor); the base
+ * tilted by the least inclination that keeps every pose, at most
+ * MaxPlannedTiltDeg, eased in and out within TiltRateDegPerSec and
+ * TiltAccelDegPerSec2 over only the stretch that needs it and back to level
+ * after; a level crossing with planned stops (bAllowPlannedStop); else a
+ * refusal that names the leg and the limit that bind. A crossing's plan is
+ * made off the game thread (BeginNegotiation; CheckFeasibility plans in the
+ * call), sampled on grids laid on the terrain so that the same terrain plans
+ * the same whether the robot stands a little nearer or further, and checked
+ * over the whole crossing before it is kept.
  *
- *   Prepare  every wheel down; the chassis rises (or sinks) to the height that
- *            lets this axle clear the step while the other two still reach
- *            their ground, and the centre wheels shift fore/aft so the centre
- *            of mass stays between the two axles that will be carrying it;
- *   Lift     this axle comes up clear of the higher surface;
- *   Advance  the robot drives on the other two until it is over its landing
- *            spot -- past the edge when climbing, clear of it when descending;
- *   Plant    it goes down onto the far side and takes load.
+ * The plan is then run against the robot as measured, each wheel on its own
+ * state machine (Planted, Lifting, Clear, Planting, Loading, Held; see
+ * GetWheelStatus) triggered by that wheel's measured distance past the edge,
+ * not by time: a lift begins only where the wheels it must not be off the
+ * ground with are down and the robot as measured, with that wheel up, still
+ * stands inside its wheels; a landing is found by the wheel touching the
+ * surface (or its leg stopping above where its servo lag model has it), then
+ * takes load before the legs that carry with it lead it on. Each leg is
+ * commanded a servo lag ahead along the plan, as a trapezoid at LegSpeed and
+ * LegAcceleration; each lifted wheel with a motor is spun up to the ground
+ * speed it will land at (bPrespinLiftedWheels). The speed is the plan's,
+ * capped by each lift's deadline (the speed at which the wheel reaches its
+ * window just as the leg work in front of its lift is done, predicted from
+ * the legs' speeds, servo lag and how far each is behind its command now),
+ * ramped at Acceleration and Deceleration. Every stop is a braking curve
+ * against a hard limit -- no wheel not yet clear of the curb goes into its
+ * window climbing, no loaded wheel on the high side does descending. Along
+ * the way the robot slows rather than stops: besides those limits, only a
+ * stop the plan itself has, a level-in it has to make standing still, a hold
+ * (phase Hold: waiting on a lift permit, a re-plan or the terrain) and a
+ * fault ever bring it to a standstill.
  *
- * Then the chassis settles, level and on every wheel, to its starting ride
- * height over the new ground. This is the sequence of the
- * lift-drive curb-climb CAD study, generalised: the chassis heights and centre
- * shifts are not fixed poses but are planned from the step height and what
- * each leg can actually reach (FRammsCurbTuning, the 4-bar specs and the
- * 5-bar controllers' own reachability), so the same controller takes a 4 in
- * curb or an 8 in one, up or down, on either chassis -- and refuses, before
- * moving, one its legs cannot span.
+ * The robot drives up to the curb in its drive mode's stance and is levelled
+ * in from it -- every leg moved to its level target on an S-curve within
+ * LegSpeed / LegAcceleration and the base's turn within TiltRateDegPerSec /
+ * TiltAccelDegPerSec2 -- timed so that the base is level before the first
+ * wheel is near its edge (made standing still first where, on the way, it
+ * would have to be made under the floor speed). Rolling, a plan still being
+ * made slows the robot so that its level-in keeps room; a level-in that runs
+ * late slows it further rather than faulting. Once every wheel is on the far
+ * side the robot rolls on until its rear tyres are FinishClearance past the
+ * edge (Settle) and the crossing is Done, with the base back to level.
  *
- * The base is held level against gravity. Every leg that carries the robot
- * takes its height from the plane under its own wheel -- the near surface
- * until its axle crosses, the far one after -- where the wheel will be a
- * servo lag from now, so sloped and twisted surfaces move the legs, not the
- * chassis; the chassis height is planned over the mean of the wheels'
- * surfaces, and the plan checks every leg reaches what the terrain asks of
- * it over the whole stretch each step holds for. Where no one height does,
- * an axle may land further on (never so far that the next axle reaches its
- * braking point before it has landed), or the chassis may follow a path
- * planned through the corridor of heights every leg and the belly allow, at
- * least Tuning.MinCorridorCm wide all the way and no steeper than
- * Tuning.BaseHeightSpeed lets it climb or sink at speed. Lifted wheels are
- * carried clear of the terrain on their way:
- * climbing, at the curb top's height from the lift on; descending, over the
- * high side they are leaving, and no lower than their legs reach past it. A
- * gentle attitude loop (Tuning.AttitudeProportionalGain,
+ * The per-axle gait (Tuning.Gait PerAxle), kept as an option: both wheels of
+ * an axle cross together, one axle at a time, front to rear -- Prepare (every
+ * wheel down; the chassis to a height that lets this axle clear the step
+ * while the other two reach their ground, the centre wheels shifted fore/aft
+ * to keep the centre of mass between the axles that will carry it), Lift,
+ * Advance (driving on the other two to the landing spot) and Plant -- then
+ * Settle. Its chassis heights and centre shifts are planned from the terrain
+ * and what each leg can reach; where no one height serves a step it lands an
+ * axle further on, or follows a path through the corridor of heights every
+ * leg and the belly allow (at least Tuning.MinCorridorCm wide and no steeper
+ * than BaseHeightSpeed). It plans in the call, keeps the base level (never
+ * tilts or plans a stop), and paces itself by the next axle's deadline the
+ * same way; a step ends when the legs are measured where they were sent.
+ *
+ * The base is held level against gravity in both gaits. Every leg that
+ * carries the robot takes its height from the plane under its own wheel --
+ * the near surface until the wheel crosses, the far one after -- where the
+ * wheel will be a servo lag from now, so sloped and twisted surfaces move the
+ * legs, not the chassis. Lifted wheels are carried clear of the terrain on
+ * their way. A gentle attitude loop (Tuning.AttitudeProportionalGain,
  * AttitudeIntegralGain) trims what is left as a pure rotation of the support
  * legs, and each surface's height is corrected by where its planted wheels
- * find it. The robot drives up in its own stance; the first Prepare levels
- * it in, timed from how long its legs take so that the base is level before
- * any wheel is RammsCurb::LevelBeforeEdgeCm from its edge -- the attitude
- * loop taking over once the legs are on the terrain -- and the first lift
- * waits for it. A level-in that runs late slows the robot (it comes to rest
- * no nearer the edge than that line, allowing for the chassis running a lag
- * behind its command) rather than faulting.
+ * find it.
  *
  * Every plan keeps the robot standing well inside its wheels. The robot's
  * centre of mass (Tuning.CenterOfMass, moved by the mass each leg carries with
  * its wheel, FRammsCurbLeg::MovingMassKg against Tuning.RobotMassKg) must stay
  * at least Tuning.MinStabilityMargin inside the contacts of the wheels on the
- * ground in every pose a lift holds while driving, allowing for the shift of
- * braking at Deceleration or speeding up at Acceleration (h a / g, its height h
- * over the contacts): a two-dimensional margin, so a lift is checked across the
- * robot as well as along it. (A lift that must start standing still keeps at
- * least the smaller of Tuning.LiftOffMargin and MinStabilityMargin standing
- * still.) Each wheel touches where its tread meets the surface: on a slope
- * across it, at its uphill rim. The stance the robot drives up in, which is
- * the drive mode's, is not checked: its margin, evaluated as if level, is
- * recorded with the lifts' (the run stats' MinPlannedMarginCm), and on a
- * sloped approach, where the chassis drives it tilted, it can be the least of
- * the crossing. The same margin is measured on every tick of a crossing
- * (GetStabilityMargin, and the run stats).
- *
- * Speed comes from overlapping the steps rather than from moving any one leg
- * fast: the robot keeps rolling while legs reposition and lift. It slows
- * only as far as a deadline needs: the next axle to be lifted must be clear of
- * the step by the time it reaches its braking point, so the speed is capped at
- * what covers the distance left as the leg work in front of that lift --
- * predicted from the legs' speeds and servo lag, and from how far each one is
- * behind its command now -- runs out, braked back at Deceleration from any
- * step that waits on distance. The cap moves continuously; nothing is a step
- * factor. Every stop is a braking curve against a hard limit -- no wheel on
- * the low side reaches the curb face, no loaded wheel on the high side rolls
- * off the edge -- rather than a fixed waypoint, and those hard limits are the
- * only thing that ever asks for a standstill. A step ends when the legs are
- * measured where they were sent, not when a timer says so.
+ * ground in every pose of the plan, allowing for the shift of braking at
+ * Deceleration or speeding up at Acceleration (h a / g, its height h over the
+ * contacts): a two-dimensional margin, so a lift is checked across the robot
+ * as well as along it. Each wheel touches where its tread meets the surface:
+ * on a slope across it, at its uphill rim. The same margin is measured on
+ * every tick of a crossing (GetStabilityMargin, and the run stats); the
+ * per-wheel gait holds, then faults, under MinLiveStabilityMarginCm, and
+ * checks the stance it drives up in against it before it begins.
  *
  * The robot drives as it does in differential mode, on its main drive wheels
- * (the lift-drive's treaded centre wheels), with each other wheel driving or
- * rolling free by its role (FRammsCurbLeg::Drive), side by side: the
- * holonomic chassis' omni wheels on one side take over only while that side's
- * centre wheel is off the ground -- its axle's lift, crossing and landing --
- * and the linkage chassis' powered front wheels help throughout while its
- * rear omni wheels just roll. Each
+ * (FRammsCurbLeg::Drive Main), with each other wheel driving or rolling free
+ * by its role, side by side: a Fallback wheel takes over only while the Main
+ * wheel on its side is off the ground, an Assist wheel helps throughout, a
+ * Passive one only rolls. Each
  * driven wheel turns at the ground speed its centre has: the chassis' plus its
  * leg's measured fore/aft rate. A wheel motor that commands its joint relative
  * to the link it hangs from (MuJoCo's hinge) does not turn the wheel over the
@@ -159,8 +179,9 @@ namespace RammsCurb
  * first wheels' window. Until it is, the approach cannot end: the robot
  * brakes at Tuning.Deceleration to rest at that point, allowing for its
  * chassis running a lag behind the command, and once at rest looks once more
- * and refuses if it still has not seen enough. The per-axle gait lifts both
- * wheels of an axle at once, so it crosses an edge at most
+ * and refuses if it still has not seen enough. The per-wheel gait crosses an
+ * edge up to Tuning.MaxApproachDeg off square; the per-axle gait lifts both
+ * wheels of an axle at once, so it crosses one at most
  * RammsCurb::PerAxleMaxApproachDeg off square. It refuses a start with any
  * wheel over ground more than Tuning.MinStepHeight off the near surface.
  *
@@ -234,10 +255,13 @@ public:
 	/**
 	 * Plan the manoeuvre for this step without moving: true when every leg
 	 * can reach what each step of the gait asks of it. OutReason says why
-	 * not, or summarises the plan. With Tuning.Gait PerWheel the plan is made
-	 * in the call, on the game thread: tens to a few hundred milliseconds for
-	 * a level plan, up to a few seconds where it has to look for a tilt or a
-	 * stop (its lines say how long) -- ask it of a robot standing still.
+	 * not, or summarises the plan. With Tuning.Gait PerWheel (the default)
+	 * the plan is made in the call, on the game thread, which stalls for as
+	 * long as it takes: tens to a few hundred milliseconds for a level plan,
+	 * several seconds -- ten or more on a hard case -- where it has to look
+	 * for a tilt or a stop (its lines say how long). Ask it of a robot
+	 * standing still, and not every frame; BeginNegotiation plans off the
+	 * game thread.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool CheckFeasibility(FRammsCurbProfile Profile, FString& OutReason);
@@ -257,7 +281,8 @@ public:
 	 * comes on a later tick: the phase Faulted, the status "refused at rest:
 	 * <why>" (the robot handed back to the mode it came from: nothing has
 	 * moved) or "refused on the move: <why>" (braked to rest and held in this
-	 * mode). CheckFeasibility answers at once, in the call.
+	 * mode). CheckFeasibility answers in the call instead (and stalls the
+	 * game thread while it plans).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool BeginNegotiation(FRammsCurbProfile Profile, FString& OutReason);

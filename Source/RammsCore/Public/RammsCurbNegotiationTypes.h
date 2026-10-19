@@ -11,8 +11,10 @@
 /**
  * Which wheel pair a leg belongs to, front to back.
  *
- * Curb negotiation is a three-axle gait: two axles carry the robot while the
- * third is lifted over the step, one axle at a time, front to rear.
+ * The robot has three axles. The per-wheel gait (the default) lifts each
+ * wheel over the step on its own, as its own distance to the edge comes up;
+ * the per-axle gait lifts one whole axle at a time, front to rear, while the
+ * other two carry the robot.
  */
 UENUM(BlueprintType)
 enum class ERammsCurbAxle : uint8
@@ -25,11 +27,10 @@ enum class ERammsCurbAxle : uint8
 /**
  * When a leg's wheel is driven during a crossing.
  *
- * The lift-drive drives like its differential mode -- on the treaded centre
- * wheels -- and leans on the others only when it has to. Which others, and
- * when, is the robot's: the holonomic chassis' omni wheels take over only while
- * the centre wheels are off the ground; the linkage chassis' powered front
- * wheels help throughout, and its rear omni wheels are never driven.
+ * A crossing drives on the main wheels and leans on the others only when it
+ * has to. Which others, and when, is set per leg: a fallback wheel takes over
+ * only while the main wheel on its side is off the ground, an assist wheel
+ * helps throughout, and a passive wheel is never driven.
  */
 UENUM(BlueprintType)
 enum class ERammsCurbWheelDrive : uint8
@@ -138,9 +139,13 @@ struct RAMMSCORE_API FRammsCurbLeg
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
 	float MovingMassKg = 0.0f;
 
-	/** The fastest the leg's crank may turn (rad/s), for planning how long
-	 *  its moves take; 0, the default, sets no limit. (For the per-wheel
-	 *  planner; the per-axle gait times its legs by LegSpeed alone.) */
+	/** How fast the leg's crank may turn on average over a move (rad/s),
+	 *  for planning how long its moves take; 0, the default, sets no limit.
+	 *  Planner only: the per-wheel planner times a move no faster on average
+	 *  than this, but the executor still commands the leg by LegSpeed and
+	 *  LegAcceleration, so it does not cap the crank's peak rate -- set it
+	 *  from what the crank sustains over a whole move. (The per-axle gait
+	 *  times its legs by LegSpeed alone.) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
 	float MaxCrankRateRadS = 0.0f;
 };
@@ -190,8 +195,12 @@ struct RAMMSCORE_API FRammsCurbProfile
 	FRammsCurbTerrain Terrain;
 };
 
-/** Where the manoeuvre is. Each step of the gait names an axle too; see
- *  URammsCurbNegotiationController::GetPhaseAxle. */
+/** Where the manoeuvre is. Idle, Approach, Prepare, Settle, Done, Aborted and
+ *  Faulted belong to both gaits; Lift, Shift, Advance and Plant are the
+ *  per-axle gait's steps, each naming an axle (see
+ *  URammsCurbNegotiationController::GetPhaseAxle); Cross and Hold are the
+ *  per-wheel gait's, during which each wheel has its own state
+ *  (GetWheelStatus). */
 UENUM(BlueprintType)
 enum class ERammsCurbPhase : uint8
 {
@@ -202,16 +211,17 @@ enum class ERammsCurbPhase : uint8
 	/** All wheels down; the chassis moves to the height, and the centre
 	 *  wheels to the fore/aft offset, the next lift needs. */
 	Prepare UMETA(DisplayName = "Prepare"),
-	/** One axle comes up clear of the step. */
+	/** Per-axle gait: one axle comes up clear of the step. */
 	Lift UMETA(DisplayName = "Lift"),
-	/** With that axle up, the chassis and centre wheels move to where the
-	 *  robot can drive on the other two -- only when no one pose serves both
-	 *  the lift and the drive. */
+	/** Per-axle gait: with that axle up, the chassis and centre wheels move
+	 *  to where the robot can drive on the other two -- only when no one pose
+	 *  serves both the lift and the drive. */
 	Shift UMETA(DisplayName = "Shift"),
-	/** Driving on the other two axles until the lifted one is over its
-	 *  landing spot. */
+	/** Per-axle gait: driving on the other two axles until the lifted one is
+	 *  over its landing spot. */
 	Advance UMETA(DisplayName = "Advance"),
-	/** The lifted axle goes down onto the far side and takes load. */
+	/** Per-axle gait: the lifted axle goes down onto the far side and takes
+	 *  load. */
 	Plant UMETA(DisplayName = "Plant"),
 	/** Every wheel across: the chassis returns to its starting ride height,
 	 *  level, on every wheel. The drive mode handed back to then puts the
@@ -248,15 +258,17 @@ enum class ERammsCurbPhase : uint8
 	Hold UMETA(DisplayName = "Hold"),
 };
 
-/** Which gait crosses the curb. */
+/** Which gait crosses the curb (FRammsCurbTuning::Gait; PerWheel by default). */
 UENUM(BlueprintType)
 enum class ERammsCurbGait : uint8
 {
 	/** Both wheels of an axle together, axle by axle, front to rear, each step
-	 *  waiting for the last (within 10 deg of square). */
+	 *  waiting for the last (within 10 deg of square), the base level. The
+	 *  earlier gait, kept as an option. */
 	PerAxle UMETA(DisplayName = "Per axle"),
 	/** Every wheel on its own, planned in chassis travel before anything moves
-	 *  (the per-wheel planner); legs and driving overlap. */
+	 *  (the per-wheel planner); legs and driving overlap, the base level or
+	 *  tilted within MaxPlannedTiltDeg. The default. */
 	PerWheel UMETA(DisplayName = "Per wheel"),
 };
 
@@ -504,13 +516,15 @@ struct RAMMSCORE_API FRammsCurbTuning
 {
 	GENERATED_BODY()
 
-	/** Which gait crosses: PerAxle, the default, or PerWheel. A per-wheel plan
-	 *  is level where it can be, else tilted by the least within
-	 *  MaxPlannedTiltDeg at the floor speed or more, else level with a planned
-	 *  stop (bAllowPlannedStop), else refused; it never hands a crossing to the
-	 *  other gait. */
+	/** Which gait crosses: PerWheel, the default, or PerAxle (the earlier
+	 *  gait, kept as an option). A per-wheel plan is level where it can be,
+	 *  else tilted by the least within MaxPlannedTiltDeg at the floor speed or
+	 *  more, else level with a planned stop (bAllowPlannedStop), else refused;
+	 *  it never hands a crossing to the other gait. Until the per-wheel gait
+	 *  became the default, PerAxle was; a robot saved with this field at that
+	 *  default crosses per wheel now. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
-	ERammsCurbGait Gait = ERammsCurbGait::PerAxle;
+	ERammsCurbGait Gait = ERammsCurbGait::PerWheel;
 
 	/** The least speed a per-wheel plan rolls at, as a fraction of DriveSpeed
 	 *  (the floor): where it could not keep the base level at or above it,

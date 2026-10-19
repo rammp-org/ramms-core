@@ -156,6 +156,12 @@ namespace RammsCurb
 				 "same pose, its chassis origin on the near surface there -- to see how a plan depends on where it starts."),
 			ECVF_Default);
 
+		TAutoConsoleVariable<float> CVarCurbReplayCrankRate(TEXT("Ramms.Curb.ReplayCrankRateRadS"), -1.0f,
+			TEXT("Development: ramms.Curb.PlanReplay plans each input with every leg's MaxCrankRateRadS set to this (rad/s; 0 no limit) "
+				 "instead of the one recorded; negative, the default, keeps the recorded one. A leg field, which the replay's "
+				 "Field=Value overrides of FRammsCurbTuning cannot reach."),
+			ECVF_Default);
+
 		/**
 		 * ramms.Curb.PlanReplay <file or folder> <out.json> [Field=Value ...]:
 		 * plan each planner input (a file, or every *.planin in a folder, in name
@@ -217,6 +223,15 @@ namespace RammsCurb
 					{
 						Row->SetStringField(TEXT("error"), FString::Printf(TEXT("cannot set %s to '%s'"), *O.Key->GetName(), *O.Value));
 					}
+				}
+				const double CrankRate = CVarCurbReplayCrankRate.GetValueOnGameThread();
+				if (CrankRate >= 0.0)
+				{
+					for (FPlannerLeg& L : In.Legs)
+					{
+						L.MaxCrankRateRadS = CrankRate;
+					}
+					Row->SetNumberField(TEXT("crank_rate"), CrankRate);
 				}
 				const double Shift = CVarCurbReplayShiftCm.GetValueOnGameThread();
 				if (Shift != 0.0)

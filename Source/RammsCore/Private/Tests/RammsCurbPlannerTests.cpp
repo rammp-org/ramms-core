@@ -20,6 +20,7 @@
 #include "Curb/RammsCurbRobotModel.h"
 #include "Curb/RammsCurbSchedule.h"
 #include "Curb/RammsCurbTerrainFit.h"
+#include "RammsCurbNegotiationController.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -3462,6 +3463,21 @@ bool FRammsCurbExecutorPredictedLiftMargin::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("the left rear lifting as the left centre takes load (from %.1f): nothing to check"), C.SLiftStart + Off), Next,
 			TNumericLimits<double>::Max());
 	}
+	return true;
+}
+
+// The per-wheel gait is the default: a controller added with its tuning left
+// alone crosses wheel by wheel, and the per-axle gait is still there to ask
+// for.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerDefaultGaitPerWheel,
+	"Ramms.Curb.Planner.DefaultGaitPerWheel",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsCurbPlannerDefaultGaitPerWheel::RunTest(const FString& Parameters)
+{
+	TestEqual(TEXT("the tuning's default gait is per wheel"), FRammsCurbTuning().Gait, ERammsCurbGait::PerWheel);
+	const URammsCurbNegotiationController* Default = GetDefault<URammsCurbNegotiationController>();
+	TestTrue(TEXT("so is a controller's as constructed"), Default && Default->Tuning.Gait == ERammsCurbGait::PerWheel);
+	TestTrue(TEXT("the per-axle gait is still an option"), StaticEnum<ERammsCurbGait>()->IsValidEnumValue(static_cast<int64>(ERammsCurbGait::PerAxle)));
 	return true;
 }
 
