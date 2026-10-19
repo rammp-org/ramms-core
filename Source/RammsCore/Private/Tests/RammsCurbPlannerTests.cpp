@@ -1871,7 +1871,9 @@ bool FRammsCurbExecutorLegStall::RunTest(const FString& Parameters)
 {
 	// A front corner whose lift stops 3 cm up, short of clear, climbing: the
 	// hard braking cap brings the robot to rest short of its window -- the
-	// wheel never meets the face -- and the executor holds, saying which wheel.
+	// wheel never meets the face -- and the runtime checks fault, naming the
+	// wheel (its leg off its servo lag model, or its lift overrunning); the
+	// executor halts and the robot stays at rest there.
 	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
 	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
 	RammsCurb::FExecDryRunOptions  Options;
@@ -1880,18 +1882,12 @@ bool FRammsCurbExecutorLegStall::RunTest(const FString& Parameters)
 	Options.MaxSeconds = 20.0;
 	const RammsCurb::FExecDryRunResult R = ExecRunOf(*this, TEXT("Square up, front_left stalling"), In, S, Options, /*bExpectFluid=*/false);
 	TestFalse(TEXT("not done"), R.bDone);
-	TestEqual(TEXT("held"), FString(RammsCurb::ExecPhaseName(R.EndPhase)), FString(TEXT("Hold")));
-	TestTrue(FString::Printf(TEXT("a hold counted (%d)"), R.Counts.Holds), R.Counts.Holds >= 1);
+	TestTrue(FString::Printf(TEXT("faulted, naming the wheel: %s"), *R.FaultWhy), R.bFaulted && R.FaultWhy.Contains(TEXT("front_left")));
+	TestEqual(TEXT("halted"), FString(RammsCurb::ExecPhaseName(R.EndPhase)), FString(TEXT("Halted")));
 	TestTrue(FString::Printf(TEXT("the braking cap bound (%d ticks)"), R.Counts.BrakingTicks), R.Counts.BrakingTicks > 0);
 	TestTrue(FString::Printf(TEXT("at rest at its window, FaceMargin short of the face: %.2f cm past the edge, the window from %.2f"),
 				 R.FinalPastEdgeCm.IsValidIndex(PlanFL) ? R.FinalPastEdgeCm[PlanFL] : 0.0, S.Wheels[PlanFL].DUp),
 		R.FinalPastEdgeCm.IsValidIndex(PlanFL) && R.FinalPastEdgeCm[PlanFL] <= S.Wheels[PlanFL].DUp + 0.5 && R.FinalSpeedCmS < 0.5);
-	bool bNamed = false;
-	for (const FString& L : R.Log)
-	{
-		bNamed = bNamed || (L.Contains(TEXT("hold")) && L.Contains(TEXT("front_left")));
-	}
-	TestTrue(TEXT("the hold names the wheel"), bNamed);
 	return true;
 }
 
@@ -2225,6 +2221,9 @@ bool FRammsCurbExecutorLegStallDown::RunTest(const FString& Parameters)
 	const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Options);
 	const RammsCurb::FWheelPlan&	   W = S.Wheels[PlanFL];
 	const double					   Most = R.MaxNearCarryPastEdgeCm.IsValidIndex(PlanFL) ? R.MaxNearCarryPastEdgeCm[PlanFL] : 1e9;
+	// (Its leg rises no more than the descent's clearance asks, under
+	// LegErrorFaultCm off its servo lag model: the executor holds, and the
+	// controller's hold timeout faults it.)
 	TestFalse(TEXT("not done"), R.bDone);
 	TestEqual(TEXT("held"), FString(RammsCurb::ExecPhaseName(R.EndPhase)), FString(TEXT("Hold")));
 	TestTrue(FString::Printf(TEXT("a hold counted (%d)"), R.Counts.Holds), R.Counts.Holds >= 1);
@@ -2294,6 +2293,541 @@ bool FRammsCurbExecutorPlannedStopNoHold::RunTest(const FString& Parameters)
 		{
 			AddInfo(FString::Printf(TEXT("trace: %s"), *L));
 		}
+	}
+	return true;
+}
+
+namespace
+{
+	/** A disturbed run (the runtime checks): the executor round the kinematic
+	 *  robot as Options disturb it, checked for what must hold whatever it
+	 *  does -- no wheel on the ground in its window, no lifted one into the
+	 *  terrain (as it is), no forbidden set, no lift before the wheels it
+	 *  waits on -- with what it did as info, and its log on a failure. */
+	RammsCurb::FExecDryRunResult ExecDisturbed(FAutomationTestBase& Test, const FString& What, const RammsCurb::FPlannerInput& In,
+		const RammsCurb::FCurbSchedule& S, const RammsCurb::FExecDryRunOptions& Options)
+	{
+		const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Options);
+		Test.TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *What), R.KeepOffViolations, 0);
+		Test.TestEqual(FString::Printf(TEXT("%s: lifted wheels into the terrain"), *What), R.IntoTerrain, 0);
+		Test.TestEqual(FString::Printf(TEXT("%s: ticks with a forbidden set off the ground"), *What), R.Counts.ForbiddenTicks, 0);
+		Test.TestEqual(FString::Printf(TEXT("%s: lifts before the wheels they wait on had landed"), *What), R.EarlyLifts, 0);
+		Test.AddInfo(FString::Printf(TEXT("%s: %.1f s, ended %s, done %d, faulted %d (%s) at %.2f s, halted %d, at rest %d, braking at most %.0f cm/s^2, "
+										  "inclined at most %.2f deg (%.2f once halted), %d re-plans, clearance %s cm"),
+			*What, R.Seconds, RammsCurb::ExecPhaseName(R.EndPhase), R.bDone ? 1 : 0, R.bFaulted ? 1 : 0, *R.FaultWhy, R.FaultAt, R.bHalted ? 1 : 0,
+			R.bStopped ? 1 : 0, R.HaltBrakingCmS2, R.MaxInclinationDeg, R.HaltedInclinationDeg, R.Replans,
+			R.MinSwingClearanceCm < 1e6 ? *FString::Printf(TEXT("%.2f"), R.MinSwingClearanceCm) : TEXT("-")));
+		if (Test.HasAnyErrors())
+		{
+			for (const FString& L : R.Log)
+			{
+				Test.AddInfo(FString::Printf(TEXT("%s log: %s"), *What, *L));
+			}
+		}
+		return R;
+	}
+
+	/** A fault ended the run cleanly: named (Contains), the robot halted and
+	 *  brought to rest, braked no harder than twice Deceleration, upright
+	 *  (within MaxIncl of level once halted). */
+	void ExpectCleanFault(FAutomationTestBase& Test, const FString& What, const RammsCurb::FExecDryRunResult& R, const TCHAR* Contains,
+		const FRammsCurbTuning& T, double MaxIncl = 5.0)
+	{
+		Test.TestTrue(FString::Printf(TEXT("%s: faulted, '%s' (%s)"), *What, Contains, *R.FaultWhy), R.bFaulted && R.FaultWhy.Contains(Contains));
+		Test.TestTrue(FString::Printf(TEXT("%s: halted and at rest (%.2f cm/s)"), *What, R.FinalSpeedCmS), R.bHalted && R.bStopped && R.FinalSpeedCmS < 0.5);
+		Test.TestTrue(FString::Printf(TEXT("%s: braked at most twice Deceleration (%.0f cm/s^2)"), *What, R.HaltBrakingCmS2),
+			R.HaltBrakingCmS2 <= 2.0 * T.Deceleration + 1.0);
+		Test.TestTrue(FString::Printf(TEXT("%s: upright once halted (%.2f deg)"), *What, R.HaltedInclinationDeg), R.HaltedInclinationDeg < MaxIncl);
+	}
+} // namespace
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorTerrainOff2cm,
+	"Ramms.Curb.Executor.TerrainOff2cm",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorTerrainOff2cm::RunTest(const FString& Parameters)
+{
+	// The far surface off by what a plane's bias takes up (MaxPlaneBiasCm): the
+	// traces ahead find it, its bias takes it up (lifted wheels carried that much
+	// higher over a higher one), and the crossing is made, up and down -- no
+	// fault. Off by 2 cm (TerrainMismatchCm), seen only once the front wheels
+	// have begun to cross -- too late to re-plan -- more than a bias takes up: a
+	// clean fault, naming it.
+	for (const bool bUp : { true, false })
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), bUp));
+		const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+		if (!TestTrue(TEXT("planned"), S.IsValid()))
+		{
+			continue;
+		}
+		for (const double Off : { 1.4, -1.4, 2.0, -2.0 })
+		{
+			const FString				  What = FString::Printf(TEXT("Square %s, the far surface %+.1f cm"), bUp ? TEXT("up") : TEXT("down"), Off);
+			RammsCurb::FExecDryRunOptions Options;
+			Options.TrueOffsetCm = FVector2D(0.0, Off);
+			const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+			if (FMath::Abs(Off) <= RammsCurb::MaxPlaneBiasCm)
+			{
+				TestTrue(FString::Printf(TEXT("%s: done, no fault (%s)"), *What, *R.FaultWhy), R.bDone && !R.bFaulted);
+			}
+			else
+			{
+				TestFalse(FString::Printf(TEXT("%s: not done"), *What), R.bDone);
+				ExpectCleanFault(*this, What, R, TEXT("a plane's bias takes up"), In.Tuning);
+			}
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorTerrainOff5cm,
+	"Ramms.Curb.Executor.TerrainOff5cm",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorTerrainOff5cm::RunTest(const FString& Parameters)
+{
+	// The far surface 5 cm off: the traces ahead see it before any wheel
+	// reaches it, and the crossing faults -- "terrain not as detected" -- the
+	// robot braked to rest short of every window, upright; no wheel meets the
+	// face or lands on what is not there.
+	for (const bool bUp : { true, false })
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), bUp));
+		const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+		if (!TestTrue(TEXT("planned"), S.IsValid()))
+		{
+			continue;
+		}
+		for (const double Off : { 5.0, -5.0 })
+		{
+			const FString				  What = FString::Printf(TEXT("Square %s, the far surface %+.0f cm"), bUp ? TEXT("up") : TEXT("down"), Off);
+			RammsCurb::FExecDryRunOptions Options;
+			Options.TrueOffsetCm = FVector2D(0.0, Off);
+			const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+			TestFalse(FString::Printf(TEXT("%s: not done"), *What), R.bDone);
+			ExpectCleanFault(*this, What, R, TEXT("terrain not as detected"), In.Tuning);
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorNearRefit,
+	"Ramms.Curb.Executor.NearRefit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorNearRefit::RunTest(const FString& Parameters)
+{
+	// The surface the robot stands on 1.5 cm lower than planned (and so the
+	// curb 1.5 cm taller): before any wheel has begun to cross, the traces find
+	// it more than ReplanTerrainCm off, the near plane is re-fitted and the
+	// crossing re-planned on it, and made.
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	RammsCurb::FExecDryRunOptions Options;
+	Options.TrueOffsetCm = FVector2D(-1.5, 0.0);
+	const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, TEXT("Square up, the near surface 1.5 cm low"), In, S, Options);
+	TestTrue(FString::Printf(TEXT("done, no fault (%s)"), *R.FaultWhy), R.bDone && !R.bFaulted);
+	TestTrue(FString::Printf(TEXT("re-planned on the near surface re-fitted (%d: %s)"), R.Replans, R.ReplanWhy.Num() ? *R.ReplanWhy[0] : TEXT("")),
+		R.Replans >= 1 && R.ReplanWhy.Num() > 0 && R.ReplanWhy[0].Contains(TEXT("near surface")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorReplanBias,
+	"Ramms.Curb.Executor.ReplanBias",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorReplanBias::RunTest(const FString& Parameters)
+{
+	// A runtime trigger's re-plan on a surface re-fitted to what the traces
+	// found, adopted at once and after the time a plan made off the game thread
+	// takes (0.15 s): the re-fitted surface's bias, from the adoption on, is
+	// where that surface truly lies off its new plane (within a few mm) -- not
+	// the old bias moved by the re-fit, which is right only where the old one
+	// had caught up with the surface (one still catching up -- here through the
+	// planted wheels, about 0.4 cm of 1.5 after 0.15 s -- would be left wrong
+	// by the rest). The surface the robot stands on 1.5 cm low and 1.2 cm high,
+	// seen from the start. (A far surface is seen by the traces only once the
+	// front wheels are within 30 cm of the edge, after their lifts on this
+	// robot: no re-plan, the bias takes it up -- TerrainOff2cm.)
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	for (const double Off : { -1.5, 1.2 })
+	{
+		for (const double Delay : { 0.0, 0.15 })
+		{
+			const FString				  What = FString::Printf(TEXT("Square up, the near surface %+.1f cm, re-plans adopted %.2f s after the ask"), Off, Delay);
+			RammsCurb::FExecDryRunOptions Options;
+			Options.TrueOffsetCm = FVector2D(Off, 0.0);
+			Options.ReplanDelaySeconds = Delay;
+			const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+			TestTrue(FString::Printf(TEXT("%s: done, no fault (%s)"), *What, *R.FaultWhy), R.bDone && !R.bFaulted);
+			TestTrue(FString::Printf(TEXT("%s: re-planned (%d)"), *What, R.Replans), R.Replans >= 1);
+			TestTrue(FString::Printf(TEXT("%s: the re-fitted surface's bias where the surface is (off by at most %.2f cm)"), *What, R.ReplanBiasErrorCm),
+				R.ReplanBiasErrorCm <= 0.25);
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorTracedTouchdown,
+	"Ramms.Curb.Executor.TracedTouchdown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorTracedTouchdown::RunTest(const FString& Parameters)
+{
+	// The sidewalk 0.45 cm higher than planned -- under what a bias follows from
+	// the traces ahead (here blind), so the first wheels land with none: each
+	// touches down where the trace under it finds the surface, as it reaches
+	// it, rather than pressing its leg on until it stalls or the plan's
+	// surface is reached.
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	RammsCurb::FExecDryRunOptions Options;
+	Options.TrueOffsetCm = FVector2D(0.0, 0.45);
+	Options.bProbeAhead = false;
+	const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, TEXT("Square up, the sidewalk 0.45 cm high"), In, S, Options);
+	TestTrue(FString::Printf(TEXT("done, no fault (%s)"), *R.FaultWhy), R.bDone && !R.bFaulted);
+	int32 Traced = 0;
+	for (const FString& L : R.Log)
+	{
+		Traced += L.Contains(TEXT("touched down (on the surface traced under it)")) ? 1 : 0;
+	}
+	TestTrue(FString::Printf(TEXT("wheels touched down on the surface traced under them: %d"), Traced), Traced >= 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorRidge,
+	"Ramms.Curb.Executor.Ridge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorRidge::RunTest(const FString& Parameters)
+{
+	// A ridge 2.5 cm high and 4 cm wide across the sidewalk, 25 cm past the
+	// edge -- more than TerrainMismatchCm on a surface planned flat: the
+	// crossing either makes it or faults naming it, never meeting it with a
+	// wheel in the air or falling.
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	RammsCurb::FExecDryRunOptions Options;
+	Options.RidgeHeightCm = 2.5;
+	Options.RidgePastEdgeCm = 25.0;
+	Options.RidgeWidthCm = 4.0;
+	const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, TEXT("Square up, a ridge past the edge"), In, S, Options);
+	TestTrue(FString::Printf(TEXT("done, or faulted on the terrain (%s)"), *R.FaultWhy),
+		R.bDone || (R.bFaulted && R.FaultWhy.Contains(TEXT("terrain not as detected"))));
+	if (R.bFaulted)
+	{
+		ExpectCleanFault(*this, TEXT("a ridge"), R, TEXT("terrain not as detected"), In.Tuning);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorLandingChecks,
+	"Ramms.Curb.Executor.LandingChecks",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorLandingChecks::RunTest(const FString& Parameters)
+{
+	// The landing check, with the traces ahead blind (the terrain monitor sees
+	// nothing ahead to stop for): a front wheel set down on a sidewalk 2.2 cm
+	// higher than planned is stopped by it more than LandingToleranceCm above
+	// where it was to land -- a fault, naming it, and, halted, both front
+	// legs held where they met the sidewalk, their commands no more than
+	// PlantProbeCm under where their legs stood then (the faulting one at
+	// once, the other once the halt sees it pressing) rather than sent on down
+	// to where the plan has the surface (2.2 cm deeper: jacking the robot up
+	// on them); one
+	// coming down where a pit 3 cm deep begins just past its window finds no
+	// ground there (the trace under it) -- lifted clear again, a fault, naming
+	// it. With LandingToleranceCm raised to 2.5, a sidewalk 2.0 cm high is
+	// within it: touched down, not left pressing on until its plant's timeout.
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	{
+		RammsCurb::FExecDryRunOptions Options;
+		Options.bProbes = false;
+		Options.TrueOffsetCm = FVector2D(0.0, 2.2);
+		const FString					   What = TEXT("Square up, the sidewalk 2.2 cm high, no traces");
+		const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+		ExpectCleanFault(*this, What, R, TEXT("above where it was to land"), In.Tuning);
+		TestTrue(FString::Printf(TEXT("%s: a front wheel named"), *What), R.FaultWhy.Contains(TEXT("front_")));
+		if (TestEqual(FString::Printf(TEXT("%s: a hold for every wheel"), *What), R.HaltHeldPressCm.Num(), In.Legs.Num()))
+		{
+			for (const int32 Leg : { PlanFL, PlanFR })
+			{
+				TestTrue(FString::Printf(TEXT("%s: '%s' held where it met the sidewalk, its command %.2f cm under its leg then (at most %.2f)"), *What,
+							 *In.Legs[Leg].Name.ToString(), R.HaltHeldPressCm[Leg], RammsCurb::PlantProbeCm),
+					R.HaltHeldPressCm[Leg] >= 0.0 && R.HaltHeldPressCm[Leg] <= RammsCurb::PlantProbeCm + 1e-3);
+			}
+		}
+	}
+	{
+		RammsCurb::FPlannerInput Wide = In;
+		Wide.Tuning.LandingToleranceCm = 2.5f;
+		RammsCurb::FExecDryRunOptions Options;
+		Options.bProbes = false;
+		Options.TrueOffsetCm = FVector2D(0.0, 2.0);
+		const FString					   What = TEXT("Square up, the sidewalk 2.0 cm high, no traces, LandingToleranceCm 2.5");
+		const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, Wide, S, Options);
+		int32							   Down = 0;
+		for (const FString& L : R.Log)
+		{
+			Down += L.Contains(TEXT("front_")) && L.Contains(TEXT("touched down")) ? 1 : 0;
+		}
+		TestTrue(FString::Printf(TEXT("%s: the front wheels touched down (%d)"), *What, Down), Down >= 2);
+		TestFalse(FString::Printf(TEXT("%s: no landing left to its timeout (%s)"), *What, *R.FaultWhy), R.FaultWhy.Contains(TEXT("did not touch down")));
+	}
+	{
+		RammsCurb::FExecDryRunOptions Options;
+		Options.bProbeAhead = false;
+		Options.RidgeHeightCm = -3.0;
+		Options.RidgePastEdgeCm = S.Wheels[PlanFL].DDown + 1.0;
+		Options.RidgeWidthCm = 30.0;
+		const FString					   What = TEXT("Square up, a pit where the fronts land, traces under the wheels only");
+		const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+		ExpectCleanFault(*this, What, R, TEXT("found no ground where it was to land"), In.Tuning);
+		bool bLifted = false;
+		for (const FString& L : R.Log)
+		{
+			bLifted = bLifted || L.Contains(TEXT("lifted clear again"));
+		}
+		TestTrue(FString::Printf(TEXT("%s: the wheel lifted clear again"), *What), bLifted);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorAttitudeFault,
+	"Ramms.Curb.Executor.AttitudeFault",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorAttitudeFault::RunTest(const FString& Parameters)
+{
+	// The base measured off its planned attitude half-way through the crossing
+	// (a slip the model does not have), which the attitude loop -- at most
+	// MaxAttitudeCorrectionDeg (3) -- cannot take out: 8 deg, still over
+	// AttitudeFaultDeg after it -- a fault within half a second, the robot
+	// braked to rest; 3.5 deg, over half of it until the loop has taken it
+	// out -- the robot slowed to half the plan's speed meanwhile, the crossing
+	// made.
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	const RammsCurb::FExecDryRunResult Nominal = RammsCurb::ExecDryRun(In, S);
+	if (!TestTrue(TEXT("the crossing undisturbed is made"), Nominal.bDone))
+	{
+		return true;
+	}
+	const double At = 0.5 * Nominal.Seconds;
+	{
+		RammsCurb::FExecDryRunOptions Options;
+		Options.KickAtSeconds = At;
+		Options.KickDeg = FVector2D(8.0, 0.0);
+		const FString					   What = TEXT("Square up, 8 deg off its attitude");
+		const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+		ExpectCleanFault(*this, What, R, TEXT("off its planned attitude"), In.Tuning, 10.0);
+		TestTrue(FString::Printf(TEXT("%s: within half a second (%.2f s after)"), *What, R.FaultAt - At), R.FaultAt - At <= 0.5);
+	}
+	{
+		RammsCurb::FExecDryRunOptions Options;
+		Options.KickAtSeconds = At;
+		Options.KickDeg = FVector2D(0.0, 3.5);
+		const FString					   What = TEXT("Square up, 3.5 deg off its attitude");
+		const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+		TestTrue(FString::Printf(TEXT("%s: done, no fault (%s)"), *What, *R.FaultWhy), R.bDone && !R.bFaulted);
+		TestTrue(FString::Printf(TEXT("%s: slowed for it (%d ticks)"), *What, R.Counts.AttitudeSlowTicks), R.Counts.AttitudeSlowTicks > 0);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorHaltBrakes,
+	"Ramms.Curb.Executor.HaltBrakes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorHaltBrakes::RunTest(const FString& Parameters)
+{
+	// Halted (an abort) at points through the crossing, up and down: the robot
+	// braked to rest at Deceleration -- not snapped, and never harder than
+	// twice it -- no wheel on the ground in its window, none into the terrain,
+	// upright; not a fault.
+	for (const bool bUp : { true, false })
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Oblique30"), bUp));
+		const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+		if (!TestTrue(TEXT("planned"), S.IsValid()))
+		{
+			continue;
+		}
+		const RammsCurb::FExecDryRunResult Nominal = RammsCurb::ExecDryRun(In, S);
+		for (const double Share : { 0.3, 0.5, 0.7 })
+		{
+			const FString				  What = FString::Printf(TEXT("Oblique30 %s, halted %.0f %% through"), bUp ? TEXT("up") : TEXT("down"), 100.0 * Share);
+			RammsCurb::FExecDryRunOptions Options;
+			Options.HaltAtSeconds = Share * Nominal.Seconds;
+			const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+			TestTrue(FString::Printf(TEXT("%s: halted, at rest, no fault"), *What), R.bHalted && R.bStopped && !R.bFaulted && R.FinalSpeedCmS < 0.5);
+			TestTrue(FString::Printf(TEXT("%s: braked at most twice Deceleration (%.0f cm/s^2)"), *What, R.HaltBrakingCmS2),
+				R.HaltBrakingCmS2 <= 2.0 * In.Tuning.Deceleration + 1.0);
+			TestTrue(FString::Printf(TEXT("%s: upright (%.2f deg)"), *What, R.HaltedInclinationDeg), R.HaltedInclinationDeg < 5.0);
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorPlantOnHold,
+	"Ramms.Curb.Executor.PlantOnHold",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorPlantOnHold::RunTest(const FString& Parameters)
+{
+	// Halted just after the front corners have begun to lift, short of their
+	// windows: with bPlantOnHold they are set down again on the road (the robot
+	// then standing on every wheel) -- on it when the halt is over, not left in
+	// the air where they were as the robot came to rest; without it they stay
+	// up where they are.
+	RammsCurb::FPlannerInput	   In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	for (const bool bPlant : { true, false })
+	{
+		In.Tuning.bPlantOnHold = bPlant;
+		const FString				  What = FString::Printf(TEXT("Square up, halted as the fronts lift, bPlantOnHold %d"), bPlant ? 1 : 0);
+		RammsCurb::FExecDryRunOptions Options;
+		Options.HaltAtTravelCm = FMath::Max(S.Wheels[PlanFL].SLiftStart, S.Wheels[PlanFR].SLiftStart) + 3.0;
+		const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, In, S, Options);
+		bool							   bSetDown = false;
+		for (const FString& L : R.Log)
+		{
+			bSetDown = bSetDown || (L.Contains(TEXT("front_")) && L.Contains(TEXT("set down on hold over the near surface")));
+		}
+		TestTrue(FString::Printf(TEXT("%s: halted at rest"), *What), R.bHalted && R.bStopped && !R.bFaulted);
+		TestEqual(FString::Printf(TEXT("%s: a front corner set down on hold"), *What), bSetDown, bPlant);
+		if (R.FinalBottomCm.Num() == In.Legs.Num())
+		{
+			const double Highest = FMath::Max(R.FinalBottomCm[PlanFL], R.FinalBottomCm[PlanFR]);
+			if (bPlant)
+			{
+				TestTrue(FString::Printf(TEXT("%s: the front corners on the road when the halt is over (bottoms %+.2f / %+.2f cm)"), *What,
+							 R.FinalBottomCm[PlanFL], R.FinalBottomCm[PlanFR]),
+					Highest <= RammsCurb::TouchCm);
+			}
+			else
+			{
+				TestTrue(FString::Printf(TEXT("%s: a front corner still up (bottoms %+.2f / %+.2f cm)"), *What, R.FinalBottomCm[PlanFL],
+							 R.FinalBottomCm[PlanFR]),
+					Highest > RammsCurb::TouchCm);
+			}
+		}
+	}
+	{
+		// Standing in a drive stance with the front corners 6 cm up, halted at
+		// once: the robot is at rest long before the corners are down. The halt
+		// is over only once they are on the road where they were sent -- not as
+		// the robot came to rest, which would leave them where their commands
+		// then were, in the air. (The base settles 1.1 deg nose up on the first
+		// tick; the corners' targets follow the road under them.)
+		RammsCurb::FPlannerInput	   Up = FrontsUp(PlanOn(PlanScenario(TEXT("Square"), true)), 6.0);
+		const RammsCurb::FCurbSchedule SU = RammsCurb::PlanCrossing(Up);
+		if (TestTrue(TEXT("planned with the front corners up"), SU.IsValid()))
+		{
+			Up.Tuning.bPlantOnHold = true;
+			const FString				  What = TEXT("Square up, the front corners 6 cm up, halted at once, bPlantOnHold 1");
+			RammsCurb::FExecDryRunOptions Options;
+			Options.HaltAtSeconds = 0.0;
+			const RammsCurb::FExecDryRunResult R = ExecDisturbed(*this, What, Up, SU, Options);
+			TestTrue(FString::Printf(TEXT("%s: halted at rest"), *What), R.bHalted && R.bStopped && !R.bFaulted);
+			if (TestEqual(FString::Printf(TEXT("%s: a bottom for every wheel"), *What), R.FinalBottomCm.Num(), Up.Legs.Num()))
+			{
+				TestTrue(FString::Printf(TEXT("%s: the front corners on the road (bottoms %+.2f / %+.2f cm)"), *What, R.FinalBottomCm[PlanFL],
+							 R.FinalBottomCm[PlanFR]),
+					FMath::Max(R.FinalBottomCm[PlanFL], R.FinalBottomCm[PlanFR]) <= RammsCurb::TouchCm);
+			}
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorPredictedLiftMargin,
+	"Ramms.Curb.Executor.PredictedLiftMargin",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorPredictedLiftMargin::RunTest(const FString& Parameters)
+{
+	// The live lift permit's look ahead: a centre wheel lifting on the plan's
+	// position, the wheels the plan has up then up, nothing late -- the plan's
+	// own sets, nothing to check. With its own side's front corner still up
+	// past where the plan has it down -- a same-side corner and centre off the
+	// ground together -- the plan's poses over its lift stand under
+	// MinStabilityMargin, and it may not lift.
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("planned"), S.IsValid()))
+	{
+		return true;
+	}
+	const RammsCurb::FPlanModel	 M(In);
+	const RammsCurb::FWheelPlan& C = S.Wheels[PlanCL];
+	TestTrue(FString::Printf(TEXT("the left centre lifts after the left front has taken load (%.1f, %.1f)"), C.SLiftStart, S.Wheels[PlanFL].SLoaded),
+		C.SLiftStart >= S.Wheels[PlanFL].SLoaded);
+	double		   At = 0.0;
+	const double   Never = -TNumericLimits<double>::Max();
+	TArray<double> UpUntil;
+	UpUntil.Init(Never, 6);
+	const double None = RammsCurb::PredictedLiftMargin(M, S, PlanCL, C.SLiftStart, UpUntil, At);
+	TestEqual(TEXT("on the plan's position, nothing late: nothing to check"), None, TNumericLimits<double>::Max());
+	UpUntil[PlanFL] = C.SLiftStart + 20.0;
+	const double Late = RammsCurb::PredictedLiftMargin(M, S, PlanCL, C.SLiftStart, UpUntil, At);
+	TestTrue(FString::Printf(TEXT("the left front up 20 cm more: %.2f cm at %.0f cm, under MinStabilityMargin %.1f"), Late, At,
+				 In.Tuning.MinStabilityMargin),
+		Late < In.Tuning.MinStabilityMargin && At < C.SLiftStart + 20.0);
+	UpUntil[PlanFL] = C.SLiftStart - 1.0;
+	const double Down = RammsCurb::PredictedLiftMargin(M, S, PlanCL, C.SLiftStart, UpUntil, At);
+	TestEqual(TEXT("the left front down before the lift begins: nothing to check"), Down, TNumericLimits<double>::Max());
+
+	// A plan that lifts the left rear the moment the left centre has taken
+	// load: from the left centre's own lift position (either sample parity),
+	// nothing late, the sets are the plan's own up to its landing -- the
+	// sample where it has taken load and the rear is up is not one with it up.
+	RammsCurb::FCurbSchedule Tight = S;
+	for (RammsCurb::FScheduleSample& Sm : Tight.Samples)
+	{
+		if (Sm.S >= C.SLoaded && Sm.S < C.SLoaded + 10.0)
+		{
+			Sm.AirborneMask |= 1u << PlanRL;
+		}
+	}
+	UpUntil[PlanFL] = Never;
+	for (const double Off : { 0.0, Tight.SampleCm })
+	{
+		const double Next = RammsCurb::PredictedLiftMargin(M, Tight, PlanCL, C.SLiftStart + Off, UpUntil, At);
+		TestEqual(FString::Printf(TEXT("the left rear lifting as the left centre takes load (from %.1f): nothing to check"), C.SLiftStart + Off), Next,
+			TNumericLimits<double>::Max());
 	}
 	return true;
 }

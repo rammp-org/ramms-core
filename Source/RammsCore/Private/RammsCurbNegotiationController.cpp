@@ -8,6 +8,7 @@
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
 #include "Curb/RammsCurbRunStats.h"
+#include "Curb/RammsCurbSafety.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "Curb/RammsCurbTerrainFit.h"
 #include "Engine/World.h"
@@ -137,6 +138,19 @@ namespace
 	/** A wheel whose bottom is within this of the surface it should be on
 	 *  (cm) is taken to be on it. */
 	constexpr float ContactToleranceCm = 1.5f;
+
+	/** The terrain monitor's traces run from this far (cm) over each wheel's
+	 *  centre to this far under it: a curb's top is well inside either. */
+	constexpr double ProbeAboveCm = 40.0;
+	constexpr double ProbeBelowCm = 60.0;
+
+	/** A fault or abort brakes the robot to rest; one not at rest after this
+	 *  long (simulated s) has its wheels braked anyway. */
+	constexpr double StopTimeoutSeconds = 5.0;
+
+	/** Looks again on the approach in a row that find a surface further off
+	 *  than TerrainMismatchCm before the terrain is not as detected. */
+	constexpr int32 LookMismatchLooks = 3;
 
 	/** A leg commanded this far (cm) from where it began has moved. */
 	constexpr float LegMovedCm = 0.05f;
@@ -3207,6 +3221,13 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	SpeedTrim = 0.0;
 	MaxAbsSpeedTrim = 0.0;
 	MaxAbsCrossTrackCm = 0.0;
+	// A crossing before this one stopped: nothing of it runs on.
+	bStopping = false;
+	StopElapsed = 0.0;
+	LookMismatches = 0;
+	LookMismatchCm = 0.0;
+	PendingRefitCm = FVector2D::ZeroVector;
+	bPendingHeading = false;
 	CrossTrackCm = 0.0;
 	CrossTrackSteerRad = 0.0;
 	CrossTrackOrigin = ChassisOriginXY;
@@ -3288,11 +3309,50 @@ bool URammsCurbNegotiationController::NegotiateStepAhead(FString& OutReason)
 	return BeginNegotiation(Profile, OutReason);
 }
 
+bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrain Terrain, FString& OutReason)
+{
+#if UE_BUILD_SHIPPING
+	OutReason = TEXT("BeginNegotiationOnTerrain is for development and testing only");
+	return false;
+#else
+	if (!Terrain.bValid)
+	{
+		OutReason = TEXT("the terrain given is not valid");
+		Status = OutReason;
+		return false;
+	}
+	// The profile a detection of this terrain would give, from where the robot
+	// stands (its legacy fields; the crossing runs on the terrain itself).
+	FRammsCurbProfile Profile;
+	Profile.Terrain = Terrain;
+	Profile.StepHeightCm = Terrain.StepHeightCm;
+	Profile.ApproachAngleDeg = Terrain.ApproachAngleDeg;
+	FString	  Unused;
+	FVector2D Centre, Forward;
+	if (ResolveLegs(Unused) && Measure(Unused) && LocateChassis(Centre, Forward))
+	{
+		TArray<RammsCurb::FTerrainWheel> Wheels;
+		GatherTerrainWheels(Wheels);
+		RammsCurb::FillLegacyProfile(Terrain, Wheels, Centre, Forward, Profile);
+	}
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': beginning on a terrain given rather than detected (development: fault injection)"),
+		*GetNameSafe(GetOwner()));
+	return BeginNegotiation(Profile, OutReason);
+#endif
+}
+
 void URammsCurbNegotiationController::Abort()
 {
 	if (IsNegotiating())
 	{
 		Finish(ERammsCurbPhase::Aborted, TEXT("aborted"));
+	}
+	else if (bStopping)
+	{
+		// Asked again while a per-wheel crossing is being braked to rest (after a
+		// fault or an abort): every wheel braked at once, as the per-axle gait
+		// does.
+		EndStopping(TEXT("Abort called while braking to rest: every wheel braked at once"));
 	}
 }
 
@@ -3321,7 +3381,7 @@ void URammsCurbNegotiationController::EnterStep(int32 Index)
 	}
 }
 
-void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FString& Why)
+void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FString& Why, bool bRampDown)
 {
 	Phase = EndPhase;
 	Status = Why;
@@ -3365,6 +3425,17 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 							C.WindowTicks);
 		StepLog.Add(Counted);
 		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Counted);
+		// What the runtime checks saw.
+		const FString Checked = FString::Printf(TEXT("        checks: the terrain traced at most %+.2f cm off %s; the base at most %.2f deg off its "
+													 "planned attitude; %d actions late, %d holds on the measured margin, %d ticks slowed for the "
+													 "attitude, %d re-plans asked"),
+			C.TerrainOffCm,
+			C.TerrainOffPlane == INDEX_NONE
+				? TEXT("its planes")
+				: *FString::Printf(TEXT("the %s plane, %.0f cm ahead of its wheel"), C.TerrainOffPlane == 1 ? TEXT("far") : TEXT("near"), C.TerrainOffAheadCm),
+			C.AttitudeOffDeg, C.LateActions, C.MarginHolds, C.AttitudeSlowTicks, C.ReplanAsks);
+		StepLog.Add(Checked);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Checked);
 	}
 	if (bPerWheelCrossing)
 	{
@@ -3374,14 +3445,27 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 		StepLog.Add(Steered);
 		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Steered);
 	}
-	// The crossing is over: nothing of it runs on into the next.
-	if (Executor)
+	// The crossing is over: nothing of it runs on into the next -- but for a
+	// fault or an abort, which brakes the robot to rest first (StepStopping):
+	// a per-wheel crossing's executor halted to do it (legs on their targets,
+	// braked never over the hard braking caps).
+	// (The per-axle gait, whose braking caps are its steps', brakes at once.)
+	const bool bGentle = EndPhase != ERammsCurbPhase::Done && bRampDown && bDriveModeActive && bPerWheelCrossing;
+	const bool bHalting = bGentle && bPerWheelCrossing && Executor && Executor->IsRunning();
+	if (bHalting)
+	{
+		Executor->Halt(Why);
+	}
+	else if (Executor)
 	{
 		Executor->End();
 	}
 	bAwaitingPlan = false;
 	bReplanning = false;
-	DriveSpeed = 0.0f;
+	if (!bGentle)
+	{
+		DriveSpeed = 0.0f;
+	}
 	if (Telemetry)
 	{
 		Telemetry->Stats.End(Elapsed, MeasuredPitchDeg, MeasuredRollDeg);
@@ -3400,13 +3484,132 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			SetActiveModeThroughSelector(Next);
 		}
 	}
-	else
+	else if (bGentle)
 	{
-		// Hold: brake the wheels and leave the legs on their last targets. The
+		// Hold, but braked to rest first at Deceleration rather than snapping
+		// the wheels' speed loops to 0; the legs stay on their targets. The
 		// robot may be standing across the curb on two axles; letting anything
 		// go here is how it would fall.
+		bStopping = true;
+		StopElapsed = 0.0;
+		// The runaway watch starts afresh on the braking (StepStopping).
+		RunawaySeconds = 0.0;
+		const FString Braking = FString::Printf(TEXT("t=%5.2fs braking to rest from %.1f cm/s%s"), Elapsed, DriveSpeed,
+			bHalting ? TEXT(", the legs holding their targets") : TEXT(""));
+		StepLog.Add(Braking);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Braking);
+	}
+	else
+	{
+		// Hold: brake the wheels and leave the legs on their last targets.
 		StopWheels(/*bRelease=*/false);
 	}
+}
+
+void URammsCurbNegotiationController::StepStopping(float DeltaTime)
+{
+	StopElapsed += DeltaTime;
+	FString Unmeasured;
+	if (!Measure(Unmeasured))
+	{
+		EndStopping(FString::Printf(TEXT("cannot measure the robot (%s)"), *Unmeasured));
+		return;
+	}
+	if (RammsCurb::OverMaxTilt(MeasuredPitchDeg, MeasuredRollDeg, Tuning.MaxTiltDeg))
+	{
+		EndStopping(FString::Printf(TEXT("inclined %.1f deg, over MaxTiltDeg %.1f"), RammsCurb::InclinationDeg(MeasuredPitchDeg, MeasuredRollDeg),
+			Tuning.MaxTiltDeg));
+		return;
+	}
+	for (FLegState& State : LegState)
+	{
+		if (State.bHasWorld)
+		{
+			State.Progress = static_cast<float>(ActiveTerrain.DistancePastEdge(FVector2D(State.WheelWorld.X, State.WheelWorld.Y)));
+		}
+	}
+	AdvanceLegLag(DeltaTime);
+	// The wheels' feed-forward (each leg's fore/aft rate, its link's turn) from
+	// this tick's measurement, as while crossing: left as it was on the last
+	// tick of the crossing, it would go on driving the wheels by what the legs
+	// were doing then -- a robot rolling away with its speed at 0.
+	TrackLegRates(DeltaTime);
+	const float Moving = Telemetry && Telemetry->Motion.IsFull() ? Telemetry->Motion.GetSpeed() : 0.0f;
+	bool		bAtRest = false;
+	if (bPerWheelCrossing && Executor && Executor->IsRunning() && Executor->IsHalted())
+	{
+		// The halted executor: the speed braked to rest, never over the hard
+		// braking caps; every leg to its target.
+		RammsCurb::FExecMeasure M;
+		GatherExecMeasure(DeltaTime, M);
+		M.Probes.Reset(); // nothing left to check
+		RammsCurb::FExecCommand Cmd;
+		Executor->Tick(M, *Level, Cmd);
+		CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+		DriveSpeed = static_cast<float>(Cmd.DriveSpeed);
+		TArray<FString> Lines;
+		Executor->TakeLog(Lines);
+		for (const FString& Line : Lines)
+		{
+			const FString Stamped = FString::Printf(TEXT("t=%5.2fs %s"), Elapsed + StopElapsed, *Line);
+			StepLog.Add(Stamped);
+			UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Stamped);
+		}
+		bAtRest = Executor->IsStopped();
+	}
+	else
+	{
+		// No executor (the per-axle gait, or a per-wheel crossing whose plan had
+		// not come): the speed ramped down at Deceleration, each wheel still
+		// braked short of its window where there is a terrain.
+		DriveSpeed = FMath::Max(0.0f, DriveSpeed - Tuning.Deceleration * DeltaTime);
+		if (bPerWheelCrossing && ActiveTerrain.bValid)
+		{
+			DriveSpeed = FMath::Max(0.0f, FMath::Min(DriveSpeed, AwaitingBrakingCap()));
+		}
+		bAtRest = DriveSpeed <= 0.0f && (!Telemetry || !Telemetry->Motion.IsFull() || FMath::Abs(Moving) < RammsCurb::StopSpeedCmS);
+	}
+	// Braked to rest through the wheels the crossing drives only while they
+	// hold the robot: one running away from the command as it falls, or
+	// rolling back, is not held by them (nothing on the ground drives it, or
+	// the wheels not driven roll free on a slope) -- every wheel is braked at
+	// once.
+	if (Telemetry && Telemetry->Motion.IsFull())
+	{
+		const RammsCurb::ERunaway Runaway = RammsCurb::RunawayStep(RunawayCommand, RunawaySeconds, DriveSpeed, Moving, true, true, DeltaTime);
+		if (Runaway != RammsCurb::ERunaway::None)
+		{
+			EndStopping(FString::Printf(TEXT("%s at %.1f cm/s for %.1f s while braking to rest (commanded %.1f cm/s): every wheel braked at once"),
+				Runaway == RammsCurb::ERunaway::Back ? TEXT("rolling back") : TEXT("running away"), Moving, RunawaySeconds, DriveSpeed));
+			return;
+		}
+	}
+	PredictLegRates(DeltaTime);
+	CommandWheels(DriveSpeed, Tuning.HeadingGain * HeadingErrorRad);
+	if (bAtRest)
+	{
+		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving));
+	}
+	else if (StopElapsed > StopTimeoutSeconds)
+	{
+		const bool bLegsLate = FMath::Abs(Moving) < RammsCurb::StopSpeedCmS && Executor && Executor->IsHalted() && !Executor->AreLegsHome();
+		EndStopping(bLegsLate ? FString::Printf(TEXT("at rest, but a leg not on its target after %.0f s: the wheels braked"), StopTimeoutSeconds)
+							  : FString::Printf(TEXT("not at rest after %.0f s (%.1f cm/s measured): the wheels braked"), StopTimeoutSeconds, Moving));
+	}
+}
+
+void URammsCurbNegotiationController::EndStopping(const FString& Why)
+{
+	bStopping = false;
+	DriveSpeed = 0.0f;
+	StopWheels(/*bRelease=*/false);
+	if (Executor)
+	{
+		Executor->End();
+	}
+	const FString Line = FString::Printf(TEXT("t=%5.2fs stopped: %s; the wheels braked, the legs held"), Elapsed + StopElapsed, *Why);
+	StepLog.Add(Line);
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
 }
 
 void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
@@ -3434,7 +3637,16 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		bHandBackPending = false;
 		if (IsNegotiating())
 		{
-			Finish(ERammsCurbPhase::Aborted, TEXT("another drive mode was selected"));
+			// The other mode takes the robot over at once: nothing to brake for.
+			Finish(ERammsCurbPhase::Aborted, TEXT("another drive mode was selected"), /*bRampDown=*/false);
+		}
+		if (bStopping)
+		{
+			bStopping = false;
+			if (Executor)
+			{
+				Executor->End();
+			}
 		}
 		if (bWheelsDriven)
 		{
@@ -4448,6 +4660,8 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 	Out.SpeedCmS = Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f;
 	Out.bSpeedValid = Telemetry && Telemetry->Motion.IsFull();
 	Out.Legs.SetNum(Legs.Num());
+	Out.Probes.Reset();
+	const FVector2D Forward = Out.Forward;
 	for (int32 i = 0; i < Legs.Num() && i < LegState.Num(); ++i)
 	{
 		const FLegState&	 State = LegState[i];
@@ -4455,7 +4669,26 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 		L.WheelWorld = State.WheelWorld;
 		L.XZ = FVector2D(State.MeasuredX, State.MeasuredZ);
 		L.LagZ = State.LagZ;
+		L.LagX = State.LagX;
+		L.bLagX = State.FiveBar != nullptr;
 		L.bValid = State.bHasWorld;
+		if (!State.bHasWorld)
+		{
+			continue;
+		}
+		// The terrain monitor's traces (the executor's runtime checks): straight
+		// down at each of RammsCurb::ProbeAheadCm along the heading from the
+		// wheel's centre, from ProbeAboveCm over it to ProbeBelowCm under it.
+		for (int32 k = 0; k < RammsCurb::NumProbes; ++k)
+		{
+			RammsCurb::FTerrainProbe& P = Out.Probes.AddDefaulted_GetRef();
+			P.Leg = i;
+			P.AheadCm = RammsCurb::ProbeAheadCm[k];
+			P.XY = FVector2D(State.WheelWorld.X, State.WheelWorld.Y) + Forward * P.AheadCm;
+			P.AboveZ = State.WheelWorld.Z + ProbeAboveCm;
+			P.BelowZ = State.WheelWorld.Z - ProbeBelowCm;
+			P.bHit = TraceSurface(FVector(P.XY.X, P.XY.Y, 0.0), P.AboveZ, P.BelowZ, P.Z);
+		}
 	}
 }
 
@@ -4544,11 +4777,37 @@ void URammsCurbNegotiationController::TakePerWheelReplan()
 	FString Why;
 	if (!Executor->Adopt(*ReplanInput, Done, Why))
 	{
-		const FString Line = FString::Printf(TEXT("t=%5.2fs a re-plan came too late (%s); kept the plan in force"), Elapsed, *Why);
+		// The plan in force stays, and so do the terrain and the line it runs
+		// on: what a runtime trigger's ask changed for the re-plan is undone.
+		const bool bUndo = !PendingRefitCm.IsZero() || bPendingHeading;
+		if (bUndo)
+		{
+			ActiveTerrain.Near.Origin.Z -= PendingRefitCm.X;
+			ActiveTerrain.Far.Origin.Z -= PendingRefitCm.Y;
+			ActiveTerrain.EdgePoint.Z -= PendingRefitCm.X;
+			ActiveTerrain.StepHeightCm -= static_cast<float>(PendingRefitCm.Y - PendingRefitCm.X);
+			if (bPendingHeading)
+			{
+				Heading = PendingHeadingWas;
+				CrossTrackOrigin = PendingCrossTrackOriginWas;
+			}
+		}
+		const FString Line = FString::Printf(TEXT("t=%5.2fs a re-plan came too late (%s); kept the plan in force%s"), Elapsed, *Why,
+			bUndo ? TEXT(", and the terrain and heading it runs on") : TEXT(""));
 		StepLog.Add(Line);
 		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
+		PendingRefitCm = FVector2D::ZeroVector;
+		bPendingHeading = false;
 		return;
 	}
+	// A runtime trigger's re-fitted surfaces: their planes are now where the
+	// traces measured them, and their biases start again from there.
+	if (Level)
+	{
+		Level->Refitted(PendingRefitCm);
+	}
+	PendingRefitCm = FVector2D::ZeroVector;
+	bPendingHeading = false;
 	*Schedule = MoveTemp(Done);
 	AdoptSchedule();
 	*CrossingInput = *ReplanInput;
@@ -4667,7 +4926,6 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	// meets the face. (Before the level-in, in the drive stance, a robot on a
 	// slope rolls as it would in its drive mode, and a crossing begun rolling
 	// back brakes from there.)
-	RunawayCommand += (DriveSpeed - RunawayCommand) * FMath::Clamp(DeltaTime / RammsCurb::RunawayLagSeconds, 0.0, 1.0);
 	bool bLevelling = false, bCrossingUp = false;
 	if (!bAwaitingPlan && Executor && Executor->IsRunning())
 	{
@@ -4684,19 +4942,23 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	// While the plan of a crossing begun on the move is made, too: the wheels
 	// are this mode's then, braked short of every window, and a chassis that
 	// goes on faster than that is not held by them.
-	const float Moving = Telemetry && Telemetry->Motion.IsFull() ? Telemetry->Motion.GetSpeed() : 0.0f;
-	const bool	bAhead = (bLevelling || bAwaitingPlan) && Moving - RunawayCommand > RammsCurb::RunawayCmS;
-	const bool	bBack = bCrossingUp && Moving < -RammsCurb::RollBackCmS;
-	RunawaySeconds = bAhead || bBack ? RunawaySeconds + DeltaTime : 0.0;
-	if (RunawaySeconds > RammsCurb::RunawaySeconds)
+	const float				  Moving = Telemetry && Telemetry->Motion.IsFull() ? Telemetry->Motion.GetSpeed() : 0.0f;
+	const RammsCurb::ERunaway Runaway = RammsCurb::RunawayStep(RunawayCommand, RunawaySeconds, DriveSpeed, Moving, bLevelling || bAwaitingPlan,
+		bCrossingUp, DeltaTime);
+	if (Runaway != RammsCurb::ERunaway::None)
 	{
+		// The wheels this crossing drives do not hold the robot: braking it to
+		// rest through them, the rest rolling free, would let it go on. Every
+		// wheel is braked at once.
 		Finish(ERammsCurbPhase::Faulted,
-			bBack ? FString::Printf(TEXT("rolled back during %s at %.1f cm/s for %.1f s with a wheel off the ground (nothing on the ground holds "
-										 "it)"),
-						*Status, Moving, RunawaySeconds)
-				  : FString::Printf(TEXT("ran away during %s: commanded %.1f cm/s (%.1f as the chassis follows it), but the chassis moved at "
-										 "%.1f cm/s for %.1f s (nothing on the ground drives it)"),
-						*Status, DriveSpeed, RunawayCommand, Moving, RunawaySeconds));
+			Runaway == RammsCurb::ERunaway::Back
+				? FString::Printf(TEXT("rolled back during %s at %.1f cm/s for %.1f s with a wheel off the ground (nothing on the ground holds "
+									   "it); every wheel braked at once"),
+					  *Status, Moving, RunawaySeconds)
+				: FString::Printf(TEXT("ran away during %s: commanded %.1f cm/s (%.1f as the chassis follows it), but the chassis moved at "
+									   "%.1f cm/s for %.1f s (nothing on the ground drives it); every wheel braked at once"),
+					  *Status, DriveSpeed, RunawayCommand, Moving, RunawaySeconds),
+			/*bRampDown=*/false);
 		return;
 	}
 	if (Executor && Executor->IsRunning())
@@ -4811,12 +5073,41 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 		Executor->SetExternalCap(TNumericLimits<double>::Max());
 	}
 
-	// The executor: wheel states, leg commands, the speed.
+	// The executor: wheel states, leg commands, the speed -- and its runtime
+	// checks, on the terrain traced ahead of and under every wheel.
 	RammsCurb::FExecMeasure M;
 	GatherExecMeasure(DeltaTime, M);
 	RammsCurb::FExecCommand Cmd;
 	Executor->Tick(M, *Level, Cmd);
 	CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+	// A re-plan a runtime trigger asks for before any wheel has begun to cross:
+	// the surfaces re-fitted by what the traces found, the heading held the
+	// chassis' own where it turned from the plan's -- undone if the re-plan
+	// comes too late to be adopted (TakePerWheelReplan). The ask is taken only
+	// when a re-plan can be launched: one left while another runs is dropped
+	// when that is adopted (it was against the planes it replaces), and taken
+	// once it is not.
+	if (!bReplanning && !bAwaitingPlan)
+	{
+		RammsCurb::FExecutor::FReplanAsk Ask;
+		if (Executor->TakeReplanAsk(Ask))
+		{
+			ActiveTerrain.Near.Origin.Z += Ask.RefitCm.X;
+			ActiveTerrain.Far.Origin.Z += Ask.RefitCm.Y;
+			ActiveTerrain.EdgePoint.Z += Ask.RefitCm.X;
+			ActiveTerrain.StepHeightCm += static_cast<float>(Ask.RefitCm.Y - Ask.RefitCm.X);
+			PendingRefitCm = Ask.RefitCm;
+			bPendingHeading = Ask.bHeading;
+			if (Ask.bHeading)
+			{
+				PendingHeadingWas = Heading;
+				PendingCrossTrackOriginWas = CrossTrackOrigin;
+				Heading = Horizontal(FVector(ChassisForward.X, ChassisForward.Y, 0.0)).GetSafeNormal();
+				CrossTrackOrigin = ChassisOriginXY;
+			}
+			LaunchPerWheelReplan(Ask.Why);
+		}
+	}
 	const TArray<RammsCurb::FExecWheel>& Wheels = Executor->GetWheels();
 	for (int32 i = 0; i < Legs.Num() && i < Wheels.Num(); ++i)
 	{
@@ -4859,6 +5150,9 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 		case RammsCurb::EExecPhase::Settle:
 			Phase = ERammsCurbPhase::Settle;
 			break;
+		case RammsCurb::EExecPhase::Halted:
+			// A runtime check faulted (below).
+			break;
 		default:
 			Phase = ERammsCurbPhase::Settle;
 			break;
@@ -4882,6 +5176,13 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	const float YawRate = PerWheelSteering(DeltaTime, FMath::Min(Executor->GetDiag().Braking, CommitCap));
 	CommandWheels(DriveSpeed, YawRate, static_cast<float>(SpeedTrim), static_cast<float>(LateralCmd));
 	RecordRunTick(DeltaTime, LegError);
+	if (Executor->HasFault())
+	{
+		// A runtime check: the executor has halted itself; it brakes the robot
+		// to rest from here (StepStopping), naming the check.
+		Finish(ERammsCurbPhase::Faulted, Executor->GetFaultWhy());
+		return;
+	}
 	if (Executor->GetPhase() == RammsCurb::EExecPhase::Done)
 	{
 		Finish(ERammsCurbPhase::Done, FString::Printf(TEXT("%s %.1f cm in %.1f s"), ActiveTerrain.StepHeightCm > 0.0f ? TEXT("climbed") : TEXT("descended"), FMath::Abs(ActiveTerrain.StepHeightCm), Elapsed));
@@ -5193,7 +5494,8 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 			}
 		}
 	}
-	if (!IsNegotiating() || !bDriveModeActive || (!bPerWheelCrossing && !Steps.IsValidIndex(StepIndex)))
+	const bool bCrossing = IsNegotiating() && bDriveModeActive && (bPerWheelCrossing || Steps.IsValidIndex(StepIndex));
+	if (!bCrossing && !(bStopping && bDriveModeActive))
 	{
 		LastSimTime = -1.0;
 		return;
@@ -5214,7 +5516,23 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 			// No one asked for the stop, so it is a fault rather than an
 			// Abort; but nothing is left standing across a step to hold, so
 			// the mode from before takes the robot back too.
-			Finish(ERammsCurbPhase::Faulted, TEXT("the simulation was reset"));
+			if (IsNegotiating())
+			{
+				Finish(ERammsCurbPhase::Faulted, TEXT("the simulation was reset"), /*bRampDown=*/false);
+			}
+			else
+			{
+				// Braking to rest after a fault or an abort: nothing left to brake.
+				bStopping = false;
+				StopWheels(/*bRelease=*/false);
+				if (Executor)
+				{
+					Executor->End();
+				}
+				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while braking to rest"), Elapsed + StopElapsed);
+				StepLog.Add(Line);
+				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
+			}
 			LastSimTime = -1.0;
 			bHandBackPending = true;
 			return;
@@ -5227,7 +5545,11 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	}
 	if (Step > 0.0f)
 	{
-		if (bPerWheelCrossing)
+		if (bStopping)
+		{
+			StepStopping(Step);
+		}
+		else if (bPerWheelCrossing)
 		{
 			StepPerWheel(Step);
 		}
@@ -5753,12 +6075,34 @@ void URammsCurbNegotiationController::LookAgain(bool bForce)
 		return;
 	}
 	LastLookFailure.Reset();
+	// A look that moved anything more than RedetectRejectCm (the traces and fits
+	// good to TerrainToleranceCm) is thrown away: a glitch, not a refinement.
+	// But one look after another finding a surface or the edge further off
+	// than TerrainMismatchCm is no glitch: the terrain is not as the crossing
+	// was planned on, and it stops.
 	const RammsCurb::FTerrainChange Change = RammsCurb::CompareTerrain(ActiveTerrain, Seen);
-	if (Change.MaxCm() > RammsCurb::RedetectRejectCm || Change.MaxDeg() > RammsCurb::RedetectRejectDeg)
+	if (Change.MaxCm() > RammsCurb::RedetectRejectCm + RammsCurb::TerrainToleranceCm || Change.MaxDeg() > RammsCurb::RedetectRejectDeg)
 	{
 		Note(FString::Printf(TEXT("looked again and threw it away: it moved %s"), *Change.Describe()));
+		if (bPerWheelCrossing && Change.MaxCm() > Tuning.TerrainMismatchCm + RammsCurb::TerrainToleranceCm)
+		{
+			++LookMismatches;
+			LookMismatchCm = FMath::Max(LookMismatchCm, Change.MaxCm());
+			if (LookMismatches >= LookMismatchLooks)
+			{
+				Finish(ERammsCurbPhase::Faulted,
+					FString::Printf(TEXT("terrain not as detected: looking again on the approach, %d times in a row, the terrain was %s from the one the "
+										 "crossing runs on (up to %.1f cm, more than TerrainMismatchCm %.1f)"),
+						LookMismatches, *Change.Describe(), LookMismatchCm, Tuning.TerrainMismatchCm));
+			}
+		}
+		else
+		{
+			LookMismatches = 0;
+		}
 		return;
 	}
+	LookMismatches = 0;
 	// Before the first lift the whole terrain is refined; after it -- the far
 	// side still unconfirmed -- only how deep that is.
 	const bool		  bBeforeLift = bPerWheelCrossing ? (Executor && !Executor->HasCrossingBegun()) : StepIndex <= 1;

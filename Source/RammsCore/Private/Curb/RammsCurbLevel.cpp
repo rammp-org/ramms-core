@@ -73,6 +73,16 @@ namespace RammsCurb
 		Bias = FMath::Clamp(Bias, -MaxPlaneBiasCm, MaxPlaneBiasCm);
 	}
 
+	void FPlaneBias::Follow(float OffsetCm, float Dt)
+	{
+		if (Dt <= 0.0f || !FMath::IsFinite(OffsetCm))
+		{
+			return;
+		}
+		Bias += (FMath::Clamp(OffsetCm, -MaxPlaneBiasCm, MaxPlaneBiasCm) - Bias) * FMath::Clamp(Dt / PlaneBiasFollowSeconds, 0.0f, 1.0f);
+		Bias = FMath::Clamp(Bias, -MaxPlaneBiasCm, MaxPlaneBiasCm);
+	}
+
 	void DriveRoles(TConstArrayView<FDriveWheel> Wheels, TArrayView<bool> OutDriven)
 	{
 		// Per side: is there a Main wheel, and is one of them not planted.

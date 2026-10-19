@@ -172,9 +172,25 @@ namespace RammsCurb
  * handed its motion (IRammsDriveMode::SeedMotion), and the selector ramps the
  * legs from where the crossing left them to that mode's stance. One
  * stopped by Abort, or by a tilt, step-timeout, stall or measurement fault, keeps
- * the robot held in this mode; a retry that succeeds still hands back to the
- * mode from before. A simulation reset faults it too, but hands back as well:
- * the robot is at its start pose, with nothing across a step to hold.
+ * the robot held in this mode -- per wheel, braked to rest at
+ * Tuning.Deceleration (twice that where a wheel is about to meet the curb)
+ * rather than at once, the legs holding their targets, then the wheels
+ * braked; per axle, braked at once; a retry that succeeds still
+ * hands back to the mode from before. A simulation reset faults it too, but
+ * hands back as well: the robot is at its start pose, with nothing across a
+ * step to hold.
+ *
+ * The per-wheel gait checks itself as it runs, every tick (see the executor's
+ * runtime checks, Private/Curb): it traces the terrain ahead of and under
+ * every wheel against the planes it planned on (Tuning.TerrainMismatchCm),
+ * checks each landing (LandingToleranceCm), the base against its planned
+ * attitude (AttitudeFaultDeg), the robot's measured stability margin
+ * (MinLiveStabilityMarginCm: a hold, then a fault), each clear wheel's rim
+ * against the traced terrain, each leg against its servo lag model and each
+ * lift, landing and level-in against its planned time; and before any wheel
+ * has begun to cross it re-plans when the terrain, the heading or a wheel's
+ * window moved from the plan. Each fault names the check, the wheel and the
+ * numbers (GetStatusText).
  * Selected by hand with nothing to cross, it hands straight back -- there is
  * nothing to drive in it.
  *
@@ -268,7 +284,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool NegotiateStepAhead(FString& OutReason);
 
-	/** Stop driving and hold the legs where they are. */
+	/**
+	 * Development and test only (not in shipping builds): BeginNegotiation on
+	 * the terrain given rather than one detected -- for fault injection, a
+	 * terrain off from the world's, to see the crossing's runtime checks find
+	 * it. The crossing runs as on a detected terrain: the approach looks again
+	 * as it closes in, and the terrain monitor traces ahead of every wheel.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb", meta = (DevelopmentOnly))
+	bool BeginNegotiationOnTerrain(FRammsCurbTerrain Terrain, FString& OutReason);
+
+	/** Stop driving and hold the legs where they are sent: the per-wheel gait
+	 *  braked to rest at Tuning.Deceleration (twice that where a wheel is
+	 *  about to meet the curb), the per-axle gait at once. Called again while
+	 *  the per-wheel gait is braking to rest (after an abort or a fault),
+	 *  every wheel is braked at once. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	void Abort();
 
@@ -882,7 +912,15 @@ private:
 	 *  speed trim never takes the wheels past. */
 	float PerWheelSteering(float DeltaTime, double TrimCapCmS);
 	void  StopWheels(bool bRelease);
-	void  Finish(ERammsCurbPhase EndPhase, const FString& Why);
+	/** The crossing ends: Done hands back; a fault or an abort brakes the robot
+	 *  to rest first (bRampDown: StepStopping, the per-wheel executor halted)
+	 *  -- not a simulation reset or another mode selected, which let go at
+	 *  once. */
+	void Finish(ERammsCurbPhase EndPhase, const FString& Why, bool bRampDown = true);
+	/** After a fault or an abort: one tick of braking the robot to rest, the
+	 *  legs holding their targets; the wheels braked once it is at rest. */
+	void  StepStopping(float DeltaTime);
+	void  EndStopping(const FString& Why);
 	void  SetActiveModeThroughSelector(FName ModeId);
 	float AxleProgress(ERammsCurbAxle Axle) const;
 
@@ -1133,6 +1171,26 @@ private:
 	/** While the far side is unconfirmed: where (chassis travel along the plan,
 	 *  cm) the robot must come to rest -- short of the first lift. */
 	double PerWheelCommitS = 0.0;
+	/** A fault or an abort is braking the robot to rest (StepStopping), and for
+	 *  how long (simulated s). */
+	bool   bStopping = false;
+	double StopElapsed = 0.0;
+	/** Looks again on the approach in a row that found a surface further off
+	 *  the one the crossing runs on than TerrainMismatchCm (thrown away), and
+	 *  the largest of them (cm): enough of them, and the terrain is not as
+	 *  detected. */
+	int32  LookMismatches = 0;
+	double LookMismatchCm = 0.0;
+	/** What a runtime trigger's re-plan under way changed as it was launched:
+	 *  the re-fit (cm; X near, Y far) moved into ActiveTerrain -- once the
+	 *  re-plan is adopted, the re-fitted planes' biases start again --, and
+	 *  whether the heading held (and the cross-track line's origin) became
+	 *  the chassis' own, and what they were. All of it undone if the re-plan
+	 *  comes too late to be adopted. */
+	FVector2D PendingRefitCm = FVector2D::ZeroVector;
+	bool	  bPendingHeading = false;
+	FVector	  PendingHeadingWas = FVector::ForwardVector;
+	FVector2D PendingCrossTrackOriginWas = FVector2D::ZeroVector;
 
 	/** BeginNegotiation with the per-wheel gait: a robot at rest is planned in
 	 *  the call (refusing at once); one on the move (or rolling back) off the

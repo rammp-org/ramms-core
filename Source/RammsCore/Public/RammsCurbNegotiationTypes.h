@@ -218,14 +218,24 @@ enum class ERammsCurbPhase : uint8
 	 *  robot in its own stance. */
 	Settle UMETA(DisplayName = "Settle"),
 	Done   UMETA(DisplayName = "Done"),
-	/** Stopped on request: by Abort, after which the robot holds where it is,
-	 *  or by selecting another drive mode, which takes the robot over. */
+	/** Stopped on request: by Abort, after which the robot holds where it is
+	 *  (per wheel, once braked to rest at Tuning.Deceleration), or by
+	 *  selecting another drive mode, which takes the robot over. */
 	Aborted UMETA(DisplayName = "Aborted"),
 	/** Stopped by one of its own checks: a tilt past MaxTiltDeg, a step that
 	 *  overran its timeout, a stall (FRammsCurbTuning::StallSeconds), or a
-	 *  robot it can no longer measure, after which the robot holds where it
-	 *  is; or a simulation reset, after which the mode from before takes it
-	 *  back. See GetStatusText. */
+	 *  robot it can no longer measure -- and, per wheel, the terrain not as
+	 *  detected (TerrainMismatchCm), a landing off its surface
+	 *  (LandingToleranceCm), the base off its planned attitude
+	 *  (AttitudeFaultDeg), the robot measured near tipping, a lifted wheel at
+	 *  the terrain, a leg far off its servo, or a lift, landing or level-in
+	 *  overrunning -- after which the robot holds where it is (per wheel, once
+	 *  braked to rest at Tuning.Deceleration; a robot its driven wheels are
+	 *  found not to hold -- running away from its command, or rolling back
+	 *  with a wheel up or while it brakes -- has every wheel braked at once);
+	 *  or a simulation reset,
+	 *  after which the mode from before takes it back. See GetStatusText,
+	 *  which names the check, the wheel and the numbers. */
 	Faulted UMETA(DisplayName = "Faulted"),
 	/** Per-wheel gait: a wheel's crossing is pending or under way (appended
 	 *  after Faulted: the values before it keep their indices). */
@@ -521,6 +531,14 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
 	bool bPrespinLiftedWheels = true;
 
+	/** When a per-wheel crossing faults or is aborted, a wheel then off the
+	 *  ground over a surface -- not over the edge, inside its keep-off window
+	 *  -- is set down on that surface as the robot stops, where the robot then
+	 *  stands at least MinLiveStabilityMarginCm inside its wheels. Off, the
+	 *  default: every leg holds the target it had. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
+	bool bPlantOnHold = false;
+
 	/** Ground speed when nothing nearby limits it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
 	float DriveSpeed = 35.0f;
@@ -719,7 +737,10 @@ struct RAMMSCORE_API FRammsCurbTuning
 	 *  in one that keeps MinStabilityMargin standing, the per-wheel gait
 	 *  levels in first; else, keeping this, it levels in at once; else,
 	 *  rolling in one that keeps this at a steady speed, it levels in at once
-	 *  holding its speed; else it refuses. */
+	 *  holding its speed; else it refuses. Once levelled in, a per-wheel
+	 *  crossing measured under it holds -- no wheel lifts, braked to rest --
+	 *  until it is back over it, and one measured under 0.5 cm faults; a wheel
+	 *  lifts only where the robot measured with it up keeps this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
 	float MinLiveStabilityMarginCm = 1.5f;
 
@@ -817,6 +838,34 @@ struct RAMMSCORE_API FRammsCurbTuning
 	 *  check off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "0.0"))
 	float StallSeconds = 2.0f;
+
+	/** Per-wheel gait: a wheel must touch down within this (cm) of the surface
+	 *  it lands on, as planned (its plane and the bias its planted wheels
+	 *  find): stopped (or pressing on the ground) within it, it has touched
+	 *  down. Stopped short of it by more -- on the lip, or something lying
+	 *  there -- or finding no ground that far below it (lifted clear again),
+	 *  the crossing stops and faults, naming the wheel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "0.1"))
+	float LandingToleranceCm = 1.5f;
+
+	/** Per-wheel gait: the terrain the crossing finds as it goes -- traced
+	 *  ahead of and under each wheel, and where its planted wheels stand --
+	 *  may lie at most this far (cm) off the surfaces it was planned on.
+	 *  Further, and the crossing stops and faults ("terrain not as detected").
+	 *  Within it, before any wheel has begun to cross, a surface found more
+	 *  than 1 cm off is re-fitted and the crossing re-planned; once one has,
+	 *  each surface's bias takes up at most 1.5 cm, and a surface further off
+	 *  than that stops and faults too. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "0.1"))
+	float TerrainMismatchCm = 2.0f;
+
+	/** Per-wheel gait: how far (deg) the base may be off the attitude the plan
+	 *  holds it at -- its inclination from that attitude, whichever way --
+	 *  for 0.25 s before the crossing stops and faults (a slip, a wheel off an
+	 *  edge, a landing on something). Half of it slows the crossing to half
+	 *  the plan's speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "0.5"))
+	float AttitudeFaultDeg = 4.0f;
 
 	/** How far ahead of the front wheels the step detection scans (cm). It
 	 *  has to see far enough past the edge to know the far side is deep

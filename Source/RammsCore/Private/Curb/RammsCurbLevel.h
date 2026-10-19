@@ -51,6 +51,10 @@ namespace RammsCurb
 	 *  and stays within this (cm). */
 	constexpr float PlaneBiasSeconds = 0.5f;
 	constexpr float MaxPlaneBiasCm = 1.5f;
+	/** A bias following what the terrain traces find (no wheel there to say)
+	 *  follows it with this time constant (s): the traces see the surface
+	 *  itself, several at once, with no load to settle. */
+	constexpr float PlaneBiasFollowSeconds = 0.1f;
 	/** A planted wheel's bottom is counted towards its plane's bias only this
 	 *  far (cm) off it either way. */
 	constexpr float PlaneBiasSampleCm = 1.5f;
@@ -125,8 +129,12 @@ namespace RammsCurb
 	class FPlaneBias
 	{
 	public:
-		void  Reset() { Bias = 0.0f; }
-		void  Tick(TConstArrayView<float> ResidualsCm, float Dt);
+		void Reset() { Bias = 0.0f; }
+		void Tick(TConstArrayView<float> ResidualsCm, float Dt);
+		/** While too few wheels stand on the surface to say (Tick holds), how
+		 *  far the terrain traces find it off its plane (cm), followed with time
+		 *  constant PlaneBiasFollowSeconds and kept within MaxPlaneBiasCm. */
+		void  Follow(float OffsetCm, float Dt);
 		float Get() const { return Bias; }
 
 	private:
@@ -246,6 +254,27 @@ namespace RammsCurb
 
 		void	  Reset() { *this = FLevelState(); }
 		FVector2D GetBias() const { return FVector2D(NearBias.Get(), FarBias.Get()); }
+		/**
+		 * A re-plan on surfaces re-fitted to what the terrain traces found (cm;
+		 * X near, Y far; 0 where a surface was not re-fitted) has been adopted:
+		 * a re-fitted surface's plane is now where the traces measured it, so
+		 * its bias starts again from 0 -- and follows its planted wheels, or
+		 * the traces, from there -- whatever it had reached against the old
+		 * plane. (Moving the old bias by the re-fit instead keeps it right only
+		 * where it had already caught up with the surface; one still catching
+		 * up, or held at MaxPlaneBiasCm, would be left wrong by the rest.)
+		 */
+		void Refitted(const FVector2D& RefitCm)
+		{
+			if (!FMath::IsNearlyZero(RefitCm.X, 1e-3))
+			{
+				NearBias.Reset();
+			}
+			if (!FMath::IsNearlyZero(RefitCm.Y, 1e-3))
+			{
+				FarBias.Reset();
+			}
+		}
 
 		/**
 		 * One tick of the attitude loop: MeasuredDeg (pitch, roll) low-passed

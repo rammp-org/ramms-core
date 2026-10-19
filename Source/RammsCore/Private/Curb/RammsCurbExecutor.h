@@ -6,6 +6,7 @@
 #include "Curb/RammsCurbLevel.h"
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
+#include "Curb/RammsCurbSafety.h"
 #include "Curb/RammsCurbSchedule.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "RammsCurbNegotiationTypes.h"
@@ -30,12 +31,16 @@
  *            that set removed, stands at least MinLiveStabilityMarginCm inside
  *            its wheels braking and speeding up, the centre wheels are within
  *            PermitToleranceCm of their planned fore/aft, and the base has been
- *            levelled in. Otherwise its lift is blocked, and says why. (The
- *            chassis height is logged against the plan, not a permit; the
- *            margin is the one measured now, not one predicted over the time
- *            the wheel will be up.) A lift still within AbortWithinCm of the
- *            ground when that margin falls under the floor is aborted: the
- *            wheel is Planted again.
+ *            levelled in, the chassis within PermitToleranceCm of its
+ *            commanded height, and -- where a wheel is still up past where the
+ *            plan has it down, or this one lifts ahead of the plan -- the
+ *            plan's poses over the time this wheel will be up stand at least
+ *            MinStabilityMargin inside the wheels left on the ground (the
+ *            predicted airborne interval; where the sets off the ground are
+ *            the plan's own, its verification holds). Otherwise its lift is
+ *            blocked, and says why. A lift still within AbortWithinCm of the
+ *            ground when the margin measured with it up falls under the floor
+ *            is aborted: the wheel is Planted again.
  *   Clear    measured over the most its clearance profile asks over its
  *            window, less ClearToleranceCm: from here no braking cap holds it.
  *   Planting past its window (its measured distance past the edge), going
@@ -97,10 +102,64 @@
  * Phases: Approach (the drive stance, legs held), Prepare (the level-in),
  * Cross (wheel events), Hold (braked to wait: a blocked lift, a wheel's
  * deadline or braking cap, the centre wheels lagging, the far side
- * unconfirmed -- not the plan's own speed, a planned stop or the level-in),
- * Settle (every wheel on the far side, rolling on until the rear tyres are
- * FinishClearance past the edge and the legs are where the plan ends them),
- * Done.
+ * unconfirmed, the measured margin under MinLiveStabilityMarginCm, a lifted
+ * wheel too near the terrain -- not the plan's own speed, a planned stop or
+ * the level-in), Settle (every wheel on the far side, rolling on until the
+ * rear tyres are FinishClearance past the edge and the legs are where the
+ * plan ends them), Done; Halted (a fault or Halt: stopping).
+ *
+ * The runtime checks (RammsCurbSafety.h), every tick once the crossing runs:
+ *
+ *  - the terrain monitor: traces ahead of and under each wheel
+ *    (FExecMeasure::Probes) against the planes the crossing was planned on.
+ *    A probe further than TerrainMismatchCm off its surface faults ("terrain
+ *    not as detected"); a surface the probes find off its plane, while too
+ *    few wheels stand on it to say, is taken up by its bias (within
+ *    MaxPlaneBiasCm); before any wheel has begun to cross, one more than
+ *    ReplanTerrainCm off asks for a re-fit and a re-plan (TakeReplanAsk).
+ *    Once a wheel has begun to cross (too late to re-plan), a surface further
+ *    off than a bias takes up (MaxPlaneBiasCm, if under TerrainMismatchCm)
+ *    faults.
+ *    Every wheel planted on a surface standing more than TerrainMismatchCm
+ *    above it faults too. A lifted wheel is carried as much higher as the
+ *    higher surface's bias puts it;
+ *  - the landing check: a wheel touching down more than LandingToleranceCm
+ *    above its surface (its leg stopped by something above it: the lip, a
+ *    thing lying there; or pressing on it, FPressWatch) faults; one finding
+ *    no ground within it under its surface (the trace under it) is lifted
+ *    clear again and faults;
+ *  - the attitude: the base more than AttitudeFaultDeg off the plan's attitude
+ *    (AttitudeErrorDeg, an inclination) for AttitudeFaultSeconds faults, half
+ *    of that slows the robot to half the plan's speed;
+ *  - the live margin: measured under MinLiveStabilityMarginCm, the robot holds
+ *    (no new lift, a lift still near the ground set down again, landings
+ *    finish, braked at half Deceleration); under MarginFaultCm it faults;
+ *  - swing clearance: a clear wheel's rim nearer than SwingFaultCm the
+ *    terrain the traces find under it, inside its window, stops the robot;
+ *    still there after SwingFaultSeconds, it faults;
+ *  - watchdogs: a leg LegErrorFaultCm off its servo lag model for
+ *    LegErrorFaultSeconds, a climb's lift, a landing's plant or the level-in
+ *    taking ActionTimeoutFactor times its planned time plus
+ *    ActionTimeoutExtraSeconds -- each faults, naming the wheel;
+ *  - re-plan triggers before any wheel has begun to cross (TakeReplanAsk):
+ *    the heading ReplanYawDeg off the plan's, a wheel's window ReplanWindowCm
+ *    off where the plan has it, a surface off its plane (above). After, a
+ *    re-plan is not possible: the heading that far off faults.
+ *
+ * A fault halts the executor (as Halt does): the speed ramps down at
+ * Deceleration -- twice that where a hard braking cap was already under the
+ * command (an imminent collision) -- never over the braking caps, to rest;
+ * every leg keeps the target it had (the attitude loop's integral held), a
+ * wheel that found no ground goes back up clear, and with bPlantOnHold a
+ * lifted wheel over a surface, not inside its window, is set down on it where
+ * the robot then stands at least MinLiveStabilityMarginCm inside its wheels.
+ * But no landing leg presses on into what it has met: a wheel being set down
+ * whose landing faulted, or that meets the ground while halted (on its
+ * surface, its leg stopped above the servo lag model, or pressing the robot
+ * up), is held where it met it, PlantProbeCm in (its preload for one set down
+ * on hold); a wheel taking its load presses no more than its preload from
+ * where it stands. The halt is over (IsStopped) once the robot is at rest and
+ * every leg is on its target.
  */
 namespace RammsCurb
 {
@@ -118,9 +177,11 @@ namespace RammsCurb
 	constexpr double ClearToleranceCm = 0.3;
 	/** A wheel's bottom this near (cm) its surface has touched down; its leg
 	 *  stopped above where the servo lag model has it (or the model at its
-	 *  target) counts only with its bottom within TouchdownToleranceCm. */
+	 *  target, or pressing on the ground) counts only with its bottom within
+	 *  the tuning's LandingToleranceCm (and TerrainToleranceCm) -- the band
+	 *  the landing check faults above, so that every landing stopped short of
+	 *  its surface is either a touchdown or a fault. */
 	constexpr double TouchCm = 0.3;
-	constexpr double TouchdownToleranceCm = 1.5;
 	/** A leg stopped this much (cm) above where the servo lag model has it,
 	 *  going down, has met the ground. */
 	constexpr double StallCm = 0.4;
@@ -199,6 +260,26 @@ namespace RammsCurb
 	constexpr double RollBackCmS = 5.0;
 	constexpr double RunawaySeconds = 0.4;
 	constexpr double RunawayLagSeconds = 0.3;
+	/** What the runaway watch found (RunawayStep). */
+	enum class ERunaway : uint8
+	{
+		None,
+		/** RunawayCmS faster than the command as the chassis can follow it. */
+		Ahead,
+		/** Rolling back faster than RollBackCmS. */
+		Back,
+	};
+	/**
+	 * One tick of the runaway watch: FollowedCmS (the command as the chassis
+	 * can follow it: through RunawayLagSeconds) moved on towards CommandCmS,
+	 * and Seconds the time the chassis has been running away -- MeasuredCmS
+	 * more than RunawayCmS over FollowedCmS (where bAheadArmed), or rolling
+	 * back faster than RollBackCmS (where bBackArmed). Which of the two once
+	 * that has lasted more than RunawaySeconds (rolling back first), else
+	 * None. Seconds starts again from 0 on a tick with neither.
+	 */
+	ERunaway RunawayStep(double& FollowedCmS, double& Seconds, double CommandCmS, double MeasuredCmS, bool bAheadArmed, bool bBackArmed,
+		double Dt);
 	/** A leg's command within this (cm) of its target has caught up. */
 	constexpr double ExecCaughtUpCm = 0.05;
 	/** v_track: the centre wheels or the chassis this far (cm) off the plan
@@ -220,6 +301,9 @@ namespace RammsCurb
 		Hold,
 		Settle,
 		Done,
+		/** Stopping on a fault or Halt: braked to rest, the legs holding their
+		 *  targets. */
+		Halted,
 	};
 
 	/** The term of the speed law that set the target speed. */
@@ -239,6 +323,12 @@ namespace RammsCurb
 		/** The cap from outside the plan (the commit point while the far side is
 		 *  unconfirmed). */
 		External,
+		/** The base off its planned attitude: half the plan's speed. */
+		Attitude,
+		/** The measured margin under MinLiveStabilityMarginCm: a hold. */
+		Margin,
+		/** A clear wheel's rim too near the terrain under it: a hold. */
+		Swing,
 	};
 
 	const TCHAR* ExecPhaseName(EExecPhase Phase);
@@ -254,8 +344,10 @@ namespace RammsCurb
 		 *  crank, a 5-bar's from its hips. */
 		FVector2D XZ = FVector2D::ZeroVector;
 		/** Where the servo lag model has the leg's height (cm, chassis frame),
-		 *  under the commands sent. */
+		 *  under the commands sent; and a 5-bar's fore/aft (bLagX). */
 		double LagZ = 0.0;
+		double LagX = 0.0;
+		bool   bLagX = false;
 		bool   bValid = false;
 	};
 
@@ -277,6 +369,11 @@ namespace RammsCurb
 		double			 SpeedCmS = 0.0;
 		bool			 bSpeedValid = false;
 		TArray<FExecLeg> Legs;
+		/** The terrain traced this tick ahead of and under each wheel (at
+		 *  ProbeAheadCm along Forward from its centre), for the terrain
+		 *  monitor, the landing check and swing clearance; none: those checks
+		 *  see nothing (and do not act). */
+		TArray<FTerrainProbe> Probes;
 	};
 
 	/** What to command this tick. */
@@ -300,9 +397,11 @@ namespace RammsCurb
 		 *  than held up to its window). */
 		bool bLower = false;
 		/** Measured this tick: its centre's distance past the edge (cm), and its
-		 *  bottom over the surface it follows (cm). */
+		 *  bottom over the surface it follows (cm; RawBottomCm over its plane,
+		 *  BottomCm over the plane and its bias). */
 		double PastEdgeCm = 0.0;
 		double BottomCm = 0.0;
+		double RawBottomCm = 0.0;
 		/** Its centre's distance past the edge once set down on the far plane
 		 *  (cm): a corner's fore/aft moves with its leg's height, as the plan's
 		 *  landing position has it. */
@@ -345,6 +444,31 @@ namespace RammsCurb
 		 *  down to it. */
 		bool   bReachClamped = false;
 		double ReachDeficitCm = 0.0;
+
+		/** The runtime checks' clocks: its leg off its servo lag model, its rim
+		 *  too near the terrain inside its window, landing above its surface,
+		 *  finding no ground, pressing on the ground. How long it has been
+		 *  Planting other than at its reach (s). Its action logged late; it
+		 *  found no ground and goes back up clear (on a halt); its window's
+		 *  drift from the plan logged. */
+		FPersist	LegError;
+		FPersist	SwingLow;
+		FPersist	LandHigh;
+		FPersist	NoGround;
+		FPressWatch Press;
+		double		PlantingFor = 0.0;
+		bool		bLateLogged = false;
+		bool		bRelift = false;
+		bool		bDriftLogged = false;
+		/** Its landing faulted (set down above its surface, pressing on it, or
+		 *  overrunning its plant): on the halt its leg is held where it
+		 *  stopped. Halted: a landing wheel held where it met the ground
+		 *  (bHaltHeld), pressed no further into it than HaltPressCm (cm), and
+		 *  its leg's measured height then (cm, chassis frame). */
+		bool   bLandFault = false;
+		bool   bHaltHeld = false;
+		double HaltPressCm = 0.0;
+		double HaltHeldAtZ = 0.0;
 	};
 
 	/** Why the speed is what it is, as of the last tick (cm/s; the largest
@@ -392,6 +516,22 @@ namespace RammsCurb
 		 *  leg) whose deadline set the speed on some tick. */
 		int32  BrakingTicks = 0;
 		uint32 DeadlineLegs = 0;
+		/** Actions (a lift, a plant, the level-in) that finished more than
+		 *  LateActionSeconds later than planned; holds on the measured margin;
+		 *  ticks the base was slowed for being off its planned attitude; re-plans
+		 *  asked for (TakeReplanAsk). */
+		int32 LateActions = 0;
+		int32 MarginHolds = 0;
+		int32 AttitudeSlowTicks = 0;
+		int32 ReplanAsks = 0;
+		/** The furthest the terrain monitor's probes found a surface off its
+		 *  plane (cm, signed), on which plane (0 near, 1 far; INDEX_NONE for
+		 *  none) and how far ahead of its wheel (cm); the furthest the base
+		 *  was off its planned attitude once levelled in (deg). */
+		double TerrainOffCm = 0.0;
+		int32  TerrainOffPlane = INDEX_NONE;
+		double TerrainOffAheadCm = 0.0;
+		double AttitudeOffDeg = 0.0;
 	};
 
 	class FExecutor
@@ -430,6 +570,44 @@ namespace RammsCurb
 		/** A further cap on the speed (cm/s) from outside the plan -- the commit
 		 *  point while the far side is unconfirmed; the largest double for none. */
 		void SetExternalCap(double CmS) { ExternalCap = CmS; }
+
+		/** Stop the crossing (an abort, or a fault outside the executor): from
+		 *  the next tick the robot is braked to rest at Deceleration (twice that
+		 *  where a hard braking cap is already under the command), never over
+		 *  the hard braking caps, every leg holding its target -- with
+		 *  bPlantOnHold, a lifted wheel over a surface set down on it where the
+		 *  robot then stands. Why is logged. */
+		void Halt(const FString& Why);
+		/** A runtime check faulted (the executor has halted itself), and why:
+		 *  the check, the wheel, its state and the numbers. */
+		bool		   HasFault() const { return bFault; }
+		const FString& GetFaultWhy() const { return FaultWhy; }
+		bool		   IsHalted() const { return bHalted; }
+		/** Halted and at rest: the command at 0, the chassis stopped, and every
+		 *  leg on the target the halt left it (its command there, the leg where
+		 *  it was sent or stopped short of it on the ground) -- for
+		 *  MinStopSeconds. */
+		bool IsStopped() const { return bStopped; }
+		/** Halted, and every leg on its target as of the last tick. */
+		bool AreLegsHome() const { return bLegsHome; }
+		/** A re-plan a runtime trigger asks for before any wheel has begun to
+		 *  cross (taken once): why; how far (cm; X near, Y far) each surface was
+		 *  found off its plane, to re-fit it by (0 where it was not); and whether
+		 *  the heading held should be the chassis' own now (it turned from the
+		 *  plan's). The re-planned crossing is handed over with Adopt; the
+		 *  re-fitted planes' biases are for the caller to start again
+		 *  (FLevelState::Refitted). Taken only when a re-plan can be launched:
+		 *  one left untaken is dropped by the next Adopt (it was against the
+		 *  planes that plan replaces). */
+		struct FReplanAsk
+		{
+			FString	  Why;
+			FVector2D RefitCm = FVector2D::ZeroVector;
+			bool	  bHeading = false;
+		};
+		bool TakeReplanAsk(FReplanAsk& Out);
+		/** The stability margin measured on the last tick (cm). */
+		double GetLiveMarginCm() const { return LiveMarginCm; }
 
 		bool				 IsRunning() const { return bRunning; }
 		EExecPhase			 GetPhase() const { return Phase; }
@@ -501,8 +679,30 @@ namespace RammsCurb
 		double SecondsTo(double SAt) const;
 		/** Whether leg Leg may lift now, and if not why. */
 		bool LiftPermit(int32 Leg, const FExecMeasure& Measure, const FLevelState& Level, FString& OutWhy) const;
-		/** The measured margin with Without (bit per leg) off the ground too. */
-		double MarginWithout(const FExecMeasure& Measure, uint32 Without) const;
+		/** The measured margin with Without (bit per leg) off the ground too, and
+		 *  With (bit per leg) on it. */
+		double MarginWithout(const FExecMeasure& Measure, uint32 Without, uint32 With = 0) const;
+		/** The least margin (cm) the plan's poses keep from now until wheel Leg
+		 *  has taken load -- the predicted airborne interval -- with it up, and
+		 *  every wheel landing late (up where the plan has it down by now) still
+		 *  up until its landing work is done (PredictedLiftMargin). The largest
+		 *  double when no set differs from the plan's; OutAt is the travel (S)
+		 *  of the least. */
+		double PredictedMargin(int32 Leg, const FExecMeasure& Measure, double& OutAt) const;
+		/** A runtime check faults: Why logged, the executor halted. */
+		void Fault(const FString& Why);
+		/** The halted executor's tick: the speed braked to rest, the legs to
+		 *  their targets. */
+		void TickHalted(const FExecMeasure& Measure, FLevelState& Level, FExecCommand& Out, double Dt, bool bWheelsMeasured);
+		/** The wheels' measured places this tick (distance past the edge, bottom
+		 *  over its surface, leg rate). */
+		void MeasureWheels(const FExecMeasure& Measure, const FVector2D& Bias, double Dt);
+		/** How much higher (cm) a lifted wheel is carried than the plan has it:
+		 *  the higher surface's bias, where that is above its plane. */
+		double SwingRaiseCm(const FLevelState& Level) const;
+		/** A runtime trigger asks for a re-plan (before any wheel has begun to
+		 *  cross; at most once every ReplanEveryCm of travel). */
+		void AskReplan(const FString& Why, const FVector2D& RefitCm, bool bHeading = false);
 		/** The deadline cap (cm/s) of each lift still ahead; the largest double
 		 *  with none. Names the wheel that binds. */
 		double DeadlineCap(const FExecMeasure& Measure, int32& OutLeg) const;
@@ -633,6 +833,45 @@ namespace RammsCurb
 		ERammsCurbAxle LatestAxle = ERammsCurbAxle::Front;
 		/** The 5-bar legs by side (-Y [0], +Y [1]). */
 		int32 Centre[2] = { INDEX_NONE, INDEX_NONE };
+
+		/** The runtime checks (RammsCurbSafety.h). A fault and its reason; halted
+		 *  (a fault or Halt), how hard it brakes, at rest (and every leg on its
+		 *  target), and whether the halt's leg targets are set. */
+		bool	 bFault = false;
+		FString	 FaultWhy;
+		bool	 bHalted = false;
+		double	 HaltDecel = 0.0;
+		bool	 bHaltSetUp = false;
+		bool	 bStopped = false;
+		bool	 bLegsHome = false;
+		FPersist AtRest;
+		/** The clocks: the terrain off its planes, a surface's planted wheels all
+		 *  above it (near, far), the base off its planned attitude (faulting, and
+		 *  slowing), the measured margin under MarginFaultCm. */
+		FPersist	 TerrainOff;
+		FPersist	 PlantedHigh[2];
+		FPersist	 AttitudeOff;
+		FPersist	 AttitudeSlow;
+		bool		 bAttitudeSlow = false;
+		FMarginWatch MarginWatch;
+		/** Holding on the measured margin (under MinLiveStabilityMarginCm), and
+		 *  the margin measured this tick (cm). */
+		bool   bMarginHold = false;
+		double LiveMarginCm = 0.0;
+		/** A clear wheel's rim too near the terrain: the robot stopped for it. */
+		bool bSwingStop = false;
+		/** When the level-in began (s since Begin; < 0 not yet), and its
+		 *  planned time (s), for its watchdog. */
+		double LevelInFrom = -1.0;
+		/** A re-plan asked for: why, the re-fit, and where it was last asked
+		 *  (S). The heading's turn from the plan's logged after the crossing
+		 *  began. */
+		bool	   bReplanAsk = false;
+		FReplanAsk Replan;
+		double	   ReplanAskedAt = -TNumericLimits<double>::Max();
+		/** How much higher (cm) lifted wheels are carried than the plan has
+		 *  them this tick (SwingRaiseCm). */
+		double SwingRaise = 0.0;
 	};
 
 	/** What the closed-loop dry run of the executor found. */
@@ -677,7 +916,50 @@ namespace RammsCurb
 		 *  error, the base's attitude. */
 		TArray<FString> Trace;
 		EExecPhase		EndPhase = EExecPhase::Approach;
+		/** A runtime check faulted (or the run was halted), why, and when (s);
+		 *  the run then went on until the robot was at rest (bStopped) or for
+		 *  HaltRunSeconds. The largest command decrease per second while halted
+		 *  (cm/s^2: the braking), and the base's largest inclination from level
+		 *  over the whole run and once halted (deg). */
+		bool	bFaulted = false;
+		FString FaultWhy;
+		double	FaultAt = -1.0;
+		bool	bHalted = false;
+		bool	bStopped = false;
+		double	HaltBrakingCmS2 = 0.0;
+		double	MaxInclinationDeg = 0.0;
+		double	HaltedInclinationDeg = 0.0;
+		/** Re-plans the run made on the executor's asks (TakeReplanAsk), and
+		 *  their reasons; the largest error (cm) of a re-fitted surface's bias,
+		 *  on the tick a re-plan was adopted, against where that surface truly
+		 *  lies off its new plane. */
+		int32			Replans = 0;
+		TArray<FString> ReplanWhy;
+		double			ReplanBiasErrorCm = 0.0;
+		/** Per wheel, once halted: held where it met the ground on the halt,
+		 *  how far (cm) its leg's last command lies below the leg's measured
+		 *  height when it was held -- how far it pressed into what it met (-1
+		 *  for a wheel never so held). And where each wheel's bottom ended over
+		 *  the world's surface under it (cm; negative pressed in). */
+		TArray<double> HaltHeldPressCm;
+		TArray<double> FinalBottomCm;
 	};
+
+	/**
+	 * The live lift permit's look ahead (the predicted airborne interval): the
+	 * least stability margin (cm) the plan's poses keep from travel S until
+	 * wheel Leg has taken load again, with it up, and each other wheel j up
+	 * wherever the travel is short of UpUntilS[j] (a wheel landing late, until
+	 * it is predicted down; the lowest double for none) -- only at the samples
+	 * where those sets are not the plan's own (there the plan's verification
+	 * holds). The largest double where none differs; OutAt the travel (S) of
+	 * the least.
+	 */
+	double PredictedLiftMargin(const FPlanModel& M, const FCurbSchedule& Plan, int32 Leg, double S, TConstArrayView<double> UpUntilS,
+		double& OutAt);
+	/** A wheel landing late is taken to need this many times its planned
+	 *  landing work to be down (PredictedLiftMargin's UpUntilS). */
+	constexpr double LateWorkFactor = 1.5;
 
 	/** How the dry run disturbs the robot. */
 	struct FExecDryRunOptions
@@ -700,6 +982,41 @@ namespace RammsCurb
 		/** The robot begins this far (cm) along the plan's heading from where the
 		 *  plan was made (negative: behind it, as a robot that rolled back). */
 		double StartTravelCm = 0.0;
+
+		/** The world as it is, where it is not as planned: each surface this far
+		 *  (cm; X near, Y far) above the plane the plan has; and a ridge
+		 *  RidgeHeightCm high and RidgeWidthCm wide along the edge, its near side
+		 *  RidgePastEdgeCm past it. The robot stands and rolls on this; the
+		 *  executor plans and acts on the plan's terrain. */
+		FVector2D TrueOffsetCm = FVector2D::ZeroVector;
+		double	  RidgeHeightCm = 0.0;
+		double	  RidgePastEdgeCm = 0.0;
+		double	  RidgeWidthCm = 4.0;
+		/** The executor's probes (FExecMeasure::Probes) of the world as it is:
+		 *  every one, or only the one under each wheel (bProbeAhead false), or
+		 *  none (bProbes false: the terrain monitor, landing trace and swing
+		 *  clearance blind). */
+		bool bProbes = true;
+		bool bProbeAhead = true;
+		/** The base's measured attitude is off by this (deg; pitch, roll) from
+		 *  KickAtSeconds on (a slip, a bump the model does not have). */
+		double	  KickAtSeconds = -1.0;
+		FVector2D KickDeg = FVector2D::ZeroVector;
+		/** Halt the executor (an abort) at this time (s; < 0 never), or once the
+		 *  robot has gone this far along the plan (cm; the largest double never). */
+		double HaltAtSeconds = -1.0;
+		double HaltAtTravelCm = TNumericLimits<double>::Max();
+		/** Once halted, the run goes on until the robot has been at rest for
+		 *  StoppedRunSeconds, or for HaltRunSeconds in all (s). */
+		double HaltRunSeconds = 5.0;
+		double StoppedRunSeconds = 0.5;
+		/** A re-plan the executor asks for (TakeReplanAsk) is made, from the
+		 *  robot as it stands then on the plan's terrain re-fitted, and adopted,
+		 *  as the controller does -- ReplanDelaySeconds later (the controller
+		 *  plans off the game thread: 50-150 ms on the move), if no wheel has
+		 *  begun to cross by then. */
+		bool   bReplan = true;
+		double ReplanDelaySeconds = 0.0;
 	};
 
 	/**
@@ -710,6 +1027,10 @@ namespace RammsCurb
 	 * analytic terrain. Checks every tick that no wheel on the ground is in its
 	 * window (a support wheel, or one lifting that still carries load), lifted
 	 * wheels clear the terrain inside it, and counts what the executor counts.
+	 * The world may differ from the plan's terrain (TrueOffsetCm, a ridge): the
+	 * robot stands on the world, and the executor's probes trace it. A fault
+	 * (or Halt, HaltAtSeconds) is run on until the robot is at rest; a re-plan
+	 * it asks for is made and adopted as the controller does (bReplan).
 	 */
 	FExecDryRunResult ExecDryRun(const FPlannerInput& In, const FCurbSchedule& Plan, const FExecDryRunOptions& Options = FExecDryRunOptions());
 } // namespace RammsCurb
