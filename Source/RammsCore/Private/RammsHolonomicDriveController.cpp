@@ -97,6 +97,7 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 		return;
 	}
 	bDriveModeActive = bActive;
+	bHoldInactive = false;
 	// Either way this mode starts and ends at rest -- unless the selector
 	// hands it the robot's motion (SeedMotion) right after taking over.
 	// Taking over matters as much as standing down: a SetDriveCommand that
@@ -173,8 +174,29 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 
 	URammsRobotBaseComponent* Base = EnsureBase();
 	const double			  T = Now();
-	const double			  Dt = (LastTickTime >= 0.0 && T >= LastTickTime) ? T - LastTickTime : 0.0;
-	LastTickTime = T;
+	double					  Dt = 0.0;
+	if (RammsDrive::AdvanceHoldClock(T, FirstTickTime, LastTickTime, Dt))
+	{
+		// The simulation was reset: the robot is back at its start pose, every
+		// wheel's angle with it. Nothing held before stands: a wheel still held
+		// for a switch is held again where it is now; the mode's own hold
+		// waits out the spawn's second again.
+		bHoldingStill = false;
+		HoldAngles.Reset();
+		if (Base && bHoldInactive)
+		{
+			LatchHold(*Base);
+		}
+	}
+	// Nothing held while the robot is put down as it spawns.
+	const bool bMayHold = bHoldWhenIdle && RammsDrive::HoldWhenIdleEnabled() && T - FirstTickTime >= RammsDrive::SpawnSettleSeconds;
+	if (Base && bHoldInactive && !bDriveModeActive)
+	{
+		// Stood down at rest while the next mode's wheels go down: these still
+		// carry the robot, held where they are.
+		CommandHold(*Base);
+		return;
+	}
 	if (!Base || Resolved.Wheels.Num() == 0 || !bDriveModeActive)
 	{
 		return;
@@ -196,6 +218,16 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	{
 		Target = Bound->GetCarriableMotion(Commanded);
 	}
+	// Holding still: a command let go brings the robot to rest at the
+	// hand-over rates, not at once -- its wheels are then held (below) -- and
+	// a command given while held is taken up from rest at those rates, so the
+	// hold lets go smoothly (on a slope the speed loops' integrals carry the
+	// pull on).
+	const bool bNothingAsked = Target.IsNearlyZero(1e-3f, 1e-3f);
+	if (bMayHold && ((bNothingAsked && !Output.IsNearlyZero(1e-3f, 1e-3f)) || (!bNothingAsked && bHoldingStill)))
+	{
+		bOutputRamping = true;
+	}
 	if (bOutputRamping || Bound || bHeldForStance)
 	{
 		Output = RammsDrive::RampMotion(Output, Target, HandOverAcceleration, HandOverYawAcceleration, Dt);
@@ -210,6 +242,21 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	}
 
 	const bool bIdle = Output.IsNearlyZero(1e-3f, 1e-3f);
+	if (bMayHold && bIdle && bNothingAsked)
+	{
+		// At rest with nothing asked (or its wheels still going down): every
+		// wheel held where it stopped, its speed loop kept on and asked back
+		// towards that angle. On a slope the loop's integral takes the pull.
+		if (!bHoldingStill || HoldAngles.Num() != Resolved.Wheels.Num())
+		{
+			LatchHold(*Base);
+			bHoldingStill = true;
+		}
+		CommandHold(*Base);
+		bDrivingMotors = true;
+		return;
+	}
+	bHoldingStill = false;
 	if (bIdle && !bDrivingMotors)
 	{
 		// Nothing commanded and nothing left running: leave the motors alone so
@@ -249,6 +296,59 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	bDrivingMotors = !bIdle;
 }
 
+void URammsHolonomicDriveController::LatchHold(URammsRobotBaseComponent& Base)
+{
+	HoldAngles.SetNum(Resolved.Wheels.Num());
+	for (int32 i = 0; i < Resolved.Wheels.Num(); ++i)
+	{
+		HoldAngles[i] = Resolved.Wheels[i].MotorId.IsNone() ? 0.0 : Base.GetMotorValue(Resolved.Wheels[i].MotorId);
+	}
+}
+
+void URammsHolonomicDriveController::CommandHold(URammsRobotBaseComponent& Base) const
+{
+	for (int32 i = 0; i < Resolved.Wheels.Num() && i < HoldAngles.Num(); ++i)
+	{
+		const FName Motor = Resolved.Wheels[i].MotorId;
+		if (!Motor.IsNone())
+		{
+			RammsDrive::FWheelHold Hold;
+			Hold.Latch(HoldAngles[i]);
+			Base.SetMotorVelocityCommand(Motor, static_cast<float>(Hold.Rate(Base.GetMotorValue(Motor))));
+		}
+	}
+}
+
+void URammsHolonomicDriveController::HoldWheelsWhileInactive(bool bHold)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (bDriveModeActive || !Base)
+	{
+		bHoldInactive = false;
+		return;
+	}
+	if (bHold && bHoldWhenIdle)
+	{
+		LatchHold(*Base);
+		bHoldInactive = true;
+		CommandHold(*Base);
+		return;
+	}
+	if (bHoldInactive)
+	{
+		// Let go, as standing down does.
+		bHoldInactive = false;
+		for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
+		{
+			if (!Wheel.MotorId.IsNone())
+			{
+				Base->ClearMotorVelocityCommand(Wheel.MotorId);
+				Base->SetMotorCommand(Wheel.MotorId, 0.0f);
+			}
+		}
+	}
+}
+
 // --- switching on the move -------------------------------------------------------
 
 double URammsHolonomicDriveController::Now() const
@@ -272,6 +372,7 @@ void URammsHolonomicDriveController::ResetSwitching()
 	HandOverTarget.Reset();
 	bOutputRamping = false;
 	bHeldForStance = false;
+	bHoldingStill = false;
 }
 
 bool URammsHolonomicDriveController::BeginHandOver(const IRammsDriveMode& Other)

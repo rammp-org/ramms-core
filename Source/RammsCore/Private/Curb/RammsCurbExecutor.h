@@ -796,7 +796,7 @@ namespace RammsCurb
 		 *  stance to their level targets along an S-curve in time (SCurveShare of
 		 *  the whole move, at RampRate / RampAccel of it per second), over
 		 *  RampSpan, so that no leg moves faster than LegSpeed / LegAcceleration
-		 *  and neither the base's pitch nor its roll turns faster than
+		 *  and the base turns (pitch and roll together) no faster than
 		 *  TiltRateDegPerSec / TiltAccelDegPerSec2. */
 		bool   bLoweredDown = false;
 		double LevelRampFrom = -1.0;
@@ -897,8 +897,8 @@ namespace RammsCurb
 		double MinMarginCm = TNumericLimits<double>::Max();
 		/** The largest base tilt (deg) the support legs' errors give. */
 		double MaxTiltDeg = 0.0;
-		/** The fastest the base turned (deg/s, either axis, over 0.3 s) while
-		 *  levelling in (Prepare). */
+		/** The fastest the base turned (deg/s, pitch and roll together, over
+		 *  0.3 s) while levelling in (Prepare). */
 		double MaxLevelInTurnDegS = 0.0;
 		/** Per wheel: the furthest past the edge (cm) it was while it carried
 		 *  load on the near surface (the lowest -- largest double for never). */

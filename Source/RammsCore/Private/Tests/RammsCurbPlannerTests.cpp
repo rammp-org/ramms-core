@@ -307,20 +307,20 @@ namespace
 			const double					  Dt = S.SampleCm / V;
 			const double					  DtMean = S.SampleCm / FMath::Max(0.5, 0.5 * (A.V + B.V));
 			FString							  Why;
-			// Pitch and roll each.
+			// The base's turn, pitch and roll together.
 			const FVector2D Rate((B.PitchDeg - A.PitchDeg) / DtMean, (B.RollDeg - A.RollDeg) / DtMean);
-			if (Rate.GetAbsMax() > T.TiltRateDegPerSec * (1.0 + 1e-6) + 1e-6)
+			if (Rate.Size() > T.TiltRateDegPerSec * (1.0 + 1e-6) + 1e-6)
 			{
 				Why += FString::Printf(TEXT(" tilt rate %+.3f / %+.3f deg/s;"), Rate.X, Rate.Y);
 			}
 			// The rate's change between steps, over the time between their
 			// middles.
-			const double Accel = LastDt > 0.0 ? ((Rate - LastRate) / (0.5 * (DtMean + LastDt))).GetAbsMax() : 0.0;
+			const double Accel = LastDt > 0.0 ? ((Rate - LastRate) / (0.5 * (DtMean + LastDt))).Size() : 0.0;
 			if (Accel > T.TiltAccelDegPerSec2 * (1.0 + 1e-6) + 1e-6)
 			{
 				Why += FString::Printf(TEXT(" tilt acceleration %.3f deg/s^2;"), Accel);
 			}
-			if ((A.bStop || B.bStop) && Rate.GetAbsMax() > 1e-9)
+			if ((A.bStop || B.bStop) && Rate.Size() > 1e-9)
 			{
 				Why += TEXT(" tilt changing through a planned stop;");
 			}
@@ -1092,11 +1092,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerTiltProfileBlends,
 bool FRammsCurbPlannerTiltProfileBlends::RunTest(const FString& Parameters)
 {
 	// Two stretches leaning the same way, closer than two easings: straight from
-	// the larger to the smaller (no stop at the larger's level, no dip), pitch
-	// and roll each within the rate and its change everywhere; level before
-	// the first and after the last. Then too close for even that at the speed:
-	// a gap named, and the speed that would let it.
-	const double Rate = 2.0, Accel = 4.0;
+	// the larger to the smaller (no stop at the larger's level, no dip), the
+	// base's turn (pitch and roll together) within the rate and its change
+	// everywhere; level before the first and after the last. Then too close
+	// for even that at the speed: a gap named, and the speed that would let
+	// it.
+	const double Rate = 3.0, Accel = 4.0;
 	const int32	 N = 400;
 	auto		 Run = [&](double Speed, TArray<FVector2D>& Out, TArray<RammsCurb::FTiltGap>& Tight, uint8 Mode = 0) {
 		TArray<double> Seconds, S;
@@ -1109,8 +1110,9 @@ bool FRammsCurbPlannerTiltProfileBlends::RunTest(const FString& Parameters)
 		const uint8				   Modes[3] = { Mode, Mode, Mode };
 		return RammsCurb::TiltProfile(Seconds, S, Holds, Rate, Accel, Out, &Tight, Modes);
 	};
-	// Pitch and roll each within the rate and its change at every sample, at
-	// Speed; the largest rate of either axis and of the two together.
+	// The base's turn (pitch and roll together) within the rate and its
+	// change at every sample, at Speed; the largest rate of either axis and of
+	// the two together.
 	auto Smooth = [&](const TArray<FVector2D>& T, double Speed, double* OutAxis = nullptr, double* OutTotal = nullptr) {
 		const double D = 1.0 / Speed;
 		bool		 bOk = true;
@@ -1120,10 +1122,10 @@ bool FRammsCurbPlannerTiltProfileBlends::RunTest(const FString& Parameters)
 			const FVector2D R = (T[k] - T[k - 1]) / D;
 			Axis = FMath::Max(Axis, R.GetAbsMax());
 			Total = FMath::Max(Total, R.Size());
-			bOk = bOk && R.GetAbsMax() <= Rate * (1.0 + 1e-9) + 1e-9;
+			bOk = bOk && R.Size() <= Rate * (1.0 + 1e-9) + 1e-9;
 			if (k > 1)
 			{
-				bOk = bOk && ((T[k] - 2.0 * T[k - 1] + T[k - 2]) / (D * D)).GetAbsMax() <= Accel * (1.0 + 1e-9) + 1e-9;
+				bOk = bOk && ((T[k] - 2.0 * T[k - 1] + T[k - 2]) / (D * D)).Size() <= Accel * (1.0 + 1e-9) + 1e-9;
 			}
 		}
 		if (OutAxis)
@@ -1166,12 +1168,12 @@ bool FRammsCurbPlannerTiltProfileBlends::RunTest(const FString& Parameters)
 	TestTrue(TEXT("level at either end"), Tilt[0].IsNearlyZero(1e-12) && Tilt.Last().IsNearlyZero(1e-12));
 	// Out of the larger early: already easing at the sample after it.
 	TestTrue(FString::Printf(TEXT("easing out of the larger tilt as it ends (%.4f)"), Tilt[166].X), Tilt[166].X < 3.5 && Tilt[166].X > 3.4);
-	// At 35 cm/s the 38 cm between them is 1.09 s, under the 1.63 s the change
-	// takes.
+	// At 35 cm/s the 38 cm between them is 1.09 s, under the 1.81 s the change
+	// (3.18 deg of turn) takes; at 20 cm/s, 1.90 s, it fits.
 	TestFalse(TEXT("at 35 cm/s it does not fit"), Run(35.0, Tilt, Tight));
 	if (TestEqual(TEXT("one gap"), Tight.Num(), 1))
 	{
-		const double Need = RammsCurb::SCurveSeconds(2.25, Rate, Accel);
+		const double Need = RammsCurb::SCurveSeconds((FVector2D(3.5, -3.5) - FVector2D(1.25, -1.25)).Size(), Rate, Accel);
 		TestEqual(TEXT("between the stretches"), Tight[0].First, 165);
 		TestEqual(TEXT("to the next"), Tight[0].Last, 203);
 		TestNearlyEqual(TEXT("needing the change's time"), Tight[0].NeedSeconds, Need, 1e-9);
@@ -1194,9 +1196,9 @@ bool FRammsCurbPlannerTiltProfileBlends::RunTest(const FString& Parameters)
 	// then +1 / +3 -- the base goes along the straight way between them
 	// (pitch plus roll stays 4), never leaning further than either; each axis
 	// on its own S-curve, out of its larger early and into its larger late,
-	// would dip towards +1 / +1 between them. The easing is timed by the axis
-	// that changes most: a diagonal tilt eased in from level turns pitch and
-	// roll each at the rate (the base, the two together, sqrt(2) times it).
+	// would dip towards +1 / +1 between them. The easing is timed by the whole
+	// turn: a diagonal tilt eased in from level turns the base (pitch and roll
+	// together) at the rate, each axis at 1 / sqrt(2) of it.
 	{
 		TArray<double> Seconds, S;
 		for (int32 k = 0; k < N; ++k)
@@ -1223,8 +1225,8 @@ bool FRammsCurbPlannerTiltProfileBlends::RunTest(const FString& Parameters)
 		RammsCurb::TiltProfile(Seconds, S, Diag, Rate, Accel, In);
 		double Axis = 0.0, Total = 0.0;
 		TestTrue(TEXT("diagonal: within the rate and its change"), Smooth(In, 10.0, &Axis, &Total));
-		TestTrue(FString::Printf(TEXT("diagonal: pitch and roll each at the rate (%.4f), the two together at sqrt(2) times it (%.4f)"), Axis, Total),
-			FMath::IsNearlyEqual(Axis, Rate, 0.01) && FMath::IsNearlyEqual(Total, Rate * UE_DOUBLE_SQRT_2, 0.02));
+		TestTrue(FString::Printf(TEXT("diagonal: the base turning at the rate (%.4f), pitch and roll each at 1 / sqrt(2) of it (%.4f)"), Total, Axis),
+			FMath::IsNearlyEqual(Total, Rate, 0.02) && FMath::IsNearlyEqual(Axis, Rate / UE_DOUBLE_SQRT_2, 0.01));
 	}
 	return true;
 }

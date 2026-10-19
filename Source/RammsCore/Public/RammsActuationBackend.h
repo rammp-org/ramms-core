@@ -39,6 +39,18 @@ public:
 	/** The motor's current joint velocity (rad/s or cm/s). 0 when unavailable. */
 	virtual float GetVelocity(FName MotorId) const = 0;
 
+	/**
+	 * Whether a motor's joint is simulated as a joint: GetValue reports its
+	 * coordinate -- for a continuous wheel its angle, unwrapped -- and, for a
+	 * Torque motor, SetCommand applies a physical torque (N.m) about it. A
+	 * controller that closes its own loop on a wheel's angle, with gains from
+	 * the robot's mass (a drive mode holding the robot still), needs both.
+	 * Default true, as GetValue and SetCommand are documented above; the Chaos
+	 * backend's skeletal wheels are not (GetValue reads 0, and their command
+	 * is the legacy x100 acceleration change).
+	 */
+	virtual bool SimulatesMotorJoint(FName MotorId) const { return true; }
+
 	/** Stop actively driving a motor: a Position/Velocity servo lets go of its
 	 *  joint (a Chaos constraint drive is disabled; a MuJoCo position actuator
 	 *  is parked at the joint's current position). Torque motors have nothing

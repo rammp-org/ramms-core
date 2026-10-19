@@ -234,8 +234,11 @@ enum class ERammsCurbPhase : uint8
 	 *  found not to hold -- running away from its command, or rolling back
 	 *  with a wheel up or while it brakes -- has every wheel braked at once);
 	 *  or a simulation reset,
-	 *  after which the mode from before takes it back. See GetStatusText,
-	 *  which names the check, the wheel and the numbers. */
+	 *  after which the mode from before takes it back. A per-wheel plan made
+	 *  off the game thread that refuses ends here too ("refused on the move:
+	 *  ..." -- braked to rest and held -- or "refused at rest: ...", the robot
+	 *  handed back to the mode it came from: nothing moved). See
+	 *  GetStatusText, which names the check, the wheel and the numbers. */
 	Faulted UMETA(DisplayName = "Faulted"),
 	/** Per-wheel gait: a wheel's crossing is pending or under way (appended
 	 *  after Faulted: the values before it keep their indices). */
@@ -775,15 +778,21 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0", ClampMax = "10.0"))
 	float MaxPlannedTiltDeg = 5.0f;
 
-	/** The fastest a planned tilt, and the level-in, may change the base's
-	 *  pitch or its roll (deg/s, each). An easing between two tilts runs
-	 *  along the straight way between them, pitch and roll together, timed by
-	 *  the one that changes most. */
+	/** The fastest a planned tilt, and the level-in, may turn the base
+	 *  (deg/s): its total turn rate, pitch and roll together, whichever way it
+	 *  turns -- not each axis (as MaxPlannedTiltDeg bounds the inclination).
+	 *  An easing between two tilts runs along the straight way between them.
+	 *  The drive-mode selector's hand-back from a crossing to a drive mode's
+	 *  stance turns the base no faster than this either (see
+	 *  GetStanceChangeMinSeconds). Until 2026-10-17 this bounded pitch and
+	 *  roll each, at 2 deg/s (2.83 deg/s of total turn on a diagonal). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.1"))
-	float TiltRateDegPerSec = 2.0f;
+	float TiltRateDegPerSec = 3.0f;
 
-	/** How fast that rate may change (deg/s^2, each axis): the tilt eases in
-	 *  and out rather than starting and stopping at once. */
+	/** How fast that turn rate may change (deg/s^2, pitch and roll
+	 *  together): the tilt eases in and out rather than starting and stopping
+	 *  at once. Until 2026-10-17 each axis's (so up to 5.66 deg/s^2 of the
+	 *  turn's on a diagonal). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.1"))
 	float TiltAccelDegPerSec2 = 4.0f;
 

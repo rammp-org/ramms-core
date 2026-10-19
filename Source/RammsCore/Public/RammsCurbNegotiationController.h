@@ -170,15 +170,22 @@ namespace RammsCurb
  * at the speed the robot has -- and finishing one hands back to the mode that
  * was active without stopping: the robot rolls on, the mode it returns to is
  * handed its motion (IRammsDriveMode::SeedMotion), and the selector ramps the
- * legs from where the crossing left them to that mode's stance. One
+ * legs from where the crossing left them to that mode's stance, no faster
+ * than the base may turn to the attitude that stance takes on the ground
+ * (GetStanceChangeMinSeconds: within Tuning.TiltRateDegPerSec and
+ * TiltAccelDegPerSec2). On ground sloping more than a degree it hands back
+ * only to a mode that holds the robot still with no command
+ * (IRammsDriveMode::HoldsRobotStill) -- another such mode if the one it came
+ * from does not, else it keeps the robot here, its wheels held. One
  * stopped by Abort, or by a tilt, step-timeout, stall or measurement fault, keeps
  * the robot held in this mode -- per wheel, braked to rest at
  * Tuning.Deceleration (twice that where a wheel is about to meet the curb)
  * rather than at once, the legs holding their targets, then the wheels
- * braked; per axle, braked at once; a retry that succeeds still
- * hands back to the mode from before. A simulation reset faults it too, but
- * hands back as well: the robot is at its start pose, with nothing across a
- * step to hold.
+ * braked: each held at the angle it stopped at, its speed loop asked back
+ * to it, so that on a slope the robot stays put; per axle, braked at once; a
+ * retry that succeeds still hands back to the mode from before. A simulation
+ * reset faults it too, but hands back as well: the robot is at its start
+ * pose, with nothing across a step to hold.
  *
  * The per-wheel gait checks itself as it runs, every tick (see the executor's
  * runtime checks, Private/Curb): it traces the terrain ahead of and under
@@ -235,9 +242,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool CheckFeasibility(FRammsCurbProfile Profile, FString& OutReason);
 
-	/** Plan and start. False, with a reason, when the step cannot be crossed
-	 *  from here -- or the active drive mode is moving the robot sideways (see
-	 *  GetCarriableMotion); nothing moves then. */
+	/**
+	 * Plan and start. False, with a reason, when the crossing cannot start
+	 * from here before any plan is made -- the robot cannot be measured or is
+	 * not on the near side, the active drive mode is moving it sideways (see
+	 * GetCarriableMotion), the profile is not one this gait takes -- and with
+	 * the per-axle gait (Tuning.Gait PerAxle), whose plan is made in the call,
+	 * when that plan refuses; nothing moves then. The per-wheel gait plans off
+	 * the game thread (a plan takes tens of milliseconds to a few seconds),
+	 * at rest or on the move: true means the crossing has begun with its plan
+	 * being made (phase Approach), the robot held in its stance -- at rest,
+	 * every wheel held where it stands; on the move, rolling on, braked short
+	 * of where its level-in would have to begin -- and a refusal by the plan
+	 * comes on a later tick: the phase Faulted, the status "refused at rest:
+	 * <why>" (the robot handed back to the mode it came from: nothing has
+	 * moved) or "refused on the move: <why>" (braked to rest and held in this
+	 * mode). CheckFeasibility answers at once, in the call.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool BeginNegotiation(FRammsCurbProfile Profile, FString& OutReason);
 
@@ -426,6 +447,15 @@ public:
 	 *  the selector's HandOverMaxSidewaysSpeed is refused, and a mode handed
 	 *  back to is held to this until its stance is in place. */
 	virtual FRammsDriveMotion GetCarriableMotion(const FRammsDriveMotion& Motion) const override;
+	/**
+	 * How long the selector's ramp from where a crossing left the legs to the
+	 * next mode's stance should take, at least, so that the base turns from
+	 * its attitude now to the one that stance takes on the ground under it no
+	 * faster than Tuning.TiltRateDegPerSec and TiltAccelDegPerSec2: that
+	 * attitude is the ground's plus the stance's own tilt over the ground it
+	 * stood on as the crossing began. 0 before any crossing.
+	 */
+	virtual float GetStanceChangeMinSeconds() const override;
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
@@ -1024,9 +1054,46 @@ private:
 	FName PreviousModeId;
 	bool  bDriveModeActive = false;
 	bool  bWheelsDriven = false;
+	/** The crossing ending now hands the robot back, as Done does (a refusal
+	 *  at rest: nothing moved). */
+	bool bHandBackOnFinish = false;
 	/** Selected without a manoeuvre to run (picked from the mode list): hand
 	 *  the robot back on the next tick, outside the selector's switch. */
 	bool bHandBackPending = false;
+
+	/** The wheels held where they stand (StopWheels without letting go): each
+	 *  wheel's speed loop asked back towards the angle it was latched at
+	 *  (rad, the motor's sense), every tick, until the wheels are driven or
+	 *  let go. */
+	bool		   bHoldingWheels = false;
+	TArray<double> WheelHoldAngles;
+	/** The physics clock at the last tick the wheels were held with no
+	 *  crossing running (-1 otherwise): a reset is seen there too. */
+	double IdleHoldSimTime = -1.0;
+	/** Latch every wheel where it stands and hold it (bHoldingWheels). */
+	void HoldWheels();
+	/** One tick of holding the wheels latched. */
+	void StepWheelHold();
+	/** Whether the drive mode ModeId holds the robot still with no command
+	 *  (IRammsDriveMode::HoldsRobotStill); and the first such mode, or None. */
+	bool  ModeHoldsStill(FName ModeId) const;
+	FName HoldingModeId() const;
+	/** The drive mode ModeId on this actor, or null. */
+	IRammsDriveMode* FindDriveMode(FName ModeId) const;
+	/** The mode a crossing that has ended hands the robot back to: the one it
+	 *  came from (or ReturnModeId), as long as the robot stands on ground
+	 *  sloping no more than HandBackLevelDeg or that mode holds it still;
+	 *  else a mode that does; else None -- it stays here, its wheels held. */
+	FName HandBackModeId(FString& OutNote) const;
+
+	/** The base's attitude (deg: pitch, roll) over the ground it stood on as
+	 *  the crossing began -- its drive stance's own tilt -- for the hand-back's
+	 *  stance ramp (GetStanceChangeMinSeconds). */
+	FVector2D StanceAttitudeOverGround = FVector2D::ZeroVector;
+	bool	  bStanceAttitudeKnown = false;
+	/** The attitude (deg: pitch nose up, roll +Y side up) a stance standing
+	 *  on Plane takes, the chassis facing as it does now. */
+	FVector2D GroundAttitudeDeg(const FRammsCurbPlane& Plane) const;
 
 	/** The stability margin last measured in a crossing (GetStabilityMargin). */
 	float LiveMarginCm = 0.0f;
@@ -1116,10 +1183,12 @@ private:
 
 	/** The crossing under way (or the last) runs the per-wheel gait. */
 	bool bPerWheelCrossing = false;
-	/** Begun on the move: its plan is being made off the game thread, and the
+	/** Its plan is being made off the game thread: begun on the move, the
 	 *  robot holds its speed and stance until it comes (braked short of every
-	 *  wheel's window). */
+	 *  wheel's window and of the line its level-in must be done by); begun at
+	 *  rest (bPlanningAtRest), it is held where it stands. */
 	bool bAwaitingPlan = false;
+	bool bPlanningAtRest = false;
 	/** A re-plan on the approach (the terrain looked at again moved) is under
 	 *  way off the game thread. */
 	bool bReplanning = false;
@@ -1192,11 +1261,12 @@ private:
 	FVector	  PendingHeadingWas = FVector::ForwardVector;
 	FVector2D PendingCrossTrackOriginWas = FVector2D::ZeroVector;
 
-	/** BeginNegotiation with the per-wheel gait: a robot at rest is planned in
-	 *  the call (refusing at once); one on the move (or rolling back) off the
-	 *  game thread. The plan's own fallback chain decides what runs: level,
-	 *  else its least tilt within MaxPlannedTiltDeg, else a level planned stop,
-	 *  else a refusal. */
+	/** BeginNegotiation with the per-wheel gait: planned off the game thread,
+	 *  a robot at rest held where it stands meanwhile (bPlanningAtRest), one on
+	 *  the move (or rolling back) rolling on in its stance; the plan's refusal
+	 *  comes on a later tick (TakeCrossingPlan). The plan's own fallback chain
+	 *  decides what runs: level, else its least tilt within MaxPlannedTiltDeg,
+	 *  else a level planned stop, else a refusal. */
 	bool BeginPerWheel(const FRammsCurbProfile& Profile, FString& OutReason);
 	/** The per-axle crossing (BuildPlan done): take the robot over and start. */
 	void StartPerAxleCrossing(const FRammsCurbProfile& Profile);
@@ -1218,7 +1288,8 @@ private:
 	 *  wheel's braking cap short of its window (cm/s). */
 	float AwaitingBrakingCap() const;
 	/** The per-wheel crossing's plan arrived off the game thread: run it, or
-	 *  fault with the plan's refusal. */
+	 *  end with the plan's refusal (Faulted: at rest handing the robot back,
+	 *  on the move braking it to rest). */
 	void TakeCrossingPlan();
 	/** The per-wheel crossing's re-plan arrived: adopt it if no wheel has begun
 	 *  to cross. */

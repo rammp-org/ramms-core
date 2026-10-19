@@ -17,6 +17,13 @@ namespace RammsCurb
 		return DistanceCm - FMath::Max(0.0f, SpeedCmS) * FMath::Max(0.0f, LagSeconds);
 	}
 
+	float AwaitingPlanCap(float ToWindowCm, float LevelInCm, float SpeedCmS, float Deceleration)
+	{
+		const float Window = BrakingSpeed(LagBrakingDistance(ToWindowCm, SpeedCmS, DriveLagSeconds), Deceleration);
+		const float Line = BrakingSpeed(LagBrakingDistance(ToWindowCm - FMath::Max(0.0f, LevelInCm), SpeedCmS, DriveLagSeconds), Deceleration);
+		return FMath::Min(Window, Line);
+	}
+
 	float DeadlineSpeed(float RoomCm, float Seconds, float Deceleration)
 	{
 		const float Room = FMath::Max(0.0f, RoomCm);

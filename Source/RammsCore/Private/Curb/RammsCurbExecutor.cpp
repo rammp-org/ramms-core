@@ -2048,9 +2048,10 @@ namespace RammsCurb
 			// The level-in's second stage: every support leg from where the stance
 			// has it to its level target, together, along one S-curve in time --
 			// its rate and the rate's change bounded so that no leg moves faster
-			// than LegSpeed / LegAcceleration and the base, turning from the
-			// stance's attitude to the plan's, its pitch and its roll each no
-			// faster than TiltRateDegPerSec / TiltAccelDegPerSec2.
+			// than LegSpeed / LegAcceleration and the base turns from the
+			// stance's attitude to the plan's (pitch and roll together, along
+			// the straight way between them) no faster than TiltRateDegPerSec /
+			// TiltAccelDegPerSec2.
 			LevelRampFrom = Elapsed;
 			double Move = 0.0;
 			for (int32 i = 0; i < N; ++i)
@@ -2065,7 +2066,7 @@ namespace RammsCurb
 				}
 			}
 			const FVector2D Off = Measure.AttitudeDeg - PlannedAttitude;
-			const double	Turn = Off.GetAbsMax();
+			const double	Turn = Off.Size();
 			RampRate = FMath::Min(T.TiltRateDegPerSec / FMath::Max(Turn, 1e-3), LegSpeed / FMath::Max(Move, 1e-3));
 			RampAccel = FMath::Min(T.TiltAccelDegPerSec2 / FMath::Max(Turn, 1e-3), LegAccel / FMath::Max(Move, 1e-3));
 			RampRate = FMath::Max(RampRate, 1e-3);
@@ -3234,7 +3235,7 @@ namespace RammsCurb
 				const double Span = Time - TurnHistory[0].X;
 				if (Span >= 0.3 - 0.5 * Dt)
 				{
-					const double Turn = FMath::Max(FMath::Abs(Attitude.X - TurnHistory[0].Y), FMath::Abs(Attitude.Y - TurnHistory[0].Z));
+					const double Turn = FVector2D(Attitude.X - TurnHistory[0].Y, Attitude.Y - TurnHistory[0].Z).Size();
 					Out.MaxLevelInTurnDegS = FMath::Max(Out.MaxLevelInTurnDegS, Turn / Span);
 				}
 			}

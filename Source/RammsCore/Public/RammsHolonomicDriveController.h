@@ -100,6 +100,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic|Switching", meta = (ClampMin = "1.0"))
 	float HandOverYawAcceleration = 90.0f;
 
+	/**
+	 * With no command, bring the robot to rest -- the body velocity ramped to
+	 * zero at HandOverAcceleration / HandOverYawAcceleration rather than
+	 * dropped -- and hold it there: each wheel's speed loop is kept on and
+	 * asked back towards the angle the wheel stopped at, so on a slope the
+	 * robot stays where it stopped instead of rolling away (along a slope;
+	 * across one the omni wheels' rollers still creep -- HoldsRobotStill is
+	 * false). A command takes
+	 * the wheels on from there at those same rates, the speed loops' integrals
+	 * (what held the slope's pull) carrying on. Nothing is held for the first
+	 * second after the mode's first tick: the robot is being put down as it
+	 * spawns, its legs jumping into the initial stance. Off, a command
+	 * applies at once and the wheels are let go once it is released, as
+	 * before.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic|Holding")
+	bool bHoldWhenIdle = true;
+
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("holonomic"); }
 	virtual FText GetDriveModeDisplayName() const override
@@ -118,14 +136,24 @@ public:
 	virtual bool BeginHandOver(const IRammsDriveMode& Other) override;
 	virtual void EndHandOver() override;
 	/** While held, drives towards rest at HandOverAcceleration whatever is
-	 *  commanded (at rest: nothing); released, goes to the command at that
-	 *  rate. */
+	 *  commanded (at rest: its wheels held where they are, bHoldWhenIdle, so
+	 *  that they touch down still; else nothing); released, goes to the
+	 *  command at that rate. */
 	virtual void HoldForStance(bool bHold) override;
 	/** Starts from Motion (unclamped: it is what the robot is doing) and goes
 	 *  to its operator's command -- within any BeginHandOver bound -- at
 	 *  HandOverAcceleration; to rest, with no command. Its speed loop holds
 	 *  what it is told, so it needs no hold: HoldSeconds is not used. */
 	virtual void SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds) override;
+	/** False: with bHoldWhenIdle its wheels are held, which holds the robot
+	 *  along a slope, but across one the rollers of its omni wheels -- free
+	 *  to turn, and the wheels' motors driving mostly along the robot -- let
+	 *  it creep, so a curb crossing that ends on a slope hands the robot back
+	 *  to a mode that does hold it still. */
+	virtual bool HoldsRobotStill() const override { return false; }
+	/** Stood down at rest with bHoldWhenIdle, its wheels held where they are
+	 *  until released (their speed loops on, asked back to that angle). */
+	virtual void HoldWheelsWhileInactive(bool bHold) override;
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
@@ -175,4 +203,19 @@ private:
 	/** HoldForStance: its wheels are still going down. */
 	bool   bHeldForStance = false;
 	double LastTickTime = -1.0;
+
+	/** bHoldWhenIdle: the robot has come to rest with nothing commanded, and
+	 *  each wheel (Resolved.Wheels order) is held at this angle (rad, the
+	 *  motor's sense). */
+	bool		   bHoldingStill = false;
+	TArray<double> HoldAngles;
+	/** Stood down, its wheels held (HoldWheelsWhileInactive). */
+	bool bHoldInactive = false;
+	/** The clock at its first tick: nothing is held for
+	 *  RammsDrive::SpawnSettleSeconds after it (the robot being put down). */
+	double FirstTickTime = -1.0;
+	/** Latch HoldAngles at the wheels' angles now. */
+	void LatchHold(URammsRobotBaseComponent& Base);
+	/** Each wheel's speed loop asked back towards its HoldAngles entry. */
+	void CommandHold(URammsRobotBaseComponent& Base) const;
 };

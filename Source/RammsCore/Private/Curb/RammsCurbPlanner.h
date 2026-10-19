@@ -68,8 +68,9 @@
  *    plan comes to, least first, every candidate's least and at most
  *    Ramms.Curb.MaxTiltPlans larger ones (SearchTilts)
  *    -- held over the stretch that needs it and eased in, between stretches
- *    and out on S-curves along the straight way between two tilts, pitch
- *    and roll each within TiltRateDegPerSec and TiltAccelDegPerSec2 in time
+ *    and out on S-curves along the straight way between two tilts, the
+ *    base's turn (pitch and roll together) within TiltRateDegPerSec and
+ *    TiltAccelDegPerSec2 in time
  *    (slowing over an easing that has too little
  *    time; an easing that would not fit even at the floor runs into the
  *    stretches either side, or one of them is left out); then, if allowed,
@@ -85,8 +86,8 @@
  *    Deceleration, every pose of a planned stop's re-pose, the base's
  *    inclination within MaxPlannedTiltDeg at every sample (the easings
  *    between two tilts included), and the rate limits on the chassis
- *    height, the centre wheels and the tilt (its rate and its rate's change,
- *    each axis); the level-in's least
+ *    height, the centre wheels and the tilt (the base's turn rate and its
+ *    change, pitch and roll together); the level-in's least
  *    margin by a straight move from the
  *    stance, reported;
  *  - one plan line per event.
@@ -225,10 +226,10 @@ namespace RammsCurb
 	 * the two lean apart); level before the first and after the last. Every
 	 * easing is one S-curve (SCurveShare) in time along the straight way
 	 * between its two tilts, pitch and roll together, SampleSeconds[k] being
-	 * the time at sample k, timed by the axis that changes most: neither pitch
-	 * nor roll changes faster than Rate nor its rate faster than Accel, and the
-	 * way between two tilts never inclines the base more than the more
-	 * inclined of them. A
+	 * the time at sample k, timed by the whole turn: the base turns (pitch and
+	 * roll together) no faster than Rate nor its turn rate changes faster than
+	 * Accel, and the way between two tilts never inclines the base more than
+	 * the more inclined of them. A
 	 * transition with too little time is named in OutTight (with the speed
 	 * over its stretch that would give it the time). Holds are taken in
 	 * sample order; overlapping ones are a transition with no time. True when

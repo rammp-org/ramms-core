@@ -956,4 +956,59 @@ bool FRammsCurbSpeedLawCrossTrack::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawAwaitingPlanCap,
+	"Ramms.Curb.SpeedLaw.AwaitingPlanCap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSpeedLawAwaitingPlanCap::RunTest(const FString& Parameters)
+{
+	// While a plan made on the move is pending the robot rolls on in its drive
+	// stance, braked short of the line its level-in must be done by (here 30 cm
+	// short of the nearest window), allowing for the chassis' lag behind its
+	// command: at the line, no speed; far from it, no cap below the speed the
+	// robot has; and a robot rolling at 30 cm/s 80 cm short of the window,
+	// whose plan never comes, comes to rest at the line -- not past it, so the
+	// level-in has the room it needs -- where the window's own cap alone would
+	// have let it roll on to the window.
+	const float LevelIn = 30.0f;
+	const float Deceleration = 40.0f;
+	TestEqual(TEXT("at the line: no speed"), RammsCurb::AwaitingPlanCap(LevelIn, LevelIn, 0.0f, Deceleration), 0.0f, 1e-6f);
+	TestEqual(TEXT("past the line: no speed"), RammsCurb::AwaitingPlanCap(LevelIn - 5.0f, LevelIn, 0.0f, Deceleration), 0.0f, 1e-6f);
+	TestTrue(TEXT("far from it: no cap below 30 cm/s"), RammsCurb::AwaitingPlanCap(200.0f, LevelIn, 30.0f, Deceleration) > 30.0f);
+	TestTrue(TEXT("never above the window's own braking cap"),
+		RammsCurb::AwaitingPlanCap(60.0f, LevelIn, 20.0f, Deceleration)
+			<= RammsCurb::BrakingSpeed(RammsCurb::LagBrakingDistance(60.0f, 20.0f, RammsCurb::DriveLagSeconds), Deceleration));
+	TestTrue(TEXT("nor with no level-in to do"),
+		FMath::IsNearlyEqual(RammsCurb::AwaitingPlanCap(60.0f, 0.0f, 20.0f, Deceleration),
+			RammsCurb::BrakingSpeed(RammsCurb::LagBrakingDistance(60.0f, 20.0f, RammsCurb::DriveLagSeconds), Deceleration), 1e-4f));
+	// The robot: its command the cap whenever the cap is below the 30 cm/s it
+	// rolls at (a hard braking cap: it acts directly, falling along its own
+	// braking curve), the chassis following the command as a first-order lag
+	// of the controller's DriveLagSeconds.
+	for (const bool bLine : { true, false })
+	{
+		const float Dt = 0.01f;
+		float		Command = 30.0f, Speed = 30.0f, ToWindow = 80.0f, Closest = ToWindow;
+		for (int32 i = 0; i < 1000; ++i)
+		{
+			const float Cap = RammsCurb::AwaitingPlanCap(ToWindow, bLine ? LevelIn : 0.0f, Speed, Deceleration);
+			Command = FMath::Min(30.0f, Cap);
+			Speed += (Command - Speed) * Dt / RammsCurb::DriveLagSeconds;
+			ToWindow -= Speed * Dt;
+			Closest = FMath::Min(Closest, ToWindow);
+		}
+		if (bLine)
+		{
+			TestTrue(FString::Printf(TEXT("braked for the level-in: at rest %.2f cm short of the window (the line 30 cm short, within 1.5 cm)"), Closest),
+				Closest >= LevelIn - 1.5f && Speed < 0.5f);
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("the window's cap alone: on to %.2f cm short of it, past where the level-in had to be done"), Closest),
+				Closest < LevelIn - 10.0f);
+		}
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

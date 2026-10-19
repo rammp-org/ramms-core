@@ -2,8 +2,22 @@
 
 #include "RammsDriveHandOver.h"
 
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarRammsDriveHoldWhenIdle(
+	TEXT("ramms.Drive.HoldWhenIdle"),
+	1,
+	TEXT("Drive modes: hold the robot still with no input where their bHoldWhenIdle is on (1, the default), or never (0:\n")
+		TEXT("development A/B runs only; the modes then leave their wheels to the control mode as before the hold)."),
+	ECVF_Default);
+
 namespace RammsDrive
 {
+	bool HoldWhenIdleEnabled()
+	{
+		return CVarRammsDriveHoldWhenIdle.GetValueOnGameThread() != 0;
+	}
+
 	double SmoothStep(double X)
 	{
 		const double T = FMath::Clamp(X, 0.0, 1.0);
@@ -345,6 +359,258 @@ namespace RammsDrive
 		SinceHold = 0.0;
 	}
 
+	// --- holding still ------------------------------------------------------------
+
+	double FWheelHold::Rate(double Angle) const
+	{
+		return bHeld ? FMath::Clamp(-Gain * (Angle - Anchor), -MaxRate, MaxRate) : 0.0;
+	}
+
+	FTorqueHoldGains TorqueHoldGains(double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2)
+	{
+		// A second-order loop on the wheel's angle: about 6 rad/s, damped 0.8, its
+		// integral (what holds a slope's pull at no error) over half a second.
+		// Slow enough for a loop closed once a game tick (a 62 ms tick is about a
+		// third of a radian of it), stiff enough that a 6 deg slope's pull sags
+		// the robot a centimetre or two before the integral takes it.
+		constexpr double Omega = 6.0;
+		constexpr double Zeta = 0.8;
+		constexpr double IntegralSeconds = 0.5;
+		const double	 J = FMath::Max(InertiaKgM2, 1e-3);
+		FTorqueHoldGains G;
+		G.Kp = J * Omega * Omega;
+		G.Kd = 2.0 * Zeta * Omega * J;
+		G.Ki = G.Kp / IntegralSeconds;
+		G.MaxTorque = FMath::Max(MaxTorqueNm, 0.0);
+		G.Decel = RadiusCm > 0.0 ? FMath::Max(DecelCmS2, 0.0) / RadiusCm : 0.0;
+		G.Inertia = J;
+		return G;
+	}
+
+	bool AdvanceHoldClock(double T, double& InOutFirst, double& InOutLast, double& OutDt)
+	{
+		if (InOutLast >= 0.0 && T < InOutLast)
+		{
+			InOutFirst = T;
+			InOutLast = T;
+			OutDt = 0.0;
+			return true;
+		}
+		OutDt = InOutLast >= 0.0 ? T - InOutLast : 0.0;
+		if (InOutFirst < 0.0)
+		{
+			InOutFirst = T;
+		}
+		InOutLast = T;
+		return false;
+	}
+
+	double FWheelAngle::Update(double Reading, double Rate, double DeltaSeconds)
+	{
+		const double Dt = FMath::Max(DeltaSeconds, 0.0);
+		if (!bStarted)
+		{
+			bStarted = true;
+			Integrated = 0.0;
+			ReadingAtStart = Reading;
+			Value = Reading;
+			return Value;
+		}
+		Integrated += Rate * Dt;
+		if (!bDecided && FMath::Abs(Integrated) >= CheckRad)
+		{
+			bDecided = true;
+			bReadingFollows = FMath::Abs(Reading - ReadingAtStart) >= FollowShare * FMath::Abs(Integrated);
+			// From here the rate's travel from where the reading began: the
+			// reading stood still meanwhile, the wheel did not.
+			Offset = ReadingAtStart;
+		}
+		Value = bReadingFollows ? Reading : Integrated + Offset;
+		return Value;
+	}
+
+	double GroundHoldTorque(double MassKg, double GradeDeg, double RadiusCm, int32 Wheels)
+	{
+		if (MassKg <= 0.0 || RadiusCm <= 0.0 || Wheels <= 0)
+		{
+			return 0.0;
+		}
+		return MassKg * 9.81 * FMath::Sin(FMath::DegreesToRadians(GradeDeg)) * (RadiusCm / 100.0) / Wheels;
+	}
+
+	void FTorqueHold::Begin(double Angle, double Rate, double InitialIntegral, bool bEase)
+	{
+		bActive = true;
+		bFree = false;
+		OffTicks = 0;
+		Target = Angle;
+		TargetRate = Rate;
+		Integral = InitialIntegral;
+		LastTorque = 0.0;
+		bEaseToRest = bEase;
+		bPulledThisBraking = false;
+	}
+
+	double FTorqueHold::Step(double Angle, double Rate, double DeltaSeconds, const FTorqueHoldGains& Gains)
+	{
+		if (!bActive)
+		{
+			LastTorque = 0.0;
+			return 0.0;
+		}
+		const double Dt = FMath::Max(DeltaSeconds, 0.0);
+		// Braking never asks a wheel for more than it has: one slowing faster
+		// than its target (a slope's pull uphill, its own drag) takes the target
+		// with it, so the hold neither drives it on nor, finding it far off a
+		// target that ran ahead, lets go of it as if it were in the air.
+		const bool	 bDecided = bPairDecided;
+		const double Scale = bDecided ? DecelScale : 1.0;
+		bPairDecided = false;
+		DecelScale = 1.0;
+		if (TargetRate != 0.0 && !bFree && !bDecided)
+		{
+			const double Along = FMath::Sign(TargetRate);
+			if (Along * (TargetRate - Rate) > CatchUpRadS)
+			{
+				const double Speed = Along * Rate;
+				TargetRate = Speed > 0.0 ? Along * (Speed + CatchUpRadS) : 0.0;
+				Target = Angle;
+			}
+		}
+		const double RateWas = TargetRate;
+		// The target brakes from where the wheel was turning to rest, then stays;
+		// twice as hard while the wheel runs on ahead of it (a slope pulling it
+		// on), so that downhill the loop brakes it sooner and harder; begun
+		// eased, eased to rest at the end unless a slope has pulled it on.
+		if (TargetRate != 0.0)
+		{
+			const bool bPulledOn = !bDecided && !bFree && FMath::Sign(TargetRate) * (Rate - TargetRate) > CatchUpRadS;
+			bPulledThisBraking = bPulledThisBraking || (bDecided ? Scale > 1.0 : bPulledOn);
+			const double Full = (bDecided ? Scale : (bPulledOn ? PulledOnDecelScale : 1.0)) * Gains.Decel;
+			const double Decel = (bEaseToRest && !bPulledThisBraking && Full > 0.0)
+				? Full * FMath::Clamp(FMath::Abs(TargetRate) / (Full * BrakeTaperSeconds), BrakeTaperFloor, 1.0)
+				: Full;
+			const double Slow = Decel * Dt;
+			if (Decel <= 0.0 || FMath::Abs(TargetRate) <= Slow)
+			{
+				const double ToRest = Decel > 0.0 ? FMath::Abs(TargetRate) / Decel : 0.0;
+				Target += 0.5 * TargetRate * ToRest;
+				TargetRate = 0.0;
+			}
+			else
+			{
+				const double Next = TargetRate - FMath::Sign(TargetRate) * Slow;
+				Target += 0.5 * (TargetRate + Next) * Dt;
+				TargetRate = Next;
+			}
+		}
+		// A wheel that is not carrying (in the air) is let go of rather than
+		// spun up by gains set for one that is; held again once it is slow.
+		if (bFree)
+		{
+			if (FMath::Abs(Rate) >= RearmRadS)
+			{
+				LastTorque = 0.0;
+				return 0.0;
+			}
+			bFree = false;
+			Target = Angle;
+			TargetRate = 0.0;
+			Integral = 0.0;
+		}
+		// Off its target by FreeSpinRadS the way the loop's own last torque
+		// drove it, FreeSpinTicks ticks running: a wheel carrying the robot that
+		// runs off (a slope's pull the torque is fighting), or one jolted for a
+		// tick, stays held.
+		OffTicks = (FMath::Abs(Rate - TargetRate) > FreeSpinRadS && (Rate - TargetRate) * LastTorque > 0.0) ? OffTicks + 1 : 0;
+		if (OffTicks >= FreeSpinTicks)
+		{
+			OffTicks = 0;
+			bFree = true;
+			Integral = 0.0;
+			LastTorque = 0.0;
+			return 0.0;
+		}
+		const double Error = Target - Angle;
+		const double Trial = Integral + Gains.Ki * Error * Dt;
+		// The braking fed forward: what the wheel's share of the robot needs to
+		// slow as the target does (a slope's pull is the integral's to find).
+		const double Braking = Dt > 0.0 ? Gains.Inertia * (TargetRate - RateWas) / Dt : 0.0;
+		double		 Torque = Gains.Kp * Error + Gains.Kd * (TargetRate - Rate) + Trial + Braking;
+		if (Gains.MaxTorque > 0.0 && FMath::Abs(Torque) > Gains.MaxTorque)
+		{
+			// At the limit: the integral held where it was, so it does not wind up.
+			Torque = FMath::Clamp(Torque, -Gains.MaxTorque, Gains.MaxTorque);
+		}
+		else
+		{
+			Integral = Gains.MaxTorque > 0.0 ? FMath::Clamp(Trial, -Gains.MaxTorque, Gains.MaxTorque) : Trial;
+		}
+		LastTorque = Torque;
+		return Torque;
+	}
+
+	void BoundTurnError(FTorqueHold& Left, double LeftAngle, FTorqueHold& Right, double RightAngle, double MaxDifferenceRad)
+	{
+		if (!Left.bActive || !Right.bActive || Left.bFree || Right.bFree || MaxDifferenceRad <= 0.0)
+		{
+			return;
+		}
+		const double Difference = (Left.Target - LeftAngle) - (Right.Target - RightAngle);
+		const double Excess = Difference - FMath::Clamp(Difference, -MaxDifferenceRad, MaxDifferenceRad);
+		Left.Target -= 0.5 * Excess;
+		Right.Target += 0.5 * Excess;
+	}
+
+	void StepTorqueHoldPair(FTorqueHold& Left, double LeftAngle, double LeftRate, FTorqueHold& Right, double RightAngle, double RightRate,
+		double DeltaSeconds, const FTorqueHoldGains& LeftGains, const FTorqueHoldGains& RightGains, double MaxTurnDifferenceRad,
+		double& OutLeftTorque, double& OutRightTorque)
+	{
+		const bool bBoth = Left.bActive && Right.bActive && !Left.bFree && !Right.bFree;
+		if (bBoth)
+		{
+			const double MeanTarget = 0.5 * (Left.TargetRate + Right.TargetRate);
+			const double MeanRate = 0.5 * (LeftRate + RightRate);
+			double		 Scale = 1.0;
+			if (MeanTarget != 0.0)
+			{
+				const double Along = FMath::Sign(MeanTarget);
+				if (Along * (MeanTarget - MeanRate) > FTorqueHold::CatchUpRadS)
+				{
+					// The robot slows faster than its targets: both follow it.
+					const double Speed = Along * MeanRate;
+					const double Rate = Speed > 0.0 ? Along * (Speed + FTorqueHold::CatchUpRadS) : 0.0;
+					Left.TargetRate = Right.TargetRate = Rate;
+					Left.Target = LeftAngle;
+					Right.Target = RightAngle;
+				}
+				else if (Along * (MeanRate - MeanTarget) > FTorqueHold::CatchUpRadS)
+				{
+					Scale = FTorqueHold::PulledOnDecelScale;
+				}
+			}
+			Left.bPairDecided = Right.bPairDecided = true;
+			Left.DecelScale = Right.DecelScale = Scale;
+		}
+		BoundTurnError(Left, LeftAngle, Right, RightAngle, MaxTurnDifferenceRad);
+		OutLeftTorque = Left.Step(LeftAngle, LeftRate, DeltaSeconds, LeftGains);
+		OutRightTorque = Right.Step(RightAngle, RightRate, DeltaSeconds, RightGains);
+	}
+
+	double StanceTurnSeconds(double TurnDeg, double RateDegS, double AccelDegS2)
+	{
+		const double Turn = FMath::Abs(TurnDeg);
+		if (Turn <= 0.0)
+		{
+			return 0.0;
+		}
+		// SmoothStep: 1.5 x the mean rate at its steepest, and 6 / T^2 of the turn
+		// at its ends.
+		const double ByRate = RateDegS > 0.0 ? 1.5 * Turn / RateDegS : 0.0;
+		const double ByAccel = AccelDegS2 > 0.0 ? FMath::Sqrt(6.0 * Turn / AccelDegS2) : 0.0;
+		return FMath::Max(ByRate, ByAccel);
+	}
+
 	// --- the switch itself -------------------------------------------------------
 
 	namespace
@@ -364,6 +630,7 @@ namespace RammsDrive
 		StanceMode = INDEX_NONE;
 		bActiveHeld = false;
 		bAwaiting = false;
+		HeldOutgoing = INDEX_NONE;
 		Gate.Reset();
 		Paused = 0.0;
 		SinceAsked = 0.0;
@@ -485,6 +752,13 @@ namespace RammsDrive
 		{
 			bAwaiting = true;
 			Host.HoldForStance(Wanted, true);
+			// The outgoing mode's wheels still carry the robot until this mode's
+			// are down: held where they are meanwhile (on a slope it would roll).
+			if (Out != INDEX_NONE && Out != Wanted && Host.IsValidMode(Out))
+			{
+				HeldOutgoing = Out;
+				Host.HoldOutgoingWheels(Out, true);
+			}
 		}
 		Host.Report(Status, false);
 		return true;
@@ -595,6 +869,9 @@ namespace RammsDrive
 			{
 				bAwaiting = false;
 				Host.HoldForStance(Active, false);
+				// Its wheels are down and hold the robot now: the outgoing mode's
+				// go up in the second stage.
+				ReleaseOutgoing(Host);
 			}
 			if (bDone)
 			{
@@ -682,6 +959,16 @@ namespace RammsDrive
 		}
 		bActiveHeld = false;
 		bAwaiting = false;
+		ReleaseOutgoing(Host);
+	}
+
+	void FModeSwitcher::ReleaseOutgoing(ISwitchHost& Host)
+	{
+		if (HeldOutgoing != INDEX_NONE && Host.IsValidMode(HeldOutgoing))
+		{
+			Host.HoldOutgoingWheels(HeldOutgoing, false);
+		}
+		HeldOutgoing = INDEX_NONE;
 	}
 
 	bool FModeSwitcher::PlanStance(ISwitchHost& Host, int32 Mode, bool bTwoStages, const FSwitchConfig& Config)

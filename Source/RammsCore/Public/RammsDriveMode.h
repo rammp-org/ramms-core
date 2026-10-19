@@ -125,6 +125,18 @@ public:
 	virtual void HoldForStance(bool bHold) {}
 
 	/**
+	 * Called on a mode the selector has just stood down at rest while the
+	 * incoming mode's wheels go down (the first stage of a change between two
+	 * stances): with bHold true, keep the wheels this mode drives held still
+	 * where they are -- they still carry the robot, which on a slope would
+	 * otherwise roll -- driving nothing else and offering no controls; with
+	 * false (the incoming mode's wheels are down), let them go as standing
+	 * down does. Activated again meanwhile, the mode drops it. The default
+	 * ignores it.
+	 */
+	virtual void HoldWheelsWhileInactive(bool bHold) {}
+
+	/**
 	 * Called on the incoming mode right after the selector activates it on the
 	 * move: carry on from Motion, the robot's measured motion (within
 	 * GetCarriableMotion), instead of starting from rest -- as where the mode
@@ -139,4 +151,44 @@ public:
 	 * it (the mode starts from rest, as before).
 	 */
 	virtual void SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds) {}
+
+	// --- Holding still, and the base's attitude through a stance change ---------
+
+	/**
+	 * True when, with no command from its operator, this mode holds the robot
+	 * still where it comes to rest -- on a slope too -- rather than letting its
+	 * wheels roll free. A curb crossing hands the robot back at its end only
+	 * to a mode that holds (URammsCurbNegotiationController). The default:
+	 * false.
+	 */
+	virtual bool HoldsRobotStill() const
+	{
+		return false;
+	}
+
+	/**
+	 * Called on the mode just activated by a hand-back from a mode that knows
+	 * the ground under the robot (a curb crossing at its end): the ground's
+	 * grade along the chassis' forward axis (deg, positive rising ahead) and,
+	 * when known (above 0), the robot's mass (kg). A mode that holds the robot
+	 * still takes the slope's pull up at once with it -- fed into the hold it
+	 * begins within the next couple of seconds -- rather than finding it as
+	 * the robot sags back down the slope. The default ignores it.
+	 */
+	virtual void SeedGroundSlope(float ForwardGradeDeg, float RobotMassKg) {}
+
+	/**
+	 * The least time (simulated seconds) a stance change away from this mode
+	 * -- the selector's ramp from the pose it leaves the robot in to the next
+	 * mode's stance -- should take, each stage, so that the base's attitude
+	 * changes no faster than this mode allows; 0 (the default) asks nothing of
+	 * it. A curb crossing that has just finished on a slope leaves the base
+	 * level, and the next mode's stance follows the ground: the crossing asks
+	 * that the base turn there no faster than its tilt limits
+	 * (FRammsCurbTuning::TiltRateDegPerSec, TiltAccelDegPerSec2).
+	 */
+	virtual float GetStanceChangeMinSeconds() const
+	{
+		return 0.0f;
+	}
 };

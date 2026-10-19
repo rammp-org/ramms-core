@@ -67,6 +67,18 @@ namespace RammsCurb
 	float LagBrakingDistance(float DistanceCm, float SpeedCmS, float LagSeconds);
 
 	/**
+	 * The drive speed's cap (cm/s) while a plan made on the move is pending,
+	 * the robot rolling on in its drive stance: braked, allowing for the
+	 * chassis' lag (LagBrakingDistance, DriveLagSeconds), short of the line
+	 * its level-in must be done by -- LevelInCm (along the heading) short of
+	 * the nearest wheel's window, ToWindowCm ahead, where a level-in begun
+	 * standing still ends -- and so of every window. A long plan would
+	 * otherwise roll the robot on into the LEVEL window in its stance; braked
+	 * to rest here, it levels in standing once the plan comes.
+	 */
+	float AwaitingPlanCap(float ToWindowCm, float LevelInCm, float SpeedCmS, float Deceleration);
+
+	/**
 	 * The deadline speed: held for Seconds (at least MinDeadlineSeconds), it
 	 * leaves the chassis able to brake at Deceleration to a stop within
 	 * RoomCm -- v * T + v^2 / (2 * Deceleration) = RoomCm. So the work ends

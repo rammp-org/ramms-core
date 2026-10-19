@@ -223,6 +223,244 @@ namespace RammsDrive
 		void End();
 	};
 
+	// --- holding still ------------------------------------------------------------
+	//
+	// With no command from its operator a drive mode holds the robot where it
+	// comes to rest, on a slope too, rather than letting its wheels roll free:
+	// each wheel it drives is held at the angle it stopped at. A wheel under a
+	// speed loop (the robot base's) is asked a rate back towards that angle
+	// (FWheelHold); a torque-driven one is given the torque itself, by a stiff
+	// loop on its angle whose target first brakes the wheel to rest
+	// (FTorqueHold).
+
+	/** How long (simulated seconds) after a drive mode's first tick it holds
+	 *  nothing: the robot is being put down as it spawns and the selector
+	 *  jumps its legs into the initial stance -- a leg carrying its
+	 *  wheel fore/aft -- and a wheel held at its angle meanwhile would drag
+	 *  the chassis back (and, one side before the other, turn it) instead of
+	 *  rolling with its leg. */
+	constexpr double SpawnSettleSeconds = 1.0;
+
+	/** The development switch ramms.Drive.HoldWhenIdle (1 by default): 0 turns
+	 *  every drive mode's hold off, for A/B runs. */
+	bool HoldWhenIdleEnabled();
+
+	/**
+	 * A drive mode's clock from one tick to the next: OutDt, the seconds since
+	 * the last tick (0 on the first); InOutFirst, the first tick's time (from
+	 * which SpawnSettleSeconds runs); InOutLast, this tick's. Returns true when
+	 * the clock went back -- the simulation was reset (the physics' clock
+	 * restarted, the robot back at its start pose, every wheel's angle with
+	 * it): nothing held before may stand, and the first second without a hold
+	 * starts again from T, as at the spawn.
+	 */
+	bool AdvanceHoldClock(double T, double& InOutFirst, double& InOutLast, double& OutDt);
+
+	/**
+	 * A wheel's angle for holding it still: the backend's reading while it
+	 * follows the wheel's rate, else the rate integrated. A reading that does
+	 * not move while the rate turns the wheel through CheckRad (a backend that
+	 * reports no angle for a continuous wheel reads 0 throughout) is not an
+	 * angle: a hold on it would brake the wheel towards a target the reading
+	 * never reaches and drive it on instead. Decided once, the first time the
+	 * rate has turned the wheel through CheckRad.
+	 */
+	struct FWheelAngle
+	{
+		/** The rate's travel (rad) over which the reading is checked, and the
+		 *  least share of it the reading must have moved. */
+		static constexpr double CheckRad = 0.2;
+		static constexpr double FollowShare = 0.25;
+
+		bool   bStarted = false;
+		bool   bDecided = false;
+		bool   bReadingFollows = true;
+		double Integrated = 0.0;
+		double ReadingAtStart = 0.0;
+		double Offset = 0.0;
+		double Value = 0.0;
+
+		/** The angle now (rad), from the reading and the rate (rad/s) over
+		 *  DeltaSeconds since the last update. */
+		double Update(double Reading, double Rate, double DeltaSeconds);
+		/** Start again (the simulation reset). */
+		void Reset() { *this = FWheelAngle(); }
+	};
+
+	/** The torque (N.m) on each of Wheels drive wheels of RadiusCm that holds
+	 *  a robot of MassKg on ground rising GradeDeg ahead -- positive drives it
+	 *  forward, uphill; a holding loop begun with it as its integral takes the
+	 *  slope's pull at once rather than finding it as the robot sags back. */
+	double GroundHoldTorque(double MassKg, double GradeDeg, double RadiusCm, int32 Wheels);
+
+	/** A wheel under a speed loop held at an angle: the speed loop's own
+	 *  integral carries the load (a slope's pull), this brings the wheel back
+	 *  to where it was latched. */
+	struct FWheelHold
+	{
+		/** The rate asked per rad off the angle held (1/s), and the most asked
+		 *  either way (rad/s). */
+		static constexpr double Gain = 4.0;
+		static constexpr double MaxRate = 1.0;
+
+		bool   bHeld = false;
+		double Anchor = 0.0;
+
+		/** Hold the wheel at Angle (rad), its angle now. */
+		void Latch(double Angle)
+		{
+			bHeld = true;
+			Anchor = Angle;
+		}
+		void Release() { bHeld = false; }
+		/** The rate (rad/s) to ask the wheel's speed loop for, at Angle: back
+		 *  towards the angle held, Gain per rad, at most MaxRate; 0 when not
+		 *  held. */
+		double Rate(double Angle) const;
+	};
+
+	/** How a torque-driven wheel is held: a loop on its angle, stiff enough to
+	 *  stop a robot on a slope within a centimetre or two and settle in about
+	 *  a second, braking it to rest first at no more than Decel. */
+	struct FTorqueHoldGains
+	{
+		/** N.m per rad, N.m per rad/s, N.m per rad-second. */
+		double Kp = 0.0;
+		double Kd = 0.0;
+		double Ki = 0.0;
+		/** The most torque (N.m) either way. */
+		double MaxTorque = 0.0;
+		/** How fast (rad/s^2) the target brakes from the wheel's rate to rest. */
+		double Decel = 0.0;
+		/** The wheel's share of the robot (kg m^2): the target's braking is fed
+		 *  forward as this times its deceleration. */
+		double Inertia = 0.0;
+	};
+
+	/** Gains for a wheel carrying InertiaKgM2 of the robot (its share of the
+	 *  mass times the radius squared) with a motor of MaxTorqueNm: a loop of
+	 *  about 6 rad/s, damped 0.8, its integral over half a second; the target
+	 *  braking at DecelCmS2 over a wheel of RadiusCm. */
+	FTorqueHoldGains TorqueHoldGains(double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2);
+
+	/**
+	 * A torque-driven wheel held still: Begin from its angle and rate now;
+	 * the target then brakes to rest at the gains' Decel -- twice that while
+	 * the wheel runs on ahead of it, or as fast as the wheel slows if that is
+	 * faster (CatchUpRadS) -- and stays there, and
+	 * Step gives the torque that holds the wheel on it (proportional, rate and
+	 * integral, the integral frozen while the torque is at its limit, and the
+	 * target's braking fed forward through the wheel's inertia). The
+	 * torque Step gave last is kept, for a release that fades it out rather
+	 * than dropping it.
+	 */
+	struct FTorqueHold
+	{
+		/** A wheel the loop's own torque has driven this much (rad/s) off its
+		 *  target -- off it the way the last torque pushed -- FreeSpinTicks
+		 *  ticks running is not one the loop holds: it carries none of the
+		 *  robot (in the air), against whose share of the robot the gains were
+		 *  set, and the loop, closed once a tick, spins it up (tens of rad/s
+		 *  within a second). The hold lets go of it (no torque) until it turns
+		 *  slower than RearmRadS, then holds it again where it is. A loaded
+		 *  wheel stays well inside it -- one the slope runs off against the
+		 *  torque is held on, and one tick's reading of a jolted wheel (over
+		 *  15 rad/s, seen once) is not enough to let go of it. */
+		static constexpr double FreeSpinRadS = 8.0;
+		static constexpr int32	FreeSpinTicks = 3;
+		static constexpr double RearmRadS = 0.5;
+		/** While braking, the most (rad/s) the target may run ahead of a wheel
+		 *  slowing faster than it: beyond, the target is brought back to the
+		 *  wheel (its angle, and its rate plus this). */
+		static constexpr double CatchUpRadS = 0.5;
+		/** While braking, a wheel running more than CatchUpRadS ahead of its
+		 *  target (a slope pulling it on) has the target brake this many times
+		 *  as hard as the gains' Decel. */
+		static constexpr double PulledOnDecelScale = 2.0;
+		/** A hold begun eased (bEaseToRest) has its target's braking eased
+		 *  off as it comes to rest: once its rate is within this long (s) of
+		 *  rest at its deceleration, it slows in proportion to what is left
+		 *  (a first-order approach), never below BrakeTaperFloor of the
+		 *  deceleration. A target stopped in one step leaves a loop closed
+		 *  once a game tick to carry the wheel past and back (the tests'
+		 *  made-up wheel, on a 62.5 ms tick: about 2 cm/s of roll-back after
+		 *  a stop from speed). */
+		static constexpr double BrakeTaperSeconds = 0.3;
+		static constexpr double BrakeTaperFloor = 0.15;
+
+		bool bActive = false;
+		/** Let go of: turning far off its target (FreeSpinRadS), and the ticks
+		 *  running it has been so. */
+		bool   bFree = false;
+		int32  OffTicks = 0;
+		double Target = 0.0;
+		double TargetRate = 0.0;
+		double Integral = 0.0;
+		double LastTorque = 0.0;
+		/** For the next Step only: the braking decided for the robot rather
+		 *  than from this wheel alone (StepTorqueHoldPair) -- the target not
+		 *  caught up to this wheel, and braking DecelScale times the gains'
+		 *  Decel. */
+		bool   bPairDecided = false;
+		double DecelScale = 1.0;
+		/** Ease the target to rest (BrakeTaperSeconds) -- except in a braking
+		 *  a slope has pulled the wheel on ahead of its target in, where easing
+		 *  off would only let it run further (bPulledThisBraking: held for the
+		 *  rest of the braking, so a wheel read noisily either side of its
+		 *  target does not ease the braking off and on). */
+		bool bEaseToRest = false;
+		bool bPulledThisBraking = false;
+
+		/** Hold from Angle (rad), braking from Rate (rad/s); Integral (N.m) is
+		 *  what the loop starts holding with -- a slope's pull already known
+		 *  (GroundHoldTorque), or what a hold just ended held -- 0 to find it;
+		 *  bEase: the target eased to rest (bEaseToRest). */
+		void Begin(double Angle, double Rate, double InitialIntegral = 0.0, bool bEase = false);
+		void End() { bActive = false; }
+		/** The torque (N.m) this tick, with the wheel at Angle (rad) turning
+		 *  at Rate (rad/s), DeltaSeconds since the last; 0 when not active. */
+		double Step(double Angle, double Rate, double DeltaSeconds, const FTorqueHoldGains& Gains);
+		/** At rest on its target: braking done. */
+		bool IsBraked() const { return bActive && TargetRate == 0.0; }
+	};
+
+	/**
+	 * Two torque-held wheels of one robot, one each side (a differential
+	 * drive): if their errors (target less angle, rad, each wheel in its own
+	 * motor's sense, both turning the same way when the robot drives
+	 * straight) differ by more than MaxDifferenceRad, move their targets
+	 * towards each other's -- half the excess each, so what they hold the
+	 * robot at along its way is unchanged -- until they differ by that much:
+	 * the hold then never turns the robot back by more than that, whatever
+	 * the wheels did since it began (one slipped while braking, a leg dragged
+	 * one). Nothing unless both are held and neither is let go of.
+	 */
+	void BoundTurnError(FTorqueHold& Left, double LeftAngle, FTorqueHold& Right, double RightAngle, double MaxDifferenceRad);
+
+	/**
+	 * One tick of two torque-held wheels of one robot, one each side, braking
+	 * as one: whether the robot slows faster than its targets (their targets
+	 * then follow it, CatchUpRadS) or runs on ahead of them (a slope pulling
+	 * it on: PulledOnDecelScale) is decided on the two wheels' mean rate
+	 * against their targets' mean, and both targets are moved alike -- each
+	 * wheel deciding for itself on its own reading (up to a rad/s off on a
+	 * loaded wheel for a tick) would brake the two sides differently and turn
+	 * the robot. Then BoundTurnError, then each wheel's Step; the torques
+	 * (N.m) out.
+	 */
+	void StepTorqueHoldPair(FTorqueHold& Left, double LeftAngle, double LeftRate, FTorqueHold& Right, double RightAngle, double RightRate,
+		double DeltaSeconds, const FTorqueHoldGains& LeftGains, const FTorqueHoldGains& RightGains, double MaxTurnDifferenceRad,
+		double& OutLeftTorque, double& OutRightTorque);
+
+	/**
+	 * The least time (s) a stance change on the selector's S-curve
+	 * (SmoothStep, whose slope is 1.5 at its steepest and whose second
+	 * derivative is 6 at its ends) must take so that a turn of the base of
+	 * TurnDeg goes no faster than RateDegS nor changes its rate faster than
+	 * AccelDegS2; 0 for no turn or no limits.
+	 */
+	double StanceTurnSeconds(double TurnDeg, double RateDegS, double AccelDegS2);
+
 	// --- the switch itself -------------------------------------------------------
 
 	/** The chassis' measured motion, or none (the window not yet full, or a
@@ -289,6 +527,9 @@ namespace RammsDrive
 		virtual void EndHandOver(int32 Mode) = 0;
 		/** IRammsDriveMode::HoldForStance. */
 		virtual void HoldForStance(int32 Mode, bool bHold) = 0;
+		/** IRammsDriveMode::HoldWheelsWhileInactive, on a mode just stood down
+		 *  whose wheels still carry the robot. The default does nothing. */
+		virtual void HoldOutgoingWheels(int32 Mode, bool bHold) {}
 		/** Stand every other mode down and activate Mode; with Seed, hand it
 		 *  that motion to carry (HoldSeconds the stance change left). Returns a
 		 *  line on what it carried, for the status. */
@@ -325,7 +566,10 @@ namespace RammsDrive
 	 *    if moving), its stance planned against what activating it made
 	 *    available, held to what the outgoing mode carries through the whole
 	 *    change, and, while a two-stage change's first stage puts its own
-	 *    wheels down, held still (HoldForStance).
+	 *    wheels down, held still (HoldForStance) -- the outgoing mode, stood
+	 *    down, keeping its wheels held where they are meanwhile
+	 *    (HoldOutgoingWheels): they still carry the robot, which on a slope
+	 *    would otherwise roll.
 	 *  - A refusal or a cancel brings the stance back to the active mode's from
 	 *    wherever the change had it, the mode held to what the abandoned one
 	 *    carries until it is.
@@ -347,6 +591,9 @@ namespace RammsDrive
 		bool IsActiveHeld() const { return bActiveHeld; }
 		/** The active mode is held still for its wheels (HoldForStance). */
 		bool IsAwaitingWheels() const { return bAwaiting; }
+		/** The mode stood down whose wheels are held meanwhile
+		 *  (HoldOutgoingWheels), or INDEX_NONE. */
+		int32 GetHeldOutgoing() const { return HeldOutgoing; }
 		/** The stage being ramped (2: none). */
 		int32		   GetStage() const { return Stage; }
 		double		   GetStageSeconds(int32 S) const { return (S == 0 || S == 1) ? StageSeconds[S] : 0.0; }
@@ -359,8 +606,11 @@ namespace RammsDrive
 		void HandOver(ISwitchHost& Host, const FMotionSample& Measured);
 		void Finish(ISwitchHost& Host);
 		void Cancel(ISwitchHost& Host, const FString& Why, bool bRestore, const FSwitchConfig& Config);
-		/** End this switch's hold and wait on the active mode, if any. */
+		/** End this switch's hold and wait on the active mode, if any, and the
+		 *  hold on the outgoing mode's wheels. */
 		void ReleaseActive(ISwitchHost& Host);
+		/** End the hold on the outgoing mode's wheels, if any. */
+		void ReleaseOutgoing(ISwitchHost& Host);
 		void ResetStages();
 
 		ESwitchPhase  Phase = ESwitchPhase::Idle;
@@ -369,6 +619,7 @@ namespace RammsDrive
 		int32		  StanceMode = INDEX_NONE;
 		bool		  bActiveHeld = false;
 		bool		  bAwaiting = false;
+		int32		  HeldOutgoing = INDEX_NONE;
 		FHandOverGate Gate;
 		/** How long the first stage has waited for the motion (s). */
 		double				   Paused = 0.0;

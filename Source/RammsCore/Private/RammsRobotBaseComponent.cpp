@@ -527,6 +527,12 @@ float URammsRobotBaseComponent::GetMotorVelocity(FName MotorId) const
 	return Backend_ ? Backend_->GetVelocity(MotorId) * DirectionOf(MotorId) : 0.0f;
 }
 
+bool URammsRobotBaseComponent::SimulatesMotorJoint(FName MotorId) const
+{
+	EnsureBackend();
+	return Backend_ ? Backend_->SimulatesMotorJoint(MotorId) : false;
+}
+
 bool URammsRobotBaseComponent::GetMotorTransform(FName MotorId, FTransform& OutWorld) const
 {
 	EnsureBackend();

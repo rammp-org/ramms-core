@@ -197,9 +197,10 @@ namespace RammsCurb
 		// tilt B), one S-curve along the straight way from A to B -- pitch and
 		// roll together, so (the inclination's level sets being convex) the base
 		// never leans further on the way than the more inclined of A and B --
-		// timed by the axis that changes most, so that neither pitch nor roll
-		// changes faster than Rate nor its rate faster than Accel; level at
-		// either end of the plan is free to begin or end anywhere.
+		// timed by the whole turn, so that the base turns (pitch and roll
+		// together) no faster than Rate nor its turn rate changes faster than
+		// Accel; level at either end of the plan is free to begin or end
+		// anywhere.
 		for (int32 h = 0; h <= Sorted.Num(); ++h)
 		{
 			const bool		bFirst = h == 0;
@@ -214,7 +215,7 @@ namespace RammsCurb
 			}
 			const double TE = At(E), TS = At(S);
 			const double G = TS - TE;
-			const double DA = A.GetAbsMax(), DB = B.GetAbsMax(), DAB = (B - A).GetAbsMax();
+			const double DA = A.Size(), DB = B.Size(), DAB = (B - A).Size();
 			const double TA = Sc(DA), TB = Sc(DB), TAB = Sc(DAB);
 			auto		 Tight = [&]() {
 				bFits = false;
@@ -1700,9 +1701,10 @@ namespace RammsCurb
 		}
 		// Every leg moves together along one S-curve in time (the executor's
 		// ramp): its share of the move bounded so that no leg goes faster than
-		// LegSpeed / LegAcceleration and neither the base's pitch nor its roll
-		// turns faster than TiltRateDegPerSec / TiltAccelDegPerSec2.
-		const double Turn = FMath::Max(FMath::Abs(In.AttitudeDeg.X), FMath::Abs(In.AttitudeDeg.Y));
+		// LegSpeed / LegAcceleration and the base turns -- pitch and roll
+		// together, along the straight way to level -- no faster than
+		// TiltRateDegPerSec / TiltAccelDegPerSec2.
+		const double Turn = In.AttitudeDeg.Size();
 		const double ShareRate = FMath::Min(FMath::Max(0.1, static_cast<double>(T.TiltRateDegPerSec)) / FMath::Max(Turn, 1e-3),
 			FMath::Max(1.0, static_cast<double>(T.LegSpeed)) / FMath::Max(Move, 1e-3));
 		const double ShareAccel = FMath::Min(FMath::Max(0.1, static_cast<double>(T.TiltAccelDegPerSec2)) / FMath::Max(Turn, 1e-3),
@@ -3703,10 +3705,10 @@ namespace RammsCurb
 				break;
 			}
 		}
-		// The tilt: its pitch and its roll each within TiltRateDegPerSec and
-		// TiltAccelDegPerSec2 in time at the planned speed, wherever it is
-		// planned (its easing may begin in the level-in); held, not changing,
-		// through a planned stop.
+		// The tilt: the base turning -- pitch and roll together -- within
+		// TiltRateDegPerSec and TiltAccelDegPerSec2 in time at the planned
+		// speed, wherever it is planned (its easing may begin in the
+		// level-in); held, not changing, through a planned stop.
 		FVector2D LastRate = FVector2D::ZeroVector;
 		double	  LastDt = 0.0;
 		for (int32 k = 1; k < NumS; ++k)
@@ -3715,21 +3717,20 @@ namespace RammsCurb
 			const FVector2D Step(P.Pitch[k] - P.Pitch[k - 1], P.Roll[k] - P.Roll[k - 1]);
 			const bool		bStop = P.Stop[k] || P.Stop[k - 1];
 			const FVector2D R = Step / Dt;
-			if (bStop && Step.GetAbsMax() > 1e-9)
+			if (bStop && Step.Size() > 1e-9)
 			{
 				Fail(FMath::Max(k, K0), FString::Printf(TEXT("the tilt changes through the planned stop at %.0f cm"), SAt(k)));
 			}
-			if (R.GetAbsMax() > Rate * (1.0 + 1e-6) + 1e-6)
+			if (R.Size() > Rate * (1.0 + 1e-6) + 1e-6)
 			{
-				Fail(FMath::Max(k, K0),
-					FString::Printf(TEXT("the tilt changes faster than TiltRateDegPerSec at %.0f cm (%.2f deg/s)"), SAt(k), R.GetAbsMax()));
+				Fail(FMath::Max(k, K0), FString::Printf(TEXT("the base turns faster than TiltRateDegPerSec at %.0f cm (%.2f deg/s)"), SAt(k), R.Size()));
 			}
 			if (k > 1)
 			{
-				const double A = ((R - LastRate) / (0.5 * (Dt + LastDt))).GetAbsMax();
+				const double A = ((R - LastRate) / (0.5 * (Dt + LastDt))).Size();
 				if (A > TiltAcc * (1.0 + 1e-6) + 1e-6)
 				{
-					Fail(FMath::Max(k, K0), FString::Printf(TEXT("the tilt's rate changes faster than TiltAccelDegPerSec2 at %.0f cm (%.2f deg/s^2)"), SAt(k), A));
+					Fail(FMath::Max(k, K0), FString::Printf(TEXT("the base's turn rate changes faster than TiltAccelDegPerSec2 at %.0f cm (%.2f deg/s^2)"), SAt(k), A));
 				}
 			}
 			LastRate = R;

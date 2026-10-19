@@ -55,7 +55,11 @@ namespace RammsDrive
  *    incoming mode cannot carry come back, the wheels wait where they are,
  *    and the switch is refused once they have waited HandOverTimeoutSeconds.
  *    From a pose no drive mode set (where a curb crossing left the legs, or
- *    the low-level mode) every actuator moves together in one stage.
+ *    the low-level mode) every actuator moves together in one stage. Each
+ *    stage takes at least StanceRampSeconds, and at least what the outgoing
+ *    mode asks (IRammsDriveMode::GetStanceChangeMinSeconds: a curb crossing
+ *    that ends on a slope has the base turn to the ground's attitude no
+ *    faster than its tilt limits).
  *  - At the hand-over the incoming mode is activated and handed the measured
  *    motion (SeedMotion), so the speed carries across -- and so do the
  *    operator's drive commands held on the control surface, which a switch

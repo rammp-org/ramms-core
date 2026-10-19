@@ -99,6 +99,13 @@ namespace RammsDrive
 				M->EndHandOver();
 			}
 		}
+		virtual void HoldOutgoingWheels(int32 Mode, bool bHold) override
+		{
+			if (IRammsDriveMode* M = Selector.ModeAt(Mode))
+			{
+				M->HoldWheelsWhileInactive(bHold && !M->IsDriveModeActive());
+			}
+		}
 		virtual void HoldForStance(int32 Mode, bool bHold) override
 		{
 			if (IRammsDriveMode* M = Selector.ModeAt(Mode))
@@ -811,7 +818,15 @@ bool URammsDriveModeSelector::SetActiveMode(FName ModeId)
 		return false;
 	}
 	RammsDrive::FSelectorHost Host(*this);
-	return State->Switcher.Request(Host, Wanted, SampleOf(State.Get()), ConfigOf(*this));
+	// The stance changes away from the active mode no faster than it asks: a
+	// curb crossing's end, on a slope, has the base turn from level to the
+	// ground's attitude within its tilt limits.
+	RammsDrive::FSwitchConfig Config = ConfigOf(*this);
+	if (const IRammsDriveMode* Outgoing = ModeAt(ActiveIndex()))
+	{
+		Config.MinStageSeconds = FMath::Max(Config.MinStageSeconds, static_cast<double>(Outgoing->GetStanceChangeMinSeconds()));
+	}
+	return State->Switcher.Request(Host, Wanted, SampleOf(State.Get()), Config);
 }
 
 bool URammsDriveModeSelector::CycleMode()

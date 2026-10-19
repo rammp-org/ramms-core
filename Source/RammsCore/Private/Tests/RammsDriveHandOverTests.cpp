@@ -476,11 +476,13 @@ namespace
 		static constexpr double CornersDownK = 1.0;
 		static constexpr double CornerTouchK = 0.5;
 
-		double			  L = TreadsUpL;
-		double			  K = CornersDownK;
-		int32			  Active = Holo;
-		int32			  BoundTo[NumModes] = { INDEX_NONE, INDEX_NONE, INDEX_NONE, INDEX_NONE };
-		bool			  Held[NumModes] = { false, false, false, false };
+		double L = TreadsUpL;
+		double K = CornersDownK;
+		int32  Active = Holo;
+		int32  BoundTo[NumModes] = { INDEX_NONE, INDEX_NONE, INDEX_NONE, INDEX_NONE };
+		bool   Held[NumModes] = { false, false, false, false };
+		/** A mode stood down whose wheels are held (HoldOutgoingWheels). */
+		bool			  OutgoingHeld[NumModes] = { false, false, false, false };
 		FRammsDriveMotion Stick;
 		FRammsDriveMotion Slide;
 		bool			  bMeasured = true;
@@ -585,6 +587,7 @@ namespace
 		}
 		virtual void	EndHandOver(int32 Mode) override { BoundTo[Mode] = INDEX_NONE; }
 		virtual void	HoldForStance(int32 Mode, bool bHold) override { Held[Mode] = bHold && Mode == Active; }
+		virtual void	HoldOutgoingWheels(int32 Mode, bool bHold) override { OutgoingHeld[Mode] = bHold && Mode != Active; }
 		virtual FString ActivateMode(int32 Mode, const FRammsDriveMotion* Seed, double HoldSeconds) override
 		{
 			for (int32 i = 0; i < NumModes; ++i)
@@ -597,6 +600,7 @@ namespace
 				}
 			}
 			Active = Mode;
+			OutgoingHeld[Mode] = false;
 			++Activations[Mode];
 			SeededForward = Seed ? Seed->ForwardCmPerSecond : -1.0;
 			return Seed ? TEXT("carried") : TEXT("nothing carried");
@@ -808,17 +812,28 @@ bool FRammsDriveHandOverSwitchAtRest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("...held still while its corners go down"), R.Held[FToyRobot::Holo]);
 		TestEqual(TEXT("...and bounded by what the treads carry"), R.BoundTo[FToyRobot::Holo], static_cast<int32>(FToyRobot::Diff));
 		TestEqual(TEXT("...nothing handed over"), R.SeededForward, -1.0);
-		double ReleasedAtK = -1.0;
+		TestTrue(TEXT("...the treads, stood down, held where they are meanwhile"), R.OutgoingHeld[FToyRobot::Diff]);
+		double ReleasedAtK = -1.0, TreadsLetGoAtK = -1.0;
+		int32  TreadsLetGoUp = 0;
 		for (int32 i = 0; i < 1000 && S.GetPhase() != ESwitchPhase::Idle; ++i)
 		{
 			const bool bWasHeld = R.Held[FToyRobot::Holo];
+			const bool bTreadsWereHeld = R.OutgoingHeld[FToyRobot::Diff];
 			R.Tick(S, Config);
 			if (bWasHeld && !R.Held[FToyRobot::Holo])
 			{
 				ReleasedAtK = R.K;
 			}
+			if (bTreadsWereHeld && !R.OutgoingHeld[FToyRobot::Diff])
+			{
+				TreadsLetGoAtK = R.K;
+				TreadsLetGoUp += R.TreadsDown() ? 0 : 1;
+			}
 		}
 		TestEqual(TEXT("released once the first stage has its corners down"), ReleasedAtK, FToyRobot::CornersDownK, 1e-9);
+		TestEqual(TEXT("the treads held until then, and let go then (still on the ground)"), TreadsLetGoAtK, FToyRobot::CornersDownK, 1e-9);
+		TestEqual(TEXT("...not after they had come up"), TreadsLetGoUp, 0);
+		TestFalse(TEXT("...nor held at the end"), R.OutgoingHeld[FToyRobot::Diff]);
 		TestEqual(TEXT("never strafed with the treads down"), R.SidewaysOnTreads, 0);
 		TestEqual(TEXT("never drove its corners in the air"), R.DrivenInAir, 0);
 		TestEqual(TEXT("the bound gone at the end"), R.BoundTo[FToyRobot::Holo], static_cast<int32>(INDEX_NONE));
@@ -833,17 +848,25 @@ bool FRammsDriveHandOverSwitchAtRest::RunTest(const FString& Parameters)
 		R.Stick = FRammsDriveMotion(25.0f, 0.0f, 0.0f);
 		TestEqual(TEXT("active at once"), R.Active, static_cast<int32>(FToyRobot::Diff));
 		TestTrue(TEXT("...held still while its treads go down"), R.Held[FToyRobot::Diff]);
-		double ReleasedAtL = -1.0;
+		TestTrue(TEXT("...the corners, stood down, held where they are meanwhile"), R.OutgoingHeld[FToyRobot::Holo]);
+		double ReleasedAtL = -1.0, CornersLetGoAtL = -1.0;
 		for (int32 i = 0; i < 1000 && S.GetPhase() != ESwitchPhase::Idle; ++i)
 		{
 			const bool bWasHeld = R.Held[FToyRobot::Diff];
+			const bool bCornersWereHeld = R.OutgoingHeld[FToyRobot::Holo];
 			R.Tick(S, Config);
 			if (bWasHeld && !R.Held[FToyRobot::Diff])
 			{
 				ReleasedAtL = R.L;
 			}
+			if (bCornersWereHeld && !R.OutgoingHeld[FToyRobot::Holo])
+			{
+				CornersLetGoAtL = R.L;
+			}
 		}
 		TestEqual(TEXT("released once its treads are down"), ReleasedAtL, FToyRobot::TreadsDownL, 1e-9);
+		TestEqual(TEXT("the corners held until then, and let go then"), CornersLetGoAtL, FToyRobot::TreadsDownL, 1e-9);
+		TestFalse(TEXT("...nor held at the end"), R.OutgoingHeld[FToyRobot::Holo]);
 		TestEqual(TEXT("never drove its treads in the air"), R.DrivenInAir, 0);
 		TestEqual(TEXT("in its stance at the end"), R.K, FToyRobot::CornersUpK, 1e-9);
 	}
