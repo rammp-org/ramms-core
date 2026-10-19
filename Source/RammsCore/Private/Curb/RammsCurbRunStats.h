@@ -137,6 +137,11 @@ namespace RammsCurb
 		void AddHold();
 		void AddReplan();
 
+		/** A re-plan, whose plan's figures join those of the plans before it:
+		 *  the planned least speed and margin are the least over every plan
+		 *  the crossing ran on. */
+		void AddReplan(float PlannedMinSpeed, TOptional<float> PlannedMinMarginCm);
+
 		/** The crossing ended -- Done, or a fault or abort -- at Elapsed, in
 		 *  this attitude, which counts towards the largest tilt (a tilt fault
 		 *  ends on a tick Tick never saw). */
@@ -173,6 +178,8 @@ namespace RammsCurb
 		bool   bStopCounted = false;
 		bool   bSwingSeen = false;
 		bool   bMarginSeen = false;
+		/** Some plan the crossing ran on planned a margin. */
+		bool bPlannedMargin = false;
 	};
 
 	/** What the controller keeps between ticks for its telemetry. */

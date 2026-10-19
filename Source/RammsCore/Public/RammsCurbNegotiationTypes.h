@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Ramms4BarLegSpec.h"
+#include "RammsCurbTerrain.h"
 #include "RammsHolonomicDriveTypes.h"
 #include "RammsCurbNegotiationTypes.generated.h"
 
@@ -39,8 +40,8 @@ enum class ERammsCurbWheelDrive : uint8
 	/** Drives throughout the crossing, alongside the main wheels and in their
 	 *  place while they are lifted. */
 	Assist UMETA(DisplayName = "Assist"),
-	/** Drives only while the main wheels are off the ground; rolls free
-	 *  otherwise. */
+	/** Drives only while a main wheel on its own side of the robot is off the
+	 *  ground (or its side has none); rolls free otherwise. */
 	Fallback UMETA(DisplayName = "Fallback"),
 	/** Never driven: rolls free throughout. */
 	Passive UMETA(DisplayName = "Passive"),
@@ -61,9 +62,10 @@ enum class ERammsCurbLegKind : uint8
  * One leg and the wheel on the end of it.
  *
  * Heights are wheel-centre heights in the chassis frame (cm, up positive), the
- * same frame both linkage specs use, so a support leg on ground at height G
- * (relative to where the robot started) with the chassis origin at height B
- * sits at G + WheelRadiusCm - B.
+ * same frame both linkage specs use, so a support leg whose ground is at
+ * height G under its wheel, with the chassis origin at height B and level,
+ * sits at G + rho - B: rho is WheelRadiusCm on level ground, a little more on
+ * a slope (along the wheel, and across it by half ContactWidthCm).
  */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbLeg
@@ -104,6 +106,20 @@ struct RAMMSCORE_API FRammsCurbLeg
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.1"))
 	float WheelRadiusCm = 10.0f;
 
+	/** The tyre's full width across its axle (cm): the footprint a lifted
+	 *  wheel must keep clear of the curb, and how wide the step detection's
+	 *  scan reaches beyond the outermost wheels. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
+	float TyreWidthCm = 6.0f;
+
+	/** The width (cm) over which the tyre sits flat on the ground: how far
+	 *  across its axle a sideways slope lifts the wheel centre (half this
+	 *  times the slope). 0, the default, means the tyre's whole width
+	 *  (TyreWidthCm); set less for a wheel that only touches over part of it,
+	 *  such as an omni wheel's rollers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
+	float ContactWidthCm = 0.0f;
+
 	/**
 	 * When this wheel is driven; see ERammsCurbWheelDrive. On a robot with no
 	 * Main wheel, every wheel that is not Passive drives throughout.
@@ -132,10 +148,29 @@ struct RAMMSCORE_API FRammsCurbProfile
 	 * How much farther the edge is from the farthest front wheel than from
 	 * the nearest (cm), when the robot meets it a little off square. The
 	 * braking limits keep to the near end of the edge and every landing is
-	 * planned past the far end.
+	 * planned past the far end. From a detected terrain it is derived: the
+	 * front track times |tan ApproachAngleDeg|.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
 	float EdgeSkewCm = 0.0f;
+
+	/**
+	 * The angle (deg) between the robot's heading and the normal to the edge:
+	 * 0 square on, positive when the robot's +Y wheels meet the edge first.
+	 * The per-axle gait lifts both wheels of an axle together, which only
+	 * works within 10 deg of square; it refuses an edge farther off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	float ApproachAngleDeg = 0.0f;
+
+	/**
+	 * The terrain the step was found in (DetectTerrainAhead), when it was
+	 * detected: the two surfaces and the edge, which the fields above are
+	 * derived from. Used when bValid; a profile without one stands for level
+	 * ground on both sides of an edge square to the heading.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbTerrain Terrain;
 };
 
 /** Where the manoeuvre is. Each step of the gait names an axle too; see
@@ -170,9 +205,10 @@ enum class ERammsCurbPhase : uint8
 	 *  or by selecting another drive mode, which takes the robot over. */
 	Aborted UMETA(DisplayName = "Aborted"),
 	/** Stopped by one of its own checks: a tilt past MaxTiltDeg, a step that
-	 *  overran its timeout, or a robot it can no longer measure, after which
-	 *  the robot holds where it is; or a simulation reset, after which the mode
-	 *  from before takes it back. See GetStatusText. */
+	 *  overran its timeout, a stall (FRammsCurbTuning::StallSeconds), or a
+	 *  robot it can no longer measure, after which the robot holds where it
+	 *  is; or a simulation reset, after which the mode from before takes it
+	 *  back. See GetStatusText. */
 	Faulted UMETA(DisplayName = "Faulted"),
 };
 
@@ -321,8 +357,9 @@ struct RAMMSCORE_API FRammsCurbRunStats
 	float MaxAbsRollDeg = 0.0f;
 
 	/** Largest pitch or roll away from the attitude the gait meant to hold.
-	 *  Per-axle: level, once the first Prepare has brought the chassis level
-	 *  from the stance the robot drove up in (not counted while it does). */
+	 *  Per-axle: level, once the level-in has brought the chassis within
+	 *  1 deg of level from the stance the robot drove up in (not counted
+	 *  while it does). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Attitude")
 	float MaxAttitudeErrorDeg = 0.0f;
 
@@ -359,7 +396,9 @@ struct RAMMSCORE_API FRammsCurbRunStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
 	float MaxLegErrorCm = 0.0f;
 
-	/** Least drive speed the plan called for (per-axle: the slowest step). */
+	/** Least drive speed the plan called for (per-axle: the slowest step's
+	 *  own speed, 0 for a lift made standing still; the deadline cap that
+	 *  slows it ahead of each lift is live, not planned). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Plan")
 	float PlannedMinSpeed = 0.0f;
 
@@ -407,19 +446,36 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
 	float DriveSpeed = 35.0f;
 
-	/** Fraction of DriveSpeed used while legs reposition (Prepare, Lift) and
-	 *  while an axle lands (Plant). Zero makes the gait strictly stop-and-go. */
+	/**
+	 * Deprecated; per-axle gait only. A further cap, as a fraction of
+	 * DriveSpeed, on the steps that move legs (Prepare, Lift, Shift, Plant,
+	 * Settle). The speed while legs move is the deadline cap's (see
+	 * URammsCurbNegotiationController), so the default, 1, adds nothing;
+	 * zero makes the gait strictly stop-and-go.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float OverlapSpeedFraction = 0.4f;
+	float OverlapSpeedFraction = 1.0f;
 
-	/** Acceleration and braking limit, cm/s^2. Every stop the gait makes is
-	 *  planned against this, so it is also how close it dares approach. */
+	/** How fast the drive speed may rise, cm/s^2. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "1.0"))
 	float Acceleration = 60.0f;
+
+	/** How fast the drive speed may fall, cm/s^2: the ramp down to any lower
+	 *  speed, and every stop the gait makes is planned against it -- the
+	 *  braking caps and the deadline cap -- so it is also how close it dares
+	 *  approach. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "1.0"))
+	float Deceleration = 60.0f;
 
 	/** Yaw-rate gain (1/s) holding the heading the manoeuvre began on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
 	float HeadingGain = 2.0f;
+
+	/** Where the base cannot be held level at a speed at or above the floor,
+	 *  the planner may plan a stop with the base level, rather than refuse.
+	 *  (Used by the per-wheel planner; the per-axle gait plans none.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive")
+	bool bAllowPlannedStop = true;
 
 	/** Vertical speed of a wheel being lifted or planted. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.1"))
@@ -514,6 +570,15 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry", meta = (ClampMin = "0.0"))
 	float FinishClearance = 20.0f;
 
+	/**
+	 * Half the chassis' belly plate (cm): X fore/aft, Y across, about the
+	 * chassis origin. The chassis is kept ChassisClearance over the higher
+	 * surface under it. 0 (the default) takes the rectangle of the corner
+	 * crank pivots, fore/aft, and of the corner wheels, across.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry", meta = (ClampMin = "0.0"))
+	FVector2D ChassisHalfExtent = FVector2D::ZeroVector;
+
 	/** Centre of mass, fore/aft, in the chassis frame (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability")
 	float CenterOfMassX = 0.0f;
@@ -544,6 +609,57 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
 	float LiftOffMargin = 1.0f;
 
+	/**
+	 * The most the base may be tilted on purpose (deg), pitch or roll, where
+	 * its legs cannot span the terrain with it level. Planned tilt is eased in
+	 * and out (TiltRateDegPerSec, TiltAccelDegPerSec2) only over the stretch
+	 * that needs it, and the base returns to level after it. Beyond this the
+	 * planner stops level (bAllowPlannedStop) or refuses. (Used by the
+	 * per-wheel planner; the per-axle gait holds the base level.)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float MaxPlannedTiltDeg = 3.5f;
+
+	/** The fastest a planned tilt may change (deg/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.1"))
+	float TiltRateDegPerSec = 2.0f;
+
+	/** How fast a planned tilt's rate may change (deg/s^2): the tilt eases in
+	 *  and out rather than starting and stopping at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.1"))
+	float TiltAccelDegPerSec2 = 4.0f;
+
+	/** A chassis-height corridor narrower than this (cm) counts as no level
+	 *  pose: the planner tilts a little or slows rather than shave margins.
+	 *  The per-axle gait, where no one chassis height serves a step and it
+	 *  follows the corridor of heights instead, needs it this wide all the
+	 *  way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0"))
+	float MinCorridorCm = 1.0f;
+
+	/**
+	 * The attitude loop's proportional gain: the support legs rotate the base
+	 * by this times its attitude error (measured less planned), on top of
+	 * following the terrain. A nose-up error retracts the front legs.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0"))
+	float AttitudeProportionalGain = 0.3f;
+
+	/** The attitude loop's integral gain (1/s): what the legs' servos and the
+	 *  drive wheels' extra press leave is trimmed out at this rate. Held while
+	 *  fewer than three wheels are planted or a wheel is landing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0"))
+	float AttitudeIntegralGain = 2.0f;
+
+	/** Attitude errors within this (deg) are left alone: the leg servos
+	 *  chatter at about this much. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0"))
+	float AttitudeDeadbandDeg = 0.15f;
+
+	/** The most the attitude loop rotates the base by (deg), pitch or roll. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0"))
+	float MaxAttitudeCorrectionDeg = 3.0f;
+
 	/** Pitch or roll (deg) beyond which the manoeuvre stops. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "1.0"))
 	float MaxTiltDeg = 12.0f;
@@ -556,16 +672,58 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "0.5"))
 	float ApproachTimeout = 20.0f;
 
-	/** How far ahead DetectStepAhead looks (cm). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "1.0"))
-	float DetectRange = 250.0f;
+	/** The manoeuvre stops when the drive speed commanded stays above 5 cm/s
+	 *  while the chassis measures under 1 cm/s (over 0.3 s) for this long (s):
+	 *  wheels slipping, or something holding the robot back. 0 turns the
+	 *  check off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "0.0"))
+	float StallSeconds = 2.0f;
 
-	/** Smallest height change DetectStepAhead calls a step (cm). */
+	/** How far ahead of the front wheels the step detection scans (cm). It
+	 *  has to see far enough past the edge to know the far side is deep
+	 *  enough for the whole robot; when it cannot from where the crossing
+	 *  begins, the approach looks again as the robot closes in (see
+	 *  URammsCurbNegotiationController). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "1.0"))
+	float DetectRange = 350.0f;
+
+	/** Smallest height change the step detection calls a step (cm): along
+	 *  the whole stretch of edge the robot crosses. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.1"))
 	float MinStepHeight = 2.0f;
 
-	/** Largest step the controller will attempt (cm). Planning refuses
-	 *  anything the legs cannot reach regardless. */
+	/** Largest step the controller will attempt (cm), anywhere along the
+	 *  stretch of edge the robot crosses. Planning refuses anything the legs
+	 *  cannot reach regardless. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.1"))
 	float MaxStepHeight = 22.0f;
+
+	/** The largest angle (deg) between the heading and the normal to the
+	 *  edge the detection accepts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.0", ClampMax = "80.0"))
+	float MaxApproachDeg = 35.0f;
+
+	/** The steepest either surface may slope, in any direction (deg). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.0", ClampMax = "45.0"))
+	float MaxSurfaceSlopeDeg = 8.0f;
+
+	/** How far (cm) the edge points the scan finds may lie from one straight
+	 *  line: farther, and the edge is not straight. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.0"))
+	float MaxEdgeResidualCm = 1.5f;
+
+	/** The RMS (cm) of the samples a surface's plane is fitted to may be no
+	 *  more than this: rougher, and it is not a plane. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.0"))
+	float MaxPlaneRmsCm = 0.5f;
+
+	/** A sample farther than this (cm) from a surface's plane is not on it;
+	 *  more than a tenth of them off it, and the surface is not a plane. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "0.0"))
+	float MaxPlaneResidualCm = 1.5f;
+
+	/** How deep past the edge (cm) the far surface's plane is fitted, at most
+	 *  (and never across a second edge). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "10.0"))
+	float FarFitDepthCm = 120.0f;
 };

@@ -66,6 +66,7 @@ namespace RammsCurb
 		Stats.PlannedMaxTiltDeg = PlannedMaxTiltDeg;
 		Stats.PlannedCrossingSeconds = PlannedCrossingSeconds;
 		Stats.MinPlannedMarginCm = PlannedMinMarginCm.Get(0.0f);
+		bPlannedMargin = PlannedMinMarginCm.IsSet();
 		CruiseFloor = CruiseFloorSpeed;
 	}
 
@@ -201,6 +202,22 @@ namespace RammsCurb
 		if (!bEnded)
 		{
 			++Stats.Replans;
+		}
+	}
+
+	void FRunStatsTracker::AddReplan(float PlannedMinSpeed, TOptional<float> PlannedMinMarginCm)
+	{
+		if (bEnded)
+		{
+			return;
+		}
+		++Stats.Replans;
+		Stats.PlannedMinSpeed = FMath::Min(Stats.PlannedMinSpeed, PlannedMinSpeed);
+		if (PlannedMinMarginCm.IsSet())
+		{
+			Stats.MinPlannedMarginCm = bPlannedMargin ? FMath::Min(Stats.MinPlannedMarginCm, PlannedMinMarginCm.GetValue())
+													  : PlannedMinMarginCm.GetValue();
+			bPlannedMargin = true;
 		}
 	}
 
