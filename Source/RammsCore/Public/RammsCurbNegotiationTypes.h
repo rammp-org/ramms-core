@@ -227,6 +227,24 @@ enum class ERammsCurbPhase : uint8
 	 *  is; or a simulation reset, after which the mode from before takes it
 	 *  back. See GetStatusText. */
 	Faulted UMETA(DisplayName = "Faulted"),
+	/** Per-wheel gait: a wheel's crossing is pending or under way (appended
+	 *  after Faulted: the values before it keep their indices). */
+	Cross UMETA(DisplayName = "Cross"),
+	/** Per-wheel gait: braked and waiting, with a reason (a permit, a re-plan,
+	 *  the terrain), resuming when it clears. */
+	Hold UMETA(DisplayName = "Hold"),
+};
+
+/** Which gait crosses the curb. */
+UENUM(BlueprintType)
+enum class ERammsCurbGait : uint8
+{
+	/** Both wheels of an axle together, axle by axle, front to rear, each step
+	 *  waiting for the last (within 10 deg of square). */
+	PerAxle UMETA(DisplayName = "Per axle"),
+	/** Every wheel on its own, planned in chassis travel before anything moves
+	 *  (the per-wheel planner); legs and driving overlap. */
+	PerWheel UMETA(DisplayName = "Per wheel"),
 };
 
 /** Where one wheel is in the crossing. See FRammsCurbWheelStatus. */
@@ -373,6 +391,12 @@ struct RAMMSCORE_API FRammsCurbRunStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Attitude")
 	float MaxAbsRollDeg = 0.0f;
 
+	/** Largest inclination of the base from level -- its total tilt,
+	 *  atan(sqrt(tan^2 pitch + tan^2 roll)), whichever way it leans --
+	 *  standing or moving, the attitude a fault stopped on included. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Attitude")
+	float MaxInclinationDeg = 0.0f;
+
 	/** Largest pitch or roll away from the attitude the gait meant to hold.
 	 *  Per-axle: level, once the level-in has brought the chassis within
 	 *  1 deg of level from the stance the robot drove up in (not counted
@@ -425,7 +449,8 @@ struct RAMMSCORE_API FRammsCurbRunStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Plan")
 	float PlannedMinSpeed = 0.0f;
 
-	/** Largest base tilt the plan called for (per-axle: 0, level). */
+	/** Largest inclination of the base from level the plan called for (its
+	 *  total tilt, which Tuning.MaxPlannedTiltDeg bounds; per-axle: 0, level). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Plan")
 	float PlannedMaxTiltDeg = 0.0f;
 
@@ -466,6 +491,36 @@ struct RAMMSCORE_API FRammsCurbTuning
 {
 	GENERATED_BODY()
 
+	/** Which gait crosses: PerAxle, the default, or PerWheel. A per-wheel plan
+	 *  is level where it can be, else tilted by the least within
+	 *  MaxPlannedTiltDeg at the floor speed or more, else level with a planned
+	 *  stop (bAllowPlannedStop), else refused; it never hands a crossing to the
+	 *  other gait. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
+	ERammsCurbGait Gait = ERammsCurbGait::PerAxle;
+
+	/** The least speed a per-wheel plan rolls at, as a fraction of DriveSpeed
+	 *  (the floor): where it could not keep the base level at or above it,
+	 *  it tilts, stops or refuses (see MaxPlannedTiltDeg). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinSpeedFraction = 0.25f;
+
+	/** How fast a leg's vertical speed may change (cm/s^2): with LegSpeed and
+	 *  ServoLagSeconds, how long the per-wheel planner takes a lift or a
+	 *  landing to be. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait", meta = (ClampMin = "1.0"))
+	float LegAcceleration = 200.0f;
+
+	/** A per-wheel plan that rolls slower than the floor somewhere, without
+	 *  stopping, is accepted rather than refused. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
+	bool bAllowSlowCrossing = false;
+
+	/** The per-wheel gait spins each lifted wheel that has a motor at the
+	 *  ground speed it will land at, so that it lands without a jolt. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
+	bool bPrespinLiftedWheels = true;
+
 	/** Ground speed when nothing nearby limits it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
 	float DriveSpeed = 35.0f;
@@ -494,6 +549,23 @@ struct RAMMSCORE_API FRammsCurbTuning
 	/** Yaw-rate gain (1/s) holding the heading the manoeuvre began on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
 	float HeadingGain = 2.0f;
+
+	/**
+	 * Cross-track correction (per-wheel gait): the heading held is turned back
+	 * towards the line the crossing was planned along by this much (deg) per cm
+	 * the chassis has drifted off it sideways, so that a robot pushed sideways
+	 * (a cross slope, omni wheels) steers back onto its path rather than only
+	 * holding its heading. On a robot whose wheels roll partly sideways (omni
+	 * wheels with their hubs turned off the heading), the same offset also
+	 * asks those wheels for a sideways speed back onto the line while they
+	 * carry on both sides and no main wheel does. 0 turns both off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Heading", meta = (ClampMin = "0.0"))
+	float CrossTrackGainDegPerCm = 0.1f;
+
+	/** The most the cross-track correction turns the heading held (deg). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Heading", meta = (ClampMin = "0.0"))
+	float MaxCrossTrackSteerDeg = 3.0f;
 
 	/** Where the base cannot be held level at a speed at or above the floor,
 	 *  the planner may plan a stop with the base level, rather than refuse.
@@ -640,6 +712,17 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
 	float MinStabilityMargin = 3.0f;
 
+	/** The least stability margin (cm) the robot may be measured at, braking
+	 *  and speeding up included: what a pose the planner did not choose -- the
+	 *  stance the robot drives up in -- is held to (a planned pose is held to
+	 *  MinStabilityMargin). A stance under MinStabilityMargin: standing still
+	 *  in one that keeps MinStabilityMargin standing, the per-wheel gait
+	 *  levels in first; else, keeping this, it levels in at once; else,
+	 *  rolling in one that keeps this at a steady speed, it levels in at once
+	 *  holding its speed; else it refuses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Stability", meta = (ClampMin = "0.0"))
+	float MinLiveStabilityMarginCm = 1.5f;
+
 	/**
 	 * Per-axle gait only. The least stability margin accepted for the instant
 	 * a corner axle leaves the ground with the robot standing still, when no
@@ -657,21 +740,28 @@ struct RAMMSCORE_API FRammsCurbTuning
 	float LiftOffMargin = 1.0f;
 
 	/**
-	 * The most the base may be tilted on purpose (deg), pitch or roll, where
-	 * its legs cannot span the terrain with it level. Planned tilt is eased in
-	 * and out (TiltRateDegPerSec, TiltAccelDegPerSec2) only over the stretch
-	 * that needs it, and the base returns to level after it. Beyond this the
-	 * planner stops level (bAllowPlannedStop) or refuses. (Used by the
+	 * The most the base may be inclined on purpose (deg) where its legs cannot
+	 * span the terrain with it level: its total tilt from level,
+	 * atan(sqrt(tan^2 pitch + tan^2 roll)), whichever way it leans -- not pitch
+	 * and roll each (3.5 deg of both is 4.9 deg of inclination). The planner
+	 * looks for the least inclination that keeps a pose, up to this. Planned
+	 * tilt is eased in and out (TiltRateDegPerSec, TiltAccelDegPerSec2) only
+	 * over the stretch that needs it, and the base returns to level after it.
+	 * Beyond this the planner stops level (bAllowPlannedStop) or refuses,
+	 * naming this field and the inclination it would need. (Used by the
 	 * per-wheel planner; the per-axle gait holds the base level.)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0", ClampMax = "10.0"))
-	float MaxPlannedTiltDeg = 3.5f;
+	float MaxPlannedTiltDeg = 5.0f;
 
-	/** The fastest a planned tilt may change (deg/s). */
+	/** The fastest a planned tilt, and the level-in, may change the base's
+	 *  pitch or its roll (deg/s, each). An easing between two tilts runs
+	 *  along the straight way between them, pitch and roll together, timed by
+	 *  the one that changes most. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.1"))
 	float TiltRateDegPerSec = 2.0f;
 
-	/** How fast a planned tilt's rate may change (deg/s^2): the tilt eases in
+	/** How fast that rate may change (deg/s^2, each axis): the tilt eases in
 	 *  and out rather than starting and stopping at once. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.1"))
 	float TiltAccelDegPerSec2 = 4.0f;
@@ -707,7 +797,9 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Level", meta = (ClampMin = "0.0"))
 	float MaxAttitudeCorrectionDeg = 3.0f;
 
-	/** Pitch or roll (deg) beyond which the manoeuvre stops. */
+	/** The base's measured inclination (deg) beyond which the manoeuvre
+	 *  stops: its total tilt from level, atan(sqrt(tan^2 pitch + tan^2 roll)),
+	 *  whichever way it leans -- not pitch and roll each. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Safety", meta = (ClampMin = "1.0"))
 	float MaxTiltDeg = 12.0f;
 

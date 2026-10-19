@@ -89,6 +89,7 @@ namespace RammsCurb
 
 		Stats.MaxAbsPitchDeg = FMath::Max(Stats.MaxAbsPitchDeg, FMath::Abs(In.PitchDeg));
 		Stats.MaxAbsRollDeg = FMath::Max(Stats.MaxAbsRollDeg, FMath::Abs(In.RollDeg));
+		Stats.MaxInclinationDeg = FMath::Max(Stats.MaxInclinationDeg, static_cast<float>(InclinationDeg(In.PitchDeg, In.RollDeg)));
 		if (In.bAttitudePlanned)
 		{
 			const float Error = FMath::Max(FMath::Abs(In.PitchDeg - In.PlannedPitchDeg), FMath::Abs(In.RollDeg - In.PlannedRollDeg));
@@ -181,6 +182,16 @@ namespace RammsCurb
 		}
 	}
 
+	void FRunStatsTracker::SetPlan(float PlannedMinSpeed, float PlannedMaxTiltDeg, float PlannedCrossingSeconds,
+		TOptional<float> PlannedMinMarginCm)
+	{
+		Stats.PlannedMinSpeed = PlannedMinSpeed;
+		Stats.PlannedMaxTiltDeg = PlannedMaxTiltDeg;
+		Stats.PlannedCrossingSeconds = PlannedCrossingSeconds;
+		Stats.MinPlannedMarginCm = PlannedMinMarginCm.Get(0.0f);
+		bPlannedMargin = PlannedMinMarginCm.IsSet();
+	}
+
 	void FRunStatsTracker::AddPlannedStop()
 	{
 		if (!bEnded)
@@ -234,6 +245,7 @@ namespace RammsCurb
 		// the tilt that stopped it is still the largest, moving or not.
 		Stats.MaxAbsPitchDeg = FMath::Max(Stats.MaxAbsPitchDeg, FMath::Abs(PitchDeg));
 		Stats.MaxAbsRollDeg = FMath::Max(Stats.MaxAbsRollDeg, FMath::Abs(RollDeg));
+		Stats.MaxInclinationDeg = FMath::Max(Stats.MaxInclinationDeg, static_cast<float>(InclinationDeg(PitchDeg, RollDeg)));
 		if (LegsMovedAt >= 0.0)
 		{
 			Stats.CrossingSeconds = static_cast<float>(Elapsed - LegsMovedAt);

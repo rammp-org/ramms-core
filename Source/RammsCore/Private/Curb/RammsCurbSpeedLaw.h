@@ -333,6 +333,92 @@ namespace RammsCurb
 	 *  Value: the servo lag model. */
 	float LagStep(float Value, float Command, float Dt, float Lag);
 
+	/** The speed trim's integral gain (1/s) and its bound (cm/s); it runs only
+	 *  while the command is steady: within SpeedTrimSteadyCmS of itself as the
+	 *  chassis follows it. */
+	constexpr double SpeedTrimGain = 1.0;
+	constexpr double SpeedTrimMaxCmS = 45.0;
+	constexpr double SpeedTrimSteadyCmS = 1.0;
+	/** The trim runs only on a grade steeper than this (deg, along the
+	 *  heading); on less it fades (SpeedTrimFadeSeconds) -- a shortfall on the
+	 *  level is something holding a wheel back (a leg moving, a tyre
+	 *  scrubbing), which more drive would only fight, slewing the robot. */
+	constexpr double SpeedTrimGradeDeg = 2.0;
+	constexpr double SpeedTrimFadeSeconds = 1.0;
+	/** The most of the measured speed's shortfall (cm/s, either way) the trim
+	 *  integrates on one tick: a large one is a transient the chassis' own lag
+	 *  is still taking out (coming out of a roll back, say), not the steady
+	 *  error a grade leaves, and integrated whole it winds the trim up past
+	 *  what the grade needs. */
+	constexpr double SpeedTrimMaxErrorCmS = 8.0;
+
+	/**
+	 * One tick of the speed trim (cm/s): the integral, at SpeedTrimGain, of
+	 * how far the chassis' measured speed falls short of its command as the
+	 * chassis can follow it (CommandFollowedCmS: the command through the
+	 * drive's lag and the speed measurement's window; at most
+	 * SpeedTrimMaxErrorCmS of it a tick), bounded by SpeedTrimMaxCmS. Added to
+	 * what the carrying driven wheels are asked, it makes the chassis go at its
+	 * command where the wheels' own speed loops (proportional: they carry a
+	 * load only with a speed error) would not: on a grade, a robot asked to
+	 * stop rolls on at the speed error its weight along the slope needs.
+	 * Unchanged while the measurement is not valid, and while the command
+	 * (CommandCmS) is more than SpeedTrimSteadyCmS from itself as followed --
+	 * braking or speeding up, the chassis' own lag (which no model has
+	 * exactly) is most of the difference, and an integral of it overshoots
+	 * the speed at the end of the ramp. The follower must start from the
+	 * chassis' signed measured speed (a robot rolling back is not at rest).
+	 */
+	double SpeedTrimStep(double Trim, double CommandCmS, double CommandFollowedCmS, double MeasuredCmS, bool bMeasuredValid, bool bOnGrade,
+		double Dt);
+
+	/**
+	 * The speed trim kept under a hard braking cap (cm/s): once the chassis
+	 * goes faster than the cap (MeasuredCmS over CapCmS, the speed it can
+	 * still brake short of a window from), the trim forward is cut to the room
+	 * between the drive command (CommandCmS) and the cap -- the trim carries a
+	 * grade's load at the speed asked, it never takes the chassis past where
+	 * it can stop. Under the cap, or backward (down a grade, or a robot
+	 * rolling back), it is left alone: cut whenever the cap merely binds the
+	 * command, it would slow a robot on a grade under the command the cap
+	 * allows.
+	 */
+	double SpeedTrimUnderCap(double Trim, double MeasuredCmS, double CommandCmS, double CapCmS);
+
+	/**
+	 * The drive command as the measured speed can follow it, one tick on: the
+	 * command through the chassis' lag behind it (DriveLagSeconds), then
+	 * through the speed measurement's own (DriveLagSeconds: half its 0.3 s
+	 * window) -- two first-order stages, A and B, kept by the caller. Returns
+	 * B: what SpeedTrimStep compares the measured speed with.
+	 */
+	double SpeedFollowStep(double& A, double& B, double CommandCmS, double Dt);
+
+	/**
+	 * The heading correction (rad, positive turning towards the robot's +Y)
+	 * for a chassis OffsetCm to the +Y side of the line it follows: back
+	 * towards the line, GainDegPerCm per cm, at most MaxDeg either way.
+	 */
+	double CrossTrackSteer(double OffsetCm, double GainDegPerCm, double MaxDeg);
+
+	/** The sideways speed command's gain on the offset (1/s), its integral's
+	 *  gain (1/s^2) and the most either asks (cm/s). */
+	constexpr double LateralGain = 2.0;
+	constexpr double LateralTrimGain = 2.0;
+	constexpr double LateralMaxCmS = 30.0;
+
+	/**
+	 * The sideways speed (cm/s, towards the robot's +Y) to ask of the wheels
+	 * that can roll the chassis sideways (omni wheels whose hubs are turned off
+	 * the heading) for a chassis OffsetCm to the +Y side of its line: back
+	 * towards it, LateralGain per cm, plus an integral of the offset (Trim,
+	 * cm/s, kept by the caller) that carries a steady sideways push -- the
+	 * robot's weight on a cross slope, with nothing else holding it. The
+	 * integral runs only while such wheels drive (bAuthority); both bounded by
+	 * LateralMaxCmS.
+	 */
+	double LateralSpeed(double& Trim, double OffsetCm, bool bAuthority, double Dt);
+
 	/**
 	 * The angle (rad) a body turned about Axis (a unit vector, world) from one
 	 * world rotation to the next: positive by the right-hand rule in the

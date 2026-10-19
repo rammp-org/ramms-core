@@ -23,6 +23,12 @@ namespace RammsCurb
 	struct FTerrainWheel;
 	struct FFarDepthNeed;
 	struct FRobotModel;
+	struct FCurbSchedule;
+	struct FFiveBarGridCache;
+	struct FPlannerInput;
+	class FPlanTask;
+	class FExecutor;
+	struct FExecMeasure;
 } // namespace RammsCurb
 
 /**
@@ -202,7 +208,10 @@ public:
 	/**
 	 * Plan the manoeuvre for this step without moving: true when every leg
 	 * can reach what each step of the gait asks of it. OutReason says why
-	 * not, or summarises the plan.
+	 * not, or summarises the plan. With Tuning.Gait PerWheel the plan is made
+	 * in the call, on the game thread: tens to a few hundred milliseconds for
+	 * a level plan, up to a few seconds where it has to look for a tilt or a
+	 * stop (its lines say how long) -- ask it of a robot standing still.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool CheckFeasibility(FRammsCurbProfile Profile, FString& OutReason);
@@ -352,6 +361,22 @@ public:
 	 *  before any. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	float GetStabilityMargin() const { return LiveMarginCm; }
+
+	/** The per-wheel gait's plan (Tuning.Gait PerWheel), one line per event in
+	 *  the order of the chassis' travel -- each wheel's lift and landing, the
+	 *  level-in, any planned tilt or stop, with the chassis height, the base's
+	 *  attitude, the centre wheels' fore/aft and the speed there -- then a
+	 *  summary: the plan's class (level, tilt, planned stop) and its floor
+	 *  speed, least margin, narrowest corridor and timing, or why it refused.
+	 *  Empty before any per-wheel plan. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	TArray<FString> GetScheduleLines() const;
+
+	/** The base tilt (deg; X pitch nose up, Y roll +Y side up) the last
+	 *  per-wheel plan calls for at its largest, each axis signed as planned:
+	 *  0 when it plans the base level, and for the per-axle gait. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	FVector2D GetPlannedTiltDeg() const;
 
 	// --- IRammsDriveMode ------------------------------------------------------
 	virtual FName GetDriveModeId() const override { return FName("curb"); }
@@ -538,6 +563,35 @@ private:
 	/** Measure the robot as it starts, check it can start here, and build
 	 *  Steps for a profile (BuildSteps). */
 	bool BuildPlan(const FRammsCurbProfile& Profile, FString& OutReason);
+
+	/** The per-wheel gait (Tuning.Gait PerWheel): measure the robot, check it
+	 *  can start here, and plan the crossing on the profile's terrain (or the
+	 *  level ground and square edge a profile without one stands for) with
+	 *  RammsCurb::PlanCrossing. The plan is kept (GetScheduleLines); nothing
+	 *  moves. */
+	bool PlanPerWheel(const FRammsCurbProfile& Profile, FString& OutReason);
+
+	/** PlanPerWheel's checks and the planner's input, without planning. */
+	bool PreparePerWheel(const FRammsCurbProfile& Profile, RammsCurb::FPlannerInput& OutInput, FString& OutReason);
+
+	/** A per-wheel re-plan: the same input, planned off the game thread
+	 *  (RammsCurb::FPlanTask), the schedule swapped in by PollReplan when it is
+	 *  done. A plan takes longer than a tick; a re-plan must not stall one.
+	 *  Only between crossings: it measures the robot as PlanPerWheel does,
+	 *  which resets what a crossing under way keeps. */
+	bool StartReplan(const FRammsCurbProfile& Profile, FString& OutReason);
+
+	/** Take a finished re-plan (each tick): adopted while the gait is PerWheel,
+	 *  no crossing runs and no plan has been made since it was launched;
+	 *  otherwise dropped. */
+	void PollReplan();
+
+	/** The schedule's lines and figures into what the controller reports. */
+	void AdoptSchedule();
+
+	/** Each 5-bar leg's knee-limited reach on a grid, from its controller's
+	 *  SolveTarget: built once per set of legs (RammsCurb::FFiveBarGridCache). */
+	void EnsureFiveBarGrids();
 
 	/** Build Steps for a profile from the state measured as the crossing
 	 *  began: the edge placed from where the front wheels are now. Also how a
@@ -801,8 +855,17 @@ private:
 	 *  commit point's braking allows the chassis' lag for. */
 	float MeasuredWheelSpeed() const;
 	/** Ramp every leg towards the step's goals by at most RampStep's worth. */
-	void  CommandLegs(float RampStep);
-	void  CommandWheels(float Speed, float YawRate);
+	void CommandLegs(float RampStep);
+	/** Drive the wheels at Speed (cm/s) and YawRate (rad/s); the carrying
+	 *  driven wheels Trim (cm/s) faster (the per-wheel gait's speed trim); the
+	 *  chassis Lateral (cm/s) towards its +Y, through the wheels that roll
+	 *  partly sideways. */
+	void CommandWheels(float Speed, float YawRate, float Trim = 0.0f, float Lateral = 0.0f);
+	/** The per-wheel crossing's speed trim and cross-track steer, one tick
+	 *  (SpeedTrim, CrossTrackCm, CrossTrackSteerRad); the yaw rate to drive
+	 *  at. TrimCapCmS: the hard braking cap binding now (cm/s), which the
+	 *  speed trim never takes the wheels past. */
+	float PerWheelSteering(float DeltaTime, double TrimCapCmS);
 	void  StopWheels(bool bRelease);
 	void  Finish(ERammsCurbPhase EndPhase, const FString& Why);
 	void  SetActiveModeThroughSelector(FName ModeId);
@@ -968,4 +1031,128 @@ private:
 	/** The robot model: each 4-bar's table, the centre of mass and the legs'
 	 *  moving masses, the belly (Private/Curb); built with the legs. */
 	TPimplPtr<RammsCurb::FRobotModel> Model;
+
+	/** The last per-wheel plan (Private/Curb). */
+	TPimplPtr<RammsCurb::FCurbSchedule> Schedule;
+
+	/** The 5-bar legs' reach grids the per-wheel planner uses (Private/Curb). */
+	TPimplPtr<RammsCurb::FFiveBarGridCache> FiveBarGrids;
+
+	/** A per-wheel re-plan under way off the game thread (Private/Curb). */
+	TPimplPtr<RammsCurb::FPlanTask> ReplanTask;
+
+	/** Every plan made (either gait) or begun takes the next number; a re-plan
+	 *  is adopted only if no other came after the one it was launched as. */
+	int32 PlanGeneration = 0;
+	int32 ReplanGeneration = INDEX_NONE;
+
+	/** Forget the per-wheel plan and any re-plan under way (a per-axle plan or
+	 *  crossing replaces it). */
+	void DropPerWheelPlan();
+
+	// --- the per-wheel crossing (Tuning.Gait PerWheel) ---------------------------
+
+	/** The per-wheel gait's executor (Private/Curb), and the input its plan was
+	 *  made from. */
+	TPimplPtr<RammsCurb::FExecutor>		Executor;
+	TPimplPtr<RammsCurb::FPlannerInput> CrossingInput;
+	/** The input of a re-plan under way (bReplanning), and the terrain it was
+	 *  launched on. */
+	TPimplPtr<RammsCurb::FPlannerInput> ReplanInput;
+	FRammsCurbTerrain					ReplanTerrain;
+
+	/** The crossing under way (or the last) runs the per-wheel gait. */
+	bool bPerWheelCrossing = false;
+	/** Begun on the move: its plan is being made off the game thread, and the
+	 *  robot holds its speed and stance until it comes (braked short of every
+	 *  wheel's window). */
+	bool bAwaitingPlan = false;
+	/** A re-plan on the approach (the terrain looked at again moved) is under
+	 *  way off the game thread. */
+	bool bReplanning = false;
+	/** Seconds the crossing has been in Hold, and the executor's holds and
+	 *  planned stops already counted in the run stats. */
+	double HoldSeconds = 0.0;
+	/** Seconds the chassis has run away: RunawayCmS faster than its command as
+	 *  the chassis can follow it (RunawayCommand: the command through
+	 *  RunawayLagSeconds), or rolling back faster than RollBackCmS. */
+	double RunawaySeconds = 0.0;
+	double RunawayCommand = 0.0;
+	/** The per-wheel crossing's speed trim (cm/s): an integral of the chassis
+	 *  speed's shortfall against its command (as the chassis can follow it),
+	 *  added to what the carrying driven wheels are asked -- the wheels' own
+	 *  speed loops hold no load without an error, which on a grade is the
+	 *  robot rolling away (RammsCurb::SpeedTrimStep). */
+	double SpeedTrim = 0.0;
+	/** The command as the measured speed follows it (two lag stages), started
+	 *  at the chassis' signed measured speed. */
+	double TrimFollowA = 0.0;
+	double TrimFollowB = 0.0;
+	/** The most the speed trim reached either way (cm/s); the most the chassis
+	 *  drifted off its line either way (cm). Logged. */
+	double MaxAbsSpeedTrim = 0.0;
+	double MaxAbsCrossTrackCm = 0.0;
+	/** The chassis' sideways distance (cm, towards its +Y) from the line the
+	 *  per-wheel crossing was planned along, and the heading correction it
+	 *  asks (rad, the sense of HeadingErrorRad). */
+	double CrossTrackCm = 0.0;
+	double CrossTrackSteerRad = 0.0;
+	/** The chassis origin (world xy) where the crossing began: the line the
+	 *  cross-track correction holds runs from it along Heading. */
+	FVector2D CrossTrackOrigin = FVector2D::ZeroVector;
+	/** The sideways speed asked (cm/s, towards +Y) and its integral (cm/s);
+	 *  whether carrying driven wheels on both sides roll partly sideways (omni
+	 *  hubs turned more than LateralAuthorityShare off the heading), as of the
+	 *  last wheel command -- through one side alone the sideways speed would
+	 *  turn the robot, so it is asked only then. */
+	double					LateralCmd = 0.0;
+	double					LateralTrim = 0.0;
+	bool					bLateralDriven = false;
+	static constexpr double LateralAuthorityShare = 0.2;
+	/** The surface under the chassis slopes (any way) more than
+	 *  RammsCurb::SpeedTrimGradeDeg: the fallback wheels drive too whenever they
+	 *  carry. */
+	bool  bSlopedDrive = false;
+	int32 CountedHolds = 0;
+	int32 CountedPlannedStops = 0;
+	/** While the far side is unconfirmed: where (chassis travel along the plan,
+	 *  cm) the robot must come to rest -- short of the first lift. */
+	double PerWheelCommitS = 0.0;
+
+	/** BeginNegotiation with the per-wheel gait: a robot at rest is planned in
+	 *  the call (refusing at once); one on the move (or rolling back) off the
+	 *  game thread. The plan's own fallback chain decides what runs: level,
+	 *  else its least tilt within MaxPlannedTiltDeg, else a level planned stop,
+	 *  else a refusal. */
+	bool BeginPerWheel(const FRammsCurbProfile& Profile, FString& OutReason);
+	/** The per-axle crossing (BuildPlan done): take the robot over and start. */
+	void StartPerAxleCrossing(const FRammsCurbProfile& Profile);
+	/** What every crossing does as it starts: the drive mode, the clocks, the
+	 *  run stats (with the plan's figures), the looks again. */
+	void StartCrossingCommon(const FRammsCurbProfile& Profile, float PlannedMinSpeedCmS, float PlannedTiltDeg,
+		float PlannedSeconds);
+	/** The per-wheel crossing on *Schedule, made from Input: the executor
+	 *  begins from the robot as it is measured. */
+	bool StartPerWheelRun(const RammsCurb::FPlannerInput& Input, FString& OutReason);
+	/** The planner's input from the robot as measured now and ActiveTerrain
+	 *  (PreparePerWheel's last part, without its checks and resets). */
+	void FillPlannerInput(RammsCurb::FPlannerInput& Out);
+	/** One tick of the per-wheel crossing. */
+	void StepPerWheel(float DeltaTime);
+	/** The executor's measurement from the controller's. */
+	void GatherExecMeasure(float DeltaTime, RammsCurb::FExecMeasure& Out) const;
+	/** While the plan of a crossing begun on the move is being made: each
+	 *  wheel's braking cap short of its window (cm/s). */
+	float AwaitingBrakingCap() const;
+	/** The per-wheel crossing's plan arrived off the game thread: run it, or
+	 *  fault with the plan's refusal. */
+	void TakeCrossingPlan();
+	/** The per-wheel crossing's re-plan arrived: adopt it if no wheel has begun
+	 *  to cross. */
+	void TakePerWheelReplan();
+	/** Launch a re-plan of the per-wheel crossing on ActiveTerrain. */
+	void LaunchPerWheelReplan(const FString& Why);
+	/** Send each leg the executor's command (a 5-bar's partial move taken back
+	 *  to the executor). */
+	void CommandPerWheelLegs(const TArray<double>& LegZ, const TArray<double>& LegX);
 };

@@ -36,6 +36,28 @@ namespace RammsCurb
 	constexpr float RiseDropCmS = 2.0f;
 
 	/**
+	 * The base's inclination from level (deg) at a pitch and a roll (deg): the
+	 * angle its plane makes with the horizontal, atan(sqrt(tan^2 pitch +
+	 * tan^2 roll)) -- its total tilt, whichever way it leans. Pitch and roll
+	 * are the elevations of its forward and +Y axes as ChassisFrameFrom builds
+	 * them (the plane through both rises tan pitch along the heading and
+	 * tan roll across it). What MaxPlannedTiltDeg and MaxTiltDeg bound.
+	 */
+	inline double InclinationDeg(double PitchDeg, double RollDeg)
+	{
+		const double Tp = FMath::Tan(FMath::DegreesToRadians(PitchDeg));
+		const double Tr = FMath::Tan(FMath::DegreesToRadians(RollDeg));
+		return FMath::RadiansToDegrees(FMath::Atan(FMath::Sqrt(Tp * Tp + Tr * Tr)));
+	}
+
+	/** Whether a measured attitude is past the safety limit MaxTiltDeg: its
+	 *  inclination over it, whichever way it leans (not pitch or roll each). */
+	inline bool OverMaxTilt(double PitchDeg, double RollDeg, double MaxTiltDeg)
+	{
+		return InclinationDeg(PitchDeg, RollDeg) > MaxTiltDeg;
+	}
+
+	/**
 	 * The chassis' ground speed along its heading, over the last
 	 * SpeedWindowSeconds of samples.
 	 */
@@ -131,6 +153,10 @@ namespace RammsCurb
 		/** One controller tick, every one from Begin to the one that ends the
 		 *  crossing. After End nothing counts. */
 		void Tick(const FRunTick& In);
+
+		/** The plan's figures, for a plan that came after Begin (one made off the
+		 *  game thread for a crossing begun on the move). */
+		void SetPlan(float PlannedMinSpeed, float PlannedMaxTiltDeg, float PlannedCrossingSeconds, TOptional<float> PlannedMinMarginCm);
 
 		/** The gait stopped, held or re-planned on purpose. */
 		void AddPlannedStop();

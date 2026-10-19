@@ -348,6 +348,12 @@ bool FRammsCurbRunStatsAttitudeAndEnd::RunTest(const FString& Parameters)
 	const FRammsCurbRunStats& S = Tracker.Get();
 	TestEqual(TEXT("largest |pitch|"), S.MaxAbsPitchDeg, 2.8f);
 	TestEqual(TEXT("largest |roll|"), S.MaxAbsRollDeg, 3.1f);
+	// The largest inclination is the most inclined tick's (-1.2 pitch, -3.1
+	// roll: 3.32 deg), not the larger axis of either tick, nor the largest
+	// pitch and roll taken together (2.8 and 3.1: 4.18).
+	TestEqual(TEXT("largest inclination, of the most inclined tick"), S.MaxInclinationDeg,
+		static_cast<float>(RammsCurb::InclinationDeg(-1.2, -3.1)), 1e-5f);
+	TestTrue(TEXT("more than its larger axis"), S.MaxInclinationDeg > 3.3f && S.MaxInclinationDeg < 3.35f);
 	TestEqual(TEXT("attitude error only where an attitude is planned"), S.MaxAttitudeErrorDeg, 3.1f);
 	TestEqual(TEXT("least swing clearance, from the ticks that measured one"), S.MinSwingClearanceCm, 2.5f);
 	TestEqual(TEXT("least measured margin, from the ticks that measured one"), S.MinMeasuredMarginCm, 9.0f);
@@ -366,6 +372,7 @@ bool FRammsCurbRunStatsAttitudeAndEnd::RunTest(const FString& Parameters)
 	Tracker.AddPlannedStop();
 	Tracker.End(Feed.Elapsed, 5.0f, 5.0f);
 	TestEqual(TEXT("no tilt after the end"), Tracker.Get().MaxAbsPitchDeg, 2.8f);
+	TestTrue(TEXT("nor inclination"), Tracker.Get().MaxInclinationDeg < 3.35f);
 	TestEqual(TEXT("no stop after the end"), Tracker.Get().Stops, 0);
 	TestEqual(TEXT("no planned stop after the end"), Tracker.Get().PlannedStops, 0);
 	TestEqual(TEXT("the first end stands"), Tracker.Get().FinalPitchDeg, 0.3f);
@@ -385,6 +392,8 @@ bool FRammsCurbRunStatsAttitudeAndEnd::RunTest(const FString& Parameters)
 	Tracker.End(Again.Elapsed, -12.5f, 4.0f);
 	TestEqual(TEXT("the faulting pitch is the largest"), Tracker.Get().MaxAbsPitchDeg, 12.5f);
 	TestEqual(TEXT("and the faulting roll"), Tracker.Get().MaxAbsRollDeg, 4.0f);
+	TestEqual(TEXT("and the faulting inclination"), Tracker.Get().MaxInclinationDeg, static_cast<float>(RammsCurb::InclinationDeg(-12.5, 4.0)),
+		1e-5f);
 
 	// Standing still is no reason to miss a tilt, a lagging leg or a poor
 	// margin: those count from Begin, only the speeds wait for motion.
@@ -402,6 +411,7 @@ bool FRammsCurbRunStatsAttitudeAndEnd::RunTest(const FString& Parameters)
 	TestFalse(TEXT("standing is not under way"), Standing.IsUnderWay());
 	TestEqual(TEXT("a tilt before first motion counts"), Standing.Get().MaxAbsPitchDeg, 9.5f);
 	TestEqual(TEXT("as does its roll"), Standing.Get().MaxAbsRollDeg, 2.0f);
+	TestEqual(TEXT("and its inclination"), Standing.Get().MaxInclinationDeg, static_cast<float>(RammsCurb::InclinationDeg(9.5, -2.0)), 1e-5f);
 	TestEqual(TEXT("a leg error before first motion counts"), Standing.Get().MaxLegErrorCm, 1.7f);
 	TestEqual(TEXT("a margin before first motion counts"), Standing.Get().MinMeasuredMarginCm, 4.5f);
 	TestEqual(TEXT("but no speed is counted"), Standing.Get().MinMeasuredSpeed, 0.0f);

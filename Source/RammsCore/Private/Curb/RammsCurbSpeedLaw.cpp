@@ -249,6 +249,57 @@ namespace RammsCurb
 		return Value + (Command - Value) * (1.0f - FMath::Exp(-FMath::Max(Dt, 0.0f) / Lag));
 	}
 
+	double SpeedTrimStep(double Trim, double CommandCmS, double CommandFollowedCmS, double MeasuredCmS, bool bMeasuredValid, bool bOnGrade,
+		double Dt)
+	{
+		if (Dt <= 0.0)
+		{
+			return Trim;
+		}
+		if (!bOnGrade)
+		{
+			return Trim * FMath::Exp(-Dt / SpeedTrimFadeSeconds);
+		}
+		if (!bMeasuredValid || FMath::Abs(CommandCmS - CommandFollowedCmS) > SpeedTrimSteadyCmS)
+		{
+			return Trim;
+		}
+		const double Error = FMath::Clamp(CommandFollowedCmS - MeasuredCmS, -SpeedTrimMaxErrorCmS, SpeedTrimMaxErrorCmS);
+		return FMath::Clamp(Trim + SpeedTrimGain * Error * Dt, -SpeedTrimMaxCmS, SpeedTrimMaxCmS);
+	}
+
+	double SpeedTrimUnderCap(double Trim, double MeasuredCmS, double CommandCmS, double CapCmS)
+	{
+		if (Trim <= 0.0 || MeasuredCmS <= CapCmS)
+		{
+			return Trim;
+		}
+		return FMath::Min(Trim, FMath::Max(0.0, CapCmS - CommandCmS));
+	}
+
+	double SpeedFollowStep(double& A, double& B, double CommandCmS, double Dt)
+	{
+		const double K = 1.0 - FMath::Exp(-FMath::Max(Dt, 0.0) / static_cast<double>(DriveLagSeconds));
+		A += (CommandCmS - A) * K;
+		B += (A - B) * K;
+		return B;
+	}
+
+	double CrossTrackSteer(double OffsetCm, double GainDegPerCm, double MaxDeg)
+	{
+		const double Most = FMath::Max(0.0, MaxDeg);
+		return FMath::DegreesToRadians(FMath::Clamp(-GainDegPerCm * OffsetCm, -Most, Most));
+	}
+
+	double LateralSpeed(double& Trim, double OffsetCm, bool bAuthority, double Dt)
+	{
+		if (bAuthority && Dt > 0.0)
+		{
+			Trim = FMath::Clamp(Trim - LateralTrimGain * OffsetCm * Dt, -LateralMaxCmS, LateralMaxCmS);
+		}
+		return FMath::Clamp(Trim - LateralGain * OffsetCm, -LateralMaxCmS, LateralMaxCmS);
+	}
+
 	double TurnAbout(const FQuat& From, const FQuat& To, const FVector& Axis)
 	{
 		// The world-frame turn from one to the other, the short way round.

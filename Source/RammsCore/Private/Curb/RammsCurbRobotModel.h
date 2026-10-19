@@ -75,6 +75,13 @@ namespace RammsCurb
 		/** The crank angle (rad) at Height, held at an end beyond it. */
 		double CrankAt(double Height) const;
 
+		/** The table as it is, to an archive and back (development: a plan's
+		 *  input replayed off the game). */
+		friend FArchive& operator<<(FArchive& Ar, FFourBarTable& Table)
+		{
+			return Ar << Table.Z << Table.X << Table.Crank;
+		}
+
 	private:
 		double Interpolate(const TArray<double>& Values, double Height) const;
 
@@ -114,6 +121,12 @@ namespace RammsCurb
 
 		/** How many cells are reachable. */
 		int32 CountReachable() const;
+
+		/** The grid as it is, to an archive and back (development). */
+		friend FArchive& operator<<(FArchive& Ar, FFiveBarGrid& Grid)
+		{
+			return Ar << Grid.Cells << Grid.Origin << Grid.XStep << Grid.ZStep << Grid.NumX << Grid.NumZ;
+		}
 
 	private:
 		bool Cell(int32 I, int32 J) const { return Cells[J * NumX + I]; }

@@ -760,4 +760,200 @@ bool FRammsCurbSpeedLawCarrierTurn::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace
+{
+	/** What a made-up robot on a grade did under the speed trim. */
+	struct FTrimRun
+	{
+		double MinSpeed = 1e9;
+		double MaxSpeed = -1e9;
+		double SpeedAtEnd = 0.0;
+		double TrimAtEnd = 0.0;
+		double MostTrim = 0.0;
+		/** The largest |speed - command| over the last 2 s. */
+		double LateError = 0.0;
+	};
+
+	/**
+	 * A made-up robot whose wheels' speed loops carry load only with a speed
+	 * error: its speed follows the wheel command plus GradeCmS (the speed error
+	 * its weight along the slope needs, positive downhill) as a first-order lag
+	 * of 0.3 s (the controller takes 0.15: the trim must not need its model
+	 * to be right). The speed is measured through 0.15 s of lag (half a 0.3 s
+	 * window); the command as the chassis can follow it is SpeedFollowStep's.
+	 * The command brakes from From to To at 60 cm/s^2 and holds; the trim
+	 * (when bTrim) is added to the wheels, kept under CapCmS (a hard braking
+	 * cap) as the controller keeps it. The robot starts at From (signed: a
+	 * robot rolling back), the command at no less than 0 (the controller's
+	 * drive speed is never below 0), the follower at the robot's speed.
+	 */
+	FTrimRun RunTrim(double GradeCmS, double From, double To, double Seconds, bool bTrim, double PlantLag = 0.3,
+		double CapCmS = TNumericLimits<double>::Max())
+	{
+		FTrimRun	 R;
+		const double Dt = 0.002;
+		double		 Speed = From, Measured = From, FollowA = From, FollowB = From, Command = FMath::Max(0.0, From), Trim = 0.0;
+		for (double T = 0.0; T < Seconds; T += Dt)
+		{
+			Command = RammsCurb::RampSpeed(static_cast<float>(Command), static_cast<float>(To), Accel, Decel, static_cast<float>(Dt));
+			const double Followed = RammsCurb::SpeedFollowStep(FollowA, FollowB, Command, Dt);
+			if (bTrim)
+			{
+				Trim = RammsCurb::SpeedTrimStep(Trim, Command, Followed, Measured, true, /*bOnGrade=*/true, Dt);
+				Trim = RammsCurb::SpeedTrimUnderCap(Trim, Measured, Command, CapCmS);
+			}
+			Speed += (Command + Trim + GradeCmS - Speed) * Dt / PlantLag;
+			Measured += (Speed - Measured) * Dt / 0.15;
+			if (T > 1.0)
+			{
+				R.MinSpeed = FMath::Min(R.MinSpeed, Speed);
+			}
+			R.MaxSpeed = FMath::Max(R.MaxSpeed, Speed);
+			if (T > Seconds - 2.0)
+			{
+				R.LateError = FMath::Max(R.LateError, FMath::Abs(Speed - Command));
+			}
+			R.MostTrim = FMath::Max(R.MostTrim, FMath::Abs(Trim));
+		}
+		R.SpeedAtEnd = Speed;
+		R.TrimAtEnd = Trim;
+		return R;
+	}
+} // namespace
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawSpeedTrim,
+	"Ramms.Curb.SpeedLaw.SpeedTrim",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSpeedLawSpeedTrim::RunTest(const FString& Parameters)
+{
+	// Down a grade whose weight needs 30 cm/s of speed error in the wheels'
+	// loops: asked to stop, the robot without the trim rolls on at 30 cm/s;
+	// with it, it comes to rest and stays there, the trim carrying the grade.
+	const FTrimRun Bare = RunTrim(30.0, 30.0, 0.0, 8.0, false);
+	TestEqual(TEXT("without the trim the robot asked to stop rolls on at the grade's error"), Bare.SpeedAtEnd, 30.0, 0.5);
+	const FTrimRun Held = RunTrim(30.0, 30.0, 0.0, 8.0, true);
+	TestTrue(FString::Printf(TEXT("with it, at rest within 1 cm/s over the last 2 s (%.2f)"), Held.LateError), Held.LateError <= 1.0);
+	TestEqual(TEXT("the trim ends carrying the grade"), Held.TrimAtEnd, -30.0, 1.0);
+	TestTrue(FString::Printf(TEXT("and it does not drive the robot back up the grade much on the way (least %.2f cm/s)"), Held.MinSpeed),
+		Held.MinSpeed >= -6.0);
+	// Up the grade, asked to hold 20 cm/s: it holds it.
+	const FTrimRun Climb = RunTrim(-25.0, 20.0, 20.0, 8.0, true);
+	TestTrue(FString::Printf(TEXT("up a grade at 20 cm/s within 1 cm/s over the last 2 s (%.2f)"), Climb.LateError), Climb.LateError <= 1.0);
+	// Rolling back up a grade at 50 cm/s when the crossing takes the wheels
+	// (the command 0, never below), its weight along the grade needing 5 to
+	// 25 cm/s of speed error: the chassis comes to rest without the trim
+	// winding up on its recovery and then driving it forward -- about 1 cm/s
+	// at most forward with the chassis lagging as the follower takes it, and
+	// no more than 2 with a lag two thirds longer than that.
+	for (const double Grade : { -5.0, -13.0, -25.0 })
+	{
+		const FTrimRun Back = RunTrim(Grade, -50.0, 0.0, 8.0, true, 0.3);
+		TestTrue(FString::Printf(TEXT("from a roll back at 50 cm/s, grade error %.0f: at most %.2f cm/s forward"), Grade, Back.MaxSpeed),
+			Back.MaxSpeed <= 1.0);
+		TestTrue(FString::Printf(TEXT("and held at rest over the last 2 s (%.2f)"), Back.LateError), Back.LateError <= 1.0);
+		const FTrimRun Slower = RunTrim(Grade, -50.0, 0.0, 8.0, true, 0.5);
+		TestTrue(FString::Printf(TEXT("a slower chassis (0.5 s), grade error %.0f: at most %.2f cm/s forward"), Grade, Slower.MaxSpeed),
+			Slower.MaxSpeed <= 2.0);
+	}
+	// Under a hard braking cap of 0 (a wheel at its window), the trim never
+	// takes the chassis forward: it holds the robot against the grade while it
+	// rolls back, and goes as soon as the chassis runs forward.
+	for (const double Grade : { -5.0, -13.0, -25.0 })
+	{
+		const FTrimRun Capped = RunTrim(Grade, -50.0, 0.0, 8.0, true, 0.3, /*CapCmS=*/0.0);
+		TestTrue(FString::Printf(TEXT("under a cap of 0, grade error %.0f: at most %.3f cm/s forward"), Grade, Capped.MaxSpeed), Capped.MaxSpeed <= 0.25);
+	}
+	TestEqual(TEXT("over the cap: the trim forward cut to the room under it"), RammsCurb::SpeedTrimUnderCap(12.0, 16.0, 10.0, 15.0), 5.0, 1e-12);
+	TestEqual(TEXT("over a cap of 0: none forward"), RammsCurb::SpeedTrimUnderCap(12.0, 1.0, 0.0, 0.0), 0.0, 1e-12);
+	TestEqual(TEXT("under the cap: left alone"), RammsCurb::SpeedTrimUnderCap(12.0, 14.0, 10.0, 15.0), 12.0, 1e-12);
+	TestEqual(TEXT("rolling back under a cap of 0: left alone"), RammsCurb::SpeedTrimUnderCap(12.0, -3.0, 0.0, 0.0), 12.0, 1e-12);
+	TestEqual(TEXT("backward trim left alone"), RammsCurb::SpeedTrimUnderCap(-8.0, 20.0, 10.0, 10.0), -8.0, 1e-12);
+	// One tick integrates no more than SpeedTrimMaxErrorCmS of shortfall.
+	TestEqual(TEXT("a large shortfall integrated at most SpeedTrimMaxErrorCmS a tick"), RammsCurb::SpeedTrimStep(0.0, 0.0, 0.0, -50.0, true, true, 0.1),
+		RammsCurb::SpeedTrimGain * RammsCurb::SpeedTrimMaxErrorCmS * 0.1, 1e-12);
+	// On flat ground, speeding up to 20 cm/s: the trim only takes up the
+	// difference between the chassis' lag and its model, and goes again.
+	const FTrimRun Flat = RunTrim(0.0, 0.0, 20.0, 6.0, true);
+	TestTrue(FString::Printf(TEXT("on flat ground the trim stays small (most %.2f cm/s)"), Flat.MostTrim), Flat.MostTrim <= 4.0);
+	TestTrue(FString::Printf(TEXT("and goes again (%.3f cm/s at the end)"), Flat.TrimAtEnd), FMath::Abs(Flat.TrimAtEnd) <= 0.2);
+	// Bounded; held while the speed is not measured.
+	TestEqual(TEXT("bounded"), RammsCurb::SpeedTrimStep(0.0, 1000.0, 1000.0, 0.0, true, true, 10.0), RammsCurb::SpeedTrimMaxCmS, 1e-9);
+	TestEqual(TEXT("bounded the other way"), RammsCurb::SpeedTrimStep(0.0, -1000.0, -1000.0, 0.0, true, true, 10.0), -RammsCurb::SpeedTrimMaxCmS, 1e-9);
+	TestEqual(TEXT("held while the speed is not measured"), RammsCurb::SpeedTrimStep(-7.0, 20.0, 20.0, 0.0, false, true, 0.1), -7.0, 1e-12);
+	TestEqual(TEXT("held while the command ramps (the chassis' own lag)"), RammsCurb::SpeedTrimStep(-7.0, 20.0, 25.0, 0.0, true, true, 0.1), -7.0, 1e-12);
+	// Off a grade it never grows -- a shortfall there is a wheel held back,
+	// which more drive would only fight -- and fades.
+	TestEqual(TEXT("off a grade: no integral"), RammsCurb::SpeedTrimStep(0.0, 20.0, 20.0, 5.0, true, false, 0.1), 0.0, 1e-12);
+	TestEqual(TEXT("off a grade: it fades over SpeedTrimFadeSeconds"), RammsCurb::SpeedTrimStep(-20.0, 20.0, 20.0, 20.0, true, false, RammsCurb::SpeedTrimFadeSeconds),
+		-20.0 / UE_DOUBLE_EULERS_NUMBER, 1e-6);
+	// A dip of the command on flat ground (35 to 13 cm/s and back to 17, as a
+	// lift's deadline asks): the trim does not deepen the dip the chassis'
+	// lag makes on its own by more than 0.5 cm/s.
+	{
+		auto Dip = [](bool bTrim) {
+			const double Dt = 0.002;
+			double		 Speed = 35.0, Measured = 35.0, A = 35.0, B = 35.0, Command = 35.0, Trim = 0.0, Least = 1e9;
+			for (double T = 0.0; T < 6.0; T += Dt)
+			{
+				const double To = T < 2.0 ? 35.0 : (T < 3.5 ? 13.0 : 17.0);
+				Command = RammsCurb::RampSpeed(static_cast<float>(Command), static_cast<float>(To), Accel, Decel, static_cast<float>(Dt));
+				const double Followed = RammsCurb::SpeedFollowStep(A, B, Command, Dt);
+				if (bTrim)
+				{
+					Trim = RammsCurb::SpeedTrimStep(Trim, Command, Followed, Measured, true, /*bOnGrade=*/true, Dt);
+				}
+				Speed += (Command + Trim - Speed) * Dt / 0.3;
+				Measured += (Speed - Measured) * Dt / 0.15;
+				Least = FMath::Min(Least, Measured);
+			}
+			return Least;
+		};
+		const double Plain = Dip(false), Trimmed = Dip(true);
+		TestTrue(FString::Printf(TEXT("a dip: least measured %.2f cm/s with the trim, %.2f without"), Trimmed, Plain), Trimmed >= Plain - 0.5);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawCrossTrack,
+	"Ramms.Curb.SpeedLaw.CrossTrack",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSpeedLawCrossTrack::RunTest(const FString& Parameters)
+{
+	// The heading correction: back towards the line, 0.1 deg per cm, at most
+	// 3 deg; none with no gain.
+	TestEqual(TEXT("5 cm to +Y: turn 0.5 deg towards -Y"), RammsCurb::CrossTrackSteer(5.0, 0.1, 3.0), FMath::DegreesToRadians(-0.5), 1e-9);
+	TestEqual(TEXT("8 cm to -Y: turn 0.8 deg towards +Y"), RammsCurb::CrossTrackSteer(-8.0, 0.1, 3.0), FMath::DegreesToRadians(0.8), 1e-9);
+	TestEqual(TEXT("at most 3 deg"), RammsCurb::CrossTrackSteer(100.0, 0.1, 3.0), FMath::DegreesToRadians(-3.0), 1e-9);
+	TestEqual(TEXT("no gain, no turn"), RammsCurb::CrossTrackSteer(100.0, 0.0, 3.0), 0.0, 1e-12);
+
+	// The sideways speed: a chassis pushed sideways at 8 cm/s (a cross slope
+	// on omni wheels) from on its line, its sideways speed following the
+	// command through 0.3 s of lag: it stays within a few cm of the line and
+	// comes back onto it, the integral carrying the push.
+	{
+		const double Dt = 0.002, Push = 8.0;
+		double		 Y = 0.0, Vy = 0.0, Trim = 0.0, Most = 0.0;
+		for (double T = 0.0; T < 15.0; T += Dt)
+		{
+			const double Cmd = RammsCurb::LateralSpeed(Trim, Y, true, Dt);
+			Vy += (Cmd + Push - Vy) * Dt / 0.3;
+			Y += Vy * Dt;
+			Most = FMath::Max(Most, FMath::Abs(Y));
+		}
+		TestTrue(FString::Printf(TEXT("pushed sideways at 8 cm/s it strays at most 6 cm (%.2f)"), Most), Most <= 6.0);
+		TestTrue(FString::Printf(TEXT("and comes back onto its line (%.3f cm)"), Y), FMath::Abs(Y) <= 0.5);
+		TestEqual(TEXT("the integral carries the push"), Trim, -Push, 0.5);
+	}
+	// Without wheels to roll it sideways the integral holds; bounded.
+	{
+		double Trim = 3.0;
+		TestEqual(TEXT("no authority: only the offset's term"), RammsCurb::LateralSpeed(Trim, 2.0, false, 0.1), 3.0 - RammsCurb::LateralGain * 2.0, 1e-9);
+		TestEqual(TEXT("and the integral held"), Trim, 3.0, 1e-12);
+		TestEqual(TEXT("bounded"), RammsCurb::LateralSpeed(Trim, -1000.0, true, 0.1), RammsCurb::LateralMaxCmS, 1e-9);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
