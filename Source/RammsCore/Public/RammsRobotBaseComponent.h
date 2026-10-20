@@ -166,6 +166,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	float GetMotorVelocity(FName MotorId) const;
 
+	/** Whether the backend simulates this motor's joint as a joint -- its angle
+	 *  reported by GetMotorValue and a Torque command applied in N.m
+	 *  (IRammsActuationBackend::SimulatesMotorJoint); false without a backend.
+	 *  A controller closing its own loop on a wheel's angle checks this first. */
+	bool SimulatesMotorJoint(FName MotorId) const;
+
 	/** True if the registry contains a motor with this Id. */
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool HasMotor(FName MotorId) const;

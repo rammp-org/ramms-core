@@ -28,11 +28,13 @@ struct RAMMSCORE_API FRammsOmniWheelSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
 	FName MotorId;
 
-	/** Chassis-relative position, cm. X forward, Y left. */
+	/** Chassis-relative position, cm. X forward, Y to the robot's right
+	 *  (Unreal's sense, as FRammsDriveMotion and the drive command use). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
 	FVector2D Position = FVector2D::ZeroVector;
 
-	/** Heading the wheel rolls along, degrees CCW from chassis forward. */
+	/** Heading the wheel rolls along, degrees from chassis forward towards
+	 *  +Y (the robot's right). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Holonomic")
 	float RollDirectionDeg = 0.0f;
 

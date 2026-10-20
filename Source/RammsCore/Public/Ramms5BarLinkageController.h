@@ -123,8 +123,8 @@ private:
 public:
 	/** Endpoint heights (cm) the control surface offers for this linkage. Leave
 	 *  zero-width (the default) to derive it from the mechanism: the heights at
-	 *  the linkage's current X that the IK and the two motors' ControlRanges
-	 *  reach (see GetReachableHeightRange). */
+	 *  the linkage's current X that the IK (knee ranges included) and the two
+	 *  motors' ControlRanges reach (see GetReachableHeightRange). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|5-Bar")
 	FVector2D EndpointHeightRange = FVector2D::ZeroVector;
 
@@ -145,10 +145,11 @@ private:
 	 * interval reachable at it.
 	 *
 	 * Measured on a grid rather than by walking outward from the live pose.
-	 * Whether a point is reachable is pure IK plus the motors' authored
-	 * ranges -- nothing about where the linkage is standing enters into it --
-	 * but a scan seeded from the live endpoint can only find the interval
-	 * CONTAINING that endpoint, so rows far from the current pose were failing
+	 * Whether a point is reachable is pure IK (the spec's knee ranges
+	 * included) plus the motors' authored ranges -- nothing about where the
+	 * linkage is standing enters into it -- but a scan seeded from the live
+	 * endpoint can only find the interval CONTAINING that endpoint, so rows
+	 * far from the current pose were failing
 	 * to find their seed and being dropped. That made the region shrink and
 	 * change shape with the drive mode's stance: the lift-drive published a
 	 * region 8 cm shorter, with its peak cut off, in a raised stance than in a
@@ -159,8 +160,9 @@ private:
 
 	/** The measured region, kept once it has been measured.
 	 *
-	 *  Reachability is the spec and the motors' authored ranges, neither of
-	 *  which changes while the game runs, so measuring is a one-off. It is
+	 *  Reachability is the spec (knee ranges included) and the motors'
+	 *  authored ranges, neither of which changes while the game runs, so
+	 *  measuring is a one-off. It is
 	 *  asked for three times per surface rebuild -- once for each extent and
 	 *  once for the outline -- and each measurement is thousands of IK solves,
 	 *  which is what makes a finer scan affordable at all. */

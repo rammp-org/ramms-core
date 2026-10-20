@@ -24,9 +24,11 @@ public:
 	 * Inverse kinematics: the two proximal joint angles (FVector2D(A, B), rad)
 	 * that place the shared endpoint at TargetXZ. bReachable is false when either
 	 * arm can't reach (the returned angles then clamp that arm as close as it
-	 * gets) or when the pair is not a pose the assembled mechanism can hold at
+	 * gets), when the pair is not a pose the assembled mechanism can hold at
 	 * the target (checked with ComputeEndpoint: mirrored assembly, knee past
-	 * straight); callers should gate commanding on it.
+	 * straight), or when a knee would have to bend outside the spec's
+	 * DistalRangeA/B (the angles are still the solution, so a caller can see
+	 * what was asked); callers should gate commanding on it.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	static FVector2D SolveIK(const FRamms5BarLinkageSpec& Spec, FVector2D TargetXZ, bool& bReachable);
@@ -38,7 +40,9 @@ public:
 	 * returned is then the closest-approach midpoint) or a passive knee would
 	 * have to bend past straight (the geometric intersection is returned, but
 	 * it is not a pose of the assembled mechanism). Live joint readings always
-	 * produce valid poses; the flag matters for hypothetical angle pairs.
+	 * produce valid poses; the flag matters for hypothetical angle pairs. The
+	 * knee ranges (DistalRangeA/B) are not checked here: a live reading
+	 * pressed a little past a knee stop is still where the linkage is.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	static FVector2D ComputeEndpoint(const FRamms5BarLinkageSpec& Spec, FVector2D JointAnglesAB, bool& bValid);

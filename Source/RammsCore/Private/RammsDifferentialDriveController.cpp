@@ -4,6 +4,7 @@
 
 #include "RammsControlIds.h"
 #include "RammsDifferentialDriveLibrary.h"
+#include "RammsDriveHandOver.h"
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
@@ -18,6 +19,12 @@ URammsDifferentialDriveController::URammsDifferentialDriveController()
 	// the robot is standing on them.
 	PlantedStance.bHasLinkageHeight = true;
 	PlantedStance.LinkageHeightCm = 12.7f;
+
+	Carry = MakePimpl<RammsDrive::FCarry>();
+	HoldLeft = MakePimpl<RammsDrive::FTorqueHold>();
+	HoldRight = MakePimpl<RammsDrive::FTorqueHold>();
+	LeftAngleSource = MakePimpl<RammsDrive::FWheelAngle>();
+	RightAngleSource = MakePimpl<RammsDrive::FWheelAngle>();
 }
 
 void URammsDifferentialDriveController::BeginPlay()
@@ -153,6 +160,68 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	UpdateWheelState(LeftMotorId, LeftWheelBoneName, LeftWheelState);
 	UpdateWheelState(RightMotorId, RightWheelBoneName, RightWheelState);
 
+	const double T = Now();
+	double		 Dt = 0.0;
+	if (RammsDrive::AdvanceHoldClock(T, FirstTickTime, LastTickTime, Dt))
+	{
+		// The simulation was reset: the robot is back at its start pose, every
+		// wheel's angle with it, and nothing held before stands.
+		ResetHoldState();
+	}
+	// Each drive wheel's angle, for holding it still: the backend's reading
+	// while it follows the wheel's rate, else the rate integrated.
+	const bool bCanHold = CanHoldWithTorque();
+	if (bCanHold)
+	{
+		LeftAngle = LeftAngleSource->Update(BaseComponent->GetMotorValue(LeftMotorId), LeftWheelState.AngularVelocity, Dt);
+		RightAngle = RightAngleSource->Update(BaseComponent->GetMotorValue(RightMotorId), RightWheelState.AngularVelocity, Dt);
+	}
+	{
+		const double Share = Dt > 0.0 ? FMath::Min(1.0, Dt / HoldRateSmoothSeconds) : 1.0;
+		SmoothLeftRate += Share * (LeftWheelState.AngularVelocity - SmoothLeftRate);
+		SmoothRightRate += Share * (RightWheelState.AngularVelocity - SmoothRightRate);
+	}
+	if (ReleaseElapsed >= 0.0)
+	{
+		ReleaseElapsed += Dt;
+		if (ReleaseElapsed >= HoldReleaseSeconds)
+		{
+			ReleaseElapsed = -1.0;
+		}
+	}
+	CarryWeight = 0.0f;
+	bool bCarryGrace = false;
+	if (bDriveModeActive && Carry && Carry->bActive)
+	{
+		// A motion handed over on a switch: held while the stance changes and
+		// the operator holds the stick where it was, then faded out (see
+		// AddCarryTorque). The first tick is the operator's to be heard on.
+		bCarryGrace = bFirstCarryTick;
+		bFirstCarryTick = false;
+		const bool bCommanding = IsOperatorCommanding();
+		if (bCommanding && !bCarryInputSet)
+		{
+			CarryInput = DriveInput;
+			bCarryInputSet = true;
+		}
+		if (!bCommanding && !bCarryGrace)
+		{
+			// Nobody driving: speed carries across a switch, it does not keep
+			// a robot moving that nobody is driving.
+			EndCarry();
+		}
+		else
+		{
+			const bool bAsBefore = !bCarryInputSet || (DriveInput - CarryInput).GetAbsMax() <= CarryInputTolerance;
+			Carry->Step(Dt, bCarryGrace || bAsBefore);
+			CarryWeight = Carry->bHolding ? 1.0f : static_cast<float>(1.0 - RammsDrive::CarryBlend(Carry->SinceHold, CarryFadeSeconds));
+			if (CarryWeight <= 0.0f)
+			{
+				EndCarry();
+			}
+		}
+	}
+
 	// Actuate only while this is the live drive mode. Zeroing the input on
 	// stand-down is not enough on its own: the braking and control paths run
 	// every frame regardless of what was commanded, so an inactive controller
@@ -160,10 +229,54 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	// the raw per-motor axes the low-level mode hands out. Wheel state and
 	// odometry above and below this still update, so the estimate stays live
 	// while another mode drives.
-	if (bDriveModeActive)
+	//
+	// Holding still (bHoldWhenIdle): with the input at centre each drive wheel
+	// braked to rest and held where it stopped -- not while its wheels are
+	// still going down (HoldForStance: in the air the hold's gains, set for a
+	// loaded wheel, would spin it), and not on a carry's first tick, which is
+	// its operator's to be heard on. The input off centre lets go, the holding
+	// torque fading into the control mode's.
+	const bool bHold = bDriveModeActive && bHoldWhenIdle && bCanHold && RammsDrive::HoldWhenIdleEnabled() && !bHeldForStance
+		&& !IsOperatorCommanding() && !bCarryGrace && T - FirstTickTime >= RammsDrive::SpawnSettleSeconds;
+	if (!bHold && !(bHoldInactive && !bDriveModeActive) && (HoldLeft->bActive || HoldRight->bActive))
 	{
-		// Check for braking
-		bIsBraking = ShouldApplyBrakes();
+		ReleaseHold();
+	}
+	if (bHold)
+	{
+		if (!HoldLeft->bActive || !HoldRight->bActive)
+		{
+			// Braked straight: both sides from the robot's forward rate (their
+			// mean), not each from its own -- with nobody driving, a turn the
+			// robot was making stops at once rather than running on while it
+			// brakes. Begun on a hand-back that told it the ground
+			// (SeedGroundSlope), the slope's pull is held from the start, not
+			// found as the robot sags back, and the braking is eased to rest
+			// (FTorqueHold::bEaseToRest): stopped short, the loop rolls the
+			// robot back a little after it stops.
+			const double Forward = 0.5 * (SmoothLeftRate + SmoothRightRate);
+			const bool	 bHandedOver = SeedExpires >= 0.0 && T <= SeedExpires;
+			const double Seed = bHandedOver ? SeedTorque : 0.0;
+			BeginHold(Forward, Forward, Seed, Seed, bHandedOver);
+			SeedExpires = -1.0;
+			ReleaseElapsed = -1.0;
+		}
+		bIsBraking = true;
+		StepHold(Dt);
+	}
+	else if (bDriveModeActive && bHeldForStance)
+	{
+		// Its wheels are still going down (HoldForStance): drive nothing. A
+		// tread spun up in the air touches down spinning.
+		bIsBraking = false;
+		ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, 0.0f, LeftMotorParams, LeftWheelState);
+		ApplyWheelTorque(RightMotorId, RightWheelBoneName, 0.0f, RightMotorParams, RightWheelState);
+	}
+	else if (bDriveModeActive)
+	{
+		// Check for braking -- not on a carry's first tick, which is its
+		// operator's to be heard on.
+		bIsBraking = !bCarryGrace && ShouldApplyBrakes();
 
 		if (bIsBraking)
 		{
@@ -183,6 +296,17 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 					break;
 			}
 		}
+	}
+	else if (bHoldInactive)
+	{
+		// Stood down at rest while the next mode's wheels go down: these still
+		// carry the robot, held where they are (again where a reset put them).
+		if (!HoldLeft->bActive || !HoldRight->bActive)
+		{
+			BeginHold(SmoothLeftRate, SmoothRightRate, 0.0, 0.0);
+		}
+		bIsBraking = true;
+		StepHold(Dt);
 	}
 	else
 	{
@@ -478,6 +602,8 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 	RightWheelState.TargetAngularVelocity = Command.RightCommand;
 
 	// Apply torques to wheels
+	AddCarryTorque(LeftTorque, RightTorque);
+	AddReleaseTorque(LeftTorque, RightTorque);
 	ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
 	ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
 }
@@ -521,8 +647,196 @@ void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
 	}
 
 	// Apply torques to wheels
+	AddCarryTorque(LeftTorque, RightTorque);
+	AddReleaseTorque(LeftTorque, RightTorque);
 	ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
 	ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+}
+
+void URammsDifferentialDriveController::StepHold(double DeltaSeconds)
+{
+	// The wheel's share of the robot about its axle: half the mass at the
+	// wheel's radius. The loop's gains follow from it (RammsDrive::TorqueHoldGains).
+	const double Radius = FMath::Max(WheelRadius, 1.0f);
+	const double Inertia = 0.5 * FMath::Max(VehicleMass, 1.0f) * FMath::Square(Radius / 100.0);
+	// A brake, not a drive: with a robot base the hold may use the whole torque
+	// the actuator takes (its registry range), not only the MaxTorque the stick
+	// scales to -- a slope's pull on a wheel can be more than that. Without
+	// one, the motor model's.
+	const auto HoldTorque = [this](FName MotorId, const FMotorParameters& Motor) {
+		double			Most = Motor.MaxTorque * TorqueMultiplier;
+		FRammsMotorSpec Spec;
+		if (UsesBase() && BaseComponent->GetMotorSpec(MotorId, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
+		{
+			Most = FMath::Max(Most, FMath::Min(FMath::Abs(static_cast<double>(Spec.ControlRange.X)), FMath::Abs(static_cast<double>(Spec.ControlRange.Y))));
+		}
+		return Most;
+	};
+	const RammsDrive::FTorqueHoldGains GainsL = RammsDrive::TorqueHoldGains(Inertia, HoldTorque(LeftMotorId, LeftMotorParams), Radius, HoldDecelerationCmS2);
+	const RammsDrive::FTorqueHoldGains GainsR = RammsDrive::TorqueHoldGains(Inertia, HoldTorque(RightMotorId, RightMotorParams), Radius, HoldDecelerationCmS2);
+	// The two sides held as one robot: braked alike, on their mean rate, and
+	// neither turning it back by more than HoldTurnErrorCm of tread travel
+	// against the other.
+	double PairLeft = 0.0, PairRight = 0.0;
+	RammsDrive::StepTorqueHoldPair(*HoldLeft, LeftAngle, LeftWheelState.AngularVelocity, *HoldRight, RightAngle, RightWheelState.AngularVelocity,
+		DeltaSeconds, GainsL, GainsR, HoldTurnErrorCm / Radius, PairLeft, PairRight);
+	const float LeftTorque = static_cast<float>(PairLeft);
+	const float RightTorque = static_cast<float>(PairRight);
+	LeftWheelState.TargetAngularVelocity = static_cast<float>(HoldLeft->TargetRate);
+	RightWheelState.TargetAngularVelocity = static_cast<float>(HoldRight->TargetRate);
+	if (UsesBase())
+	{
+		// Straight to the actuator (its range clamps it), past the motor model.
+		BaseComponent->SetMotorCommand(LeftMotorId, LeftTorque);
+		BaseComponent->SetMotorCommand(RightMotorId, RightTorque);
+		LeftWheelState.AppliedTorque = LeftTorque;
+		RightWheelState.AppliedTorque = RightTorque;
+	}
+	else
+	{
+		ApplyWheelTorque(LeftMotorId, LeftWheelBoneName, LeftTorque, LeftMotorParams, LeftWheelState);
+		ApplyWheelTorque(RightMotorId, RightWheelBoneName, RightTorque, RightMotorParams, RightWheelState);
+	}
+	// The control mode's own state starts afresh when the hold lets go.
+	LeftIntegralError = RightIntegralError = 0.0f;
+}
+
+bool URammsDifferentialDriveController::CanHoldWithTorque() const
+{
+	return UsesBase() && BaseComponent->SimulatesMotorJoint(LeftMotorId) && BaseComponent->SimulatesMotorJoint(RightMotorId);
+}
+
+bool URammsDifferentialDriveController::HoldsRobotStill() const
+{
+	return bHoldWhenIdle && CanHoldWithTorque() && RammsDrive::HoldWhenIdleEnabled();
+}
+
+void URammsDifferentialDriveController::BeginHold(double ForwardLeft, double ForwardRight, double InitialLeft, double InitialRight, bool bEase)
+{
+	HoldLeft->Begin(LeftAngle, ForwardLeft, InitialLeft, bEase);
+	HoldRight->Begin(RightAngle, ForwardRight, InitialRight, bEase);
+}
+
+void URammsDifferentialDriveController::ResetHoldState()
+{
+	HoldLeft->End();
+	HoldRight->End();
+	ReleaseElapsed = -1.0;
+	LeftAngleSource->Reset();
+	RightAngleSource->Reset();
+	SmoothLeftRate = SmoothRightRate = 0.0;
+	SeedExpires = -1.0;
+	bStoodDownHeld = false;
+}
+
+void URammsDifferentialDriveController::SeedGroundSlope(float ForwardGradeDeg, float RobotMassKg)
+{
+	SeedExpires = -1.0;
+	if (!bDriveModeActive || !CanHoldWithTorque())
+	{
+		return;
+	}
+	// Each drive wheel's share of the pull: the two carry the robot along its
+	// way (its other wheels, stood on, roll free), as far as the actuator goes.
+	const double Mass = RobotMassKg > 0.0f ? RobotMassKg : FMath::Max(VehicleMass, 1.0f);
+	double		 Most = FMath::Max(LeftMotorParams.MaxTorque, RightMotorParams.MaxTorque) * TorqueMultiplier;
+	for (const FName MotorId : { LeftMotorId, RightMotorId })
+	{
+		FRammsMotorSpec Spec;
+		if (BaseComponent->GetMotorSpec(MotorId, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
+		{
+			Most = FMath::Max(Most, FMath::Min(FMath::Abs(static_cast<double>(Spec.ControlRange.X)), FMath::Abs(static_cast<double>(Spec.ControlRange.Y))));
+		}
+	}
+	SeedTorque = FMath::Clamp(RammsDrive::GroundHoldTorque(Mass, ForwardGradeDeg, WheelRadius, 2), -Most, Most);
+	SeedExpires = Now() + SeedValidSeconds;
+}
+
+void URammsDifferentialDriveController::HoldWheelsWhileInactive(bool bHold)
+{
+	if (bDriveModeActive)
+	{
+		bHoldInactive = false;
+		return;
+	}
+	if (bHold && bHoldWhenIdle && CanHoldWithTorque() && RammsDrive::HoldWhenIdleEnabled())
+	{
+		// Carrying on with what this mode's own hold held as it was stood down
+		// (on a slope, the slope's pull): begun again from zero, the robot
+		// would sag a centimetre or two before the integral found it.
+		const FVector2D Carried = bStoodDownHeld ? StoodDownIntegral : FVector2D::ZeroVector;
+		bStoodDownHeld = false;
+		BeginHold(SmoothLeftRate, SmoothRightRate, Carried.X, Carried.Y);
+		bHoldInactive = true;
+		// And at once: standing down wrote no torque to these wheels, and the
+		// next tick is a frame away.
+		StepHold(0.0);
+		return;
+	}
+	if (bHoldInactive)
+	{
+		// Let go, as standing down does.
+		bHoldInactive = false;
+		HoldLeft->End();
+		HoldRight->End();
+		if (UsesBase())
+		{
+			for (const FName MotorId : { LeftMotorId, RightMotorId })
+			{
+				BaseComponent->ClearMotorVelocityCommand(MotorId);
+				BaseComponent->SetMotorCommand(MotorId, 0.0f);
+			}
+		}
+	}
+}
+
+void URammsDifferentialDriveController::ReleaseHold()
+{
+	// Only what held the robot along its way (the two sides' mean: a slope's
+	// pull) fades out into the control mode's torque; what the two sides held
+	// against each other -- the robot a little twisted between them -- goes at
+	// once: faded out, it would turn the robot as it moves off.
+	const double Left = HoldLeft->bActive ? HoldLeft->LastTorque : 0.0;
+	const double Right = HoldRight->bActive ? HoldRight->LastTorque : 0.0;
+	const double Along = (HoldLeft->bActive && HoldRight->bActive) ? 0.5 * (Left + Right) : 0.0;
+	ReleaseTorque = (HoldLeft->bActive && HoldRight->bActive) ? FVector2D(Along, Along) : FVector2D(Left, Right);
+	ReleaseElapsed = 0.0;
+	HoldLeft->End();
+	HoldRight->End();
+}
+
+void URammsDifferentialDriveController::AddReleaseTorque(float& LeftTorque, float& RightTorque) const
+{
+	if (ReleaseElapsed < 0.0)
+	{
+		return;
+	}
+	// What held the robot fades into the operator's command over
+	// HoldReleaseSeconds: on a slope it was holding the slope's pull, and
+	// dropped at once the robot would lurch back before the command took up.
+	const double Weight = 1.0 - RammsDrive::SmoothStep(ReleaseElapsed / HoldReleaseSeconds);
+	LeftTorque += static_cast<float>(Weight * ReleaseTorque.X);
+	RightTorque += static_cast<float>(Weight * ReleaseTorque.Y);
+}
+
+void URammsDifferentialDriveController::AddCarryTorque(float& LeftTorque, float& RightTorque) const
+{
+	if (CarryWeight <= 0.0f)
+	{
+		return;
+	}
+	// On top of the operator's command, a pull towards the wheel speeds of the
+	// motion handed over: the operator's torque is what holds the robot at the
+	// operator's speed, so near it this asks little, and it fades out to the
+	// operator's command alone with no step. Proportional only, half the
+	// motor's stall torque per rad/s of error: the wheels are on the ground
+	// by the time a mode is handed the robot (the selector puts them down
+	// first), and on a loaded wheel that is far slower than a game tick.
+	const auto Pull = [this](float Target, const FRammsWheelState& Wheel, const FMotorParameters& Motor) {
+		return CarryWeight * 0.5f * Motor.MaxTorque * TorqueMultiplier * (Target - Wheel.AngularVelocity);
+	};
+	LeftTorque += Pull(static_cast<float>(CarryWheelRates.X), LeftWheelState, LeftMotorParams);
+	RightTorque += Pull(static_cast<float>(CarryWheelRates.Y), RightWheelState, RightMotorParams);
 }
 
 float URammsDifferentialDriveController::CalculatePID(
@@ -900,6 +1214,18 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 		return;
 	}
 	bDriveModeActive = bActive;
+	bHeldForStance = false;
+	bHoldInactive = false;
+	EndCarry();
+	// Standing down while holding the robot: what the hold held, for a hold
+	// of these wheels through the switch to carry on with
+	// (HoldWheelsWhileInactive).
+	bStoodDownHeld = !bActive && HoldLeft->bActive && HoldRight->bActive && !HoldLeft->bFree && !HoldRight->bFree;
+	StoodDownIntegral = bStoodDownHeld ? FVector2D(HoldLeft->Integral, HoldRight->Integral) : FVector2D::ZeroVector;
+	HoldLeft->End();
+	HoldRight->End();
+	ReleaseElapsed = -1.0;
+	SeedExpires = -1.0;
 	if (!bActive)
 	{
 		// Straight to ApplyDriveInputInternal, not SetDriveInput: that one
@@ -907,7 +1233,77 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 		// stand-down would be a no-op exactly when something else is driving.
 		// A mode being switched away from stops, whoever was commanding it.
 		ApplyDriveInputInternal(FVector2D::ZeroVector, TEXT("SetDriveModeActive"));
+		// And lets go of its wheels. A torque written last stays in the
+		// actuator until something writes over it, so a wheel the next mode
+		// lifts clear would go on spinning up in the air, and one it rolls on
+		// would be dragged or pushed by this mode's last command.
+		if (UsesBase())
+		{
+			for (const FName MotorId : { LeftMotorId, RightMotorId })
+			{
+				BaseComponent->ClearMotorVelocityCommand(MotorId);
+				BaseComponent->SetMotorCommand(MotorId, 0.0f);
+			}
+		}
 	}
+}
+
+FRammsDriveMotion URammsDifferentialDriveController::GetCarriableMotion(const FRammsDriveMotion& Motion) const
+{
+	return RammsDrive::DifferentialCarriable(Motion, MaxTurningSpeed);
+}
+
+void URammsDifferentialDriveController::SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds)
+{
+	EndCarry();
+	if (!bDriveModeActive || !Carry || HoldSeconds <= 0.0f)
+	{
+		// Nothing to hold: the control mode carries on from the speed the
+		// robot has.
+		return;
+	}
+	const FRammsDriveMotion Carriable = GetCarriableMotion(Motion);
+	const FVector2D			Ground = RammsDrive::DifferentialWheelSpeeds(Carriable, TrackWidth);
+	CarryWheelRates = Ground / FMath::Max(WheelRadius, 1.0f);
+	// Begun whether or not the input is off centre yet: an operator whose
+	// stick reaches this mode on its own tick, or through the control surface
+	// after the switch rebuilt it, is heard on the first tick; one who is not
+	// driving by then ends it there (TickComponent).
+	Carry->Begin(Carriable, HoldSeconds, /*bOperatorCommanding=*/true);
+	bFirstCarryTick = true;
+	bCarryInputSet = IsOperatorCommanding();
+	CarryInput = DriveInput;
+}
+
+void URammsDifferentialDriveController::EndCarry()
+{
+	bFirstCarryTick = false;
+	bCarryInputSet = false;
+	if (!Carry || !Carry->bActive)
+	{
+		return;
+	}
+	Carry->End();
+	CarryWeight = 0.0f;
+}
+
+bool URammsDifferentialDriveController::IsOperatorCommanding() const
+{
+	return !URammsDifferentialDriveLibrary::ApplyDeadZone2D(DriveInput, InputDeadZone).IsNearlyZero();
+}
+
+double URammsDifferentialDriveController::Now() const
+{
+	if (UsesBase())
+	{
+		const double Sim = BaseComponent->GetSimulationTime();
+		if (Sim >= 0.0)
+		{
+			return Sim;
+		}
+	}
+	const UWorld* World = GetWorld();
+	return World ? World->GetTimeSeconds() : 0.0;
 }
 
 void URammsDifferentialDriveController::DescribeControls(FRammsControlSurface& OutSurface) const

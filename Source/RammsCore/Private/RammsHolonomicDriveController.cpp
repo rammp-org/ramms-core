@@ -2,7 +2,9 @@
 
 #include "RammsHolonomicDriveController.h"
 
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "RammsDriveHandOver.h"
 #include "RammsRobotBaseComponent.h"
 
 URammsHolonomicDriveController::URammsHolonomicDriveController()
@@ -95,11 +97,15 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 		return;
 	}
 	bDriveModeActive = bActive;
-	// Either way this mode starts and ends at rest. Taking over matters as much
-	// as standing down: a SetDriveCommand that arrived while this mode was
-	// inactive is still sitting in Command -- Tick refuses to apply it, but
-	// activating would then lurch the base on a command nobody issued for it.
+	bHoldInactive = false;
+	// Either way this mode starts and ends at rest -- unless the selector
+	// hands it the robot's motion (SeedMotion) right after taking over.
+	// Taking over matters as much as standing down: a SetDriveCommand that
+	// arrived while this mode was inactive is still sitting in Command -- Tick
+	// refuses to apply it, but activating would then lurch the base on a
+	// command nobody issued for it.
 	Command = FVector::ZeroVector;
+	ResetSwitching();
 	if (!bActive)
 	{
 		// Zero the wheels once rather than leaving them spinning at whatever
@@ -128,13 +134,18 @@ void URammsHolonomicDriveController::SetDriveCommand(FVector ForwardStrafeYaw)
 
 TArray<float> URammsHolonomicDriveController::SolveWheelRates() const
 {
+	return SolveWheelRatesFor(RammsDrive::HolonomicMotion(Command, Resolved.MaxLinearSpeedCmPerSecond, Resolved.MaxYawRateDegPerSecond));
+}
+
+TArray<float> URammsHolonomicDriveController::SolveWheelRatesFor(const FRammsDriveMotion& Motion) const
+{
 	TArray<float> Rates;
 	Rates.Reserve(Resolved.Wheels.Num());
 
 	// Body twist in real units: cm/s and rad/s.
-	const double Vx = Command.X * Resolved.MaxLinearSpeedCmPerSecond;
-	const double Vy = Command.Y * Resolved.MaxLinearSpeedCmPerSecond;
-	const double Omega = FMath::DegreesToRadians(Command.Z * Resolved.MaxYawRateDegPerSecond);
+	const double Vx = Motion.ForwardCmPerSecond;
+	const double Vy = Motion.RightCmPerSecond;
+	const double Omega = FMath::DegreesToRadians(static_cast<double>(Motion.YawRateDegPerSecond));
 	const double Radius = FMath::Max(Resolved.WheelRadiusCm, 0.1f);
 
 	for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
@@ -162,12 +173,90 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	URammsRobotBaseComponent* Base = EnsureBase();
+	const double			  T = Now();
+	double					  Dt = 0.0;
+	if (RammsDrive::AdvanceHoldClock(T, FirstTickTime, LastTickTime, Dt))
+	{
+		// The simulation was reset: the robot is back at its start pose, every
+		// wheel's angle with it. Nothing held before stands: a wheel still held
+		// for a switch is held again where it is now; the mode's own hold
+		// waits out the spawn's second again.
+		bHoldingStill = false;
+		HoldAngles.Reset();
+		if (Base && bHoldInactive)
+		{
+			LatchHold(*Base);
+		}
+	}
+	// Nothing held while the robot is put down as it spawns.
+	const bool bMayHold = bHoldWhenIdle && RammsDrive::HoldWhenIdleEnabled() && T - FirstTickTime >= RammsDrive::SpawnSettleSeconds;
+	if (Base && bHoldInactive && !bDriveModeActive)
+	{
+		// Stood down at rest while the next mode's wheels go down: these still
+		// carry the robot, held where they are.
+		CommandHold(*Base);
+		return;
+	}
 	if (!Base || Resolved.Wheels.Num() == 0 || !bDriveModeActive)
 	{
 		return;
 	}
 
-	const bool bIdle = Command.IsNearlyZero();
+	// What to drive: the command -- nothing while the stance is still putting
+	// this mode's wheels down, and within what the other mode's wheels carry
+	// while a hand-over bound holds -- reached at the hand-over rates during a
+	// switch (from the motion the robot had, after one on the move), at once
+	// otherwise.
+	const FRammsDriveMotion Commanded = RammsDrive::HolonomicMotion(Command, Resolved.MaxLinearSpeedCmPerSecond, Resolved.MaxYawRateDegPerSecond);
+	FRammsDriveMotion		Target = Commanded;
+	const IRammsDriveMode*	Bound = Cast<IRammsDriveMode>(HandOverTarget.Get());
+	if (bHeldForStance)
+	{
+		Target = FRammsDriveMotion();
+	}
+	else if (Bound)
+	{
+		Target = Bound->GetCarriableMotion(Commanded);
+	}
+	// Holding still: a command let go brings the robot to rest at the
+	// hand-over rates, not at once -- its wheels are then held (below) -- and
+	// a command given while held is taken up from rest at those rates, so the
+	// hold lets go smoothly (on a slope the speed loops' integrals carry the
+	// pull on).
+	const bool bNothingAsked = Target.IsNearlyZero(1e-3f, 1e-3f);
+	if (bMayHold && ((bNothingAsked && !Output.IsNearlyZero(1e-3f, 1e-3f)) || (!bNothingAsked && bHoldingStill)))
+	{
+		bOutputRamping = true;
+	}
+	if (bOutputRamping || Bound || bHeldForStance)
+	{
+		Output = RammsDrive::RampMotion(Output, Target, HandOverAcceleration, HandOverYawAcceleration, Dt);
+		if (!Bound && !bHeldForStance && RammsDrive::MotionsEqual(Output, Target, 1e-2))
+		{
+			bOutputRamping = false;
+		}
+	}
+	else
+	{
+		Output = Target;
+	}
+
+	const bool bIdle = Output.IsNearlyZero(1e-3f, 1e-3f);
+	if (bMayHold && bIdle && bNothingAsked)
+	{
+		// At rest with nothing asked (or its wheels still going down): every
+		// wheel held where it stopped, its speed loop kept on and asked back
+		// towards that angle. On a slope the loop's integral takes the pull.
+		if (!bHoldingStill || HoldAngles.Num() != Resolved.Wheels.Num())
+		{
+			LatchHold(*Base);
+			bHoldingStill = true;
+		}
+		CommandHold(*Base);
+		bDrivingMotors = true;
+		return;
+	}
+	bHoldingStill = false;
 	if (bIdle && !bDrivingMotors)
 	{
 		// Nothing commanded and nothing left running: leave the motors alone so
@@ -179,7 +268,7 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	// loop when the actuator is a torque motor -- writing these numbers into
 	// SetMotorCommand applies them as newton-metres instead, which turned the
 	// wheels at about 3% of the commanded rate and moved the base 2 cm.
-	const TArray<float> Rates = SolveWheelRates();
+	const TArray<float> Rates = SolveWheelRatesFor(Output);
 	for (int32 i = 0; i < Resolved.Wheels.Num() && i < Rates.Num(); ++i)
 	{
 		if (!Resolved.Wheels[i].MotorId.IsNone())
@@ -205,6 +294,126 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 		}
 	}
 	bDrivingMotors = !bIdle;
+}
+
+void URammsHolonomicDriveController::LatchHold(URammsRobotBaseComponent& Base)
+{
+	HoldAngles.SetNum(Resolved.Wheels.Num());
+	for (int32 i = 0; i < Resolved.Wheels.Num(); ++i)
+	{
+		HoldAngles[i] = Resolved.Wheels[i].MotorId.IsNone() ? 0.0 : Base.GetMotorValue(Resolved.Wheels[i].MotorId);
+	}
+}
+
+void URammsHolonomicDriveController::CommandHold(URammsRobotBaseComponent& Base) const
+{
+	for (int32 i = 0; i < Resolved.Wheels.Num() && i < HoldAngles.Num(); ++i)
+	{
+		const FName Motor = Resolved.Wheels[i].MotorId;
+		if (!Motor.IsNone())
+		{
+			RammsDrive::FWheelHold Hold;
+			Hold.Latch(HoldAngles[i]);
+			Base.SetMotorVelocityCommand(Motor, static_cast<float>(Hold.Rate(Base.GetMotorValue(Motor))));
+		}
+	}
+}
+
+void URammsHolonomicDriveController::HoldWheelsWhileInactive(bool bHold)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (bDriveModeActive || !Base)
+	{
+		bHoldInactive = false;
+		return;
+	}
+	if (bHold && bHoldWhenIdle)
+	{
+		LatchHold(*Base);
+		bHoldInactive = true;
+		CommandHold(*Base);
+		return;
+	}
+	if (bHoldInactive)
+	{
+		// Let go, as standing down does.
+		bHoldInactive = false;
+		for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
+		{
+			if (!Wheel.MotorId.IsNone())
+			{
+				Base->ClearMotorVelocityCommand(Wheel.MotorId);
+				Base->SetMotorCommand(Wheel.MotorId, 0.0f);
+			}
+		}
+	}
+}
+
+// --- switching on the move -------------------------------------------------------
+
+double URammsHolonomicDriveController::Now() const
+{
+	// The physics clock where there is one: the hand-over rates are physical.
+	if (const URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		const double Sim = Base->GetSimulationTime();
+		if (Sim >= 0.0)
+		{
+			return Sim;
+		}
+	}
+	const UWorld* World = GetWorld();
+	return World ? World->GetTimeSeconds() : 0.0;
+}
+
+void URammsHolonomicDriveController::ResetSwitching()
+{
+	Output = FRammsDriveMotion();
+	HandOverTarget.Reset();
+	bOutputRamping = false;
+	bHeldForStance = false;
+	bHoldingStill = false;
+}
+
+bool URammsHolonomicDriveController::BeginHandOver(const IRammsDriveMode& Other)
+{
+	if (!bDriveModeActive)
+	{
+		return false;
+	}
+	HandOverTarget = Cast<const UObject>(&Other);
+	// From the motion driven now, not from the projected command at once.
+	bOutputRamping = true;
+	return HandOverTarget.IsValid();
+}
+
+void URammsHolonomicDriveController::EndHandOver()
+{
+	HandOverTarget.Reset();
+	// Back to the operator's command at the same rate. (Stood down instead,
+	// SetDriveModeActive resets everything.)
+	bOutputRamping = bDriveModeActive;
+}
+
+void URammsHolonomicDriveController::HoldForStance(bool bHold)
+{
+	bHeldForStance = bHold && bDriveModeActive;
+	bOutputRamping = bDriveModeActive;
+}
+
+void URammsHolonomicDriveController::SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds)
+{
+	if (!bDriveModeActive)
+	{
+		return;
+	}
+	// Where this mode starts, not a setpoint it keeps: from here to the
+	// operator's command (within any bound the selector sets after this) at
+	// the hand-over rate, so that a stick held through the switch carries on
+	// at its own speed and one let go brings the robot to rest. A command not
+	// yet heard on the first tick costs one tick's worth of that rate.
+	Output = Motion;
+	bOutputRamping = true;
 }
 
 // --- control surface -----------------------------------------------------------

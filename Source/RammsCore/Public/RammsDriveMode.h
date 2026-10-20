@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
+#include "RammsDriveMotion.h"
 #include "RammsDriveStance.h"
 
 #include "RammsDriveMode.generated.h"
@@ -66,5 +67,128 @@ public:
 	virtual bool GetRequiredStance(FRammsDriveStance& OutStance) const
 	{
 		return false;
+	}
+
+	// --- Changing mode on the move ---------------------------------------------
+	//
+	// URammsDriveModeSelector switches modes while the robot moves: the mode
+	// coming in is handed the motion the robot has and carries on with it, and
+	// the stance changes on a ramp rather than a jump. When the incoming mode
+	// cannot carry part of that motion -- a differential drive cannot move its
+	// drive axle sideways -- the outgoing one first brings that part to zero.
+	// While the stance changes, the mode in charge is held to what the wheels
+	// still on the ground carry, and kept still while its own are still going
+	// down. All of these have defaults, so a mode that takes no part (it
+	// drives nothing, or it runs its own speed control) need not implement any.
+
+	/**
+	 * The part of a motion this mode's kinematics can carry: Motion itself
+	 * when it can carry anything (the default). A differential drive returns
+	 * it without its sideways speed and with its yaw rate within what it can
+	 * turn. The selector compares the robot's measured motion with this before
+	 * it hands over, and has the outgoing mode remove the difference first.
+	 */
+	virtual FRammsDriveMotion GetCarriableMotion(const FRammsDriveMotion& Motion) const
+	{
+		return Motion;
+	}
+
+	/**
+	 * Drive on, but keep the motion within Other.GetCarriableMotion() -- reached
+	 * at a bounded rate, never a step -- until EndHandOver; the operator's
+	 * commands still apply to the part Other carries. The selector calls it on
+	 * the active mode while some of the robot's weight is, or is about to be,
+	 * on wheels Other drives: on the outgoing mode before it hands over (Other
+	 * the incoming mode, whose wheels are going down), and on the incoming mode
+	 * through the rest of the stance change (Other the outgoing mode, whose
+	 * wheels are still coming up). False when this mode cannot (the default):
+	 * as the outgoing mode, the selector then hands over at once and says so.
+	 */
+	virtual bool BeginHandOver(const IRammsDriveMode& Other)
+	{
+		return false;
+	}
+
+	/** The bound BeginHandOver set is over: the stance change is done, or the
+	 *  switch refused (the mode stays active). Back to the operator's commands,
+	 *  reached at the same bounded rate. (Stood down instead, a mode drops it
+	 *  with everything else.) */
+	virtual void EndHandOver() {}
+
+	/**
+	 * Called on the active mode while a stance change puts the wheels it
+	 * drives down: with bHold true, drive nothing -- they are not on the ground
+	 * yet, and a wheel spun in the air touches down spinning; with false, they
+	 * are down. The selector holds an incoming mode this way through the first
+	 * stage of a switch it makes at once (at rest). The default ignores it.
+	 */
+	virtual void HoldForStance(bool bHold) {}
+
+	/**
+	 * Called on a mode the selector has just stood down at rest while the
+	 * incoming mode's wheels go down (the first stage of a change between two
+	 * stances): with bHold true, keep the wheels this mode drives held still
+	 * where they are -- they still carry the robot, which on a slope would
+	 * otherwise roll -- driving nothing else and offering no controls; with
+	 * false (the incoming mode's wheels are down), let them go as standing
+	 * down does. Activated again meanwhile, the mode drops it. The default
+	 * ignores it.
+	 */
+	virtual void HoldWheelsWhileInactive(bool bHold) {}
+
+	/**
+	 * Called on the incoming mode right after the selector activates it on the
+	 * move: carry on from Motion, the robot's measured motion (within
+	 * GetCarriableMotion), instead of starting from rest -- as where the mode
+	 * starts, going from it to its operator's command at a bounded rate, not
+	 * as a setpoint the operator cannot change. HoldSeconds is how long the
+	 * stance change that follows takes, while the wheels this mode drives take
+	 * the load: a mode whose command is not a speed (a torque-driven
+	 * differential) may pull towards Motion for that long, while its operator
+	 * keeps the stick where it was. With no command from the operator, go to
+	 * rest from Motion as the mode would: speed carries across a switch, it
+	 * does not keep a robot moving that nobody is driving. The default ignores
+	 * it (the mode starts from rest, as before).
+	 */
+	virtual void SeedMotion(const FRammsDriveMotion& Motion, float HoldSeconds) {}
+
+	// --- Holding still, and the base's attitude through a stance change ---------
+
+	/**
+	 * True when, with no command from its operator, this mode holds the robot
+	 * still where it comes to rest -- on a slope too -- rather than letting its
+	 * wheels roll free. A curb crossing hands the robot back at its end only
+	 * to a mode that holds (URammsCurbNegotiationController). The default:
+	 * false.
+	 */
+	virtual bool HoldsRobotStill() const
+	{
+		return false;
+	}
+
+	/**
+	 * Called on the mode just activated by a hand-back from a mode that knows
+	 * the ground under the robot (a curb crossing at its end): the ground's
+	 * grade along the chassis' forward axis (deg, positive rising ahead) and,
+	 * when known (above 0), the robot's mass (kg). A mode that holds the robot
+	 * still takes the slope's pull up at once with it -- fed into the hold it
+	 * begins within the next couple of seconds -- rather than finding it as
+	 * the robot sags back down the slope. The default ignores it.
+	 */
+	virtual void SeedGroundSlope(float ForwardGradeDeg, float RobotMassKg) {}
+
+	/**
+	 * The least time (simulated seconds) a stance change away from this mode
+	 * -- the selector's ramp from the pose it leaves the robot in to the next
+	 * mode's stance -- should take, each stage, so that the base's attitude
+	 * changes no faster than this mode allows; 0 (the default) asks nothing of
+	 * it. A curb crossing that has just finished on a slope leaves the base
+	 * level, and the next mode's stance follows the ground: the crossing asks
+	 * that the base turn there no faster than its tilt limits
+	 * (FRammsCurbTuning::TiltRateDegPerSec, TiltAccelDegPerSec2).
+	 */
+	virtual float GetStanceChangeMinSeconds() const
+	{
+		return 0.0f;
 	}
 };

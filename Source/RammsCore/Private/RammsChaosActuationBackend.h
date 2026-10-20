@@ -48,8 +48,11 @@ public:
 	virtual void  SetCommand(FName MotorId, float Value) override;
 	virtual float GetValue(FName MotorId) const override;
 	virtual float GetVelocity(FName MotorId) const override;
-	virtual bool  ReleaseMotor(FName MotorId) override;
-	virtual bool  GetMotorTransform(FName MotorId, FTransform& OutWorld) const override;
+	/** Only a Position motor on a constraint: a skeletal wheel reports no
+	 *  angle and takes its command as an acceleration change. */
+	virtual bool SimulatesMotorJoint(FName MotorId) const override { return IsConstraintMotor(MotorId); }
+	virtual bool ReleaseMotor(FName MotorId) override;
+	virtual bool GetMotorTransform(FName MotorId, FTransform& OutWorld) const override;
 
 private:
 	/** A Position motor resolved to a physics-asset constraint. */

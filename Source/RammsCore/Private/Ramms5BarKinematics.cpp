@@ -32,6 +32,55 @@ namespace
 		}
 		return bOk;
 	}
+
+	// The knee angle a pose needs, in FRamms5BarLinkageSpec's convention: the
+	// signed angle from the proximal link to the distal link, 0 when straight.
+	double DistalAngle(FVector2D Pivot, FVector2D Knee, FVector2D Endpoint)
+	{
+		const FVector2D Prox = Knee - Pivot;
+		const FVector2D Dist = Endpoint - Knee;
+		return FMath::Atan2(Prox.X * Dist.Y - Prox.Y * Dist.X, Prox.X * Dist.X + Prox.Y * Dist.Y);
+	}
+
+	// Whether a knee angle lies in [Range.X, Range.Y], taken modulo 2*pi so a
+	// range straddling +-pi works. A range spanning the whole circle -- the
+	// default -- bounds nothing.
+	bool WithinDistalRange(double Angle, FVector2D Range)
+	{
+		if (Range.Y - Range.X >= UE_DOUBLE_TWO_PI - 1e-6)
+		{
+			return true;
+		}
+		double Offset = FMath::Fmod(Angle - Range.X, UE_DOUBLE_TWO_PI);
+		if (Offset < 0.0)
+		{
+			Offset += UE_DOUBLE_TWO_PI;
+		}
+		return Range.X + Offset <= Range.Y;
+	}
+
+	// A knee range that is not a range (non-finite, or lowest above highest)
+	// would otherwise bound nothing or everything depending on how it is
+	// read; refuse every target instead, and say why once.
+	bool DistalRangesValid(const FRamms5BarLinkageSpec& Spec)
+	{
+		auto Valid = [](const FVector2D& Range) {
+			return FMath::IsFinite(Range.X) && FMath::IsFinite(Range.Y) && Range.X <= Range.Y;
+		};
+		const bool bOk = Valid(Spec.DistalRangeA) && Valid(Spec.DistalRangeB);
+		if (!bOk)
+		{
+			static bool bWarned = false;
+			if (!bWarned)
+			{
+				bWarned = true;
+				UE_LOG(LogTemp, Error, TEXT("Ramms5BarKinematics: linkage (motors '%s' / '%s') has DistalRangeA/B = (%g, %g) / (%g, %g); each must be finite with X <= Y. Targets are reported unreachable until the table is fixed."),
+					*Spec.ProximalMotorA.ToString(), *Spec.ProximalMotorB.ToString(),
+					Spec.DistalRangeA.X, Spec.DistalRangeA.Y, Spec.DistalRangeB.X, Spec.DistalRangeB.Y);
+			}
+		}
+		return bOk;
+	}
 } // namespace
 
 FVector2D URamms5BarKinematics::KneePosition(
@@ -87,9 +136,9 @@ FVector2D URamms5BarKinematics::SolveIK(const FRamms5BarLinkageSpec& Spec, FVect
 	bool			bReachA = false;
 	bool			bReachB = false;
 	const double	AngleA = SolveArm(Spec.PivotA, Spec.ProximalLengthA, Spec.DistalLengthA,
-		Spec.ZeroDirA, SignA, Spec.bElbowUpA, TargetXZ, bReachA);
+		   Spec.ZeroDirA, SignA, Spec.bElbowUpA, TargetXZ, bReachA);
 	const double	AngleB = SolveArm(Spec.PivotB, Spec.ProximalLengthB, Spec.DistalLengthB,
-		Spec.ZeroDirB, SignB, Spec.bElbowUpB, TargetXZ, bReachB);
+		   Spec.ZeroDirB, SignB, Spec.bElbowUpB, TargetXZ, bReachB);
 	const FVector2D Angles(AngleA, AngleB);
 	bReachable = bReachA && bReachB;
 	if (bReachable)
@@ -102,6 +151,18 @@ FVector2D URamms5BarKinematics::SolveIK(const FRamms5BarLinkageSpec& Spec, FVect
 		const FVector2D Endpoint = ComputeEndpoint(Spec, Angles, bValid);
 		const double	Tolerance = 1e-4 * (Spec.ProximalLengthA + Spec.DistalLengthA + Spec.ProximalLengthB + Spec.DistalLengthB);
 		bReachable = bValid && (Endpoint - TargetXZ).Size() <= Tolerance;
+	}
+	if (bReachable)
+	{
+		// The passive knees bend only so far either way. Without this the
+		// region is the one the links could sweep with free knees, which on a
+		// leg with real knee stops reaches well past where the leg can go: the
+		// hips are commanded, the knee stops, and the endpoint settles short.
+		const FVector2D KneeA = KneePosition(Spec.PivotA, Spec.ProximalLengthA, Spec.ZeroDirA, SignA, AngleA);
+		const FVector2D KneeB = KneePosition(Spec.PivotB, Spec.ProximalLengthB, Spec.ZeroDirB, SignB, AngleB);
+		bReachable = DistalRangesValid(Spec)
+			&& WithinDistalRange(DistalAngle(Spec.PivotA, KneeA, TargetXZ), Spec.DistalRangeA)
+			&& WithinDistalRange(DistalAngle(Spec.PivotB, KneeB, TargetXZ), Spec.DistalRangeB);
 	}
 	return Angles;
 }

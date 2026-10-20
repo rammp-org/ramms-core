@@ -100,6 +100,41 @@ struct FRamms5BarLinkageSpec : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
 	bool bElbowUpB = false;
 
+	/**
+	 * Knee limits for arm A (rad, X = lowest, Y = highest): the range the
+	 * passive knee's angle must stay in for the mechanism to hold a pose.
+	 *
+	 * The knee angle is GEOMETRIC: the signed angle from proximal link A's
+	 * direction to distal link A's direction in this x-z plane (positive from
+	 * +X towards +Z, like the link angles), 0 at a straight knee. An elbow-up
+	 * arm (bElbowUpA) therefore bends negative and an elbow-down arm positive,
+	 * and a range sits on that side of 0.
+	 *
+	 * It is not what a simulator's knee joint reads. A joint usually reads 0
+	 * in the pose the model was built in, where the knee need not be straight,
+	 * and may turn either way. A hinge range [lo, hi] becomes
+	 * sorted(Rel0 + S * lo, Rel0 + S * hi), where Rel0 is this angle in the
+	 * built pose and S is the sign AngleSignA would have for the knee hinge
+	 * (-1 about +Y, +1 about -Y, both flipped when TranslationSign is -1,
+	 * since a mirrored frame turns every rotation round). Copying the hinge
+	 * range across unchanged bounds a different angle: it either refuses
+	 * poses the leg can hold or keeps accepting ones it cannot.
+	 *
+	 * Enforced by URamms5BarKinematics::SolveIK, so by everything that asks
+	 * it whether a target is reachable: the linkage controller's SolveTarget
+	 * and SetEndpointTarget, its reachable ranges, extent and outline, and the
+	 * curb planner. ComputeEndpoint does not check it: a live reading pressed
+	 * against a stop is still a pose. Checked modulo 2*pi, so a range may
+	 * straddle +-pi; the default, the whole circle, bounds nothing and leaves
+	 * a spec without limits exactly as it was.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
+	FVector2D DistalRangeA = FVector2D(-UE_DOUBLE_PI, UE_DOUBLE_PI);
+
+	/** Knee limits for arm B (rad), in the same convention as DistalRangeA. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5-Bar|Angles")
+	FVector2D DistalRangeB = FVector2D(-UE_DOUBLE_PI, UE_DOUBLE_PI);
+
 	/** FK picks the endpoint on a fixed side of the knee-A -> knee-B line
 	 *  (the mechanism can't cross that line without the distal links going
 	 *  collinear). Default side is the lift_drive assembly (endpoint below the
