@@ -376,6 +376,7 @@ void URammsCurbNegotiationController::EndPlay(const EEndPlayReason::Type EndPlay
 		UDebugDrawService::Unregister(DebugDrawHandle);
 		DebugDrawHandle.Reset();
 	}
+	UpdateDebugLabelOverlay(false);
 	Super::EndPlay(EndPlayReason);
 }
 

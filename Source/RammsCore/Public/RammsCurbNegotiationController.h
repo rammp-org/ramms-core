@@ -7,6 +7,7 @@
 #include "RammsControlContributor.h"
 #include "RammsCurbNegotiationTypes.h"
 #include "RammsDriveMode.h"
+#include "RammsHUDPanelProvider.h"
 #include "Templates/PimplPtr.h"
 
 #include "RammsCurbNegotiationController.generated.h"
@@ -15,6 +16,11 @@ class URammsRobotBaseComponent;
 class URamms5BarLinkageController;
 class UCanvas;
 class APlayerController;
+class SWidget;
+class SRammsCurbScope;
+class SRammsCurbLabels;
+class UGameViewportClient;
+class ULocalPlayer;
 
 namespace RammsCurb
 {
@@ -32,6 +38,7 @@ namespace RammsCurb
 	class FExecutor;
 	struct FExecMeasure;
 	struct FDebugViewState;
+	struct FDebugPainter;
 } // namespace RammsCurb
 
 /**
@@ -232,7 +239,7 @@ namespace RammsCurb
  * reports one (not 0), is that rate's integral.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsCurbNegotiationController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
+class RAMMSCORE_API URammsCurbNegotiationController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode, public IRammsHUDPanelProvider
 {
 	GENERATED_BODY()
 
@@ -514,6 +521,12 @@ public:
 	static FName ViewRobotControlId() { return FName(TEXT("curb.view.robot")); }
 	static FName ViewGraphsControlId() { return FName(TEXT("curb.view.graphs")); }
 	static FName ViewLabelsControlId() { return FName(TEXT("curb.view.labels")); }
+
+	// --- IRammsHUDPanelProvider ------------------------------------------------
+	/** The debug view's colour key and graphs as a HUD panel ("Curb view"),
+	 *  wanted while there is something to show; with no HUD to host it they
+	 *  are drawn over the viewport instead. */
+	virtual void GetHUDPanels(TArray<FRammsHUDPanelDesc>& OutPanels) const override;
 
 private:
 	/** What a leg is asked to do during a step. */
@@ -1203,8 +1216,31 @@ private:
 	void DrawDebugTerrain(const UWorld* World) const;
 	void DrawDebugPlan(const UWorld* World) const;
 	void DrawDebugRobot(const UWorld* World) const;
-	/** The graphs and the colour key, over the viewport. */
+	/** The world layers' labels over the viewport, and the colour key and the
+	 *  graphs too while no HUD hosts them as a panel. */
 	void DrawDebugOverlay(UCanvas* Canvas, APlayerController* Player);
+	/** The colour key and the graphs, Width wide (Height tall, or as tall as
+	 *  they need when 0), from the painter's origin down; their height. */
+	float PaintDebugPanel(const RammsCurb::FDebugPainter& Painter, float Width, float Height, bool bDraw) const;
+	/** A layer drawn in the world wants its colour key. */
+	bool WantsDebugKey() const;
+	/** A HUD hosts the key and graphs panel (its widget is alive). */
+	bool IsDebugPanelHosted() const;
+	/** That panel's widget, while a HUD holds it. */
+	TWeakPtr<SWidget> DebugPanelWidget;
+	friend class SRammsCurbScope;
+
+	/** The world layers' labels, on the player's screen under the HUD's panels
+	 *  (the debug canvas would draw them over the panels): a Slate overlay,
+	 *  there while labels are; the viewport canvas without a game viewport. */
+	void UpdateDebugLabelOverlay(bool bWanted);
+	/** The labels, each at its point on screen (Project: world to the
+	 *  painter's frame; false when off screen). */
+	void								PaintDebugLabels(const RammsCurb::FDebugPainter& Painter, TFunctionRef<bool(const FVector&, FVector2D&)> Project) const;
+	TSharedPtr<SWidget>					DebugLabelOverlay;
+	TWeakObjectPtr<UGameViewportClient> DebugLabelViewport;
+	TWeakObjectPtr<ULocalPlayer>		DebugLabelPlayer;
+	friend class SRammsCurbLabels;
 	/** The terrain the view shows: the crossing's while one runs or after, else
 	 *  the last scan's. */
 	const FRammsCurbTerrain* DebugTerrain() const;
