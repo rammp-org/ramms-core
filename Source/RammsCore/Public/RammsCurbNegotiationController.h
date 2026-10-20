@@ -13,6 +13,8 @@
 
 class URammsRobotBaseComponent;
 class URamms5BarLinkageController;
+class UCanvas;
+class APlayerController;
 
 namespace RammsCurb
 {
@@ -29,6 +31,7 @@ namespace RammsCurb
 	class FPlanTask;
 	class FExecutor;
 	struct FExecMeasure;
+	struct FDebugViewState;
 } // namespace RammsCurb
 
 /**
@@ -237,6 +240,7 @@ public:
 	URammsCurbNegotiationController();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -251,6 +255,12 @@ public:
 	 *  was active when the manoeuvre began. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FName ReturnModeId;
+
+	/** What the debug view draws: the terrain sensed and fitted, the plan, the
+	 *  robot's state, graphs (FRammsCurbDebugView). Also switched from the
+	 *  robot's control panel, the "Curb view" group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	FRammsCurbDebugView DebugView;
 
 	/**
 	 * Plan the manoeuvre for this step without moving: true when every leg
@@ -483,10 +493,12 @@ public:
 	virtual float GetStanceChangeMinSeconds() const override;
 
 	// --- IRammsControlContributor --------------------------------------------
-	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
-	virtual bool  ApplyControl(FName Id, float Value) override { return false; }
+	virtual void DescribeControls(FRammsControlSurface& OutSurface) const override;
+	/** Only the debug view's switches are writable (the "Curb view" group). */
+	virtual bool  ApplyControl(FName Id, float Value) override;
 	virtual bool  TriggerControl(FName Id) override;
 	virtual bool  ReadControl(FName Id, float& OutValue) const override;
+	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 	virtual int32 GetControlOrder() const override { return 5; }
 
@@ -494,6 +506,14 @@ public:
 	static FName NegotiateControlId() { return FName(TEXT("curb.negotiate")); }
 	static FName AbortControlId() { return FName(TEXT("curb.abort")); }
 	static FName PhaseControlId() { return FName(TEXT("curb.phase")); }
+	/** The debug view's switches (DebugView): Sensing takes 0 Off, 1 Live,
+	 *  2 Live + trail; the others 0 off, 1 on. */
+	static FName ViewSensingControlId() { return FName(TEXT("curb.view.sensing")); }
+	static FName ViewTerrainControlId() { return FName(TEXT("curb.view.terrain")); }
+	static FName ViewPlanControlId() { return FName(TEXT("curb.view.plan")); }
+	static FName ViewRobotControlId() { return FName(TEXT("curb.view.robot")); }
+	static FName ViewGraphsControlId() { return FName(TEXT("curb.view.graphs")); }
+	static FName ViewLabelsControlId() { return FName(TEXT("curb.view.labels")); }
 
 private:
 	/** What a leg is asked to do during a step. */
@@ -1162,6 +1182,35 @@ private:
 
 	/** What the last detection called from outside found, or why not. */
 	mutable FString DetectionText;
+
+	// --- the debug view (DebugView; RammsCurbNegotiationDebug.cpp) ---------------
+
+	/** What the view keeps between frames: the last detection scan's traces
+	 *  (mutable: a detection is const and records them as it makes them), the
+	 *  terrain monitor's probes and their trail, the graphs' samples
+	 *  (Private/Curb). */
+	mutable TPimplPtr<RammsCurb::FDebugViewState> DebugState;
+	/** The graphs' and colour key's draw over the viewport (UDebugDrawService). */
+	FDelegateHandle DebugDrawHandle;
+
+	/** Once a tick, whatever path the tick took: the preview scan, the graphs'
+	 *  sample, and the world layers drawn. */
+	void TickDebugView(float DeltaTime);
+	/** The terrain monitor's probes of this tick, for the sensing layer. */
+	void RecordDebugProbes(const RammsCurb::FExecMeasure& Measure);
+	/** The layers, in the world. */
+	void DrawDebugSensing(const UWorld* World) const;
+	void DrawDebugTerrain(const UWorld* World) const;
+	void DrawDebugPlan(const UWorld* World) const;
+	void DrawDebugRobot(const UWorld* World) const;
+	/** The graphs and the colour key, over the viewport. */
+	void DrawDebugOverlay(UCanvas* Canvas, APlayerController* Player);
+	/** The terrain the view shows: the crossing's while one runs or after, else
+	 *  the last scan's. */
+	const FRammsCurbTerrain* DebugTerrain() const;
+	/** The chassis' pitch and roll (deg) from its corner pivots, crossing or
+	 *  not; false when they cannot be located. */
+	bool MeasureDebugAttitude(FVector2D& OutPitchRoll) const;
 
 	/** The measured chassis speed and the run stats (Private/Curb). */
 	TPimplPtr<RammsCurb::FRunTelemetry> Telemetry;

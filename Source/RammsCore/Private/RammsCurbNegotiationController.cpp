@@ -2,6 +2,7 @@
 
 #include "RammsCurbNegotiationController.h"
 
+#include "Curb/RammsCurbDebugView.h"
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
 #include "Curb/RammsCurbPlanTask.h"
@@ -11,10 +12,12 @@
 #include "Curb/RammsCurbSafety.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "Curb/RammsCurbTerrainFit.h"
+#include "Debug/DebugDrawService.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/ScopeExit.h"
 #include "Ramms4BarKinematics.h"
 #include "Ramms5BarLinkageController.h"
 #include "RammsDriveHandOver.h"
@@ -334,7 +337,8 @@ namespace
 } // namespace
 
 URammsCurbNegotiationController::URammsCurbNegotiationController()
-	: Telemetry(MakePimpl<RammsCurb::FRunTelemetry>())
+	: DebugState(MakePimpl<RammsCurb::FDebugViewState>())
+	, Telemetry(MakePimpl<RammsCurb::FRunTelemetry>())
 	, Drive(MakePimpl<RammsCurb::FDriveState>())
 	, Level(MakePimpl<RammsCurb::FLevelState>())
 	, Model(MakePimpl<RammsCurb::FRobotModel>())
@@ -359,6 +363,20 @@ void URammsCurbNegotiationController::BeginPlay()
 	{
 		Base->AddTickPrerequisiteComponent(this);
 	}
+	// The debug view's graphs and colour key, over the game viewport; drawn
+	// only while DebugView asks for them.
+	DebugDrawHandle = UDebugDrawService::Register(TEXT("Game"),
+		FDebugDrawDelegate::CreateUObject(this, &URammsCurbNegotiationController::DrawDebugOverlay));
+}
+
+void URammsCurbNegotiationController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (DebugDrawHandle.IsValid())
+	{
+		UDebugDrawService::Unregister(DebugDrawHandle);
+		DebugDrawHandle.Reset();
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 URammsRobotBaseComponent* URammsCurbNegotiationController::EnsureBase() const
@@ -5379,6 +5397,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	// checks, on the terrain traced ahead of and under every wheel.
 	RammsCurb::FExecMeasure M;
 	GatherExecMeasure(DeltaTime, M);
+	RecordDebugProbes(M);
 	RammsCurb::FExecCommand Cmd;
 	Executor->Tick(M, *Level, Cmd);
 	CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
@@ -5797,6 +5816,12 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	// The debug view, after whatever this tick does (it returns from several
+	// places).
+	ON_SCOPE_EXIT
+	{
+		TickDebugView(DeltaTime);
+	};
 	TrackChassisMotion();
 	PollReplan();
 	if (bHandBackPending)
@@ -6368,10 +6393,23 @@ bool URammsCurbNegotiationController::DetectTerrain(bool bBeforeStart, FRammsCur
 	TArray<AActor*>		  Attached;
 	Owner->GetAttachedActors(Attached, true, true);
 	Params.AddIgnoredActors(Attached);
+	// The debug view's sensing and terrain layers draw every trace a scan
+	// makes; recorded only while one of them is on.
+	TArray<RammsCurb::FDebugScanSample>* Record = nullptr;
+	if (DebugState && IsInGameThread() && (DebugView.Sensing != ERammsCurbSensingView::Off || DebugView.bTerrain))
+	{
+		DebugState->Capture.Reset();
+		Record = &DebugState->Capture;
+	}
 	auto SurfaceAt = [&](const FVector2D& P, double& OutZ) {
 		FHitResult Hit;
-		if (!World->LineTraceSingleByChannel(Hit, FVector(P.X, P.Y, Ground + Reach), FVector(P.X, P.Y, Ground - Reach),
-				ECC_Visibility, Params))
+		const bool bHit = World->LineTraceSingleByChannel(Hit, FVector(P.X, P.Y, Ground + Reach), FVector(P.X, P.Y, Ground - Reach),
+			ECC_Visibility, Params);
+		if (Record)
+		{
+			Record->Add({ P, Ground + Reach, Ground - Reach, bHit ? Hit.ImpactPoint.Z : Ground - Reach, bHit });
+		}
+		if (!bHit)
 		{
 			return false;
 		}
@@ -6381,8 +6419,27 @@ bool URammsCurbNegotiationController::DetectTerrain(bool bBeforeStart, FRammsCur
 	RammsCurb::FTerrainFitReport Report;
 	const double				 Start = FPlatformTime::Seconds();
 	const bool					 bFound = RammsCurb::FitTerrain(In, SurfaceAt, OutTerrain, OutReason, &Report);
-	UE_LOG(LogRammsCurb, Verbose, TEXT("[Curb] '%s' detection: %d traces in %.1f ms: %s"), *GetNameSafe(Owner), Report.Traces,
-		1000.0 * (FPlatformTime::Seconds() - Start), *OutReason);
+	const double				 Ms = 1000.0 * (FPlatformTime::Seconds() - Start);
+	UE_LOG(LogRammsCurb, Verbose, TEXT("[Curb] '%s' detection: %d traces in %.1f ms: %s"), *GetNameSafe(Owner), Report.Traces, Ms,
+		*OutReason);
+	if (Record)
+	{
+		RammsCurb::FDebugScan& Scan = DebugState->Scan;
+		Scan.bValid = true;
+		Scan.Time = World->GetTimeSeconds();
+		Scan.bPreview = DebugState->bPreviewScan;
+		Scan.bFound = bFound;
+		Scan.Why = OutReason;
+		Scan.Terrain = bFound ? OutTerrain : FRammsCurbTerrain();
+		Scan.Origin = In.Origin;
+		Scan.Heading = In.Heading;
+		Scan.Samples = MoveTemp(DebugState->Capture);
+		Scan.Lanes = Report.Lanes;
+		Scan.TrackHalfWidthCm = Report.TrackHalfWidthCm;
+		Scan.Ms = Ms;
+		Scan.ResidualCm = Tuning.MaxPlaneResidualCm;
+		DebugState->Capture.Reset();
+	}
 	if (OutInput)
 	{
 		*OutInput = MoveTemp(In);
@@ -6662,6 +6719,79 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	}
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
+
+	// The debug view's switches (DebugView), a group of their own.
+	if (!DebugView.bExposeControls)
+	{
+		return;
+	}
+	const FName View(TEXT("Curb view"));
+	auto		AddSwitch = [&](FName Id, const FText& Name, int32 Order, TArray<FText> Labels) {
+		   FRammsControlAxis Switch;
+		   Switch.Id = Id;
+		   Switch.Group = View;
+		   Switch.DisplayName = Name;
+		   Switch.Kind = ERammsControlKind::Enum;
+		   Switch.Units = ERammsControlUnits::None;
+		   Switch.Order = Order;
+		   Switch.Range = FVector2D(0.0, FMath::Max(0, Labels.Num() - 1));
+		   float Now = 0.0f;
+		   ReadControl(Id, Now);
+		   Switch.DefaultValue = Now;
+		   Switch.EnumLabels = MoveTemp(Labels);
+		   OutSurface.Add(Switch);
+	};
+	const FText Off = NSLOCTEXT("Ramms", "CurbViewOff", "Off");
+	const FText On = NSLOCTEXT("Ramms", "CurbViewOn", "On");
+	AddSwitch(ViewSensingControlId(), NSLOCTEXT("Ramms", "CurbViewSensing", "Sensing"), 0,
+		{ Off, NSLOCTEXT("Ramms", "CurbViewLive", "Live"), NSLOCTEXT("Ramms", "CurbViewTrail", "Live + trail") });
+	AddSwitch(ViewTerrainControlId(), NSLOCTEXT("Ramms", "CurbViewTerrain", "Terrain model"), 1, { Off, On });
+	AddSwitch(ViewPlanControlId(), NSLOCTEXT("Ramms", "CurbViewPlan", "Plan"), 2, { Off, On });
+	AddSwitch(ViewRobotControlId(), NSLOCTEXT("Ramms", "CurbViewRobot", "Robot state"), 3, { Off, On });
+	AddSwitch(ViewGraphsControlId(), NSLOCTEXT("Ramms", "CurbViewGraphs", "Graphs"), 4, { Off, On });
+	AddSwitch(ViewLabelsControlId(), NSLOCTEXT("Ramms", "CurbViewLabels", "Labels"), 5, { Off, On });
+}
+
+namespace
+{
+	/** The debug view's on/off switch an Id names, else null. */
+	template <typename TView>
+	auto ViewFlag(TView& View, FName Id) -> decltype(&View.bTerrain)
+	{
+		return Id == URammsCurbNegotiationController::ViewTerrainControlId() ? &View.bTerrain
+			: Id == URammsCurbNegotiationController::ViewPlanControlId()	 ? &View.bPlan
+			: Id == URammsCurbNegotiationController::ViewRobotControlId()	 ? &View.bRobot
+			: Id == URammsCurbNegotiationController::ViewGraphsControlId()	 ? &View.bGraphs
+			: Id == URammsCurbNegotiationController::ViewLabelsControlId()	 ? &View.bLabels
+																			 : nullptr;
+	}
+} // namespace
+
+bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
+{
+	const int32 Index = FMath::RoundToInt(Value);
+	if (Id == ViewSensingControlId())
+	{
+		DebugView.Sensing = static_cast<ERammsCurbSensingView>(FMath::Clamp(Index, 0, 2));
+		return true;
+	}
+	if (bool* Flag = ViewFlag(DebugView, Id))
+	{
+		*Flag = Index != 0;
+		return true;
+	}
+	return false;
+}
+
+bool URammsCurbNegotiationController::ReadTarget(FName Id, float& OutTarget) const
+{
+	// A switch's target is what it is set to, however it was set (the panel
+	// steps from it).
+	if (Id == ViewSensingControlId() || ViewFlag(DebugView, Id))
+	{
+		return ReadControl(Id, OutTarget);
+	}
+	return false;
 }
 
 bool URammsCurbNegotiationController::TriggerControl(FName Id)
@@ -6684,6 +6814,16 @@ bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) con
 	if (Id == PhaseControlId())
 	{
 		OutValue = static_cast<float>(Phase);
+		return true;
+	}
+	if (Id == ViewSensingControlId())
+	{
+		OutValue = static_cast<float>(DebugView.Sensing);
+		return true;
+	}
+	if (const bool* Flag = ViewFlag(DebugView, Id))
+	{
+		OutValue = *Flag ? 1.0f : 0.0f;
 		return true;
 	}
 	return false;
