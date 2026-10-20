@@ -147,6 +147,28 @@ namespace RammsCurb
 		FColor	Colour = FColor::White;
 	};
 
+	/** Boxes, lines and text at points in its own frame (Slate units, y down):
+	 *  what the colour key and the graphs are drawn with, over the viewport's
+	 *  canvas or into the HUD panel's Slate widget. */
+	struct FDebugPainter
+	{
+		float LineHeight = 15.0f;
+
+		virtual ~FDebugPainter() = default;
+		virtual void  Box(float X, float Y, float W, float H, const FLinearColor& Colour) const = 0;
+		virtual void  Line(float X0, float Y0, float X1, float Y1, const FLinearColor& Colour, float Thickness = 1.0f) const = 0;
+		virtual float Text(float X, float Y, const FString& S, const FLinearColor& Colour) const = 0;
+		virtual float Width(const FString& S) const = 0;
+
+		void Dashed(float X0, float X1, float Y, const FLinearColor& Colour) const
+		{
+			for (float X = X0; X < X1; X += 8.0f)
+			{
+				Line(X, Y, FMath::Min(X + 4.0f, X1), Y, Colour);
+			}
+		}
+	};
+
 	/** What the view keeps between frames. */
 	struct FDebugViewState
 	{

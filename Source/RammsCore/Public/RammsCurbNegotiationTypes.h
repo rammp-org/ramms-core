@@ -995,15 +995,16 @@ struct RAMMSCORE_API FRammsCurbDebugView
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
 	bool bRobot = false;
 
-	/** Strip charts over the viewport: the chassis speed (measured, commanded,
-	 *  the floor), the base's tilt (measured, planned, the limit) and the
-	 *  stability margin (measured, planned), over the last GraphSeconds of
-	 *  simulated time. */
+	/** Strip charts of the chassis speed (measured, commanded, the floor),
+	 *  the base's tilt (measured, planned, the limit) and the stability margin
+	 *  (measured, planned), over the last GraphSeconds of simulated time: in
+	 *  the HUD's "Curb view" panel (IRammsHUDPanelProvider), else over the
+	 *  viewport. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
 	bool bGraphs = false;
 
-	/** Text in the world beside what is drawn, and a colour key over the
-	 *  viewport. */
+	/** Text in the world beside what is drawn, and a colour key (in the
+	 *  HUD's "Curb view" panel, else over the viewport). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
 	bool bLabels = true;
 
@@ -1019,8 +1020,9 @@ struct RAMMSCORE_API FRammsCurbDebugView
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug", meta = (ClampMin = "2.0", ClampMax = "120.0"))
 	float GraphSeconds = 15.0f;
 
-	/** Where the graphs and the colour key sit: their bottom-left corner, as
-	 *  a fraction of the viewport (0,0 top left). */
+	/** Where the graphs and the colour key sit when no HUD hosts them as a
+	 *  panel (the HUD's "Curb view" panel moves like any other): their
+	 *  bottom-left corner, as a fraction of the viewport (0,0 top left). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
 	FVector2D OverlayAnchor = FVector2D(0.14, 0.98);
 
