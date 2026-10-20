@@ -938,3 +938,96 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Detection", meta = (ClampMin = "10.0"))
 	float FarFitDepthCm = 120.0f;
 };
+
+/** What the debug view's sensing layer draws (FRammsCurbDebugView::Sensing). */
+UENUM(BlueprintType)
+enum class ERammsCurbSensingView : uint8
+{
+	Off,
+	/** The latest detection scan's traces, and during a crossing the terrain
+	 *  monitor's probes as each tick makes them. */
+	Live,
+	/** Live, and the probe hits of the last TrailSeconds: the ground the
+	 *  wheels' probes have swept. */
+	Trail UMETA(DisplayName = "Live + trail"),
+};
+
+/**
+ * The curb controller's debug view: what it senses of the terrain, what it
+ * makes of it, its plan and its state, drawn in the world (debug lines, points
+ * and labels) and, for the graphs, over the viewport. Each layer is switched
+ * from the robot's control panel (the "Curb view" group) or here. Drawing
+ * costs a little each frame and, with Sensing or Terrain on while no crossing
+ * runs, a detection scan every PreviewIntervalSeconds (a few hundred traces);
+ * all off, it costs nothing. Nothing in it changes what the controller does.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsCurbDebugView
+{
+	GENERATED_BODY()
+
+	/** The rays the controller casts and where they hit: the detection scan,
+	 *  each sample coloured by the plane it fits (near, far, neither, no hit),
+	 *  and during a crossing the terrain monitor's probes ahead of and under
+	 *  each wheel, coloured by how far they land from the surface planned on.
+	 *  While no crossing runs, a preview scan shows what "Cross curb ahead"
+	 *  would find. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	ERammsCurbSensingView Sensing = ERammsCurbSensingView::Off;
+
+	/** What the scan is made into: the near and far planes, the edge line and
+	 *  the edge each scan lane found, the step, its angle and the planes'
+	 *  slopes and fit; or why there is no crossing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	bool bTerrain = false;
+
+	/** The plan: each wheel's keep-off window over the edge with the height its
+	 *  wheel is carried to, where it lifts and lands, and the chassis' planned
+	 *  path coloured by its planned speed against the floor, where it tilts and
+	 *  stops. Per-wheel gait only. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	bool bPlan = false;
+
+	/** The robot as the controller sees it: each wheel's state, its commanded
+	 *  and measured centre, why a lift waits; the support polygon, the centre
+	 *  of mass and the stability margin; the base's attitude measured and
+	 *  planned; the phase and what sets the speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	bool bRobot = false;
+
+	/** Strip charts over the viewport: the chassis speed (measured, commanded,
+	 *  the floor), the base's tilt (measured, planned, the limit) and the
+	 *  stability margin (measured, planned), over the last GraphSeconds of
+	 *  simulated time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	bool bGraphs = false;
+
+	/** Text in the world beside what is drawn, and a colour key over the
+	 *  viewport. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	bool bLabels = true;
+
+	/** How long the Trail keeps a probe hit (s, game time). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug", meta = (ClampMin = "0.5", ClampMax = "60.0"))
+	float TrailSeconds = 6.0f;
+
+	/** How often the preview scan runs while no crossing does (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug", meta = (ClampMin = "0.05", ClampMax = "5.0"))
+	float PreviewIntervalSeconds = 0.25f;
+
+	/** The graphs' span (s of simulated time). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug", meta = (ClampMin = "2.0", ClampMax = "120.0"))
+	float GraphSeconds = 15.0f;
+
+	/** Where the graphs and the colour key sit: their bottom-left corner, as
+	 *  a fraction of the viewport (0,0 top left). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	FVector2D OverlayAnchor = FVector2D(0.14, 0.98);
+
+	/** Offer these switches on the robot's control panel ("Curb view"). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	bool bExposeControls = true;
+
+	/** Any layer on. */
+	bool AnyOn() const { return Sensing != ERammsCurbSensingView::Off || bTerrain || bPlan || bRobot || bGraphs; }
+};
