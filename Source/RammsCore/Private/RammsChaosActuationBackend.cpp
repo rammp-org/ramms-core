@@ -8,6 +8,24 @@
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/ConstraintInstance.h"
 
+namespace
+{
+	/** The body a wheel bone is mounted on: its nearest ancestor bone with a
+	 *  simulating body (the drive motor / swing arm, ultimately the chassis). */
+	const FBodyInstance* FindWheelMountBody(const USkeletalMeshComponent& SkelMesh, FName WheelBone)
+	{
+		for (FName Bone = SkelMesh.GetParentBone(WheelBone); Bone != NAME_None; Bone = SkelMesh.GetParentBone(Bone))
+		{
+			const FBodyInstance* Body = SkelMesh.GetBodyInstance(Bone);
+			if (Body && Body->IsInstanceSimulatingPhysics())
+			{
+				return Body;
+			}
+		}
+		return nullptr;
+	}
+} // namespace
+
 bool FRammsChaosActuationBackend::Initialize(URammsRobotBaseComponent& Base)
 {
 	BaseComp = &Base;
@@ -247,6 +265,17 @@ void FRammsChaosActuationBackend::SetCommand(FName MotorId, float Value)
 			AxisVec[Info->Axis] = 1.0f;
 			CI->SetAngularOrientationTarget(FQuat(AxisVec, Value));
 		}
+		// A new target moves the joint: wake its bodies, which a drive target
+		// alone does not -- a robot at rest is asleep (its idle drive no longer
+		// wakes it every frame) and would otherwise not answer the command.
+		// An unchanged target leaves a resting robot asleep.
+		if (!Info->bCommanded || !FMath::IsNearlyEqual(Info->LastCommand, Value))
+		{
+			Info->bCommanded = true;
+			Info->LastCommand = Value;
+			SkelMesh->WakeRigidBody(Info->ChildBone);
+			SkelMesh->WakeRigidBody(Info->ParentBone);
+		}
 		return;
 	}
 
@@ -275,6 +304,14 @@ void FRammsChaosActuationBackend::SetCommand(FName MotorId, float Value)
 
 	const int32 BoneIndex = SkelMesh->GetBoneIndex(Bone);
 	if (BoneIndex == INDEX_NONE)
+	{
+		return;
+	}
+	// Nothing to apply: an AddTorque wakes the body even at zero, and a parked
+	// robot woken by its idle drive every frame fell asleep and woke again
+	// between them, each wake a jolt (the MeBot rocked at ~2-4 Hz). Torque
+	// motors apply per frame, so skipping a zero command changes nothing else.
+	if (FMath::IsNearlyZero(Value))
 	{
 		return;
 	}
@@ -373,9 +410,73 @@ float FRammsChaosActuationBackend::GetVelocity(FName MotorId) const
 		return 0.0f;
 	}
 	const FTransform BoneTransform = SkelMesh->GetBoneTransform(BoneIndex);
-	const FVector	 WorldAngVel = BodyInst->GetUnrealWorldAngularVelocityInRadians();
-	// Spin about the bone's local Y axis.
+	FVector			 WorldAngVel = BodyInst->GetUnrealWorldAngularVelocityInRadians();
+	// Spin about the bone's local Y axis, relative to what the wheel is mounted
+	// on -- what the motor's encoder measures. Read against the world, the
+	// chassis pitching about the axle read as the wheel turning, and the
+	// drive's resistive / braking torques answered it on the wheel, feeding
+	// the pitch back.
+	if (const FBodyInstance* Mount = FindWheelMountBody(*SkelMesh, Bone))
+	{
+		WorldAngVel -= Mount->GetUnrealWorldAngularVelocityInRadians();
+	}
 	return BoneTransform.InverseTransformVectorNoScale(WorldAngVel).Y;
+}
+
+bool FRammsChaosActuationBackend::SetMotorBrake(FName MotorId, bool bEngaged)
+{
+	USkeletalMeshComponent* SkelMesh = Mesh.Get();
+	// Position motors hold where they are commanded already; a brake is for a
+	// wheel left to roll freely about its joint.
+	if (!SkelMesh || IsConstraintMotor(MotorId))
+	{
+		return false;
+	}
+	const FName			 Wheel = BoneFor(MotorId);
+	FConstraintInstance* CI = SkelMesh->FindConstraintInstance(Wheel);
+	if (!CI)
+	{
+		return false;
+	}
+	if (!bEngaged)
+	{
+		if (BrakedMotors.Remove(MotorId) > 0)
+		{
+			CI->SetOrientationDriveTwistAndSwing(false, false);
+			CI->SetAngularVelocityDriveTwistAndSwing(false, false);
+			SkelMesh->WakeRigidBody(Wheel);
+		}
+		return true;
+	}
+	if (BrakedMotors.Contains(MotorId))
+	{
+		return true;
+	}
+	// The wheel's one free axis, held at the angle the constraint reads now --
+	// the same angle and target convention as a Position motor (GetValue /
+	// SetCommand), so engaging does not turn the wheel.
+	int32 Axis = INDEX_NONE;
+	int32 Free = 0;
+	if (CI->GetAngularTwistMotion() != EAngularConstraintMotion::ACM_Locked) { Axis = 0; ++Free; }
+	if (CI->GetAngularSwing2Motion() != EAngularConstraintMotion::ACM_Locked) { Axis = 1; ++Free; }
+	if (CI->GetAngularSwing1Motion() != EAngularConstraintMotion::ACM_Locked) { Axis = 2; ++Free; }
+	if (Free != 1)
+	{
+		return false;
+	}
+	const float Angle = Axis == 0 ? CI->GetCurrentTwist() : (Axis == 1 ? CI->GetCurrentSwing2() : CI->GetCurrentSwing1());
+	FVector		AxisVec = FVector::ZeroVector;
+	AxisVec[Axis] = 1.0f;
+	const URammsRobotBaseComponent* Base = BaseComp.Get();
+	CI->SetAngularDriveMode(EAngularDriveMode::TwistAndSwing);
+	CI->SetOrientationDriveTwistAndSwing(/*bTwist=*/Axis == 0, /*bSwing=*/Axis != 0);
+	CI->SetAngularVelocityDriveTwistAndSwing(/*bTwist=*/Axis == 0, /*bSwing=*/Axis != 0);
+	CI->SetAngularDriveParams(Base ? Base->ChaosParkingBrakeStiffness : 1.0e8f, Base ? Base->ChaosParkingBrakeDamping : 1.0e6f, 0.0f);
+	CI->SetAngularOrientationTarget(FQuat(AxisVec, Angle));
+	CI->SetAngularVelocityTarget(FVector::ZeroVector);
+	BrakedMotors.Add(MotorId);
+	SkelMesh->WakeRigidBody(Wheel);
+	return true;
 }
 
 bool FRammsChaosActuationBackend::ReleaseMotor(FName MotorId)

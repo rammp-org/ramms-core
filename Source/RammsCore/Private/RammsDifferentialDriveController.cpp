@@ -242,7 +242,42 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	{
 		ReleaseHold();
 	}
-	if (bHold)
+	// No torque hold on this backend (CanHoldWithTorque): park on the drive
+	// wheels' brakes instead once the robot has slowed at centre, under the
+	// same conditions the hold has; driving releases them first.
+	const bool bWantPark = bDriveModeActive && bHoldWhenIdle && !bCanHold && UsesBase() && RammsDrive::HoldWhenIdleEnabled()
+		&& !bHeldForStance && !IsOperatorCommanding() && !bCarryGrace && T - FirstTickTime >= RammsDrive::SpawnSettleSeconds;
+	if (!bWantPark)
+	{
+		SetParkingBrake(false);
+		ParkFromSpeed = 0.0f;
+	}
+	else if (!bParkingBrake)
+	{
+		// Closed once the treads are slow, or the moment the robot turns back
+		// against the way it was going when let go: stopped on a slope, it
+		// passes through rest in a frame and gravity takes it back down, often
+		// never as slowly as ParkingBrakeSpeed again with the braking against it.
+		const float Forward = 0.5f * (LeftWheelState.LinearVelocity + RightWheelState.LinearVelocity);
+		if (ParkFromSpeed == 0.0f)
+		{
+			ParkFromSpeed = FMath::Abs(Forward) > ParkingBrakeSpeed ? Forward : SMALL_NUMBER;
+		}
+		const bool bSlow = FMath::Max(FMath::Abs(LeftWheelState.LinearVelocity), FMath::Abs(RightWheelState.LinearVelocity)) < ParkingBrakeSpeed;
+		const bool bTurnedBack = FMath::Abs(ParkFromSpeed) > ParkingBrakeSpeed && Forward * ParkFromSpeed < 0.0f;
+		if (bSlow || bTurnedBack)
+		{
+			SetParkingBrake(true);
+		}
+	}
+	if (bParkingBrake)
+	{
+		// Held by the brakes: no wheel torque to fight them.
+		bIsBraking = true;
+		LeftWheelState.AppliedTorque = 0.0f;
+		RightWheelState.AppliedTorque = 0.0f;
+	}
+	else if (bHold)
 	{
 		if (!HoldLeft->bActive || !HoldRight->bActive)
 		{
@@ -275,8 +310,11 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	else if (bDriveModeActive)
 	{
 		// Check for braking -- not on a carry's first tick, which is its
-		// operator's to be heard on.
-		bIsBraking = !bCarryGrace && ShouldApplyBrakes();
+		// operator's to be heard on. Parking (bWantPark) brakes to rest first,
+		// auto-braking or not, as a power chair decelerates before its brakes
+		// close: left to roll, a robot let go going down a ramp never slowed
+		// to ParkingBrakeSpeed.
+		bIsBraking = !bCarryGrace && (ShouldApplyBrakes() || bWantPark);
 
 		if (bIsBraking)
 		{
@@ -454,6 +492,18 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 		// Get angular velocity in radians per second
 		// Assuming wheel spins around its local Y axis (standard for UE wheel components)
 		FVector AngularVelocity = BodyInst->GetUnrealWorldAngularVelocityInRadians();
+		// Relative to the body the wheel is mounted on, as an encoder reads it
+		// (see FRammsChaosActuationBackend::GetVelocity): the chassis pitching
+		// about the axle is not the wheel turning.
+		for (FName Mount = ContactMesh->GetParentBone(ContactBone); Mount != NAME_None; Mount = ContactMesh->GetParentBone(Mount))
+		{
+			const FBodyInstance* MountBody = ContactMesh->GetBodyInstance(Mount);
+			if (MountBody && MountBody->IsInstanceSimulatingPhysics())
+			{
+				AngularVelocity -= MountBody->GetUnrealWorldAngularVelocityInRadians();
+				break;
+			}
+		}
 
 		// Convert to local space to extract the rotation speed around the
 		// wheel's spin axis (typically Y axis)
@@ -580,9 +630,17 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 		}
 	}
 
-	// Apply resistive torque that opposes motion (simulates back-EMF, friction, drag)
-	float LeftResistiveTorque = -FMath::Sign(LeftWheelState.AngularVelocity) * ResistiveTorqueCoefficient * FMath::Abs(LeftWheelState.AngularVelocity);
-	float RightResistiveTorque = -FMath::Sign(RightWheelState.AngularVelocity) * ResistiveTorqueCoefficient * FMath::Abs(RightWheelState.AngularVelocity);
+	// Apply resistive torque that opposes motion (simulates back-EMF, friction, drag).
+	// Not below the brakes' deadband (ApplyBrakes): a parked robot's wheels read a
+	// few hundredths of a rad/s of solver noise, and answering it put a torque on
+	// them every frame, which kept the robot from ever coming to rest (each torque
+	// wakes it; it nearly slept and was jolted awake again, rocking at ~2-4 Hz).
+	constexpr float ResistiveDeadband = 0.1f; // rad/s
+	const auto		Resistive = [this](float AngVel) {
+		return FMath::Abs(AngVel) > ResistiveDeadband ? -AngVel * ResistiveTorqueCoefficient : 0.0f;
+	};
+	float LeftResistiveTorque = Resistive(LeftWheelState.AngularVelocity);
+	float RightResistiveTorque = Resistive(RightWheelState.AngularVelocity);
 
 	// Add resistive torque to commanded torque
 	LeftTorque += LeftResistiveTorque;
@@ -727,6 +785,8 @@ void URammsDifferentialDriveController::ResetHoldState()
 	SmoothLeftRate = SmoothRightRate = 0.0;
 	SeedExpires = -1.0;
 	bStoodDownHeld = false;
+	// Its wheels are back where a reset put them; brake them afresh once at rest.
+	SetParkingBrake(false);
 }
 
 void URammsDifferentialDriveController::SeedGroundSlope(float ForwardGradeDeg, float RobotMassKg)
@@ -787,6 +847,30 @@ void URammsDifferentialDriveController::HoldWheelsWhileInactive(bool bHold)
 				BaseComponent->SetMotorCommand(MotorId, 0.0f);
 			}
 		}
+	}
+}
+
+void URammsDifferentialDriveController::SetParkingBrake(bool bEngage)
+{
+	if (bEngage == bParkingBrake || !UsesBase())
+	{
+		return;
+	}
+	if (!bEngage)
+	{
+		BaseComponent->SetMotorBrake(LeftMotorId, false);
+		BaseComponent->SetMotorBrake(RightMotorId, false);
+		bParkingBrake = false;
+		return;
+	}
+	const bool bLeft = BaseComponent->SetMotorBrake(LeftMotorId, true);
+	const bool bRight = BaseComponent->SetMotorBrake(RightMotorId, true);
+	bParkingBrake = bLeft && bRight;
+	if (!bParkingBrake)
+	{
+		// One side alone would slew the robot about the braked wheel.
+		BaseComponent->SetMotorBrake(LeftMotorId, false);
+		BaseComponent->SetMotorBrake(RightMotorId, false);
 	}
 }
 
@@ -980,7 +1064,11 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 			*BoneName.ToString(), WorldTorque.X, WorldTorque.Y, WorldTorque.Z);
 	}
 
-	BodyInst->AddTorqueInRadians(WorldTorque, false, true);
+	// A zero torque would still wake the body (see FRammsChaosActuationBackend::SetCommand).
+	if (!WorldTorque.IsNearlyZero())
+	{
+		BodyInst->AddTorqueInRadians(WorldTorque, false, true);
+	}
 }
 
 void URammsDifferentialDriveController::UpdateOdometry(float DeltaTime)
@@ -1212,6 +1300,11 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 	if (bDriveModeActive == bActive)
 	{
 		return;
+	}
+	if (!bActive)
+	{
+		// The next mode drives these wheels.
+		SetParkingBrake(false);
 	}
 	bDriveModeActive = bActive;
 	bHeldForStance = false;

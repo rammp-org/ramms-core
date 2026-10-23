@@ -94,4 +94,13 @@ public:
 	 *  (ClearMotorVelocityCommand), this leaves whatever the loop last wrote
 	 *  until the motor is commanded again. */
 	virtual void ClearVelocityDrive(FName MotorId) {}
+
+	/**
+	 * Engage or release a Torque motor's parking brake: its joint held where it
+	 * stands, as a power chair's electromagnetic brakes hold its wheels while the
+	 * joystick is at centre. For backends whose wheels a drive cannot hold with
+	 * torque (SimulatesMotorJoint false). Engaging an engaged brake keeps it where
+	 * it was set. False: this backend has no brake for the motor.
+	 */
+	virtual bool SetMotorBrake(FName MotorId, bool bEngaged) { return false; }
 };

@@ -85,6 +85,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
 	float ChaosPositionDriveForceLimit = 0.0f;
 
+	/** Chaos only: stiffness of a wheel's parking brake (SetMotorBrake), the
+	 *  drive that holds its joint where it stopped. Stiff enough that the
+	 *  robot's weight on a slope barely turns it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
+	float ChaosParkingBrakeStiffness = 1.0e8f;
+
+	/** Chaos only: damping of a wheel's parking brake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Chaos", meta = (ClampMin = "0.0"))
+	float ChaosParkingBrakeDamping = 1.0e6f;
+
 	/** Gains for the velocity loop over Torque actuators, for motors whose own
 	 *  registry row does not set them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot|Velocity Loop")
@@ -147,6 +157,12 @@ public:
 	 *  release it — it is then still driven at its last command. */
 	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
 	bool ReleaseMotor(FName MotorId);
+
+	/** Engage or release a Torque motor's parking brake: its joint held where
+	 *  it stands (IRammsActuationBackend::SetMotorBrake). False if the backend
+	 *  has no brake for it. */
+	UFUNCTION(BlueprintCallable, Category = "Robot|Motors")
+	bool SetMotorBrake(FName MotorId, bool bEngaged);
 
 	/** Chaos only: the skeletal mesh component the Chaos backend drives
 	 *  (ChaosSkeletalMeshComponentName, else the owner's first). */

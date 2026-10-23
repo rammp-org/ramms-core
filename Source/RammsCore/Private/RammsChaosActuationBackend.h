@@ -52,6 +52,7 @@ public:
 	 *  angle and takes its command as an acceleration change. */
 	virtual bool SimulatesMotorJoint(FName MotorId) const override { return IsConstraintMotor(MotorId); }
 	virtual bool ReleaseMotor(FName MotorId) override;
+	virtual bool SetMotorBrake(FName MotorId, bool bEngaged) override;
 	virtual bool GetMotorTransform(FName MotorId, FTransform& OutWorld) const override;
 
 private:
@@ -66,6 +67,9 @@ private:
 		FName ChildBone;
 		FName ParentBone;
 		bool  bTakenOver = false;
+		/** The last commanded target, to wake the bodies when it changes. */
+		bool  bCommanded = false;
+		float LastCommand = 0.0f;
 	};
 
 	/** The skeletal bone / constraint name a motor maps to (ChaosName, else Id). */
@@ -94,4 +98,6 @@ private:
 
 	/** Motors already warned about (unsupported type, missing constraint...). */
 	mutable TSet<FName> WarnedUnsupported;
+	/** Torque motors whose parking brake is engaged (SetMotorBrake). */
+	TSet<FName> BrakedMotors;
 };
