@@ -66,6 +66,9 @@ private:
 		FName ChildBone;
 		FName ParentBone;
 		bool  bTakenOver = false;
+		/** The last commanded target, to wake the bodies when it changes. */
+		bool  bCommanded = false;
+		float LastCommand = 0.0f;
 	};
 
 	/** The skeletal bone / constraint name a motor maps to (ChaosName, else Id). */

@@ -454,6 +454,18 @@ void URammsDifferentialDriveController::UpdateWheelState(FName MotorId, FName Bo
 		// Get angular velocity in radians per second
 		// Assuming wheel spins around its local Y axis (standard for UE wheel components)
 		FVector AngularVelocity = BodyInst->GetUnrealWorldAngularVelocityInRadians();
+		// Relative to the body the wheel is mounted on, as an encoder reads it
+		// (see FRammsChaosActuationBackend::GetVelocity): the chassis pitching
+		// about the axle is not the wheel turning.
+		for (FName Mount = ContactMesh->GetParentBone(ContactBone); Mount != NAME_None; Mount = ContactMesh->GetParentBone(Mount))
+		{
+			const FBodyInstance* MountBody = ContactMesh->GetBodyInstance(Mount);
+			if (MountBody && MountBody->IsInstanceSimulatingPhysics())
+			{
+				AngularVelocity -= MountBody->GetUnrealWorldAngularVelocityInRadians();
+				break;
+			}
+		}
 
 		// Convert to local space to extract the rotation speed around the
 		// wheel's spin axis (typically Y axis)
@@ -580,9 +592,17 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 		}
 	}
 
-	// Apply resistive torque that opposes motion (simulates back-EMF, friction, drag)
-	float LeftResistiveTorque = -FMath::Sign(LeftWheelState.AngularVelocity) * ResistiveTorqueCoefficient * FMath::Abs(LeftWheelState.AngularVelocity);
-	float RightResistiveTorque = -FMath::Sign(RightWheelState.AngularVelocity) * ResistiveTorqueCoefficient * FMath::Abs(RightWheelState.AngularVelocity);
+	// Apply resistive torque that opposes motion (simulates back-EMF, friction, drag).
+	// Not below the brakes' deadband (ApplyBrakes): a parked robot's wheels read a
+	// few hundredths of a rad/s of solver noise, and answering it put a torque on
+	// them every frame, which kept the robot from ever coming to rest (each torque
+	// wakes it; it nearly slept and was jolted awake again, rocking at ~2-4 Hz).
+	constexpr float ResistiveDeadband = 0.1f; // rad/s
+	const auto		Resistive = [this](float AngVel) {
+		return FMath::Abs(AngVel) > ResistiveDeadband ? -AngVel * ResistiveTorqueCoefficient : 0.0f;
+	};
+	float LeftResistiveTorque = Resistive(LeftWheelState.AngularVelocity);
+	float RightResistiveTorque = Resistive(RightWheelState.AngularVelocity);
 
 	// Add resistive torque to commanded torque
 	LeftTorque += LeftResistiveTorque;
@@ -980,7 +1000,11 @@ void URammsDifferentialDriveController::ApplyWheelTorque(
 			*BoneName.ToString(), WorldTorque.X, WorldTorque.Y, WorldTorque.Z);
 	}
 
-	BodyInst->AddTorqueInRadians(WorldTorque, false, true);
+	// A zero torque would still wake the body (see FRammsChaosActuationBackend::SetCommand).
+	if (!WorldTorque.IsNearlyZero())
+	{
+		BodyInst->AddTorqueInRadians(WorldTorque, false, true);
+	}
 }
 
 void URammsDifferentialDriveController::UpdateOdometry(float DeltaTime)
