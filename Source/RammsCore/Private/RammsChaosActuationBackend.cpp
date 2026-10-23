@@ -423,6 +423,62 @@ float FRammsChaosActuationBackend::GetVelocity(FName MotorId) const
 	return BoneTransform.InverseTransformVectorNoScale(WorldAngVel).Y;
 }
 
+bool FRammsChaosActuationBackend::SetMotorBrake(FName MotorId, bool bEngaged)
+{
+	USkeletalMeshComponent* SkelMesh = Mesh.Get();
+	// Position motors hold where they are commanded already; a brake is for a
+	// wheel left to roll freely about its joint.
+	if (!SkelMesh || IsConstraintMotor(MotorId))
+	{
+		return false;
+	}
+	const FName			 Wheel = BoneFor(MotorId);
+	FConstraintInstance* CI = SkelMesh->FindConstraintInstance(Wheel);
+	if (!CI)
+	{
+		return false;
+	}
+	if (!bEngaged)
+	{
+		if (BrakedMotors.Remove(MotorId) > 0)
+		{
+			CI->SetOrientationDriveTwistAndSwing(false, false);
+			CI->SetAngularVelocityDriveTwistAndSwing(false, false);
+			SkelMesh->WakeRigidBody(Wheel);
+		}
+		return true;
+	}
+	if (BrakedMotors.Contains(MotorId))
+	{
+		return true;
+	}
+	// The wheel's one free axis, held at the angle the constraint reads now --
+	// the same angle and target convention as a Position motor (GetValue /
+	// SetCommand), so engaging does not turn the wheel.
+	int32 Axis = INDEX_NONE;
+	int32 Free = 0;
+	if (CI->GetAngularTwistMotion() != EAngularConstraintMotion::ACM_Locked) { Axis = 0; ++Free; }
+	if (CI->GetAngularSwing2Motion() != EAngularConstraintMotion::ACM_Locked) { Axis = 1; ++Free; }
+	if (CI->GetAngularSwing1Motion() != EAngularConstraintMotion::ACM_Locked) { Axis = 2; ++Free; }
+	if (Free != 1)
+	{
+		return false;
+	}
+	const float Angle = Axis == 0 ? CI->GetCurrentTwist() : (Axis == 1 ? CI->GetCurrentSwing2() : CI->GetCurrentSwing1());
+	FVector		AxisVec = FVector::ZeroVector;
+	AxisVec[Axis] = 1.0f;
+	const URammsRobotBaseComponent* Base = BaseComp.Get();
+	CI->SetAngularDriveMode(EAngularDriveMode::TwistAndSwing);
+	CI->SetOrientationDriveTwistAndSwing(/*bTwist=*/Axis == 0, /*bSwing=*/Axis != 0);
+	CI->SetAngularVelocityDriveTwistAndSwing(/*bTwist=*/Axis == 0, /*bSwing=*/Axis != 0);
+	CI->SetAngularDriveParams(Base ? Base->ChaosParkingBrakeStiffness : 1.0e8f, Base ? Base->ChaosParkingBrakeDamping : 1.0e6f, 0.0f);
+	CI->SetAngularOrientationTarget(FQuat(AxisVec, Angle));
+	CI->SetAngularVelocityTarget(FVector::ZeroVector);
+	BrakedMotors.Add(MotorId);
+	SkelMesh->WakeRigidBody(Wheel);
+	return true;
+}
+
 bool FRammsChaosActuationBackend::ReleaseMotor(FName MotorId)
 {
 	if (!IsConstraintMotor(MotorId))

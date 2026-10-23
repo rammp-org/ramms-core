@@ -195,6 +195,17 @@ bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 	return Backend_ && Backend_->ReleaseMotor(MotorId);
 }
 
+bool URammsRobotBaseComponent::SetMotorBrake(FName MotorId, bool bEngaged)
+{
+	EnsureBackend();
+	if (bEngaged)
+	{
+		// A braked wheel is not also driven at a speed.
+		DropVelocityDrive(MotorId);
+	}
+	return Backend_ && Backend_->SetMotorBrake(MotorId, bEngaged);
+}
+
 // --- velocity loop ------------------------------------------------------------
 
 void URammsRobotBaseComponent::SetMotorVelocityCommand(FName MotorId, float RadiansPerSecond)

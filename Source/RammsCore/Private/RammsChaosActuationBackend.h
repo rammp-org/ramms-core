@@ -52,6 +52,7 @@ public:
 	 *  angle and takes its command as an acceleration change. */
 	virtual bool SimulatesMotorJoint(FName MotorId) const override { return IsConstraintMotor(MotorId); }
 	virtual bool ReleaseMotor(FName MotorId) override;
+	virtual bool SetMotorBrake(FName MotorId, bool bEngaged) override;
 	virtual bool GetMotorTransform(FName MotorId, FTransform& OutWorld) const override;
 
 private:
@@ -97,4 +98,6 @@ private:
 
 	/** Motors already warned about (unsupported type, missing constraint...). */
 	mutable TSet<FName> WarnedUnsupported;
+	/** Torque motors whose parking brake is engaged (SetMotorBrake). */
+	TSet<FName> BrakedMotors;
 };

@@ -175,11 +175,30 @@ public:
 	 * applies a torque in N.m (URammsRobotBaseComponent::SimulatesMotorJoint:
 	 * MuJoCo). On the Chaos backend, whose wheel torque is an acceleration
 	 * change and whose wheels report no angle, and without a robot base, this
-	 * has no effect: auto-braking applies as before, and HoldsRobotStill() is
-	 * false.
+	 * has no torque hold: the robot is held by its drive wheels' parking brakes
+	 * instead (ParkingBrakeSpeed), and HoldsRobotStill() is false.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking")
 	bool bHoldWhenIdle = true;
+
+	/**
+	 * Where the wheels cannot be held with torque (the Chaos backend), bHoldWhenIdle
+	 * engages the drive wheels' parking brakes (URammsRobotBaseComponent::SetMotorBrake)
+	 * once the input is at centre and the treads have slowed below this speed (cm/s), or
+	 * the robot turns back against the way it was going when let go (on a slope it passes
+	 * through rest in a frame) --
+	 * as a power chair's electromagnetic brakes close when it stops -- and releases them
+	 * the moment it is driven again. Without them a robot stopped on a ramp rolls back
+	 * down it. Until they close the drive brakes to rest (ApplyBrakes), auto-braking
+	 * or not; this is above BrakingVelocityThreshold, where that braking stops, so the
+	 * robot is caught rather than left creeping.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
+	float ParkingBrakeSpeed = 6.0f;
+
+	/** Whether the drive wheels' parking brakes are engaged (ParkingBrakeSpeed). */
+	UFUNCTION(BlueprintPure, Category = "Drive|Braking")
+	bool IsParkingBrakeEngaged() const { return bParkingBrake; }
 
 	// ========== Slip/Traction ==========
 
@@ -474,6 +493,14 @@ private:
 	bool bDriveModeActive = true;
 	/** HoldForStance: its wheels are still going down. */
 	bool bHeldForStance = false;
+	/** The drive wheels' parking brakes are engaged (ParkingBrakeSpeed). */
+	bool bParkingBrake = false;
+	/** Forward tread speed (cm/s) when the robot was let go to park, signed;
+	 *  0 until then. Turning back against it closes the brakes. */
+	float ParkFromSpeed = 0.0f;
+	/** Engage / release both drive wheels' parking brakes through the base;
+	 *  engaged only if both take it. */
+	void SetParkingBrake(bool bEngage);
 
 	/** A motion handed over by the selector, pulled towards (SeedMotion). */
 	TPimplPtr<RammsDrive::FCarry> Carry;
