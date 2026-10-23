@@ -311,9 +311,15 @@ public:
 	 * the arm's inertia at full drive stiffness kicks large reaction torques into
 	 * the vehicle chassis (measured: a 2.5 mm EE nudge commanding a 45° joint-1
 	 * sweep spun the stationary MeBot chassis at 575 deg/s). 0 = unlimited.
+	 *
+	 * The default matches the Gen3's joint speed (FRevoluteJointConfig::MaxAngularSpeed,
+	 * 69.91 deg/s). Below it the cap, not the joints, limits how fast the arm can follow a
+	 * moving target: at 45 deg/s the Map_ArmTest arm lagged its 25 cm/s circular target by
+	 * ~30 cm; at 70 it tracks within ~2 cm, and the MeBot chassis disturbance while the
+	 * arm moves is unchanged (~1.8 deg/s RMS).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver", meta = (ClampMin = "0.0"))
-	float MaxIKSolutionSpeedDegPerSecond = 45.0f;
+	float MaxIKSolutionSpeedDegPerSecond = 70.0f;
 
 	/** IK iterations per frame (DLS performs multiple iterations internally) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|DLS", meta = (ClampMin = "1", ClampMax = "500", EditCondition = "IKSolverType == EIKSolverType::DLS"))
