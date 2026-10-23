@@ -3053,6 +3053,10 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 
 	FIKSolveResult IKResult;
 
+	// Each solve converges well inside the on-target tolerances (see
+	// IKConvergencePositionTolerance).
+	const float SolvePosTol = FMath::Min(IKConvergencePositionTolerance, IKPositionTolerance);
+	const float SolveRotTol = FMath::Min(IKConvergenceRotationTolerance, IKRotationTolerance);
 	if (IKSolverType == EIKSolverType::FABRIK)
 	{
 		// Use FABRIK solver with hard joint limits
@@ -3086,8 +3090,8 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			SolveTarget,
 			TaskSpaceMask,
 			CCDMaxIterations,
-			IKPositionTolerance,
-			IKRotationTolerance,
+			SolvePosTol,
+			SolveRotTol,
 			CCDPositionGain,
 			CCDOrientationGain,
 			CCDMaxAngleStepDeg);
@@ -3111,8 +3115,8 @@ void UKinovaGen3ControllerComponent::UpdateInverseKinematics(float DeltaTime)
 			IKDampingFactor,
 			StepClipDeg,
 			MaxIKIterations,
-			IKPositionTolerance,
-			IKRotationTolerance);
+			SolvePosTol,
+			SolveRotTol);
 	}
 
 	// Rate-limit the commanded solution against the previous one (see
