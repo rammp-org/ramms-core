@@ -272,13 +272,32 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver")
 	EIKSolverType IKSolverType = EIKSolverType::DLS;
 
-	/** IK convergence tolerance (cm) */
+	/** How close the arm must be to its target to count as on it (cm): the solve's
+	 *  success (bLastIKSuccess) and the teleop's stall check. How closely each solve
+	 *  converges is IKConvergencePositionTolerance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.01"))
 	float IKPositionTolerance = 1.0f;
 
-	/** IK convergence tolerance (degrees) */
+	/** How close the arm must be to its target's orientation to count as on it
+	 *  (degrees); see IKPositionTolerance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.1"))
 	float IKRotationTolerance = 5.0f;
+
+	/**
+	 * How closely each DLS / CCD solve converges on its target before it stops
+	 * iterating (cm); never looser than IKPositionTolerance. A solve stopped as
+	 * soon as it was within IKPositionTolerance left each frame's solution
+	 * anywhere in that band -- the band moving with the target, the arm stepping
+	 * about in it: with 1 cm the MeBot's end effector shook 3.8 mm RMS (11 mm at
+	 * worst) while it moved, at 0.05 cm 0.7 mm (3.4 mm), at the same frame time.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.001"))
+	float IKConvergencePositionTolerance = 0.05f;
+
+	/** How closely each DLS / CCD solve converges on its target's orientation
+	 *  (degrees); never looser than IKRotationTolerance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.01"))
+	float IKConvergenceRotationTolerance = 0.5f;
 
 	/** Task-space mask: control which DOFs [X, Y, Z, Roll, Pitch, Yaw] */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common")
