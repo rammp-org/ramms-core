@@ -2575,12 +2575,12 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	// allow. The robot may have started in one that is neither: the
 	// differential stance holds the front corners clear and pitches the
 	// chassis, and the gait's heights are all reckoned for a level chassis.
-	auto AllDown = [this](float Level, bool bFar, float NearHeight, const TArray<float>& LegX, const FGoalSpan& Span,
+	auto AllDown = [this](float SupportLevel, bool bFar, float NearHeight, const TArray<float>& LegX, const FGoalSpan& Span,
 					   float& OutHeight) {
 		FAxleGoal Down[3];
 		for (int32 a = 0; a < 3; ++a)
 		{
-			Down[a] = { ELegGoal::Support, Level, bFar };
+			Down[a] = { ELegGoal::Support, SupportLevel, bFar };
 		}
 		for (float D = 0.0f; D < 20.0f; D += 0.25f)
 		{
