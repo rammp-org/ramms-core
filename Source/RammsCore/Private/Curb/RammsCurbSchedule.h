@@ -72,6 +72,14 @@ namespace RammsCurb
 		double TLift = 0.0;
 		double TPlant = 0.0;
 		double TLoad = 0.0;
+		/** Its lift eased (LiftEaseSeconds): begun TEase s earlier than it need
+		 *  be, where the robot stands with it up, its leg rising at LiftSpeed
+		 *  (cm/s; 0: the tuning's LegSpeed) so that it is clear by its window all
+		 *  the same. SLiftStart and TLift include the easing; TLiftMin is the
+		 *  lead with the leg rising as fast as it can. */
+		double TEase = 0.0;
+		double LiftSpeed = 0.0;
+		double TLiftMin = 0.0;
 		/** Where (S, cm) it begins to lift, reaches its window (must be clear),
 		 *  leaves it (may land), touches down, and has taken load. Off the ground
 		 *  from SLiftStart to SLoaded. */

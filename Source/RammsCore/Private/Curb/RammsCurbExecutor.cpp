@@ -737,6 +737,26 @@ namespace RammsCurb
 		return 0.0;
 	}
 
+	double FExecutor::EasedLiftSpeed(int32 Leg, double TargetZ) const
+	{
+		const FRammsCurbTuning& T = In.Tuning;
+		const FWheelPlan&		P = Plan.Wheels[Leg];
+		const FExecWheel&		W = Wheels[Leg];
+		const double			LegSpeed = FMath::Max(1.0, static_cast<double>(T.LegSpeed));
+		if (P.LiftSpeed <= 0.0 || P.LiftSpeed >= LegSpeed)
+		{
+			return LegSpeed;
+		}
+		// The rise left over the time left to its window (less the servo lag
+		// and a settle): no slower than keeps it clear in time.
+		const double Cos = FMath::Max(0.1, M->NormalShare());
+		const double ToWindow = FMath::Max(0.0, (P.DUp - W.PastEdgeCm) / Cos);
+		const double Left = SecondsTo(S + ToWindow) - T.ServoLagSeconds - LegSettleSeconds;
+		const double Rise = FMath::Max(0.0, TargetZ - W.CmdZ);
+		const double Needed = Rise / FMath::Max(Left, static_cast<double>(MinDeadlineSeconds));
+		return FMath::Clamp(FMath::Max(P.LiftSpeed, Needed), P.LiftSpeed, LegSpeed);
+	}
+
 	double FExecutor::SecondsTo(double SAt) const
 	{
 		const double Ds = Plan.SampleCm;
@@ -1119,7 +1139,7 @@ namespace RammsCurb
 				const FRammsCurbTuning& T = In.Tuning;
 				const double			Down = FMath::Max(0.0, Measure.Legs[Leg].XZ.Y - W.TargetZ);
 				OutGate = W.bReachClamped ? ReachGate(Leg) : 0.0;
-				OutSeconds = FMath::Min(P.TPlant, Down / FMath::Max(1.0f, T.LegSpeed) + T.ServoLagSeconds) + P.TLoad;
+				OutSeconds = FMath::Min(P.TPlant, DescentSeconds(Down, T.LegSpeed, T) + T.ServoLagSeconds) + P.TLoad;
 				return;
 			}
 			default: // Lifting, Clear, Held: it lands once past its window
@@ -1189,7 +1209,7 @@ namespace RammsCurb
 			// lift -- the gap the plan timed (its gap caps), braked down to from
 			// now. Blocked otherwise: the lift from now. Neither: its own trigger
 			// starts it in time.
-			const double Lift = (bClimb ? P.TLift : UnloadSeconds) + ExecGapMarginSeconds;
+			const double Lift = (bClimb ? (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) : UnloadSeconds) + ExecGapMarginSeconds;
 			for (int32 j = 0; j < Wheels.Num(); ++j)
 			{
 				if (!((P.MustBeDownMask >> j) & 1u) || Wheels[j].State == ERammsCurbWheelState::Planted)
@@ -1365,20 +1385,20 @@ namespace RammsCurb
 					}
 					else
 					{
-						Distance = (P.DUp - W.PastEdgeCm) / Cos;
+						Distance = (P.DUp - W.PastEdgeCm) / Cos - StopShortCm;
 					}
 				}
 				else if (W.Plane == 0 && W.State != ERammsCurbWheelState::Clear)
 				{
 					// On the ground short of the face (or being set down there): no
 					// nearer than FaceMargin.
-					Distance = (P.DUp - W.PastEdgeCm) / Cos;
+					Distance = (P.DUp - W.PastEdgeCm) / Cos - StopShortCm;
 				}
 			}
 			else if ((W.State == ERammsCurbWheelState::Planted || W.State == ERammsCurbWheelState::Loading) && W.Plane == 0)
 			{
 				// Loaded on the high side: it may not roll off the lip.
-				Distance = (P.DUp - W.PastEdgeCm) / Cos;
+				Distance = (P.DUp - W.PastEdgeCm) / Cos - StopShortCm;
 			}
 			else if (W.State == ERammsCurbWheelState::Lifting && W.Plane == 0 && W.BottomCm <= TouchCm)
 			{
@@ -1398,7 +1418,7 @@ namespace RammsCurb
 				Distance = WalkedDistance(i, Measure, Distance);
 			}
 			const double V = BrakingSpeed(LagBrakingDistance(static_cast<float>(Distance), static_cast<float>(VHat), DriveLagSeconds),
-				T.Deceleration);
+				static_cast<float>(BrakingDecel(T)));
 			if (V < Cap)
 			{
 				Cap = V;
@@ -1989,13 +2009,13 @@ namespace RammsCurb
 							SetState(i, ERammsCurbWheelState::Planted, FString::Printf(TEXT("lift aborted %.2f cm off the ground: %s"), W.BottomCm, *W.BlockedWhy));
 						}
 					}
-					else if (M->IsClimb() && Elapsed - W.Since > ActionTimeoutFactor * P.TLift + ActionTimeoutExtraSeconds)
+					else if (M->IsClimb() && Elapsed - W.Since > ActionTimeoutFactor * (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) + P.TEase + ActionTimeoutExtraSeconds)
 					{
 						// A climb's lift is the leg's rise to clear the curb top: it
 						// never got there.
-						Fault(FString::Printf(TEXT("'%s' (lifting) took %.1f s and did not lift clear, more than %.0f x its planned %.2f s + %.0f (%.1f cm "
+						Fault(FString::Printf(TEXT("'%s' (lifting) took %.1f s and did not lift clear, more than %.0f x its planned %.2f s + %.2f eased + %.0f (%.1f cm "
 												   "under the height that clears its window)"),
-							*In.Legs[i].Name.ToString(), Elapsed - W.Since, ActionTimeoutFactor, P.TLift, ActionTimeoutExtraSeconds,
+							*In.Legs[i].Name.ToString(), Elapsed - W.Since, ActionTimeoutFactor, P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift, P.TEase, ActionTimeoutExtraSeconds,
 							W.ZTop + SwingRaise - L.WheelWorld.Z));
 						TickHalted(Measure, Level, Out, Dt, /*bWheelsMeasured=*/true);
 						return;
@@ -2311,7 +2331,19 @@ namespace RammsCurb
 			W.ReachDeficitCm = FMath::Max(0.0, Target - Wanted);
 			W.bReachClamped = W.ReachDeficitCm > 0.05;
 			W.TargetZ = Target;
-			TrackTrapezoid(W.CmdZ, W.CmdVz, Target, LegSpeed, LegAccel, Dt);
+			// A wheel being set down slows over its last few centimetres (its
+			// target is Pressed under the ground it meets); an eased lift rises at
+			// its planned speed, faster only where it would otherwise be late.
+			double Speed = LegSpeed;
+			if (W.State == ERammsCurbWheelState::Planting)
+			{
+				Speed = FMath::Min(LegSpeed, TouchdownSpeedCap(W.CmdZ - (Target + Pressed), T));
+			}
+			else if (W.State == ERammsCurbWheelState::Lifting)
+			{
+				Speed = EasedLiftSpeed(i, Target);
+			}
+			TrackTrapezoid(W.CmdZ, W.CmdVz, Target, Speed, LegAccel, Dt);
 			W.CmdZ = ClampToReach(i, X, W.CmdZ);
 			if (IsSupport(i) && FMath::Abs(W.CmdZ - Target) > ExecCaughtUpCm)
 			{
@@ -2584,8 +2616,9 @@ namespace RammsCurb
 		int32		 BrakingLeg = INDEX_NONE;
 		const double Braking = BrakingCap(Measure, BrakingLeg);
 		const double Over = VCmd - Braking;
-		const float	 DecelNow = Over > EmergencyOverCmS ? 2.0f * T.Deceleration
-														: (By == EExecTerm::Margin ? static_cast<float>(MarginHoldDecelShare) * T.Deceleration : T.Deceleration);
+		// Down the braking cap's own curve (BrakingDecel) where it binds.
+		const float Decel = Braking < VTarget ? static_cast<float>(BrakingDecel(T)) : T.Deceleration;
+		const float DecelNow = Over > EmergencyOverCmS ? 2.0f * Decel : (By == EExecTerm::Margin ? static_cast<float>(MarginHoldDecelShare) * T.Deceleration : Decel);
 		VCmd = RampSpeed(static_cast<float>(VCmd), static_cast<float>(FMath::Max(0.0, FMath::Min(VTarget, Braking))), T.Acceleration, DecelNow,
 			static_cast<float>(Dt));
 		if (VCmd > Braking && VCmd - Braking <= EmergencyOverCmS)
@@ -2889,7 +2922,9 @@ namespace RammsCurb
 					W.TargetZ = ClampToReach(i, X, PlantingTarget(i, Measure, 0.0, Bias, W.HaltPressCm));
 				}
 			}
-			TrackTrapezoid(W.CmdZ, W.CmdVz, W.TargetZ, LegSpeed, LegAccel, Dt);
+			const bool	 bSettingDown = W.State == ERammsCurbWheelState::Planting && !W.bHaltHeld;
+			const double Speed = bSettingDown ? FMath::Min(LegSpeed, TouchdownSpeedCap(W.CmdZ - (W.TargetZ + W.HaltPressCm), T)) : LegSpeed;
+			TrackTrapezoid(W.CmdZ, W.CmdVz, W.TargetZ, Speed, LegAccel, Dt);
 			W.CmdZ = ClampToReach(i, X, W.CmdZ);
 			Out.LegZ[i] = W.CmdZ;
 			Out.LegX[i] = W.CmdX;

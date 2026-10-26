@@ -122,6 +122,58 @@ namespace RammsCurb
 	 *  the planned chassis height moves at only this share of BaseHeightSpeed. */
 	constexpr double LandingSettleSeconds = 0.3;
 	constexpr double LandingHeightShare = 0.25;
+	/** The least servo lag (s) a touchdown's approach is shaped by. */
+	constexpr double MinTouchdownLagSeconds = 0.02;
+
+	/** How fast a wheel being set down may be sent down with its command
+	 *  HeightCm over where it meets the ground (cm/s): TouchdownSpeed plus
+	 *  that height over a servo lag, so it slows over its last few
+	 *  centimetres; no limit with TouchdownSpeed 0. The executor's landings
+	 *  and the planner's timing of them both use it. */
+	inline double TouchdownSpeedCap(double HeightCm, const FRammsCurbTuning& T)
+	{
+		if (T.TouchdownSpeed <= 0.0f)
+		{
+			return TNumericLimits<double>::Max();
+		}
+		return T.TouchdownSpeed + FMath::Max(0.0, HeightCm) / FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
+	}
+
+	/** The hard braking caps' deceleration (cm/s^2): BrakingDeceleration, else
+	 *  Deceleration. */
+	inline double BrakingDecel(const FRammsCurbTuning& T)
+	{
+		return FMath::Max(1.0, static_cast<double>(T.BrakingDeceleration > 0.0f ? T.BrakingDeceleration : T.Deceleration));
+	}
+
+	/** How long before reaching its window (s) a wheel's lift must begin, at
+	 *  speed V, for the robot never to come within its braking cap's distance
+	 *  of that window with the wheel still down: the drive's lag and the
+	 *  braking at BrakingDecel. */
+	inline double BrakeLeadSeconds(double V, double LagSeconds, const FRammsCurbTuning& T)
+	{
+		return LagSeconds + FMath::Max(0.0, V) / (2.0 * BrakingDecel(T));
+	}
+
+	/** How long a wheel takes to come down DownCm to the ground at Speed (s),
+	 *  slowed over its last centimetres by TouchdownSpeedCap (its speed's
+	 *  changes not counted). */
+	inline double DescentSeconds(double DownCm, double Speed, const FRammsCurbTuning& T)
+	{
+		DownCm = FMath::Max(0.0, DownCm);
+		Speed = FMath::Max(1.0, Speed);
+		if (T.TouchdownSpeed <= 0.0f || T.TouchdownSpeed >= Speed)
+		{
+			return DownCm / Speed;
+		}
+		// Within Zone of the ground the cap is under Speed; there the command
+		// closes on the ground exponentially, at TouchdownSpeed at the last.
+		const double Tau = FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
+		const double Vt = T.TouchdownSpeed;
+		const double Zone = (Speed - Vt) * Tau;
+		const double Above = FMath::Max(0.0, DownCm - Zone);
+		return Above / Speed + Tau * FMath::Loge((Vt + FMath::Min(DownCm, Zone) / Tau) / Vt);
+	}
 
 	/** What the planner knows of one leg beyond the robot model. */
 	struct FPlannerLeg
