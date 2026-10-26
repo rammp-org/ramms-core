@@ -538,6 +538,18 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait", meta = (ClampMin = "1.0"))
 	float LegAcceleration = 200.0f;
 
+	/**
+	 * Per-wheel gait: a wheel's lift may begin up to this much earlier (s)
+	 * than it need, wherever the robot stands with the wheel up that much
+	 * longer, its leg rising slower so that it is just clear by its window --
+	 * a leg that rises while the robot drives, not a step at the last moment.
+	 * A corner carried up in the drive stance whose eased lift would begin at
+	 * the level-in's end stays up instead of being set down and lifted again.
+	 * 0, the default, lifts at LegSpeed as late as it can.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait", meta = (ClampMin = "0.0"))
+	float LiftEaseSeconds = 0.0f;
+
 	/** A per-wheel plan that rolls slower than the floor somewhere, without
 	 *  stopping, is accepted rather than refused. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Gait")
@@ -580,6 +592,44 @@ struct RAMMSCORE_API FRammsCurbTuning
 	 *  approach. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "1.0"))
 	float Deceleration = 60.0f;
+
+	/**
+	 * Per-wheel gait: how hard the robot may brake for a wheel that is not up
+	 * yet (cm/s^2) -- the hard braking caps, which stop it short of a curb face
+	 * or a lip should a lift not happen. Set, every lift is also planned to
+	 * begin before the robot comes within this braking distance of the
+	 * wheel's window, so the caps act only when a lift is late (a stop that
+	 * firm is then the one wanted) rather than braking at every hand-off.
+	 * 0, the default, brakes at Deceleration and times lifts only to be clear
+	 * by their windows.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
+	float BrakingDeceleration = 0.0f;
+
+	/**
+	 * How much the per-wheel planner lets the speed rise within a crossing:
+	 * from the first wheel's lift (or a held wheel's landing) to the last
+	 * wheel's taking load, the planned speed stays under this times the
+	 * tightest speed any wheel's hand-off allows there. 1 crosses at one
+	 * steady pace -- no surging to DriveSpeed between hand-offs only to brake
+	 * again for the next; above 1 lets it rise that much between them; below
+	 * 1 holds the whole crossing under its tightest hand-off (a slower
+	 * crossing, which may fall under the floor and be refused). 0, the
+	 * default, leaves the speed free to rise between them.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
+	float CrossingSpeedRatio = 0.0f;
+
+	/**
+	 * The per-wheel planner smooths its speed profile over this much travel
+	 * (cm): each change of acceleration spread over about this length, the
+	 * speed never raised above what the plan allows anywhere (the least over
+	 * the length, then averaged over it). 0, the default, leaves the profile
+	 * as its acceleration limits shape it. Not applied to a plan with a
+	 * planned stop.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
+	float SpeedSmoothingCm = 0.0f;
 
 	/** Yaw-rate gain (1/s) holding the heading the manoeuvre began on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Drive", meta = (ClampMin = "0.0"))
@@ -629,6 +679,19 @@ struct RAMMSCORE_API FRammsCurbTuning
 	 *  rather than just touching. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.0"))
 	float PlantPreload = 0.3f;
+
+	/**
+	 * Per-wheel gait: a wheel being set down meets the ground at about this
+	 * speed (cm/s). Its command comes down no faster than this plus its height
+	 * over the ground divided by ServoLagSeconds, so it slows over the last few
+	 * centimetres -- the leg servo trails it by about that lag -- rather than
+	 * arriving at LegSpeed and braking at LegAcceleration only once there.
+	 * With stiff servos and fast legs that hard arrival rocks the base as the
+	 * wheel lands. The planner times landings with it. 0, the default, lands
+	 * at LegSpeed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.0"))
+	float TouchdownSpeed = 0.0f;
 
 	/**
 	 * How much further again a Main wheel is pressed down while it supports

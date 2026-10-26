@@ -220,6 +220,9 @@ namespace RammsCurb
 	 *  would meet the terrain, which is marched for every this far (cm). */
 	constexpr double TouchMarginCm = 0.5;
 	constexpr double TouchStepCm = 0.5;
+	/** A wheel down short of its window: its hard cap stops it this far (cm)
+	 *  short, so a stop braked onto the window's edge lands outside it. */
+	constexpr double StopShortCm = 0.1;
 	/** A walking centre wheel's room for its braking cap is looked for this far
 	 *  (cm of travel) past where the wheel would meet its window 1:1. */
 	constexpr double WalkedSearchCm = 40.0;
@@ -719,6 +722,10 @@ namespace RammsCurb
 		 *  the plan's, sample by sample) until it has gone from where it is to
 		 *  travel SAt. */
 		double SecondsTo(double SAt) const;
+		/** The speed (cm/s) a lifting leg's command rises at: its plan's eased
+		 *  LiftSpeed, or faster where that would leave it short of clear by its
+		 *  window; LegSpeed for a lift not eased. */
+		double EasedLiftSpeed(int32 Leg, double TargetZ) const;
 		/** Whether leg Leg may lift now, and if not why. */
 		bool LiftPermit(int32 Leg, const FExecMeasure& Measure, const FLevelState& Level, FString& OutWhy) const;
 		/** The measured margin with Without (bit per leg) off the ground too, and
