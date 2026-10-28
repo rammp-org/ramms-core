@@ -973,18 +973,24 @@ namespace RammsCurb
 			OutWhy = FString::Printf(TEXT("the plan never has these off the ground together here (mask %x)"), Set);
 			return false;
 		}
+		// A centre wheel off its planned fore/aft (walking behind its plan) moves
+		// the support the lift was planned with: the lift then waits unless the
+		// robot, measured as it stands, keeps the planned margin with it up.
+		// (Blocking on the offset alone braked a descent to a stop for a centre
+		// wheel 2 cm behind its walk, with 18 cm of margin measured.)
 		const FPlanAt Here = Between(S);
+		const double  Margin = MarginWithout(Measure, Set);
 		for (int32 Side = 0; Side < 2; ++Side)
 		{
 			const int32 C = Centre[Side];
-			if (C != INDEX_NONE && C != Leg && FMath::Abs(Measure.Legs[C].XZ.X - Here.X[Side]) > PermitToleranceCm)
+			if (C != INDEX_NONE && C != Leg && FMath::Abs(Measure.Legs[C].XZ.X - Here.X[Side]) > PermitToleranceCm && Margin < T.MinStabilityMargin)
 			{
-				OutWhy = FString::Printf(TEXT("'%s' is %.1f cm off its planned fore/aft %.1f"), *In.Legs[C].Name.ToString(),
-					Measure.Legs[C].XZ.X - Here.X[Side], Here.X[Side]);
+				OutWhy = FString::Printf(TEXT("'%s' is %.1f cm off its planned fore/aft %.1f, and with it up the robot would stand %.2f cm "
+											  "inside its wheels (MinStabilityMargin %.1f)"),
+					*In.Legs[C].Name.ToString(), Measure.Legs[C].XZ.X - Here.X[Side], Here.X[Side], Margin, T.MinStabilityMargin);
 				return false;
 			}
 		}
-		const double Margin = MarginWithout(Measure, Set);
 		if (Margin < T.MinLiveStabilityMarginCm)
 		{
 			OutWhy = FString::Printf(TEXT("with it up the robot would stand %.2f cm inside its wheels (MinLiveStabilityMarginCm %.1f)"), Margin,
