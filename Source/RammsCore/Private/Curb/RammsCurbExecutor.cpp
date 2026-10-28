@@ -276,6 +276,7 @@ namespace RammsCurb
 		// The seat command begins again from this run's first measure (kept
 		// from the last run it would send the seat where that run left it).
 		bSeatCmd = false;
+		SeatCmdRate = 0.0;
 		bSeatHeld = false;
 		SeatPlanLogged = 1.0e9;
 		bLoweredDown = false;
@@ -2465,7 +2466,9 @@ namespace RammsCurb
 			// support set, and a wheel still being set down (the level-in's
 			// rears, a landing) carries nothing yet. The seat waits for it, and
 			// moves on where moving makes the margin no worse.
-			const double Next = StepTowards(SeatCmdX, Want, Seat.ShiftSpeedCmS * Dt);
+			// Aft, with the drive making up the rider's speed: no faster than it can.
+			const double ShiftRate = Want < SeatCmdX && Seat.AftSpeedUpCmS > 0.0 ? FMath::Min(Seat.ShiftSpeedCmS, Seat.AftSpeedUpCmS) : Seat.ShiftSpeedCmS;
+			const double Next = StepTowards(SeatCmdX, Want, ShiftRate * Dt);
 			bool		 bHold = false;
 			if (!FMath::IsNearlyEqual(Next, SeatCmdX, 1e-9))
 			{
@@ -2479,10 +2482,12 @@ namespace RammsCurb
 								SeatCmdX, Want, SeatMargin(Measure, Next), T.MinLiveStabilityMarginCm)
 						  : FString::Printf(TEXT("seat released at %+.1f cm toward %+.1f"), SeatCmdX, Want));
 			}
+			const double SeatWas = SeatCmdX;
 			if (!bHold)
 			{
 				SeatCmdX = Next;
 			}
+			SeatCmdRate = Dt > 0.0 ? (SeatCmdX - SeatWas) / Dt : 0.0;
 			const double PlanHere = Here.SeatX;
 			if (FMath::Abs(PlanHere - SeatPlanLogged) >= 2.0)
 			{
@@ -2694,6 +2699,12 @@ namespace RammsCurb
 				VTarget = FMath::Min(VTarget, Between(At).V);
 			}
 			VTarget = FMath::Min(VTarget, Between(LookTo).V);
+		}
+		// The seat shifting aft takes its speed off the rider's; the drive makes
+		// it up (FModelSeat::AftSpeedUpCmS).
+		if (In.Model.Seat.AftSpeedUpCmS > 0.0 && bSeatCmd && SeatCmdRate < 0.0 && VTarget < TNumericLimits<double>::Max())
+		{
+			VTarget += FMath::Min(-SeatCmdRate, In.Model.Seat.AftSpeedUpCmS);
 		}
 		Diag = FExecDiag();
 		Diag.Plan = VTarget;

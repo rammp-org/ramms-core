@@ -849,6 +849,8 @@ namespace RammsCurb
 		/** The seat's commanded pivot fore/aft (cm), from where it was measured
 		 *  as the run began, stepped toward the plan's. */
 		double SeatCmdX = 0.0;
+		/** How fast SeatCmdX moved on the last tick (cm/s, + forward). */
+		double SeatCmdRate = 0.0;
 		bool   bSeatCmd = false;
 		/** The seat is being held short of the plan's fore/aft: where it is
 		 *  sent the wheels now carrying the robot would leave it under the live

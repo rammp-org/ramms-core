@@ -1094,6 +1094,9 @@ private:
 	/** Pitch and roll, low-passed, for keeping lifted wheels clear on a
 	 *  tilted chassis. */
 	float FilteredPitchRad = 0.0f;
+	/** The base's pitch filtered slower, for the seat's tilt: it compensates
+	 *  a pitch held, not a bump's brief dip (SeatPitchFilterSeconds). */
+	float SeatPitchRad = 0.0f;
 	float FilteredRollRad = 0.0f;
 
 	float BaseHeightCmd = 0.0f;

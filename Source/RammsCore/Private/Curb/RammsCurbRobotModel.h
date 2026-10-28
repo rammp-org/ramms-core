@@ -184,6 +184,8 @@ namespace RammsCurb
 		double MaxPitchRad = 0.0;
 		bool   bTilts = false;
 		double ShiftSpeedCmS = 0.0;
+		/** FRammsCurbSeat::AftSpeedUpCmS. */
+		double AftSpeedUpCmS = 0.0;
 		double MovingMassKg() const { return MechanismMassKg + PayloadMassKg; }
 		bool   Shifts() const { return bHas && XRange.X < XRange.Y; }
 	};

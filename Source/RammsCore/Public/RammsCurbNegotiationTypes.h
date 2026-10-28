@@ -226,6 +226,18 @@ struct RAMMSCORE_API FRammsCurbSeat
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
 	float ShiftSpeedCmS = 30.0f;
 
+	/**
+	 * While the seat shifts aft against the chassis -- as it does once a
+	 * crossing is over, back to its drive stance -- it shifts no faster than
+	 * this (cm/s), and the drive speeds up by as much as it is shifting, so the
+	 * rider's own ground speed (the base's less the seat's) holds at the
+	 * planned speed rather than falling by the seat's shift. 0, the default:
+	 * the seat shifts aft at ShiftSpeedCmS and the drive keeps the planned
+	 * speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float AftSpeedUpCmS = 0.0f;
+
 	/** A seat the crossing moves: both 5-bar motors named. */
 	bool IsSet() const { return !Linkage.ProximalMotorA.IsNone() && !Linkage.ProximalMotorB.IsNone(); }
 };

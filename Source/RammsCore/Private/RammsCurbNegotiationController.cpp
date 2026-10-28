@@ -164,6 +164,12 @@ namespace
 	 *  so a longer gap -- a hitch, a coarse external step -- is time the robot
 	 *  spent on the commands it already had, and ramping across all of it at
 	 *  once would be the jump the ramp is there to prevent. */
+	/** How slowly the seat's tilt takes up the base's pitch (s, a first-order
+	 *  filter's time constant): it compensates a pitch the base holds; a
+	 *  bump's brief dip it rode through on the faster filter late, and swung
+	 *  the rider further than the base (a 30 deg descent's last touchdown:
+	 *  the base 1.8 deg down and back in 0.4 s, the rider -1.5 to +2.5). */
+	constexpr float SeatPitchFilterSeconds = 0.5f;
 	constexpr float MaxRampStep = 0.1f;
 
 	/** A wheel whose bottom is within this of the surface it should be on
@@ -768,6 +774,7 @@ bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
 	S.MaxPitchRad = FMath::DegreesToRadians(static_cast<double>(Seat.MaxPitchDeg));
 	S.bTilts = !Seat.TiltMotor.IsNone();
 	S.ShiftSpeedCmS = Seat.ShiftSpeedCmS;
+	S.AftSpeedUpCmS = Seat.AftSpeedUpCmS;
 	if (Tuning.RobotMassKg > 0.0f && S.MovingMassKg() >= Tuning.RobotMassKg)
 	{
 		OutReason = FString::Printf(TEXT("the seat's masses add up to %.1f kg, as much as the whole robot (RobotMassKg %.1f)"), S.MovingMassKg(),
@@ -820,7 +827,7 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		const RammsCurb::FSeatPose Start = RammsCurb::SeatForward(Seat,
 			FVector2D(Commanded(Seat.Linkage.ProximalMotorA), Commanded(Seat.Linkage.ProximalMotorB)));
 		SeatState.PitchRef = Start.bValid && !Seat.TiltMotor.IsNone()
-			? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) + FilteredPitchRad
+			? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) + SeatPitchRad
 			: 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
@@ -841,7 +848,7 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 	if (!Seat.TiltMotor.IsNone() && Pose.bValid)
 	{
 		const double Max = FMath::DegreesToRadians(static_cast<double>(Seat.MaxPitchDeg));
-		const double Pitch = FMath::Clamp(SeatState.PitchRef - static_cast<double>(FilteredPitchRad), -Max, Max);
+		const double Pitch = FMath::Clamp(SeatState.PitchRef - static_cast<double>(SeatPitchRad), -Max, Max);
 		Base->SetMotorCommand(Seat.TiltMotor, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, SeatState.LinkAngle0, Pitch)));
 	}
 }
@@ -3454,6 +3461,7 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	bStanceAttitudeKnown = ActiveTerrain.bValid;
 	StanceAttitudeOverGround = bStanceAttitudeKnown ? FVector2D(MeasuredPitchDeg, MeasuredRollDeg) - GroundAttitudeDeg(ActiveTerrain.Near) : FVector2D::ZeroVector;
 	FilteredPitchRad = FMath::DegreesToRadians(MeasuredPitchDeg);
+	SeatPitchRad = FilteredPitchRad;
 	FilteredRollRad = FMath::DegreesToRadians(MeasuredRollDeg);
 	BaseHeightCmd = InitialBaseHeight;
 	CorridorShiftCmd = 0.0f;
@@ -4788,6 +4796,7 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 	const float PitchRad = FMath::DegreesToRadians(MeasuredPitchDeg);
 	const float RollRad = FMath::DegreesToRadians(MeasuredRollDeg);
 	FilteredPitchRad += (PitchRad - FilteredPitchRad) * FMath::Clamp(DeltaTime / 0.15f, 0.0f, 1.0f);
+	SeatPitchRad += (PitchRad - SeatPitchRad) * FMath::Clamp(DeltaTime / SeatPitchFilterSeconds, 0.0f, 1.0f);
 	FilteredRollRad += (RollRad - FilteredRollRad) * FMath::Clamp(DeltaTime / 0.15f, 0.0f, 1.0f);
 
 	if (RammsCurb::OverMaxTilt(MeasuredPitchDeg, MeasuredRollDeg, Tuning.MaxTiltDeg))
@@ -5321,6 +5330,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	const float PitchRad = FMath::DegreesToRadians(MeasuredPitchDeg);
 	const float RollRad = FMath::DegreesToRadians(MeasuredRollDeg);
 	FilteredPitchRad += (PitchRad - FilteredPitchRad) * FMath::Clamp(DeltaTime / 0.15f, 0.0f, 1.0f);
+	SeatPitchRad += (PitchRad - SeatPitchRad) * FMath::Clamp(DeltaTime / SeatPitchFilterSeconds, 0.0f, 1.0f);
 	FilteredRollRad += (RollRad - FilteredRollRad) * FMath::Clamp(DeltaTime / 0.15f, 0.0f, 1.0f);
 	if (RammsCurb::OverMaxTilt(MeasuredPitchDeg, MeasuredRollDeg, Tuning.MaxTiltDeg))
 	{
