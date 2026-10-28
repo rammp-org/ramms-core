@@ -183,6 +183,18 @@ namespace
 		return CVarCurbSeatPath.GetValueOnAnyThread() != 0;
 	}
 
+	TAutoConsoleVariable<int32> CVarCurbSeatDrive(TEXT("Ramms.Curb.SeatDrive"), 1,
+		TEXT("1 (the default): with the seat's ForeSlowDownCmS set, the plan's seat shifts as the executor moves it (eased by "
+			 "ShiftAccelCmS2) and the crossing is timed with the drive slowed under each forward shift, as the executor runs it. "
+			 "The lifts that follow the fronts' landing then take less of the travel, and the landing itself -- which the seat "
+			 "cannot help, it waits for the fronts to carry -- is slowed less. 0: the plan times the crossing at its own speed and "
+			 "the drive slows under it unplanned."),
+		ECVF_Default);
+	bool						SeatDriveOn()
+	{
+		return CVarCurbSeatDrive.GetValueOnAnyThread() != 0;
+	}
+
 	TAutoConsoleVariable<int32> CVarCurbRiseEarly(TEXT("Ramms.Curb.RiseEarly"), 1,
 		TEXT("1 (the default): the chassis rises to the height the crossing's lifts and landings need before the first lift, during "
 			 "the level-in on every wheel, and holds it until the last wheel has landed; 0: it rises as each lift needs it, as "
@@ -1561,7 +1573,14 @@ namespace RammsCurb
 		constexpr int32 CapWalk = 101;
 		constexpr int32 CapTilt = 102;
 		constexpr int32 CapSeat = 103;
+		constexpr int32 CapFore = 104;
 		constexpr int32 CapAfterLevelIn = 200;
+		/** Rounds of the planned seat and the drive under its forward shifts
+		 *  (PlanSeat), each timing the crossing at the last round's drive. */
+		constexpr int32 SeatDriveRounds = 4;
+		/** The drive's speed under the seat's shift, cm/s: rounds that change it
+		 *  by no more than this anywhere have settled. */
+		constexpr double SeatDriveSettledCmS = 0.5;
 		/** Rounds of the speed envelope (each may add caps). */
 		constexpr int32 MaxSpeedRounds = 24;
 		/** A tilted plan's easings are made at this share of TiltRateDegPerSec
@@ -1810,10 +1829,20 @@ namespace RammsCurb
 			 *  speed envelope to the next. */
 			TArray<double> TiltCap;
 			/** What set each sample's cap: INDEX_NONE nothing, CapLevelIn,
-			 *  CapWalk, CapTilt, CapAfterLevelIn + leg, or the leg whose lead or
-			 *  tail it parts from the others. */
+			 *  CapWalk, CapTilt, CapSeat, CapFore, CapAfterLevelIn + leg, or the
+			 *  leg whose lead or tail it parts from the others. */
 			TArray<int32>  CapBy;
 			TArray<double> V;
+			/** The drive's speed under the planned seat's forward shifts (cm/s,
+			 *  NoCap elsewhere; PlanSeat), kept from one speed envelope to the
+			 *  next as SeatCap is: the executor slows the base by the seat's
+			 *  speed (FModelSeat::ForeSlowDownCmS), and every lift and landing
+			 *  about a shift is timed at that. */
+			TArray<double> ForeCap;
+			/** Where ForeCap slows the drive anywhere: the speed without it (the
+			 *  rider's, near enough, where the seat shifts forward), from which
+			 *  the floor is taken; else empty. */
+			TArray<double> VNoFore;
 			TArray<uint8>  Stop;
 			TArray<double> B;
 			TArray<double> BLo;
@@ -1924,8 +1953,19 @@ namespace RammsCurb
 		bool FixSeat(FPlan& P) const;
 		/** The seat as it follows the instants' choices (FixSeat), the plan
 		 *  slowed where a pose needs it further on (SeatCap) and verified with
-		 *  it. False (P to be dropped) where that does not verify. */
-		bool		  PlanSeat(FPlan& P) const;
+		 *  it -- with the drive under its forward shifts (ForeCap, SeatDriveOn)
+		 *  where that verifies, else without. False (P to be dropped) where
+		 *  neither does. */
+		bool PlanSeat(FPlan& P) const;
+		/** PlanSeat, with the drive under the seat's forward shifts (bDrive) or
+		 *  without. */
+		bool PlanSeatPass(FPlan& P, bool bDrive) const;
+		/** The seat from X0 at sample K0 as the executor moves it: toward each
+		 *  sample's choice within Lo .. Hi at up to ShiftSpeedCmS, eased by
+		 *  ShiftAccelCmS2, the drive slowed under its forward shifts as the
+		 *  executor slows it (into OutFore, NoCap elsewhere). */
+		void		  DriveSeatPath(const FPlan& P, int32 K0, double X0, TConstArrayView<double> Lo, TConstArrayView<double> Hi, TArray<double>& OutPath,
+					 TArray<double>& OutFore) const;
 		double		  MarchFwd(const FPlan& P, double S, double Seconds) const;
 		FInstantQuery Query(const FPlan& P, int32 K, uint32 Air, uint32 Far) const;
 		bool		  Feasible(const FInstantQuery& Q, double BGuess, FInstantResult* Out = nullptr) const;
@@ -2529,6 +2569,7 @@ namespace RammsCurb
 		P.SeatX.Init(In.Model.Seat.ZeroPivot.X, NumS);
 		P.SeatBand.Init(FVector2D(1.0, 0.0), NumS);
 		P.SeatCap.Init(NoCap, NumS);
+		P.ForeCap.Init(NoCap, NumS);
 		P.Air.Init(0, NumS);
 		P.Far.Init(0, NumS);
 		P.Touch.Init(0, NumS);
@@ -2626,7 +2667,9 @@ namespace RammsCurb
 			double Least = TNumericLimits<double>::Max();
 			for (int32 k = SteadyFrom; k <= SteadyTo; ++k)
 			{
-				if (!P.Stop[k])
+				// (The drive slowed under the seat's shift is no hand-off to pace by.)
+				const bool bFore = P.ForeCap.IsValidIndex(k) && P.ForeCap[k] < NoCap && P.VCap[k] >= P.ForeCap[k] - 1e-9;
+				if (!P.Stop[k] && !bFore)
 				{
 					Least = FMath::Min(Least, FMath::Min(P.VCap[k], FreeCap(k)));
 				}
@@ -3134,6 +3177,70 @@ namespace RammsCurb
 
 	bool FPlanner::PlanSeat(FPlan& P) const
 	{
+		// With the drive under the seat's forward shifts where that verifies:
+		// it times the crossing as the executor runs it.
+		if (SeatDriveOn() && In.Model.Seat.ForeSlowDownCmS > 0.0)
+		{
+			FPlan Driven = P;
+			if (PlanSeatPass(Driven, true))
+			{
+				P = MoveTemp(Driven);
+				return true;
+			}
+			Tried.Add(FString::Printf(TEXT("%s: the seat with the drive under its shifts did not plan (%s); planned without"), *P.Name,
+				Driven.FailWhy.IsEmpty() ? TEXT("its rounds did not settle") : *Driven.FailWhy));
+		}
+		return PlanSeatPass(P, false);
+	}
+
+	void FPlanner::DriveSeatPath(const FPlan& P, int32 K0, double X0, TConstArrayView<double> Lo, TConstArrayView<double> Hi, TArray<double>& OutPath,
+		TArray<double>& OutFore) const
+	{
+		// The seat toward each choice at up to ShiftSpeedCmS, its speed changed
+		// no faster than ShiftAccelCmS2 and slowed in time to stop at the choice
+		// -- as the executor moves it -- over time at the drive's speed: under a
+		// forward shift the executor slows the base by the seat's speed, by up
+		// to ForeSlowDownCmS and no lower than the floor (FExecutor::Tick).
+		// The speed the drive is slowed from is the plan's without that (the
+		// last round's slowing is not slowed again).
+		const FModelSeat&	  Seat = In.Model.Seat;
+		const TArray<double>& VPlan = P.VNoFore.Num() == NumS ? P.VNoFore : P.V;
+		const double		  Fast = Seat.ShiftSpeedCmS;
+		const double		  Accel = Seat.ShiftAccelCmS2;
+		auto				  Drive = [&](double V, double Rate) {
+			 return Rate > 0.0 ? FMath::Min(V, FMath::Max(Floor, Cruise - FMath::Min(Rate, Seat.ForeSlowDownCmS))) : V;
+		};
+		OutPath.Init(X0, NumS);
+		OutFore.Init(NoCap, NumS);
+		double Rate = 0.0;
+		for (int32 k = K0 + 1; k < NumS; ++k)
+		{
+			const double Prev = OutPath[k - 1];
+			const double V = FMath::Max(MinTimingSpeed, FMath::Max(VPlan[k], VPlan[k - 1]));
+			const double Dt = Ds / FMath::Max(MinTimingSpeed, Drive(V, Rate)) + DwellSeconds(P, k);
+			const double Togo = P.SeatX[k] - Prev;
+			double		 Next = Prev + FMath::Clamp(Togo, -Fast * Dt, Fast * Dt);
+			if (Accel > 0.0)
+			{
+				const double Goal = FMath::Sign(Togo) * FMath::Min(Fast, FMath::Sqrt(2.0 * Accel * FMath::Abs(Togo)));
+				const double R = Rate + FMath::Clamp(Goal - Rate, -Accel * Dt, Accel * Dt);
+				Next = R * Togo >= 0.0 && FMath::Abs(R * Dt) >= FMath::Abs(Togo) ? P.SeatX[k] : Prev + R * Dt;
+			}
+			// Within the bands to come, and the seat's own speed.
+			const double L = FMath::Max(Lo[k], Prev - Fast * Dt);
+			const double H = FMath::Min(Hi[k], Prev + Fast * Dt);
+			Next = FMath::Clamp(Next, L, FMath::Max(L, H));
+			Rate = (Next - Prev) / Dt;
+			OutPath[k] = Next;
+			if (Rate > 1e-6)
+			{
+				OutFore[k] = Drive(Cruise, Rate);
+			}
+		}
+	}
+
+	bool FPlanner::PlanSeatPass(FPlan& P, bool bDrive) const
+	{
 		// The seat as it can follow the free seat's choices -- toward where
 		// each instant wants it, no faster than ShiftSpeedCmS at the planned
 		// speed, never ahead of it: forward once the fronts are across, aft
@@ -3177,7 +3284,8 @@ namespace RammsCurb
 		{
 			return false;
 		}
-		for (int32 Round = 0; Round < SeatPathRounds && !Stopped(); ++Round)
+		int32 DriveRounds = 0;
+		for (int32 Round = 0; Round < SeatPathRounds + (bDrive ? SeatDriveRounds : 0) && !Stopped(); ++Round)
 		{
 			// How far the seat may move from sample k - 1 to k.
 			TArray<double> Step;
@@ -3234,13 +3342,64 @@ namespace RammsCurb
 			{
 				// Forward: toward each choice, within the shift and the bounds.
 				TArray<double> Path;
-				Path.Init(X0, NumS);
-				for (int32 k = K0 + 1; k < NumS; ++k)
+				if (bDrive)
 				{
-					const double Prev = Path[k - 1];
-					const double L = FMath::Max(Lo[k], Prev - Step[k]);
-					const double H = FMath::Min(Hi[k], Prev + Step[k]);
-					Path[k] = FMath::Clamp(Prev + FMath::Clamp(P.SeatX[k] - Prev, -Step[k], Step[k]), L, FMath::Max(L, H));
+					// The seat as the executor moves it, and the drive under it. Timed
+					// again at that drive until it settles: the lifts after the fronts'
+					// landing take less of the travel, the landing more, and the seat
+					// waits for the landing.
+					TArray<double> Fore;
+					DriveSeatPath(P, K0, X0, Lo, Hi, Path, Fore);
+					bool   bSettled = true;
+					double Change = 0.0, Least = Cruise;
+					int32  KA = INDEX_NONE, KB = INDEX_NONE;
+					for (int32 k = 0; k < NumS; ++k)
+					{
+						const double D = FMath::Abs(FMath::Min(Fore[k], Cruise) - FMath::Min(P.ForeCap[k], Cruise));
+						bSettled = bSettled && D <= SeatDriveSettledCmS;
+						Change = FMath::Max(Change, D);
+						if (Fore[k] < NoCap)
+						{
+							KA = KA == INDEX_NONE ? k : KA;
+							KB = k;
+							Least = FMath::Min(Least, Fore[k]);
+						}
+					}
+					if (PlanDebug())
+					{
+						Tried.Add(FString::Printf(TEXT("%s: the seat with the drive under it, round %d: the seat forward from %.0f to %.0f cm, the drive "
+													   "down to %.1f cm/s; %.1f cm/s off the last round's"),
+							*P.Name, DriveRounds, KA == INDEX_NONE ? 0.0 : SAt(KA), KB == INDEX_NONE ? 0.0 : SAt(KB), Least, Change));
+					}
+					if (!bSettled)
+					{
+						// Timed at this round's drive: with rounds to go, the seat found
+						// again at it; on the last, this seat kept where it verifies at it
+						// (the rounds can swing a sample or two about where the seat
+						// sets off).
+						P.ForeCap = MoveTemp(Fore);
+						SpeedEnvelope(P);
+						P.bHeightOk = HeightPath(P);
+						if (++DriveRounds < SeatDriveRounds)
+						{
+							if (!Reverify(false))
+							{
+								return false;
+							}
+							continue;
+						}
+					}
+				}
+				else
+				{
+					Path.Init(X0, NumS);
+					for (int32 k = K0 + 1; k < NumS; ++k)
+					{
+						const double Prev = Path[k - 1];
+						const double L = FMath::Max(Lo[k], Prev - Step[k]);
+						const double H = FMath::Min(Hi[k], Prev + Step[k]);
+						Path[k] = FMath::Clamp(Prev + FMath::Clamp(P.SeatX[k] - Prev, -Step[k], Step[k]), L, FMath::Max(L, H));
+					}
 				}
 				P.SeatEndX = P.SeatX[NumS - 1];
 				P.SeatFix = MoveTemp(Path);
@@ -3250,6 +3409,42 @@ namespace RammsCurb
 					return false;
 				}
 				P.bSeatPlanned = true;
+				// The seat's own slowing (SeatCap) gives it the time to shift between
+				// two bands; with the drive under it the seat gets there sooner (or
+				// shifts before the stretch at all), and where it stands still the
+				// drive need not wait for it: released where the plan still verifies.
+				if (bDrive)
+				{
+					const TArray<double> Kept = P.SeatCap;
+					bool				 bReleased = false;
+					for (int32 k = K0 + 1; k < NumS; ++k)
+					{
+						const bool bStill = FMath::Abs(P.SeatFix[k] - P.SeatFix[k - 1]) <= 1e-3
+							&& (k + 1 >= NumS || FMath::Abs(P.SeatFix[k + 1] - P.SeatFix[k]) <= 1e-3);
+						if (P.SeatCap[k] < NoCap && bStill)
+						{
+							P.SeatCap[k] = NoCap;
+							bReleased = true;
+						}
+					}
+					if (bReleased)
+					{
+						SpeedEnvelope(P);
+						P.bHeightOk = HeightPath(P);
+						if (!Reverify(true))
+						{
+							P.SeatCap = Kept;
+							SpeedEnvelope(P);
+							P.bHeightOk = HeightPath(P);
+							if (!Reverify(true))
+							{
+								P.SeatFix.Reset();
+								P.bSeatPlanned = false;
+								return false;
+							}
+						}
+					}
+				}
 				return true;
 			}
 			// Two bands too near in time for the seat to shift between them (or
@@ -3661,6 +3856,24 @@ namespace RammsCurb
 				}
 			}
 		}
+		// The drive under the planned seat's forward shifts (PlanSeat): every
+		// lead and tail about them is timed at the speed the base will run.
+		// The caps without it are kept beside (each cap below goes on both), for
+		// the speed without it.
+		TArray<double> CapNoFore;
+		for (int32 k = 0; k < NumS && P.ForeCap.Num() == NumS; ++k)
+		{
+			if (P.VCap[k] > P.ForeCap[k])
+			{
+				if (CapNoFore.Num() == 0)
+				{
+					CapNoFore = P.VCap;
+				}
+				P.VCap[k] = P.ForeCap[k];
+				P.CapBy[k] = CapFore;
+			}
+		}
+		const bool bFore = CapNoFore.Num() == NumS;
 		// The legs' geometry with these paths; which corners stay up from the
 		// start depends on the timing, and what stands standing still on that.
 		ComputeGeometry(P);
@@ -3705,6 +3918,10 @@ namespace RammsCurb
 							P.CapBy[j] = By;
 							bNew = true;
 						}
+						if (bFore)
+						{
+							CapNoFore[j] = FMath::Min(CapNoFore[j], C);
+						}
 					}
 					Passes(P);
 					ComputeTiming(P);
@@ -3741,6 +3958,10 @@ namespace RammsCurb
 							P.VCap[j] = Cap;
 							P.CapBy[j] = CapAfterLevelIn + i;
 							bNew = true;
+						}
+						if (bFore)
+						{
+							CapNoFore[j] = FMath::Min(CapNoFore[j], Cap);
 						}
 					}
 				}
@@ -3880,8 +4101,22 @@ namespace RammsCurb
 				P.Fail[k] = EFail::Slow;
 			}
 		}
+		// The speed without the drive's slowing under the seat: the seat's shift
+		// makes that up for the rider.
+		P.VNoFore.Reset();
+		if (bFore)
+		{
+			TArray<double> V = P.V;
+			Swap(P.VCap, CapNoFore);
+			Passes(P);
+			Swap(P.VNoFore, P.V);
+			Swap(P.VCap, CapNoFore);
+			P.V = MoveTemp(V);
+		}
 		// The least speed once risen from rest -- from where the speed first
-		// stops rising -- planned stops apart.
+		// stops rising -- planned stops apart (the drive's slowing under the
+		// seat apart).
+		const TArray<double>& VRef = bFore ? P.VNoFore : P.V;
 		P.VFloor = Cruise;
 		const int32			KRise = RiseEnd(P);
 		const TArray<uint8> AtStop = StopRuns(P);
@@ -3889,7 +4124,7 @@ namespace RammsCurb
 		{
 			if (!AtStop[k])
 			{
-				P.VFloor = FMath::Min(P.VFloor, P.V[k]);
+				P.VFloor = FMath::Min(P.VFloor, VRef[k]);
 			}
 			// Under the floor fails unless a slow crossing is allowed; stopped
 			// (StopSpeedCmS) fails anywhere but at a planned stop.
@@ -6398,7 +6633,11 @@ namespace RammsCurb
 		{
 			FScheduleSample& S = Out.Samples[k];
 			S.S = SAt(k);
-			S.V = P.V[k];
+			// Without the drive's slowing under the seat's forward shifts: the
+			// executor slows the base by the seat's speed as it moves, not as
+			// planned (the seat follows the plan by travel, so a base slowed on
+			// the plan's schedule slows the seat with it).
+			S.V = P.VNoFore.IsValidIndex(k) ? P.VNoFore[k] : P.V[k];
 			S.B = P.B[k];
 			S.PitchDeg = P.Pitch[k];
 			S.RollDeg = P.Roll[k];
@@ -6543,26 +6782,29 @@ namespace RammsCurb
 			Out.Lines.Add(E.Text);
 		}
 		// What sets the floor: the slowest sample once risen (planned stops
-		// apart), and the cap nearest it that holds the speed that low.
+		// apart; the drive's slowing under the seat apart, said after), and the
+		// cap nearest it that holds the speed that low.
 		{
-			const int32			KRise = RiseEnd(P);
-			const TArray<uint8> AtStop = StopRuns(P);
-			int32				KMin = INDEX_NONE;
+			const bool			  bFore = P.VNoFore.Num() == NumS;
+			const TArray<double>& VRef = bFore ? P.VNoFore : P.V;
+			const int32			  KRise = RiseEnd(P);
+			const TArray<uint8>	  AtStop = StopRuns(P);
+			int32				  KMin = INDEX_NONE;
 			for (int32 k = KRise; k < NumS; ++k)
 			{
-				if (!AtStop[k] && (KMin == INDEX_NONE || P.V[k] < P.V[KMin]))
+				if (!AtStop[k] && (KMin == INDEX_NONE || VRef[k] < VRef[KMin]))
 				{
 					KMin = k;
 				}
 			}
-			if (KMin != INDEX_NONE && P.V[KMin] < Cruise - 0.05)
+			if (KMin != INDEX_NONE && VRef[KMin] < Cruise - 0.05)
 			{
 				int32 KCap = INDEX_NONE;
 				for (int32 d = 0; d < NumS && KCap == INDEX_NONE; ++d)
 				{
 					for (const int32 j : { KMin - d, KMin + d })
 					{
-						if (P.CapBy.IsValidIndex(j) && P.CapBy[j] != INDEX_NONE && P.VCap[j] <= P.V[KMin] + 0.5)
+						if (P.CapBy.IsValidIndex(j) && P.CapBy[j] != INDEX_NONE && P.CapBy[j] != CapFore && P.VCap[j] <= VRef[KMin] + 0.5)
 						{
 							KCap = j;
 							break;
@@ -6583,7 +6825,26 @@ namespace RammsCurb
 							  *LegName(By));
 					Why += FString::Printf(TEXT(" (capped at %.0f cm)"), SAt(KCap));
 				}
-				Out.Lines.Add(FString::Printf(TEXT("floor %.1f cm/s at %.0f cm: %s"), P.V[KMin], SAt(KMin), *Why));
+				Out.Lines.Add(FString::Printf(TEXT("floor %.1f cm/s at %.0f cm: %s"), VRef[KMin], SAt(KMin), *Why));
+			}
+			// The drive under the seat's forward shifts: each stretch, and the
+			// least the base runs there.
+			for (int32 k = 0; bFore && k < NumS;)
+			{
+				if (P.CapBy[k] != CapFore)
+				{
+					++k;
+					continue;
+				}
+				const int32 A = k;
+				double		Least = P.V[k];
+				for (; k < NumS && P.CapBy[k] == CapFore; ++k)
+				{
+					Least = FMath::Min(Least, P.V[k]);
+				}
+				Out.Lines.Add(FString::Printf(TEXT("drive slowed under the seat's forward shift from %.0f to %.0f cm: down to %.1f cm/s, the seat "
+												   "making it up for the rider (ForeSlowDownCmS)"),
+					SAt(A), SAt(k - 1), Least));
 			}
 		}
 		if (PlanDebug())
@@ -6610,9 +6871,9 @@ namespace RammsCurb
 					XZ += FString::Printf(TEXT(" %.2f,%.2f"), R.LegX[i], R.LegZ[i]);
 				}
 				Out.Lines.Add(FString::Printf(TEXT("dbg %5.0f v %7.3f cap %5.1f by %d air %02x/%02x far %02x fail %d corr %+6.1f..%+6.1f (L%d H%d) b %+6.1f x "
-												   "%+5.1f/%+5.1f m %6.2f tilt %+.5f/%+.5f%s%s%s"),
+												   "%+5.1f/%+5.1f m %6.2f seat %+5.1f tilt %+.5f/%+.5f%s%s%s"),
 					SAt(k), P.V[k], P.VCap[k], P.CapBy.IsValidIndex(k) ? P.CapBy[k] : -1, P.Air[k], P.StaticAir[k], P.Far[k], static_cast<int32>(P.Fail[k]),
-					P.BLo[k] - B0, P.BHi[k] - B0, R.LoLeg, R.HiLeg, P.B[k] - B0, P.X[0][k], P.X[1][k], P.Margin[k], P.Pitch[k], P.Roll[k], *D, *XZ,
+					P.BLo[k] - B0, P.BHi[k] - B0, R.LoLeg, R.HiLeg, P.B[k] - B0, P.X[0][k], P.X[1][k], P.Margin[k], P.SeatX.IsValidIndex(k) ? P.SeatX[k] : 0.0, P.Pitch[k], P.Roll[k], *D, *XZ,
 					P.Stop[k] ? TEXT(" STOP") : TEXT("")));
 			}
 		}
