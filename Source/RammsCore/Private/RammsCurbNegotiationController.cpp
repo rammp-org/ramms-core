@@ -809,6 +809,19 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 	{
 		SeatState.CmdAngles = FVector2D(Base->GetMotorValue(Seat.Linkage.ProximalMotorA), Base->GetMotorValue(Seat.Linkage.ProximalMotorB));
 		SeatState.bCmd = true;
+		// The rider's attitude as the crossing found it -- level in the
+		// outdoor stance, or wherever the seat's own controls had tilted it --
+		// from the motors' commands where they have them (a loaded servo sits
+		// short of its command).
+		const auto Commanded = [Base](FName Motor) {
+			float Value = 0.0f;
+			return static_cast<double>(Base->GetMotorCommand(Motor, Value) ? Value : Base->GetMotorValue(Motor));
+		};
+		const RammsCurb::FSeatPose Start = RammsCurb::SeatForward(Seat,
+			FVector2D(Commanded(Seat.Linkage.ProximalMotorA), Commanded(Seat.Linkage.ProximalMotorB)));
+		SeatState.PitchRef = Start.bValid && !Seat.TiltMotor.IsNone()
+			? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) + FilteredPitchRad
+			: 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
 	FVector2D			 Angles;
@@ -823,12 +836,12 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 	{
 		Pose = RammsCurb::SeatForward(Seat, SeatState.CmdAngles);
 	}
-	// The rider level: the platform pitched against the base's pitch, as far
-	// as it turns.
+	// The rider held where the crossing found them: the platform pitched
+	// against the base's pitch, as far as it turns.
 	if (!Seat.TiltMotor.IsNone() && Pose.bValid)
 	{
 		const double Max = FMath::DegreesToRadians(static_cast<double>(Seat.MaxPitchDeg));
-		const double Pitch = FMath::Clamp(-static_cast<double>(FilteredPitchRad), -Max, Max);
+		const double Pitch = FMath::Clamp(SeatState.PitchRef - static_cast<double>(FilteredPitchRad), -Max, Max);
 		Base->SetMotorCommand(Seat.TiltMotor, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, SeatState.LinkAngle0, Pitch)));
 	}
 }

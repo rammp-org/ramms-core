@@ -1286,6 +1286,9 @@ private:
 		/** The 5-bar motor angles last commanded: the solver's hint. */
 		FVector2D CmdAngles = FVector2D::ZeroVector;
 		bool	  bCmd = false;
+		/** The platform's pitch in the world (rad) as the crossing took the
+		 *  seat over, which the tilt holds against the base's pitch. */
+		double PitchRef = 0.0;
 	};
 	FSeatState SeatState;
 
