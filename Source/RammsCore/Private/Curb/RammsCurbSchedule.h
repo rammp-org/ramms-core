@@ -111,6 +111,9 @@ namespace RammsCurb
 		/** Each centre 5-bar's fore/aft (cm, chassis frame), in Legs order of the
 		 *  5-bar legs. */
 		double X[2] = { 0.0, 0.0 };
+		/** The seat's pivot fore/aft (cm, chassis frame) the pose was planned
+		 *  with (its zero pose on a robot without a seat). */
+		double SeatX = 0.0;
 		/** Off the ground (bit per leg). */
 		uint32 AirborneMask = 0;
 		/** The dynamic stability margin (cm) at the planned pose. */

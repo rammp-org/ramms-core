@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsRobotBaseComponent.h"
+#include "RammsMotionProfile.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "RammsActuationBackend.h"
 #include "RammsActuationBackendRegistry.h"
@@ -63,6 +64,7 @@ void URammsRobotBaseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Backend_ = nullptr;
 	bBackendResolved = false;
 	bMotorsLoaded = false;
+	PositionProfiles.Reset();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -192,6 +194,7 @@ bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 	// it straight back under command on the next tick.
 	EnsureBackend();
 	DropVelocityDrive(MotorId);
+	PositionProfiles.Remove(MotorId);
 	return Backend_ && Backend_->ReleaseMotor(MotorId);
 }
 
@@ -380,7 +383,33 @@ void URammsRobotBaseComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	StepPositionProfiles(DeltaTime);
 	StepVelocityDrives(DeltaTime);
+}
+
+void URammsRobotBaseComponent::StepPositionProfiles(float DeltaTime)
+{
+	if (PositionProfiles.Num() == 0)
+	{
+		return;
+	}
+	EnsureBackend();
+	if (!Backend_)
+	{
+		return;
+	}
+	for (TPair<FName, FPositionProfile>& Pair : PositionProfiles)
+	{
+		const FName		  MotorId = Pair.Key;
+		FPositionProfile& P = Pair.Value;
+		FRammsMotorSpec	  Spec;
+		if (!GetMotorSpec(MotorId, Spec))
+		{
+			continue;
+		}
+		RammsMotion::StepToward(P.Setpoint, P.Rate, P.Target, Spec.MaxVelocity, Spec.MaxAcceleration, DeltaTime);
+		Backend_->SetCommand(MotorId, static_cast<float>(P.Setpoint) * DirectionOf(MotorId));
+	}
 }
 
 USkeletalMeshComponent* URammsRobotBaseComponent::GetChaosSkeletalMesh() const
@@ -523,6 +552,23 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 		Value = FMath::Clamp(Value, static_cast<float>(Spec->ControlRange.X),
 			static_cast<float>(Spec->ControlRange.Y));
 	}
+	// A profiled position servo is eased to the value from where it stands
+	// (StepPositionProfiles, from this tick on); the first command to it
+	// holds the joint where it is, so nothing jumps.
+	if (Spec && Spec->Type == ERammsActuatorType::Position && (Spec->MaxVelocity > 0.0f || Spec->MaxAcceleration > 0.0f))
+	{
+		FPositionProfile* P = PositionProfiles.Find(MotorId);
+		if (!P)
+		{
+			P = &PositionProfiles.Add(MotorId);
+			P->Setpoint = GetMotorValue(MotorId);
+			P->Rate = 0.0;
+			Backend_->SetCommand(MotorId, static_cast<float>(P->Setpoint) * DirectionOf(MotorId));
+		}
+		P->Target = Value;
+		return;
+	}
+	PositionProfiles.Remove(MotorId);
 	Backend_->SetCommand(MotorId, Value * DirectionOf(MotorId));
 }
 

@@ -37,6 +37,30 @@ namespace
 	constexpr double PlanRadius = 9.0;
 	/** The chassis origin's height over flat ground the robot stands at. */
 	constexpr double PlanStandCm = 14.0;
+
+	/** The chassis rising under each lift (Ramms.Curb.RiseEarly 0) for the
+	 *  tests of what the executor does when a landing is late or a lift
+	 *  stalls under a rising chassis; restored after. */
+	struct FScopedRiseEarlyOff
+	{
+		IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.RiseEarly"));
+		int32			  Was = 1;
+		FScopedRiseEarlyOff()
+		{
+			if (Var)
+			{
+				Was = Var->GetInt();
+				Var->Set(0, ECVF_SetByCode);
+			}
+		}
+		~FScopedRiseEarlyOff()
+		{
+			if (Var)
+			{
+				Var->Set(Was, ECVF_SetByCode);
+			}
+		}
+	};
 	/** The near edge this far ahead of the chassis origin, along +X. */
 	constexpr double PlanEdgeCm = 120.0;
 
@@ -2671,6 +2695,7 @@ bool FRammsCurbExecutorLegStall::RunTest(const FString& Parameters)
 	// wheel never meets the face -- and the runtime checks fault, naming the
 	// wheel (its leg off its servo lag model, or its lift overrunning); the
 	// executor halts and the robot stays at rest there.
+	const FScopedRiseEarlyOff	   RiseUnderTheLifts;
 	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
 	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
 	RammsCurb::FExecDryRunOptions  Options;
@@ -2982,6 +3007,7 @@ bool FRammsCurbExecutorLateLandingHoldsCentres::RunTest(const FString& Parameter
 	// deadline slows it instead. (Counting that walk, the 5x slower landings
 	// had the braking cap bind on 5 and 18 ticks and held the oblique
 	// crossing.)
+	const FScopedRiseEarlyOff RiseUnderTheLifts;
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
 	{
 		for (const double Scale : { 3.0, 5.0 })
@@ -3032,6 +3058,7 @@ bool FRammsCurbExecutorBlockedLiftHoldsChassis::RunTest(const FString& Parameter
 		const TCHAR* Id;
 		double		 MaxTiltDeg;
 	};
+	const FScopedRiseEarlyOff RiseUnderTheLifts;
 	for (const FCase& C : { FCase{ TEXT("Square"), 1.15 }, FCase{ TEXT("Oblique30"), 0.7 }, FCase{ TEXT("ObliqueNeg30"), 0.7 } })
 	{
 		const FString				   What = FString::Printf(TEXT("%s up, centres landing 5x slower"), C.Id);
@@ -3700,7 +3727,11 @@ bool FRammsCurbExecutorPlantOnHold::RunTest(const FString& Parameters)
 	// windows: with bPlantOnHold they are set down again on the road (the robot
 	// then standing on every wheel) -- on it when the halt is over, not left in
 	// the air where they were as the robot came to rest; without it they stay
-	// up where they are.
+	// up where they are. (With the chassis rising under each lift: risen
+	// early, a halt as the fronts lift leaves them short of the road by the
+	// rise -- the executor does not yet lower the chassis for a plant on
+	// hold.)
+	const FScopedRiseEarlyOff	   RiseUnderTheLifts;
 	RammsCurb::FPlannerInput	   In = PlanOn(PlanScenario(TEXT("Square"), true));
 	const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
 	if (!TestTrue(TEXT("planned"), S.IsValid()))
@@ -3839,6 +3870,59 @@ bool FRammsCurbPlannerDefaultGaitPerWheel::RunTest(const FString& Parameters)
 	const URammsCurbNegotiationController* Default = GetDefault<URammsCurbNegotiationController>();
 	TestTrue(TEXT("so is a controller's as constructed"), Default && Default->Tuning.Gait == ERammsCurbGait::PerWheel);
 	TestTrue(TEXT("the per-axle gait is still an option"), StaticEnum<ERammsCurbGait>()->IsValidEnumValue(static_cast<int64>(ERammsCurbGait::PerAxle)));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerSeatHome,
+	"Ramms.Curb.Planner.SeatHome",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerSeatHome::RunTest(const FString& Parameters)
+{
+	// Where the seat is free, among the fore/afts that keep the pose well
+	// enough the one nearest home wins, and home follows the crossing: the
+	// aft end of the reach until a wheel stands on the far side, the forward
+	// end while some do and others are still to come, the aft end again once
+	// every wheel is across (the outdoor stance's seat). On level ground with
+	// a light seat every fore/aft keeps the pose, so the seat sits at home.
+	RammsCurb::FPlannerInput In = PlanOn(PlanTerrain(0.0, 0.0));
+	RammsCurb::FModelSeat&	 Seat = In.Model.Seat;
+	Seat.bHas = true;
+	Seat.ZeroPivot = FVector2D(16.5, 30.0);
+	Seat.MechanismMassKg = 2.0;
+	Seat.PayloadMassKg = 3.0;
+	Seat.PayloadOffset = FVector2D(0.0, 40.0);
+	Seat.HeightCm = 40.0;
+	Seat.XRange = FVector2D(-20.0, 27.0);
+	Seat.ShiftSpeedCmS = 30.0;
+	const RammsCurb::FPlanModel M(In);
+	auto						SeatAt = [&](uint32 OnFar) {
+		   RammsCurb::FInstantQuery Q;
+		   Q.S = 0.0;
+		   Q.OnFar = OnFar;
+		   return M.Evaluate(Q, PlanStandCm).SeatX;
+	};
+	const uint32 Fronts = (1u << PlanFL) | (1u << PlanFR);
+	const uint32 All = (1u << 6) - 1u;
+	TestEqual(TEXT("no wheel across: the aft end of the reach"), SeatAt(0u), -20.0, 1e-6);
+	TestEqual(TEXT("the fronts across: the forward end"), SeatAt(Fronts), 27.0, 1e-6);
+	TestEqual(TEXT("the fronts and centres across: still the forward end"), SeatAt(Fronts | (1u << PlanCL) | (1u << PlanCR)), 27.0, 1e-6);
+	TestEqual(TEXT("every wheel across: the aft end again"), SeatAt(All), -20.0, 1e-6);
+	// The rears landing on the far side but not yet loaded: not across, so
+	// the seat stays at the forward end for them.
+	{
+		RammsCurb::FInstantQuery Q;
+		Q.S = 0.0;
+		Q.Airborne = (1u << PlanRL) | (1u << PlanRR);
+		Q.Touching = Q.Airborne;
+		Q.OnFar = All;
+		TestEqual(TEXT("the rears landing: still the forward end"), M.Evaluate(Q, PlanStandCm).SeatX, 27.0, 1e-6);
+	}
+	// Held somewhere: there, whatever the crossing's phase.
+	RammsCurb::FInstantQuery Q;
+	Q.S = 0.0;
+	Q.SeatX = 5.0;
+	TestEqual(TEXT("held at 5: at 5"), M.Evaluate(Q, PlanStandCm).SeatX, 5.0, 1e-6);
 	return true;
 }
 

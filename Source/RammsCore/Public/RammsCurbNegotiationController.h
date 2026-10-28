@@ -21,6 +21,10 @@ class SRammsCurbScope;
 class SRammsCurbLabels;
 class UGameViewportClient;
 class ULocalPlayer;
+namespace RammsCurb
+{
+	struct FMeasuredSeat;
+}
 
 namespace RammsCurb
 {
@@ -257,6 +261,12 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FRammsCurbTuning Tuning;
+
+	/** The seat the crossing moves, where the robot has one (FRammsCurbSeat):
+	 *  its pivot shifted fore and aft for the centre of mass, its platform
+	 *  pitched against the base's to keep the rider level. Unset: no seat. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbSeat Seat;
 
 	/** Drive mode to hand back to when done. None returns to whichever mode
 	 *  was active when the manoeuvre began. */
@@ -1261,6 +1271,34 @@ private:
 	/** The robot model: each 4-bar's table, the centre of mass and the legs'
 	 *  moving masses, the belly (Private/Curb); built with the legs. */
 	TPimplPtr<RammsCurb::FRobotModel> Model;
+
+	/** The seat as resolved (ResolveSeat) and commanded (CommandSeat). */
+	struct FSeatState
+	{
+		bool bResolved = false;
+		/** The pivot at the zero pose and arm A's distal link angle there (the
+		 *  platform level), the height the crossing holds the pivot at and the
+		 *  fore/aft it can be held at there. */
+		FVector2D ZeroPivot = FVector2D::ZeroVector;
+		double	  LinkAngle0 = 0.0;
+		double	  HeightCm = 0.0;
+		FVector2D XRange = FVector2D(1.0, 0.0);
+		/** The 5-bar motor angles last commanded: the solver's hint. */
+		FVector2D CmdAngles = FVector2D::ZeroVector;
+		bool	  bCmd = false;
+	};
+	FSeatState SeatState;
+
+	/** Resolve the seat -- its motors in the registry, its zero pose, its
+	 *  reach at its crossing height -- into SeatState and the model's seat; a
+	 *  robot without one resolves to none. */
+	bool ResolveSeat(FString& OutReason);
+	/** The seat as measured now: its motors read through the kinematics. */
+	void MeasuredSeat(RammsCurb::FMeasuredSeat& Out) const;
+	/** Hold the seat's pivot at fore/aft X (cm, chassis frame) at its
+	 *  crossing height, the platform pitched against the base's (filtered)
+	 *  pitch to keep the rider level; nothing on a robot without a seat. */
+	void CommandSeat(double X);
 
 	/** The last per-wheel plan (Private/Curb). */
 	TPimplPtr<RammsCurb::FCurbSchedule> Schedule;

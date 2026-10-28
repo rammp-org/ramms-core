@@ -102,4 +102,20 @@ struct FRammsMotorSpec : public FTableRowBase
 	 *  Zero Kp means "use the base's default gains". */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Velocity Loop")
 	FRammsVelocityGains VelocityGains;
+
+	/**
+	 * Position actuators only. The fastest the real actuator turns (rad/s,
+	 * or m/s) and the most its rate may change (per s^2); 0 is no limit of
+	 * that kind. With either set, the robot base eases every position command
+	 * to this motor through them (RammsMotion::StepToward, once a tick) rather
+	 * than handing the servo the step: a simulated servo stiff enough to
+	 * follow anything then moves no faster than the actuator it stands for
+	 * -- a harmonic drive at its rated 30 rpm is 3.14 rad/s whatever its
+	 * gains. Reads are the joint's, not the eased command.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Profile", meta = (ClampMin = "0.0"))
+	float MaxVelocity = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Profile", meta = (ClampMin = "0.0"))
+	float MaxAcceleration = 0.0f;
 };

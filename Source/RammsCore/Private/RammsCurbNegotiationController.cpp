@@ -8,6 +8,7 @@
 #include "Curb/RammsCurbPlanTask.h"
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
+#include "Curb/RammsCurbSeat.h"
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbSafety.h"
 #include "Curb/RammsCurbSpeedLaw.h"
@@ -706,7 +707,130 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 			return false;
 		}
 	}
-	return Model && RammsCurb::BuildRobotModel(Legs, Tuning, ZeroPoses, *Model, OutReason);
+	if (!Model || !RammsCurb::BuildRobotModel(Legs, Tuning, ZeroPoses, *Model, OutReason))
+	{
+		return false;
+	}
+	return ResolveSeat(OutReason);
+}
+
+bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
+{
+	SeatState = FSeatState();
+	Model->Seat = RammsCurb::FModelSeat();
+	if (!Seat.IsSet())
+	{
+		return true;
+	}
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base)
+	{
+		OutReason = TEXT("no RammsRobotBaseComponent to drive the seat through");
+		return false;
+	}
+	for (const FName& Motor : { Seat.Linkage.ProximalMotorA, Seat.Linkage.ProximalMotorB, Seat.TiltMotor })
+	{
+		if (!Motor.IsNone() && !Base->HasMotor(Motor))
+		{
+			OutReason = FString::Printf(TEXT("the seat's motor '%s' is not in the motor registry"), *Motor.ToString());
+			return false;
+		}
+	}
+	const RammsCurb::FSeatPose Zero = RammsCurb::SeatForward(Seat, FVector2D::ZeroVector);
+	if (!Zero.bValid)
+	{
+		OutReason = TEXT("the seat's 5-bar does not close with both motors at 0, its zero pose");
+		return false;
+	}
+	SeatState.ZeroPivot = Zero.Pivot;
+	SeatState.LinkAngle0 = Zero.LinkAngle;
+	SeatState.HeightCm = Seat.HeightCm != 0.0f ? Seat.HeightCm : Zero.Pivot.Y;
+	auto RangeOf = [&](FName Motor) {
+		FRammsMotorSpec Spec;
+		return Base->GetMotorSpec(Motor, Spec) ? Spec.ControlRange : FVector2D(1.0, 0.0);
+	};
+	bool bReaches = false;
+	SeatState.XRange = RammsCurb::SeatReachX(Seat, SeatState.HeightCm, FVector2D::ZeroVector, RangeOf(Seat.Linkage.ProximalMotorA),
+		RangeOf(Seat.Linkage.ProximalMotorB), bReaches);
+	if (!bReaches)
+	{
+		OutReason = FString::Printf(TEXT("the seat cannot hold its pivot at %.1f cm (HeightCm) over its zero pose"), SeatState.HeightCm);
+		return false;
+	}
+	RammsCurb::FModelSeat& S = Model->Seat;
+	S.bHas = true;
+	S.ZeroPivot = Zero.Pivot;
+	S.MechanismMassKg = Seat.MechanismMassKg;
+	S.PayloadMassKg = Seat.PayloadMassKg;
+	S.PayloadOffset = Seat.PayloadOffsetCm;
+	S.HeightCm = SeatState.HeightCm;
+	S.XRange = SeatState.XRange;
+	S.MaxPitchRad = FMath::DegreesToRadians(static_cast<double>(Seat.MaxPitchDeg));
+	S.bTilts = !Seat.TiltMotor.IsNone();
+	S.ShiftSpeedCmS = Seat.ShiftSpeedCmS;
+	if (Tuning.RobotMassKg > 0.0f && S.MovingMassKg() >= Tuning.RobotMassKg)
+	{
+		OutReason = FString::Printf(TEXT("the seat's masses add up to %.1f kg, as much as the whole robot (RobotMassKg %.1f)"), S.MovingMassKg(),
+			Tuning.RobotMassKg);
+		return false;
+	}
+	SeatState.bResolved = true;
+	return true;
+}
+
+void URammsCurbNegotiationController::MeasuredSeat(RammsCurb::FMeasuredSeat& Out) const
+{
+	Out = RammsCurb::FMeasuredSeat();
+	const URammsRobotBaseComponent* Base = SeatState.bResolved ? EnsureBase() : nullptr;
+	if (!Base)
+	{
+		return;
+	}
+	const FVector2D			   Angles(Base->GetMotorValue(Seat.Linkage.ProximalMotorA), Base->GetMotorValue(Seat.Linkage.ProximalMotorB));
+	const RammsCurb::FSeatPose P = RammsCurb::SeatForward(Seat, Angles);
+	if (!P.bValid)
+	{
+		return;
+	}
+	Out.bValid = true;
+	Out.Pivot = P.Pivot;
+	Out.PitchRad = RammsCurb::SeatPlatformPitch(Seat, P.LinkAngle, SeatState.LinkAngle0,
+		Seat.TiltMotor.IsNone() ? 0.0 : static_cast<double>(Base->GetMotorValue(Seat.TiltMotor)));
+}
+
+void URammsCurbNegotiationController::CommandSeat(double X)
+{
+	URammsRobotBaseComponent* Base = SeatState.bResolved ? EnsureBase() : nullptr;
+	if (!Base || !FMath::IsFinite(X))
+	{
+		return;
+	}
+	if (!SeatState.bCmd)
+	{
+		SeatState.CmdAngles = FVector2D(Base->GetMotorValue(Seat.Linkage.ProximalMotorA), Base->GetMotorValue(Seat.Linkage.ProximalMotorB));
+		SeatState.bCmd = true;
+	}
+	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
+	FVector2D			 Angles;
+	RammsCurb::FSeatPose Pose;
+	if (RammsCurb::SeatSolve(Seat, Target, SeatState.CmdAngles, Angles, &Pose))
+	{
+		SeatState.CmdAngles = Angles;
+		Base->SetMotorCommand(Seat.Linkage.ProximalMotorA, static_cast<float>(Angles.X));
+		Base->SetMotorCommand(Seat.Linkage.ProximalMotorB, static_cast<float>(Angles.Y));
+	}
+	else
+	{
+		Pose = RammsCurb::SeatForward(Seat, SeatState.CmdAngles);
+	}
+	// The rider level: the platform pitched against the base's pitch, as far
+	// as it turns.
+	if (!Seat.TiltMotor.IsNone() && Pose.bValid)
+	{
+		const double Max = FMath::DegreesToRadians(static_cast<double>(Seat.MaxPitchDeg));
+		const double Pitch = FMath::Clamp(-static_cast<double>(FilteredPitchRad), -Max, Max);
+		Base->SetMotorCommand(Seat.TiltMotor, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, SeatState.LinkAngle0, Pitch)));
+	}
 }
 
 // --- measurement ---------------------------------------------------------------
@@ -3646,6 +3770,7 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 		RammsCurb::FExecCommand Cmd;
 		Executor->Tick(M, *Level, Cmd);
 		CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+		CommandSeat(Cmd.SeatX);
 		DriveSpeed = static_cast<float>(Cmd.DriveSpeed);
 		TArray<FString> Lines;
 		Executor->TakeLog(Lines);
@@ -4922,6 +5047,7 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 	Out.SpeedCmS = Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f;
 	Out.bSpeedValid = Telemetry && Telemetry->Motion.IsFull();
 	Out.Legs.SetNum(Legs.Num());
+	MeasuredSeat(Out.Seat);
 	Out.Probes.Reset();
 	const FVector2D Forward = Out.Forward;
 	for (int32 i = 0; i < Legs.Num() && i < LegState.Num(); ++i)
@@ -5402,6 +5528,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	RammsCurb::FExecCommand Cmd;
 	Executor->Tick(M, *Level, Cmd);
 	CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+	CommandSeat(Cmd.SeatX);
 	// A re-plan a runtime trigger asks for before any wheel has begun to cross:
 	// the surfaces re-fitted by what the traces found, the heading held the
 	// chassis' own where it turned from the plan's -- undone if the re-plan
@@ -6117,7 +6244,9 @@ bool URammsCurbNegotiationController::MeasureStabilityMargin(float& OutCm) const
 		W.bSupport = State.bHasWorld && IsLegPlanted(i);
 		W.Gradient = (State.bOnFar ? ActiveTerrain.Far : ActiveTerrain.Near).Gradient;
 	}
-	const RammsCurb::FPoseMargin M = RammsCurb::MeasuredMargin(*Model, Frame, XZ, Wheels, FVector2D(ChassisForward.X, ChassisForward.Y),
+	RammsCurb::FMeasuredSeat SeatNow;
+	MeasuredSeat(SeatNow);
+	const RammsCurb::FPoseMargin M = RammsCurb::MeasuredMargin(*Model, Frame, XZ, Wheels, SeatNow, FVector2D(ChassisForward.X, ChassisForward.Y),
 		Tuning.Acceleration, Tuning.Deceleration);
 	if (M.Support == 0)
 	{

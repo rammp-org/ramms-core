@@ -33,7 +33,7 @@ namespace RammsCurb
 		constexpr uint32 PlanInputMagic = 0x49504352; // "RCPI"
 		/** 2: the robot moving as it asked (FPlannerInput::bOnTheMove); a version-1
 		 *  file reads with it false. */
-		constexpr int32 PlanInputVersion = 2;
+		constexpr int32 PlanInputVersion = 3; // 3: the model's seat
 
 		/** A reflected struct by property name (tagged), so that a file written
 		 *  before a field was added still reads, the field at its default. */
@@ -72,6 +72,12 @@ namespace RammsCurb
 				L.Axle = static_cast<ERammsCurbAxle>(Axle);
 			}
 			Ar << In.Model.CenterOfMass << In.Model.MassKg << In.Model.BellyHalfExtent << In.Model.BellyUndersideCm;
+			if (Version >= 3)
+			{
+				FModelSeat& S = In.Model.Seat;
+				Ar << S.bHas << S.ZeroPivot << S.MechanismMassKg << S.PayloadMassKg << S.PayloadOffset << S.HeightCm << S.XRange << S.MaxPitchRad
+				   << S.bTilts << S.ShiftSpeedCmS;
+			}
 			int32 NumLegs = In.Legs.Num();
 			Ar << NumLegs;
 			if (Ar.IsLoading())

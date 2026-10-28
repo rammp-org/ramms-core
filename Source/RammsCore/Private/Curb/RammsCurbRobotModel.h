@@ -162,10 +162,37 @@ namespace RammsCurb
 		FFourBarTable FourBar;
 	};
 
+	/** The seat mechanism of the model (FRammsCurbSeat), as the stability
+	 *  checks see it: lumps that move with the platform's pivot. */
+	struct FModelSeat
+	{
+		bool bHas = false;
+		/** The pivot at the zero pose (chassis x-z, cm): CenterOfMass is
+		 *  reckoned with the seat there, level. */
+		FVector2D ZeroPivot = FVector2D::ZeroVector;
+		/** The mechanism's lump at the pivot and the rider's PayloadOffset
+		 *  from it in the platform's frame (kg, cm). */
+		double	  MechanismMassKg = 0.0;
+		double	  PayloadMassKg = 0.0;
+		FVector2D PayloadOffset = FVector2D::ZeroVector;
+		/** The height the crossing holds the pivot at and the fore/aft it
+		 *  can be held at there (cm; min > max: none). */
+		double	  HeightCm = 0.0;
+		FVector2D XRange = FVector2D(1.0, 0.0);
+		/** The most the platform pitches against the chassis (rad), and
+		 *  whether it pitches at all (a tilt motor). */
+		double MaxPitchRad = 0.0;
+		bool   bTilts = false;
+		double ShiftSpeedCmS = 0.0;
+		double MovingMassKg() const { return MechanismMassKg + PayloadMassKg; }
+		bool   Shifts() const { return bHas && XRange.X < XRange.Y; }
+	};
+
 	/** The robot, as the stability checks and the planner see it. */
 	struct FRobotModel
 	{
 		TArray<FModelLeg> Legs;
+		FModelSeat		  Seat;
 		/** The centre of mass (chassis frame, cm) with every leg at its zero
 		 *  pose. */
 		FVector CenterOfMass = FVector::ZeroVector;
@@ -181,6 +208,12 @@ namespace RammsCurb
 		 *  at WheelXZ[i] (chassis x-z, cm): CenterOfMass plus, for each leg,
 		 *  MovingMassKg / MassKg of how far its wheel is from its zero pose. */
 		FVector CenterOfMassAt(TConstArrayView<FVector2D> WheelXZ) const;
+
+		/** The same with the seat's pivot at SeatPivot (chassis x-z, cm) and
+		 *  the platform pitched SeatPitchRad against the chassis (nose up):
+		 *  the mechanism's lump moves with the pivot, the rider's with it and
+		 *  round it. The seat at its zero pose, level, is the plain one. */
+		FVector CenterOfMassAt(TConstArrayView<FVector2D> WheelXZ, const FVector2D& SeatPivot, double SeatPitchRad) const;
 
 		/** Points over the belly plate (chassis x-y, cm): Along x Across of
 		 *  them, evenly from one edge to the other. */
@@ -338,4 +371,18 @@ namespace RammsCurb
 	 */
 	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FMeasuredWheel> Wheels, const FVector2D& Heading, double Acceleration, double Deceleration);
+
+	/** The seat as measured: its pivot (chassis x-z, cm) and the platform's
+	 *  pitch against the chassis (rad). */
+	struct FMeasuredSeat
+	{
+		bool	  bValid = false;
+		FVector2D Pivot = FVector2D::ZeroVector;
+		double	  PitchRad = 0.0;
+	};
+
+	/** MeasuredMargin with the seat where it is measured (a model without a
+	 *  seat, or an invalid measure, is the plain one). */
+	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
+		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, const FVector2D& Heading, double Acceleration, double Deceleration);
 } // namespace RammsCurb

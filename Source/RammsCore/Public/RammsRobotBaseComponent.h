@@ -291,6 +291,22 @@ private:
 	/** Velocity-commanded motors that are position servos (warned once each). */
 	TSet<FName> WarnedVelocityOnPosition;
 
+	/** A position motor whose registry row profiles its commands
+	 *  (FRammsMotorSpec::MaxVelocity / MaxAcceleration): the target it was last
+	 *  given and the setpoint eased toward it, both in the robot's sense. */
+	struct FPositionProfile
+	{
+		double Target = 0.0;
+		double Setpoint = 0.0;
+		double Rate = 0.0;
+	};
+
+	/** Position motors under a profiled command, by Id. */
+	TMap<FName, FPositionProfile> PositionProfiles;
+
+	/** Ease every profiled setpoint toward its target and command it. */
+	void StepPositionProfiles(float DeltaTime);
+
 	/** Gains in force for a motor: its own row's, else the base's defaults. */
 	FRammsVelocityGains GainsFor(FName MotorId) const;
 

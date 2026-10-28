@@ -444,6 +444,13 @@ namespace RammsCurb
 	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne);
 
 	/** One instant as the planner asks about it. */
+	/** FInstantQuery::SeatX left to the pose. */
+	constexpr double FreeSeatX = -1.0e9;
+	inline bool		 IsSeatFree(double SeatX)
+	{
+		return !(SeatX > -1.0e8);
+	}
+
 	struct FInstantQuery
 	{
 		/** Chassis travel (cm). */
@@ -461,6 +468,10 @@ namespace RammsCurb
 		uint32 Touching = 0;
 		/** Each 5-bar's fore/aft (cm, chassis frame), by leg. */
 		double X[MaxPlanLegs] = {};
+		/** The seat's pivot fore/aft (cm, chassis frame) the instant is held
+		 *  with; FreeSeatX (the default): wherever the seat keeps the pose
+		 *  best (FPlanModel::PoseAt chooses, and reports it). */
+		double SeatX = FreeSeatX;
 	};
 
 	/** What an instant allows: the chassis heights (world, cm) at which every
@@ -482,6 +493,11 @@ namespace RammsCurb
 		int32  Support = 0;
 		double LegX[MaxPlanLegs] = {};
 		double LegZ[MaxPlanLegs] = {};
+		/** The seat's pivot fore/aft and the platform's pitch against the
+		 *  chassis (rad) the pose was taken with (the zero pose, level, on a
+		 *  robot without a seat). */
+		double SeatX = 0.0;
+		double SeatPitchRad = 0.0;
 
 		double Width() const { return Hi - Lo; }
 	};
@@ -582,6 +598,19 @@ namespace RammsCurb
 		FAxes	Axes(double PitchDeg, double RollDeg) const;
 		FVector ContactOffset(int32 Leg, const FAxes& A, bool bFar) const;
 		double	Belly(const FAxes& A, const FVector2D& O) const;
+		/** The margin of a centre of mass (chassis frame) against Contacts
+		 *  (world xy, Ground their heights' sum): the dynamic margin, or with
+		 *  fewer than three the hull's. */
+		double MarginFor(const FVector& Com, TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3) const;
+		/** Where the seat is for an instant: its pivot at SeatX (or, free,
+		 *  where the pose keeps its margin best, nearest the zero pose among
+		 *  equals) at the seat's crossing height, and the platform pitched
+		 *  against the base's PitchDeg to keep the rider level, within its
+		 *  limit. The zero pose, level, on a robot without a seat. */
+		/** Touching: of Support, the legs landing that carry nothing yet (they
+		 *  are not across for the seat's home). */
+		void SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
+			TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad) const;
 
 		struct FLeg
 		{
