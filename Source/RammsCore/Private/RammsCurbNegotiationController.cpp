@@ -775,6 +775,8 @@ bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
 	S.bTilts = !Seat.TiltMotor.IsNone();
 	S.ShiftSpeedCmS = Seat.ShiftSpeedCmS;
 	S.AftSpeedUpCmS = Seat.AftSpeedUpCmS;
+	S.ForeSlowDownCmS = Seat.ForeSlowDownCmS;
+	S.ShiftAccelCmS2 = Seat.ShiftAccelCmS2;
 	if (Tuning.RobotMassKg > 0.0f && S.MovingMassKg() >= Tuning.RobotMassKg)
 	{
 		OutReason = FString::Printf(TEXT("the seat's masses add up to %.1f kg, as much as the whole robot (RobotMassKg %.1f)"), S.MovingMassKg(),
@@ -6149,6 +6151,12 @@ void URammsCurbNegotiationController::TrackChassisMotion()
 		Now = World->GetTimeSeconds();
 	}
 	Telemetry->Motion.Add(Now, Centre, Forward);
+	FTransform Platform;
+	if (Seat.IsSet() && !Seat.TiltMotor.IsNone() && Base->GetMotorTransform(Seat.TiltMotor, Platform))
+	{
+		const FVector At = Platform.GetLocation();
+		Telemetry->Rider.Add(Now, FVector2D(At.X, At.Y), Forward);
+	}
 }
 
 float URammsCurbNegotiationController::AdvanceLegLag(float DeltaTime)

@@ -2468,8 +2468,18 @@ namespace RammsCurb
 			// moves on where moving makes the margin no worse.
 			// Aft, with the drive making up the rider's speed: no faster than it can.
 			const double ShiftRate = Want < SeatCmdX && Seat.AftSpeedUpCmS > 0.0 ? FMath::Min(Seat.ShiftSpeedCmS, Seat.AftSpeedUpCmS) : Seat.ShiftSpeedCmS;
-			const double Next = StepTowards(SeatCmdX, Want, ShiftRate * Dt);
-			bool		 bHold = false;
+			double		 Next = StepTowards(SeatCmdX, Want, ShiftRate * Dt);
+			// Eased (ShiftAccelCmS2): its speed changed no faster than that, and
+			// slowed in time to stop at Want, so that the drive taking it up or
+			// giving it back keeps pace.
+			if (Seat.ShiftAccelCmS2 > 0.0 && Dt > 0.0)
+			{
+				const double Togo = Want - SeatCmdX;
+				const double Goal = FMath::Sign(Togo) * FMath::Min(ShiftRate, FMath::Sqrt(2.0 * Seat.ShiftAccelCmS2 * FMath::Abs(Togo)));
+				const double Rate = StepTowards(SeatCmdRate, Goal, Seat.ShiftAccelCmS2 * Dt);
+				Next = Rate * Togo >= 0.0 && FMath::Abs(Rate * Dt) >= FMath::Abs(Togo) ? Want : SeatCmdX + Rate * Dt;
+			}
+			bool bHold = false;
 			if (!FMath::IsNearlyEqual(Next, SeatCmdX, 1e-9))
 			{
 				const double MarginNext = SeatMargin(Measure, Next);
@@ -2701,10 +2711,18 @@ namespace RammsCurb
 			VTarget = FMath::Min(VTarget, Between(LookTo).V);
 		}
 		// The seat shifting aft takes its speed off the rider's; the drive makes
-		// it up (FModelSeat::AftSpeedUpCmS).
+		// it up (FModelSeat::AftSpeedUpCmS). Shifting forward it adds its speed;
+		// the drive gives it up where the two together would pass the drive
+		// speed (FModelSeat::ForeSlowDownCmS), down to the floor
+		// (MinSpeedFraction).
 		if (In.Model.Seat.AftSpeedUpCmS > 0.0 && bSeatCmd && SeatCmdRate < 0.0 && VTarget < TNumericLimits<double>::Max())
 		{
 			VTarget += FMath::Min(-SeatCmdRate, In.Model.Seat.AftSpeedUpCmS);
+		}
+		if (In.Model.Seat.ForeSlowDownCmS > 0.0 && bSeatCmd && SeatCmdRate > 0.0)
+		{
+			const double Floor = FMath::Clamp(static_cast<double>(T.MinSpeedFraction), 0.0, 1.0) * T.DriveSpeed;
+			VTarget = FMath::Min(VTarget, FMath::Max(Floor, T.DriveSpeed - FMath::Min(SeatCmdRate, In.Model.Seat.ForeSlowDownCmS)));
 		}
 		Diag = FExecDiag();
 		Diag.Plan = VTarget;

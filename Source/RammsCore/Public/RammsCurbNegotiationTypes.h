@@ -238,6 +238,27 @@ struct RAMMSCORE_API FRammsCurbSeat
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
 	float AftSpeedUpCmS = 0.0f;
 
+	/**
+	 * While the seat shifts forward against the chassis -- as it does once a
+	 * crossing's fronts are across -- its shift adds to the rider's ground
+	 * speed. Where the two together would pass the crossing's drive speed
+	 * (FRammsCurbTuning::DriveSpeed), the drive slows by as much as the seat is
+	 * shifting, by up to this (cm/s) and no lower than the floor
+	 * (FRammsCurbTuning::MinSpeedFraction of it), so the rider goes no faster
+	 * than the approach. Below it the shift is left to make up the rider's
+	 * speed where the drive has slowed for the crossing. 0, the default: the
+	 * drive keeps the planned speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float ForeSlowDownCmS = 0.0f;
+
+	/** How fast the seat's shift speeds up and slows down (cm/s^2). At the
+	 *  drive's own Acceleration the drive can give up or make up the seat's
+	 *  speed as it changes (AftSpeedUpCmS, ForeSlowDownCmS) rather than a beat
+	 *  behind it. 0, the default: at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float ShiftAccelCmS2 = 0.0f;
+
 	/** A seat the crossing moves: both 5-bar motors named. */
 	bool IsSet() const { return !Linkage.ProximalMotorA.IsNone() && !Linkage.ProximalMotorB.IsNone(); }
 };
@@ -1150,8 +1171,9 @@ struct RAMMSCORE_API FRammsCurbDebugView
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
 	bool bRobot = false;
 
-	/** Strip charts of the chassis speed (measured, commanded, the floor),
-	 *  the base's tilt (measured, planned, the limit) and the stability margin
+	/** Strip charts of the ground speed (the chassis' measured, commanded and
+	 *  its floor, and the rider's at the seat platform's pivot), the base's
+	 *  tilt (measured, planned, the limit) and the stability margin
 	 *  (measured, planned), over the last GraphSeconds of simulated time: in
 	 *  the HUD's "Curb view" panel (IRammsHUDPanelProvider), else over the
 	 *  viewport. */
