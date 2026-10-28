@@ -147,6 +147,15 @@ namespace RammsCurb
 		/** Every SampleCm of S from 0. */
 		TArray<FScheduleSample> Samples;
 		double					SampleCm = 1.0;
+		/** The samples' SeatX is the seat as it follows each instant's choice,
+		 *  no faster than it shifts at the planned speed, and the plan was
+		 *  verified (and slowed) with it there (FPlanner::PlanSeat) -- rather
+		 *  than each instant's own choice. */
+		bool bSeatPlanned = false;
+		/** Where the seat goes once the crossing is over: the last instant's own
+		 *  choice (with bSeatPlanned the samples' seat may still be on its way
+		 *  there at the last one). */
+		double SeatEndX = 0.0;
 		/** The least planned speed once the robot has risen from rest (cm/s),
 		 *  planned stops left out. */
 		double VFloor = 0.0;

@@ -498,6 +498,10 @@ namespace RammsCurb
 		 *  robot without a seat). */
 		double SeatX = 0.0;
 		double SeatPitchRad = 0.0;
+		/** With the seat free: the fore/aft about SeatX (every SeatStepCm) at
+		 *  which the pose keeps MinStabilityMargin -- where the seat may be at
+		 *  this instant. Empty (min > max) with the seat held, or none there. */
+		FVector2D SeatBand = FVector2D(1.0, 0.0);
 
 		double Width() const { return Hi - Lo; }
 	};
@@ -609,8 +613,10 @@ namespace RammsCurb
 		 *  limit. The zero pose, level, on a robot without a seat. */
 		/** Touching: of Support, the legs landing that carry nothing yet (they
 		 *  are not across for the seat's home). */
+		/** OutBand: with the seat free, FInstantResult::SeatBand. */
 		void SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
-			TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad) const;
+			TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad,
+			FVector2D* OutBand = nullptr) const;
 
 		struct FLeg
 		{

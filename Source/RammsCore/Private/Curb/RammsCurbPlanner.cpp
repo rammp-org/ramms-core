@@ -172,6 +172,17 @@ namespace
 		return CVarCurbChoreographyRearDuringLift.GetValueOnAnyThread() != 0;
 	}
 
+	TAutoConsoleVariable<int32> CVarCurbSeatPath(TEXT("Ramms.Curb.SeatPath"), 1,
+		TEXT("1 (the default): the plan's seat is the seat as it follows each instant's choice -- no faster than ShiftSpeedCmS at "
+			 "the planned speed, never ahead of the choice -- verified where it has got to, the speed slowed where a pose needs it "
+			 "further on. 0: each instant's own choice, the seat jumping where its home changes (the executor rate-limits it and "
+			 "its measured margin gates the lifts)."),
+		ECVF_Default);
+	bool						SeatPathOn()
+	{
+		return CVarCurbSeatPath.GetValueOnAnyThread() != 0;
+	}
+
 	TAutoConsoleVariable<int32> CVarCurbRiseEarly(TEXT("Ramms.Curb.RiseEarly"), 1,
 		TEXT("1 (the default): the chassis rises to the height the crossing's lifts and landings need before the first lift, during "
 			 "the level-in on every wheel, and holds it until the last wheel has landed; 0: it rises as each lift needs it, as "
@@ -1167,8 +1178,13 @@ namespace RammsCurb
 	}
 
 	void FPlanModel::SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
-		TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad) const
+		TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad,
+		FVector2D* OutBand) const
 	{
+		if (OutBand)
+		{
+			*OutBand = FVector2D(1.0, 0.0);
+		}
 		const FModelSeat& Seat = Model.Seat;
 		OutPivot = Seat.ZeroPivot;
 		OutPitchRad = 0.0;
@@ -1217,13 +1233,20 @@ namespace RammsCurb
 		const double Home = bSomeAcross ? R.Y : R.X;
 		const double Enough = Tuning.MinStabilityMargin + SeatEnoughCm;
 		double		 BestX = Home, BestScore = -1e18;
-		auto		 Try = [&](double X) {
-			const double Score = FMath::Min(MarginFor(Model.CenterOfMassAt(LegXZ, FVector2D(X, OutPivot.Y), OutPitchRad), Contacts, Ground, A, O3), Enough);
-			if (Score > BestScore + 1e-9 || (FMath::Abs(Score - BestScore) <= 1e-9 && FMath::Abs(X - Home) < FMath::Abs(BestX - Home)))
-			{
-				BestScore = Score;
-				BestX = X;
-			}
+		// Every fore/aft tried and its margin, for the band.
+		TArray<FVector2D, TInlineAllocator<64>> Tried;
+		auto									Try = [&](double X) {
+			   const double Margin = MarginFor(Model.CenterOfMassAt(LegXZ, FVector2D(X, OutPivot.Y), OutPitchRad), Contacts, Ground, A, O3);
+			   const double Score = FMath::Min(Margin, Enough);
+			   if (OutBand)
+			   {
+				   Tried.Add(FVector2D(X, Margin));
+			   }
+			   if (Score > BestScore + 1e-9 || (FMath::Abs(Score - BestScore) <= 1e-9 && FMath::Abs(X - Home) < FMath::Abs(BestX - Home)))
+			   {
+				   BestScore = Score;
+				   BestX = X;
+			   }
 		};
 		Try(Home);
 		for (double X = Home + SeatStepCm; X <= R.Y + 1e-9; X += SeatStepCm)
@@ -1235,6 +1258,26 @@ namespace RammsCurb
 			Try(X);
 		}
 		OutPivot.X = BestX;
+		if (OutBand)
+		{
+			// The run of fore/afts about the choice that keep the requirement.
+			Tried.Sort([](const FVector2D& L, const FVector2D& Rt) { return L.X < Rt.X; });
+			const int32	 At = Tried.IndexOfByPredicate([BestX](const FVector2D& E) { return FMath::Abs(E.X - BestX) < 1e-9; });
+			const double Need = Tuning.MinStabilityMargin - 1e-9;
+			if (At != INDEX_NONE && Tried[At].Y >= Need)
+			{
+				int32 Lo = At, Hi = At;
+				while (Lo > 0 && Tried[Lo - 1].Y >= Need)
+				{
+					--Lo;
+				}
+				while (Hi < Tried.Num() - 1 && Tried[Hi + 1].Y >= Need)
+				{
+					++Hi;
+				}
+				*OutBand = FVector2D(Tried[Lo].X, Tried[Hi].X);
+			}
+		}
 	}
 
 	FVector2D FPlanModel::Reach(int32 Leg, double X) const
@@ -1416,7 +1459,8 @@ namespace RammsCurb
 		R.Support = Contacts.Num();
 		FVector2D SeatPivot;
 		double	  SeatPitch = 0.0;
-		SeatAt(Q.PitchDeg, Q.SeatX, ~Q.Airborne | Q.Touching, Q.OnFar | Q.Touching, Q.Touching, XZ, Contacts, Ground, A, O3, SeatPivot, SeatPitch);
+		SeatAt(Q.PitchDeg, Q.SeatX, ~Q.Airborne | Q.Touching, Q.OnFar | Q.Touching, Q.Touching, XZ, Contacts, Ground, A, O3, SeatPivot, SeatPitch,
+			&R.SeatBand);
 		R.SeatX = SeatPivot.X;
 		R.SeatPitchRad = SeatPitch;
 		const FVector Com = Model.Seat.bHas ? Model.CenterOfMassAt(XZ, SeatPivot, SeatPitch) : Model.CenterOfMassAt(XZ);
@@ -1516,6 +1560,7 @@ namespace RammsCurb
 		constexpr int32 CapLevelIn = 100;
 		constexpr int32 CapWalk = 101;
 		constexpr int32 CapTilt = 102;
+		constexpr int32 CapSeat = 103;
 		constexpr int32 CapAfterLevelIn = 200;
 		/** Rounds of the speed envelope (each may add caps). */
 		constexpr int32 MaxSpeedRounds = 24;
@@ -1566,6 +1611,8 @@ namespace RammsCurb
 		constexpr double NoValue = 1e300;
 		/** No cap (cm/s). */
 		constexpr double NoCap = 1e9;
+		/** Rounds of slowing for the seat's shift (PlanSeat). */
+		constexpr int32 SeatPathRounds = 6;
 
 		enum class EFail : uint8
 		{
@@ -1778,6 +1825,16 @@ namespace RammsCurb
 			 *  than it shifts (FixSeat); empty, the seat is free at every
 			 *  instant (FPlanModel::SeatAt chooses). Queries take it. */
 			TArray<double> SeatFix;
+			/** Where the seat may be at each sample (FInstantResult::SeatBand),
+			 *  as Verify last found with the seat free. */
+			TArray<FVector2D> SeatBand;
+			/** Caps the seat's shift asks for (cm/s), kept from one speed
+			 *  envelope to the next as TiltCap is (PlanSeat). */
+			TArray<double> SeatCap;
+			/** SeatFix is the plan's seat (PlanSeat), kept by EaseLifts; and the
+			 *  last instant's own choice, where it goes once the crossing is over. */
+			bool   bSeatPlanned = false;
+			double SeatEndX = 0.0;
 			/** Off the ground and on the far side, as planned at the planned speed;
 			 *  and standing still. */
 			TArray<uint32> Air;
@@ -1863,8 +1920,12 @@ namespace RammsCurb
 		 *  to LiftEaseSeconds earlier), its leg rising slower; a corner carried
 		 *  up in the drive stance whose eased lift reaches the level-in stays
 		 *  up. True when any lift was eased (the air masks rebuilt). */
-		bool		  EaseLifts(FPlan& P) const;
-		bool		  FixSeat(FPlan& P) const;
+		bool EaseLifts(FPlan& P) const;
+		bool FixSeat(FPlan& P) const;
+		/** The seat as it follows the instants' choices (FixSeat), the plan
+		 *  slowed where a pose needs it further on (SeatCap) and verified with
+		 *  it. False (P to be dropped) where that does not verify. */
+		bool		  PlanSeat(FPlan& P) const;
 		double		  MarchFwd(const FPlan& P, double S, double Seconds) const;
 		FInstantQuery Query(const FPlan& P, int32 K, uint32 Air, uint32 Far) const;
 		bool		  Feasible(const FInstantQuery& Q, double BGuess, FInstantResult* Out = nullptr) const;
@@ -2466,6 +2527,8 @@ namespace RammsCurb
 		P.BHi.Init(0.0, NumS);
 		P.Margin.Init(0.0, NumS);
 		P.SeatX.Init(In.Model.Seat.ZeroPivot.X, NumS);
+		P.SeatBand.Init(FVector2D(1.0, 0.0), NumS);
+		P.SeatCap.Init(NoCap, NumS);
 		P.Air.Init(0, NumS);
 		P.Far.Init(0, NumS);
 		P.Touch.Init(0, NumS);
@@ -3069,6 +3132,193 @@ namespace RammsCurb
 		return true;
 	}
 
+	bool FPlanner::PlanSeat(FPlan& P) const
+	{
+		// The seat as it can follow the free seat's choices -- toward where
+		// each instant wants it, no faster than ShiftSpeedCmS at the planned
+		// speed, never ahead of it: forward once the fronts are across, aft
+		// again once every wheel is, as the crossing's seat policy has it --
+		// and no further along any move than it can come back from in time for
+		// the samples after (each sample's SeatBand, the fore/aft the robot
+		// stands with there). Where two samples' bands are nearer in time than
+		// the seat can shift between them, that stretch is slowed (SeatCap) and
+		// the speed, heights and bands found again. Moving the seat early
+		// instead, to arrive with each choice, took the margin to its limit with
+		// the fronts in the air and brought the mass back while the last axle
+		// was still up: both tipped or turned the robot in PIE.
+		const FModelSeat& Seat = In.Model.Seat;
+		P.bSeatPlanned = false;
+		if (!Seat.bHas || !Seat.Shifts() || Seat.ShiftSpeedCmS <= 0.0 || P.SeatX.Num() != NumS || P.SeatBand.Num() != NumS
+			|| P.SeatCap.Num() != NumS || P.V.Num() != NumS)
+		{
+			return false;
+		}
+		const int32 K0 = FMath::Clamp(Index(LevelFromS), 0, NumS - 1);
+		auto		Reverify = [&](bool bWithSeat) {
+			   for (EFail& F : P.Fail)
+			   {
+				   if (F == EFail::Verify)
+				   {
+					   F = EFail::None;
+				   }
+			   }
+			   P.WhyAt.Reset();
+			   P.FailWhy.Reset();
+			   if (!bWithSeat)
+			   {
+				   P.SeatFix.Reset();
+			   }
+			   Verify(P);
+			   P.FirstFail = FirstFailOf(P);
+			   return IsOk(P);
+		};
+		// The bands and choices are the free seat's at these speeds.
+		if (!Reverify(false))
+		{
+			return false;
+		}
+		for (int32 Round = 0; Round < SeatPathRounds && !Stopped(); ++Round)
+		{
+			// How far the seat may move from sample k - 1 to k.
+			TArray<double> Step;
+			Step.Init(0.0, NumS);
+			for (int32 k = K0 + 1; k < NumS; ++k)
+			{
+				const double V = FMath::Max(MinTimingSpeed, FMath::Max(P.V[k], P.V[k - 1]));
+				Step[k] = Seat.ShiftSpeedCmS * (Ds / V + DwellSeconds(P, k));
+			}
+			// Backward: where the seat must be at each sample to make its own band
+			// and every later one's, and which sample's band sets each bound.
+			const double   Open = 1e9;
+			TArray<double> Lo, Hi;
+			TArray<int32>  LoBy, HiBy;
+			Lo.Init(-Open, NumS);
+			Hi.Init(Open, NumS);
+			LoBy.Init(INDEX_NONE, NumS);
+			HiBy.Init(INDEX_NONE, NumS);
+			for (int32 k = NumS - 1; k >= K0; --k)
+			{
+				const FVector2D& B = P.SeatBand[k];
+				if (B.X <= B.Y)
+				{
+					Lo[k] = B.X;
+					Hi[k] = B.Y;
+					LoBy[k] = HiBy[k] = k;
+				}
+				if (k + 1 < NumS)
+				{
+					if (Lo[k + 1] - Step[k + 1] > Lo[k])
+					{
+						Lo[k] = Lo[k + 1] - Step[k + 1];
+						LoBy[k] = LoBy[k + 1];
+					}
+					if (Hi[k + 1] + Step[k + 1] < Hi[k])
+					{
+						Hi[k] = Hi[k + 1] + Step[k + 1];
+						HiBy[k] = HiBy[k + 1];
+					}
+				}
+			}
+			// Where the seat starts, and the first sample whose bounds cross.
+			const double X0 = P.SeatX[K0];
+			int32		 Bad = INDEX_NONE;
+			for (int32 k = K0; k < NumS && Bad == INDEX_NONE; ++k)
+			{
+				if (Lo[k] > Hi[k] + 1e-6)
+				{
+					Bad = k;
+				}
+			}
+			const bool bStartOut = Bad == INDEX_NONE && (X0 < Lo[K0] - 1e-6 || X0 > Hi[K0] + 1e-6);
+			if (Bad == INDEX_NONE && !bStartOut)
+			{
+				// Forward: toward each choice, within the shift and the bounds.
+				TArray<double> Path;
+				Path.Init(X0, NumS);
+				for (int32 k = K0 + 1; k < NumS; ++k)
+				{
+					const double Prev = Path[k - 1];
+					const double L = FMath::Max(Lo[k], Prev - Step[k]);
+					const double H = FMath::Min(Hi[k], Prev + Step[k]);
+					Path[k] = FMath::Clamp(Prev + FMath::Clamp(P.SeatX[k] - Prev, -Step[k], Step[k]), L, FMath::Max(L, H));
+				}
+				P.SeatEndX = P.SeatX[NumS - 1];
+				P.SeatFix = MoveTemp(Path);
+				if (!Reverify(true))
+				{
+					P.SeatFix.Reset();
+					return false;
+				}
+				P.bSeatPlanned = true;
+				return true;
+			}
+			// Two bands too near in time for the seat to shift between them (or
+			// the start and a band): the one that holds it forward of From, the
+			// other aft of To, the stretch between slowed so that it can.
+			int32  KA = K0, KB = K0;
+			double From = X0, To = X0;
+			if (bStartOut)
+			{
+				const bool bBelow = X0 < Lo[K0];
+				KA = K0;
+				KB = bBelow ? LoBy[K0] : HiBy[K0];
+				From = X0;
+				To = bBelow ? Lo[KB] : Hi[KB];
+			}
+			else
+			{
+				const int32 A = LoBy[Bad], B = HiBy[Bad];
+				if (A == INDEX_NONE || B == INDEX_NONE)
+				{
+					return false;
+				}
+				KA = FMath::Min(A, B);
+				KB = FMath::Max(A, B);
+				From = P.SeatBand[B].Y;
+				To = P.SeatBand[A].X;
+			}
+			const double Dist = FMath::Abs(To - From);
+			if (KB <= KA || Dist <= 1e-6)
+			{
+				return false;
+			}
+			double Dwell = 0.0;
+			for (int32 k = KA + 1; k <= KB; ++k)
+			{
+				Dwell += DwellSeconds(P, k);
+			}
+			const double Run = (KB - KA) * Ds;
+			const double Seconds = Dist / Seat.ShiftSpeedCmS - Dwell;
+			if (Seconds <= 1e-6)
+			{
+				return false;
+			}
+			const double Cap = 0.95 * Run / Seconds;
+			bool		 bNew = false;
+			for (int32 k = KA; k <= KB; ++k)
+			{
+				if (P.SeatCap[k] > Cap + 1e-6)
+				{
+					P.SeatCap[k] = Cap;
+					bNew = true;
+				}
+			}
+			if (!bNew)
+			{
+				return false;
+			}
+			Tried.Add(FString::Printf(TEXT("%s: the seat's shift (%.1f cm, %+.1f to %+.1f, between %.0f and %.0f cm) slows them to %.1f cm/s"), *P.Name,
+				Dist, From, To, SAt(KA), SAt(KB), Cap));
+			SpeedEnvelope(P);
+			P.bHeightOk = HeightPath(P);
+			if (!Reverify(false))
+			{
+				return false;
+			}
+		}
+		return false;
+	}
+
 	bool FPlanner::EaseLifts(FPlan& P) const
 	{
 		const double MaxEase = static_cast<double>(T.LiftEaseSeconds);
@@ -3081,10 +3331,17 @@ namespace RammsCurb
 		// seat swung forward once the fronts carry takes a second or more to get
 		// there, and a lift eased onto its arrival was refused by the measured
 		// margin at the executor.
-		FixSeat(P);
+		const bool bPlanned = P.bSeatPlanned && P.SeatFix.Num() == NumS;
+		if (!bPlanned)
+		{
+			FixSeat(P);
+		}
 		ON_SCOPE_EXIT
 		{
-			P.SeatFix.Reset();
+			if (!bPlanned)
+			{
+				P.SeatFix.Reset();
+			}
 		};
 		const int32 K0 = Index(LevelFromS);
 		// In the order they lift: an eased lift is in the masks the next is
@@ -3188,8 +3445,20 @@ namespace RammsCurb
 		return bAny;
 	}
 
-	void FPlanner::OutputEased(const FPlan& P, EPlanClass Class, FCurbSchedule& Out) const
+	void FPlanner::OutputEased(const FPlan& Plan, EPlanClass Class, FCurbSchedule& Out) const
 	{
+		// The seat planned at its own speed, where a path verifies; else each
+		// instant's own choice, as before.
+		FPlan Seated;
+		if ((Class == EPlanClass::Level || Class == EPlanClass::Tilt) && SeatPathOn() && In.Model.Seat.Shifts())
+		{
+			Seated = Plan;
+			if (!PlanSeat(Seated))
+			{
+				Seated = FPlan();
+			}
+		}
+		const FPlan& P = Seated.bSeatPlanned ? Seated : Plan;
 		if (Class != EPlanClass::Refused && T.LiftEaseSeconds > 0.0f)
 		{
 			FPlan E = P;
@@ -3360,6 +3629,15 @@ namespace RammsCurb
 			{
 				P.VCap[k] = P.TiltCap[k];
 				P.CapBy[k] = CapTilt;
+			}
+		}
+		// What the seat's shift needs (PlanSeat).
+		for (int32 k = 0; k < NumS && P.SeatCap.Num() == NumS; ++k)
+		{
+			if (P.VCap[k] > P.SeatCap[k])
+			{
+				P.VCap[k] = P.SeatCap[k];
+				P.CapBy[k] = CapSeat;
 			}
 		}
 		// A centre wheel walks within CenterShiftSpeed: no faster travel than
@@ -4665,6 +4943,10 @@ namespace RammsCurb
 			const FInstantResult R = M.Evaluate(Q, P.B[k], true);
 			P.Margin[k] = R.Margin;
 			P.SeatX[k] = R.SeatX;
+			if (P.SeatBand.IsValidIndex(k) && !P.SeatFix.IsValidIndex(k))
+			{
+				P.SeatBand[k] = R.SeatBand;
+			}
 			if (k == K0)
 			{
 				// The approach's samples, before the level-in, are not evaluated:
@@ -6014,12 +6296,13 @@ namespace RammsCurb
 			return FString::Printf(TEXT("%s: the robot stands at most %.2f cm inside its wheels (%.1f at least)"), *Where, R.Margin, Req);
 		}
 		const int32 By = P.CapBy.IsValidIndex(K) ? P.CapBy[K] : INDEX_NONE;
-		if (P.Fail[K] == EFail::Slow && (By == CapLevelIn || By == CapWalk || By == CapTilt || By >= CapAfterLevelIn))
+		if (P.Fail[K] == EFail::Slow && (By == CapLevelIn || By == CapWalk || By == CapTilt || By == CapSeat || By >= CapAfterLevelIn))
 		{
 			// Slowed under the floor by something other than parting wheels.
 			const FString What = By == CapLevelIn ? FString(TEXT("the level-in from the drive stance"))
 				: By == CapWalk					  ? FString(TEXT("the centre wheels' walk (CenterShiftSpeed)"))
 				: By == CapTilt					  ? FString(TEXT("easing the planned tilt (TiltRateDegPerSec, TiltAccelDegPerSec2)"))
+				: By == CapSeat					  ? FString(TEXT("the seat's shift (ShiftSpeedCmS)"))
 												  : FString::Printf(TEXT("the '%s' wheel's lift (%.2f s ahead of its window at %.1f cm), which may not begin before the "
 																						   "level-in ends at %.1f cm"),
 														*LegName(By - CapAfterLevelIn), P.Wheels[By - CapAfterLevelIn].TLift, P.Wheels[By - CapAfterLevelIn].SClear,
@@ -6124,6 +6407,8 @@ namespace RammsCurb
 			S.AirborneMask = P.Air[k];
 			S.Margin = P.Margin[k];
 			S.SeatX = P.SeatX.IsValidIndex(k) ? P.SeatX[k] : In.Model.Seat.ZeroPivot.X;
+			Out.bSeatPlanned = P.bSeatPlanned;
+			Out.SeatEndX = P.bSeatPlanned ? P.SeatEndX : S.SeatX;
 			S.BLo = P.BLo[k];
 			S.BHi = P.BHi[k];
 			S.bApproach = k < K0;
@@ -6291,6 +6576,7 @@ namespace RammsCurb
 					Why = By == CapLevelIn ? FString(TEXT("the level-in"))
 						: By == CapWalk	   ? FString(TEXT("the centre wheels' walk (CenterShiftSpeed)"))
 						: By == CapTilt	   ? FString(TEXT("easing the planned tilt (TiltRateDegPerSec, TiltAccelDegPerSec2)"))
+						: By == CapSeat	   ? FString(TEXT("the seat's shift (ShiftSpeedCmS)"))
 						: By >= CapAfterLevelIn
 						? FString::Printf(TEXT("the '%s' wheel's lift lead, fitted after the level-in"), *LegName(By - CapAfterLevelIn))
 						: FString::Printf(TEXT("the '%s' wheel's lift lead or landing tail, parted from wheels it may not be off the ground with"),

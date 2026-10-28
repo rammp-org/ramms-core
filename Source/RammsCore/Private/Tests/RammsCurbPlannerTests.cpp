@@ -253,6 +253,12 @@ namespace
 		}
 		Q.X[PlanCL] = Sm.X[0];
 		Q.X[PlanCR] = Sm.X[1];
+		// A planned seat is held where the plan has it; otherwise each instant
+		// chooses, as the planner's did.
+		if (S.bSeatPlanned)
+		{
+			Q.SeatX = Sm.SeatX;
+		}
 		return Q;
 	}
 

@@ -2427,25 +2427,37 @@ namespace RammsCurb
 		if (In.Model.Seat.Shifts() && bSeatCmd)
 		{
 			const FModelSeat& Seat = In.Model.Seat;
-			const double	  Lead = FMath::Min(40.0, FMath::Max(0.0, Measure.SpeedCmS) * (Seat.XRange.Y - Seat.XRange.X) / FMath::Max(1.0, Seat.ShiftSpeedCmS));
 			const double	  SeatHere = Here.SeatX;
-			double			  Want = Between(S + Lead).SeatX;
-			// The lead is for the forward move, so the lifts over the far
-			// contacts begin with the mass there; the move back aft at the end
-			// needs none, and taken early it brings the mass back while the
-			// last axle is still up. So the lead applies forward only.
-			if (Want < SeatHere)
+			double			  Want = SeatHere;
+			if (Plan.bSeatPlanned)
 			{
-				Want = SeatHere;
+				// A planned seat is one it can follow, the plan verified with it
+				// there: followed a servo lag ahead, and past the plan's last
+				// sample on to where it goes once the crossing is over.
+				const double SeatAhead = S + FMath::Max(0.0, Measure.SpeedCmS) * T.ServoLagSeconds;
+				Want = SeatAhead >= Plan.Samples.Last().S ? Plan.SeatEndX : Between(SeatAhead).SeatX;
 			}
-			bool bAcross = false;
-			for (const FExecWheel& W : Wheels)
+			else
 			{
-				bAcross |= W.Plane == 1 && (W.State == ERammsCurbWheelState::Planted || W.State == ERammsCurbWheelState::Loading);
-			}
-			if (!bAcross)
-			{
-				Want = FMath::Min(Want, SeatHere);
+				const double Lead = FMath::Min(40.0, FMath::Max(0.0, Measure.SpeedCmS) * (Seat.XRange.Y - Seat.XRange.X) / FMath::Max(1.0, Seat.ShiftSpeedCmS));
+				Want = Between(S + Lead).SeatX;
+				// The lead is for the forward move, so the lifts over the far
+				// contacts begin with the mass there; the move back aft at the end
+				// needs none, and taken early it brings the mass back while the
+				// last axle is still up. So the lead applies forward only.
+				if (Want < SeatHere)
+				{
+					Want = SeatHere;
+				}
+				bool bAcross = false;
+				for (const FExecWheel& W : Wheels)
+				{
+					bAcross |= W.Plane == 1 && (W.State == ERammsCurbWheelState::Planted || W.State == ERammsCurbWheelState::Loading);
+				}
+				if (!bAcross)
+				{
+					Want = FMath::Min(Want, SeatHere);
+				}
 			}
 			Want = FMath::Clamp(Want, Seat.XRange.X, Seat.XRange.Y);
 			// And only where the wheels now carrying the robot keep it inside the
@@ -2475,8 +2487,8 @@ namespace RammsCurb
 			if (FMath::Abs(PlanHere - SeatPlanLogged) >= 2.0)
 			{
 				SeatPlanLogged = PlanHere;
-				Log(FString::Printf(TEXT("seat: the plan has it at %+.1f cm here (%+.1f a lead ahead), sent %+.1f, measured %+.1f"), PlanHere,
-					Between(S + Lead).SeatX, SeatCmdX, Measure.Seat.bValid ? Measure.Seat.Pivot.X : 0.0));
+				Log(FString::Printf(TEXT("seat: the plan has it at %+.1f cm here (%+.1f wanted), sent %+.1f, measured %+.1f"), PlanHere, Want, SeatCmdX,
+					Measure.Seat.bValid ? Measure.Seat.Pivot.X : 0.0));
 			}
 		}
 		Out.SeatX = SeatCmdX;
@@ -2914,7 +2926,7 @@ namespace RammsCurb
 			// and rocked the robot.
 			if (bSettled && In.Model.Seat.Shifts())
 			{
-				const double SeatEnd = Between(S).SeatX;
+				const double SeatEnd = Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX;
 				const bool	 bSeatThere = FMath::Abs(SeatCmdX - SeatEnd) <= SeatSettleCm
 					&& (!Measure.Seat.bValid || FMath::Abs(Measure.Seat.Pivot.X - SeatEnd) <= SeatSettleCm);
 				if (!bSeatThere)
