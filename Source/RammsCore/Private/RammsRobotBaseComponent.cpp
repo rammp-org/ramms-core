@@ -7,6 +7,16 @@
 #include "RammsActuationBackendRegistry.h"
 #include "RammsChaosActuationBackend.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
+
+namespace
+{
+	TAutoConsoleVariable<int32> CVarPhysicsRateProfiles(TEXT("Ramms.Motor.PhysicsRateProfiles"), 1,
+		TEXT("1 (the default): a profiled position motor's setpoint is eased every physics step by a backend that can "
+			 "(MuJoCo), each command reached along a line over the time since the one before. 0: once per game tick "
+			 "here, as before -- a staircase at the frame rate."),
+		ECVF_Default);
+} // namespace
 
 URammsRobotBaseComponent::URammsRobotBaseComponent()
 {
@@ -212,7 +222,7 @@ bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 	// it straight back under command on the next tick.
 	EnsureBackend();
 	DropVelocityDrive(MotorId);
-	PositionProfiles.Remove(MotorId);
+	DropPositionProfile(MotorId);
 	LastCommands.Remove(MotorId);
 	return Backend_ && Backend_->ReleaseMotor(MotorId);
 }
@@ -422,7 +432,11 @@ void URammsRobotBaseComponent::StepPositionProfiles(float DeltaTime)
 	{
 		const FName		  MotorId = Pair.Key;
 		FPositionProfile& P = Pair.Value;
-		FRammsMotorSpec	  Spec;
+		if (P.bInBackend)
+		{
+			continue;
+		}
+		FRammsMotorSpec Spec;
 		if (!GetMotorSpec(MotorId, Spec))
 		{
 			continue;
@@ -573,24 +587,59 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 			static_cast<float>(Spec->ControlRange.Y));
 	}
 	LastCommands.Add(MotorId, Value);
-	// A profiled position servo is eased to the value from where it stands
-	// (StepPositionProfiles, from this tick on); the first command to it
-	// holds the joint where it is, so nothing jumps.
+	// A profiled position servo is eased to the value from where it stands;
+	// the first command to it holds the joint where it is, so nothing jumps.
+	// The backend eases it every physics step where it can, else
+	// StepPositionProfiles does once per tick, from this tick on.
 	if (Spec && Spec->Type == ERammsActuatorType::Position && (Spec->MaxVelocity > 0.0f || Spec->MaxAcceleration > 0.0f))
 	{
+		const float		  Direction = DirectionOf(MotorId);
 		FPositionProfile* P = PositionProfiles.Find(MotorId);
-		if (!P)
+		const bool		  bNew = P == nullptr;
+		if (bNew)
 		{
 			P = &PositionProfiles.Add(MotorId);
 			P->Setpoint = GetMotorValue(MotorId);
 			P->Rate = 0.0;
-			Backend_->SetCommand(MotorId, static_cast<float>(P->Setpoint) * DirectionOf(MotorId));
 		}
 		P->Target = Value;
+		const bool	bPhysicsRate = CVarPhysicsRateProfiles.GetValueOnGameThread() != 0;
+		const float StartFrom = P->bInBackend ? NAN : static_cast<float>(P->Setpoint) * Direction;
+		if (bPhysicsRate && Backend_->SetPositionProfile(MotorId, Value * Direction, Spec->MaxVelocity, Spec->MaxAcceleration, StartFrom))
+		{
+			P->bInBackend = true;
+			return;
+		}
+		if (P->bInBackend)
+		{
+			// The backend has let go of it (its model not compiled), or was told
+			// to: carry on here from where the joint is, not a setpoint stale
+			// since then.
+			if (!bPhysicsRate)
+			{
+				Backend_->ClearPositionProfile(MotorId);
+			}
+			P->bInBackend = false;
+			P->Setpoint = GetMotorValue(MotorId);
+			P->Rate = 0.0;
+		}
+		if (bNew)
+		{
+			Backend_->SetCommand(MotorId, static_cast<float>(P->Setpoint) * Direction);
+		}
 		return;
 	}
-	PositionProfiles.Remove(MotorId);
+	DropPositionProfile(MotorId);
 	Backend_->SetCommand(MotorId, Value * DirectionOf(MotorId));
+}
+
+void URammsRobotBaseComponent::DropPositionProfile(FName MotorId)
+{
+	FPositionProfile Removed;
+	if (PositionProfiles.RemoveAndCopyValue(MotorId, Removed) && Removed.bInBackend && Backend_)
+	{
+		Backend_->ClearPositionProfile(MotorId);
+	}
 }
 
 bool URammsRobotBaseComponent::GetMotorCommand(FName MotorId, float& OutValue) const

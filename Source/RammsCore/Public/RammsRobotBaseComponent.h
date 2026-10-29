@@ -313,16 +313,22 @@ private:
 
 	/** A position motor whose registry row profiles its commands
 	 *  (FRammsMotorSpec::MaxVelocity / MaxAcceleration): the target it was last
-	 *  given and the setpoint eased toward it, both in the robot's sense. */
+	 *  given and the setpoint eased toward it, both in the robot's sense. The
+	 *  setpoint is this component's only while the backend is not easing it
+	 *  every physics step (SetPositionProfile). */
 	struct FPositionProfile
 	{
 		double Target = 0.0;
 		double Setpoint = 0.0;
 		double Rate = 0.0;
+		bool   bInBackend = false;
 	};
 
 	/** Position motors under a profiled command, by Id. */
 	TMap<FName, FPositionProfile> PositionProfiles;
+
+	/** Stop profiling a motor, here and in the backend. */
+	void DropPositionProfile(FName MotorId);
 
 	/** The value each motor was last given through SetMotorCommand (robot
 	 *  sense, clamped), by Id; see GetMotorCommand. */
