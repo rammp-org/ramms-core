@@ -1533,6 +1533,77 @@ bool FRammsCurbPlannerEarlyWalks::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerLowerEarly,
+	"Ramms.Curb.Planner.LowerEarly",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerLowerEarly::RunTest(const FString& Parameters)
+{
+	// Down a curb with Ramms.Curb.LowerEarly the chassis lowers on the wheels
+	// still on the top: by the first touchdown it has come down at least as
+	// far as it would have, and further where it would have lowered under the
+	// landings; nowhere up to the last landing is it higher.
+	IConsoleVariable* Early = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.LowerEarly"));
+	if (!TestNotNull(TEXT("Ramms.Curb.LowerEarly"), Early))
+	{
+		return true;
+	}
+	const int32 Was = Early->GetInt();
+	ON_SCOPE_EXIT
+	{
+		Early->Set(Was, ECVF_SetByCode);
+	};
+	auto At = [](const RammsCurb::FCurbSchedule& S, double Travel) {
+		for (const RammsCurb::FScheduleSample& X : S.Samples)
+		{
+			if (X.S >= Travel)
+			{
+				return X.B;
+			}
+		}
+		return S.Samples.Num() > 0 ? S.Samples.Last().B : 0.0;
+	};
+	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadFalls") })
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, false));
+		Early->Set(0, ECVF_SetByCode);
+		const RammsCurb::FCurbSchedule Late = RammsCurb::PlanCrossing(In);
+		Early->Set(1, ECVF_SetByCode);
+		const FString				   What = FString::Printf(TEXT("%s down"), Id);
+		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+		if (!TestTrue(FString::Printf(TEXT("%s: planned early (%s)"), *What, *S.Summary), S.IsValid()) || !Late.IsValid() || S.Wheels.Num() == 0)
+		{
+			continue;
+		}
+		double FirstDown = TNumericLimits<double>::Max(), LastLoaded = 0.0;
+		for (const RammsCurb::FWheelPlan& W : S.Wheels)
+		{
+			FirstDown = FMath::Min(FirstDown, W.SDown);
+			LastLoaded = FMath::Max(LastLoaded, W.SLoaded);
+		}
+		const double Start = At(Late, S.LevelFromS);
+		const double LateDrop = Start - At(Late, FirstDown), EarlyDrop = Start - At(S, FirstDown);
+		const double LateUnder = At(Late, FirstDown) - At(Late, LastLoaded);
+		AddInfo(FString::Printf(TEXT("%s: down %.2f cm by the first touchdown (%.2f late, which lowers %.2f cm more by the last landing)"), *What,
+			EarlyDrop, LateDrop, LateUnder));
+		TestTrue(FString::Printf(TEXT("%s: down no less by the first touchdown"), *What), EarlyDrop >= LateDrop - 0.05);
+		if (LateUnder > 1.0)
+		{
+			TestTrue(FString::Printf(TEXT("%s: down further by the first touchdown"), *What), EarlyDrop > LateDrop + 0.5);
+		}
+		bool bNoHigher = true;
+		for (const RammsCurb::FScheduleSample& X : S.Samples)
+		{
+			bNoHigher = bNoHigher && (X.S > LastLoaded || X.B <= At(Late, X.S) + 0.05);
+		}
+		TestTrue(FString::Printf(TEXT("%s: nowhere higher up to the last landing"), *What), bNoHigher);
+		PlanCheckWheels(*this, S, *What);
+		PlanCheckSamples(*this, In, S, *What);
+		PlanCheckRates(*this, In, S, *What);
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerTouchdownSpeed,
 	"Ramms.Curb.Planner.TouchdownSpeed",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
