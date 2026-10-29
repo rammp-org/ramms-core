@@ -133,9 +133,11 @@ void URammsRobotBaseComponent::EnsureBackend() const
 
 	// Resolve the backend once.
 	//  - Mujoco: the MuJoCo backend from the registry (RammsMujocoSupport).
-	//  - Chaos:  the native Chaos skeletal backend (RammsCore, no registry).
+	//  - Chaos:  the Chaos articulation backend from the registry (the robot's
+	//            articulation switched to Chaos), else the native Chaos
+	//            skeletal backend (RammsCore, deprecated).
 	//  - Auto:   try MuJoCo first (an articulation on/under this actor), else
-	//            fall back to Chaos.
+	//            fall back to the skeletal Chaos backend.
 	// Initialize() decides whether a backend can actually drive this robot; a
 	// backend that can't is discarded, and an unresolved backend leaves motor
 	// commands as safe no-ops.
@@ -152,6 +154,21 @@ void URammsRobotBaseComponent::EnsureBackend() const
 			else
 			{
 				delete Mj;
+			}
+		}
+	}
+
+	if (Backend == ERammsPhysicsBackend::Chaos)
+	{
+		if (IRammsActuationBackend* Art = RammsActuationBackends::CreateChaosArticulationBackend(Self))
+		{
+			if (Art->Initialize(Self))
+			{
+				Backend_ = Art;
+			}
+			else
+			{
+				delete Art;
 			}
 		}
 	}

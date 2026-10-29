@@ -11,8 +11,17 @@ class USkeletalMeshComponent;
 
 class IRammsActuationBackend;
 
-/** Which physics engine simulates this robot's motors. Auto = MuJoCo when a
- *  backend is registered (RammsMujocoSupport) and resolves, else Chaos. */
+/**
+ * Which physics engine simulates this robot's motors.
+ *  - MuJoCo: the robot's URLab articulation (RammsMujocoSupport), on whichever
+ *    engine simulates it.
+ *  - Chaos: the same articulation, switched to Chaos at BeginPlay
+ *    (RammsMujocoSupport's URammsChaosArticulationComponent). A robot with no
+ *    articulation (a skeletal-mesh robot) falls back to the skeletal Chaos
+ *    backend, which is deprecated.
+ *  - Auto: MuJoCo when the robot has an articulation, else the skeletal Chaos
+ *    backend.
+ */
 UENUM(BlueprintType)
 enum class ERammsPhysicsBackend : uint8
 {
