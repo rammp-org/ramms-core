@@ -195,6 +195,17 @@ namespace
 		return CVarCurbSeatDrive.GetValueOnAnyThread() != 0;
 	}
 
+	TAutoConsoleVariable<int32> CVarCurbSeatChoice(TEXT("Ramms.Curb.SeatChoice"), 1,
+		TEXT("1 (the default): with Ramms.Curb.SeatPath on, the level search weighs each level plan with its seat planned (and the "
+			 "drive under its shifts, Ramms.Curb.SeatDrive): the floors it compares -- the choreography's against the no-walk "
+			 "plan's among them -- are the ones the crossing runs at, the rider's. 0: the floors before the seat is planned, the "
+			 "seat planned for the plan kept only, as before."),
+		ECVF_Default);
+	bool						SeatChoiceOn()
+	{
+		return CVarCurbSeatChoice.GetValueOnAnyThread() != 0;
+	}
+
 	TAutoConsoleVariable<int32> CVarCurbRiseEarly(TEXT("Ramms.Curb.RiseEarly"), 1,
 		TEXT("1 (the default): the chassis rises to the height the crossing's lifts and landings need before the first lift, during "
 			 "the level-in on every wheel, and holds it until the last wheel has landed; 0: it rises as each lift needs it, as "
@@ -1864,6 +1875,9 @@ namespace RammsCurb
 			 *  last instant's own choice, where it goes once the crossing is over. */
 			bool   bSeatPlanned = false;
 			double SeatEndX = 0.0;
+			/** The level search planned its seat to weigh it (SeatChoice), whether
+			 *  or not the seat planned: not planned again. */
+			bool bSeatWeighed = false;
 			/** Off the ground and on the far side, as planned at the planned speed;
 			 *  and standing still. */
 			TArray<uint32> Air;
@@ -3643,9 +3657,10 @@ namespace RammsCurb
 	void FPlanner::OutputEased(const FPlan& Plan, EPlanClass Class, FCurbSchedule& Out) const
 	{
 		// The seat planned at its own speed, where a path verifies; else each
-		// instant's own choice, as before.
+		// instant's own choice, as before. (A plan the level search weighed
+		// with its seat has it already, or has none to plan.)
 		FPlan Seated;
-		if ((Class == EPlanClass::Level || Class == EPlanClass::Tilt) && SeatPathOn() && In.Model.Seat.Shifts())
+		if (!Plan.bSeatWeighed && (Class == EPlanClass::Level || Class == EPlanClass::Tilt) && SeatPathOn() && In.Model.Seat.Shifts())
 		{
 			Seated = Plan;
 			if (!PlanSeat(Seated))
@@ -6966,7 +6981,32 @@ namespace RammsCurb
 			return HA.Z > HB.Z + 0.05;
 		};
 		auto Enough = [&](const FPlan& P) { return IsOk(P) && (!PreferFloorOn() || P.VFloor >= PreferredFloor - 0.05); };
-		auto Offer = [&](FPlan& P) {
+		// A level plan weighed with its seat planned (SeatChoice), as
+		// OutputEased would run it: its floor is then the crossing's as the
+		// robot runs it, the drive slowed under the seat's forward shifts and
+		// the seat making that up for the rider -- a plan that leans on the seat
+		// gains there, one that waits on it does not. Where its seat does not
+		// plan, the plan as it is (the executor's free seat).
+		const bool bSeatChoice = SeatChoiceOn() && SeatPathOn() && In.Model.Seat.Shifts();
+		auto	   WithSeat = [&](FPlan& P) {
+			  if (!bSeatChoice || P.bSeatWeighed || !IsOk(P))
+			  {
+				  return;
+			  }
+			  FPlan Seated = P;
+			  P.bSeatWeighed = true;
+			  if (!PlanSeat(Seated))
+			  {
+				  Tried.Add(FString::Printf(TEXT("%s: its seat did not plan; weighed without"), *P.Name));
+				  return;
+			  }
+			  Tried.Add(FString::Printf(TEXT("%s weighed with its seat planned: floor %.1f cm/s (%.1f without)"), *P.Name, Seated.VFloor, P.VFloor));
+			  Seated.bSeatWeighed = true;
+			  P = MoveTemp(Seated);
+		};
+		// bMayKeep false: offered as tried, never kept over the best.
+		auto Offer = [&](FPlan& P, bool bMayKeep = true) {
+			WithSeat(P);
 			Candidates.Add(P);
 			int32 Kinds[5] = { 0, 0, 0, 0, 0 };
 			for (EFail F : P.Fail)
@@ -6995,7 +7035,7 @@ namespace RammsCurb
 				const bool bA = IsOk(P), bB = IsOk(Best);
 				bBetter = bA != bB ? bA : (bA ? LevelBetter(P, Best) : P.FailsLessThan(Best));
 			}
-			if (bBetter)
+			if (bBetter && bMayKeep)
 			{
 				Best = P;
 				bHaveBest = true;
@@ -7085,8 +7125,12 @@ namespace RammsCurb
 			FPlan		Kept;
 			if (PlanKnots(Chor, TEXT("choreography"), Kept, /*bPerSide=*/true))
 			{
+				// Weighed with its seat, as the no-walk plan was; a level one under
+				// the share is then not kept over it on its corridor or margin
+				// either (before, Offer could keep it so).
+				WithSeat(Kept);
 				const bool bFast = !bHaveBest || !IsOk(Best) || Kept.VFloor >= PlantedWalkFloorShare() * Best.VFloor - 1e-6;
-				Offer(Kept);
+				Offer(Kept, bFast || !IsOk(Kept) || !bSeatChoice);
 				if (IsOk(Kept) && bFast)
 				{
 					if (Best.Name != Kept.Name)
