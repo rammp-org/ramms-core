@@ -33,7 +33,7 @@ namespace RammsCurb
 		constexpr uint32 PlanInputMagic = 0x49504352; // "RCPI"
 		/** 2: the robot moving as it asked (FPlannerInput::bOnTheMove); a version-1
 		 *  file reads with it false. */
-		constexpr int32 PlanInputVersion = 2;
+		constexpr int32 PlanInputVersion = 4; // 3: the model's seat; 4: its aft speed-up, fore slow-down and shift easing
 
 		/** A reflected struct by property name (tagged), so that a file written
 		 *  before a field was added still reads, the field at its default. */
@@ -72,6 +72,17 @@ namespace RammsCurb
 				L.Axle = static_cast<ERammsCurbAxle>(Axle);
 			}
 			Ar << In.Model.CenterOfMass << In.Model.MassKg << In.Model.BellyHalfExtent << In.Model.BellyUndersideCm;
+			if (Version >= 3)
+			{
+				FModelSeat& S = In.Model.Seat;
+				Ar << S.bHas << S.ZeroPivot << S.MechanismMassKg << S.PayloadMassKg << S.PayloadOffset << S.HeightCm << S.XRange << S.MaxPitchRad
+				   << S.bTilts << S.ShiftSpeedCmS;
+			}
+			if (Version >= 4)
+			{
+				FModelSeat& S = In.Model.Seat;
+				Ar << S.AftSpeedUpCmS << S.ForeSlowDownCmS << S.ShiftAccelCmS2;
+			}
 			int32 NumLegs = In.Legs.Num();
 			Ar << NumLegs;
 			if (Ar.IsLoading())
@@ -162,6 +173,12 @@ namespace RammsCurb
 				 "Field=Value overrides of FRammsCurbTuning cannot reach."),
 			ECVF_Default);
 
+		TAutoConsoleVariable<FString> CVarCurbReplaySeat(TEXT("Ramms.Curb.ReplaySeat"), TEXT(""),
+			TEXT("Development: ramms.Curb.PlanReplay plans each input with the seat's ForeSlowDownCmS and ShiftAccelCmS2 set to these "
+				 "(\"25,60\"; empty, the default, keeps the recorded ones -- a version-3 input recorded neither). Seat fields, which "
+				 "the replay's Field=Value overrides of FRammsCurbTuning cannot reach."),
+			ECVF_Default);
+
 		/**
 		 * ramms.Curb.PlanReplay <file or folder> <out.json> [Field=Value ...]:
 		 * plan each planner input (a file, or every *.planin in a folder, in name
@@ -232,6 +249,17 @@ namespace RammsCurb
 						L.MaxCrankRateRadS = CrankRate;
 					}
 					Row->SetNumberField(TEXT("crank_rate"), CrankRate);
+				}
+				const FString SeatArgs = CVarCurbReplaySeat.GetValueOnGameThread();
+				if (!SeatArgs.IsEmpty())
+				{
+					FString Fore, Accel;
+					if (SeatArgs.Split(TEXT(","), &Fore, &Accel))
+					{
+						In.Model.Seat.ForeSlowDownCmS = FCString::Atod(*Fore);
+						In.Model.Seat.ShiftAccelCmS2 = FCString::Atod(*Accel);
+						Row->SetStringField(TEXT("seat"), SeatArgs);
+					}
 				}
 				const double Shift = CVarCurbReplayShiftCm.GetValueOnGameThread();
 				if (Shift != 0.0)

@@ -111,6 +111,9 @@ namespace RammsCurb
 		/** Each centre 5-bar's fore/aft (cm, chassis frame), in Legs order of the
 		 *  5-bar legs. */
 		double X[2] = { 0.0, 0.0 };
+		/** The seat's pivot fore/aft (cm, chassis frame) the pose was planned
+		 *  with (its zero pose on a robot without a seat). */
+		double SeatX = 0.0;
 		/** Off the ground (bit per leg). */
 		uint32 AirborneMask = 0;
 		/** The dynamic stability margin (cm) at the planned pose. */
@@ -144,6 +147,15 @@ namespace RammsCurb
 		/** Every SampleCm of S from 0. */
 		TArray<FScheduleSample> Samples;
 		double					SampleCm = 1.0;
+		/** The samples' SeatX is the seat as it follows each instant's choice,
+		 *  no faster than it shifts at the planned speed, and the plan was
+		 *  verified (and slowed) with it there (FPlanner::PlanSeat) -- rather
+		 *  than each instant's own choice. */
+		bool bSeatPlanned = false;
+		/** Where the seat goes once the crossing is over: the last instant's own
+		 *  choice (with bSeatPlanned the samples' seat may still be on its way
+		 *  there at the last one). */
+		double SeatEndX = 0.0;
 		/** The least planned speed once the robot has risen from rest (cm/s),
 		 *  planned stops left out. */
 		double VFloor = 0.0;

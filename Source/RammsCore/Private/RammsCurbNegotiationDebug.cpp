@@ -178,6 +178,7 @@ namespace
 	const FColor GoodColour(90, 210, 120);
 	const FColor MeasuredColour(0, 220, 255);
 	const FColor PlannedColour(230, 90, 255);
+	const FColor RiderColour(150, 240, 110);
 
 	const FColor WheelPalette[] = {
 		FColor(255, 110, 110),
@@ -374,6 +375,10 @@ void URammsCurbNegotiationController::TickDebugView(float DeltaTime)
 		if (Telemetry && Telemetry->Motion.IsFull())
 		{
 			G.Set(EGraphSeries::Speed, Telemetry->Motion.GetSpeed());
+		}
+		if (Telemetry && Telemetry->Rider.IsFull())
+		{
+			G.Set(EGraphSeries::RiderSpeed, Telemetry->Rider.GetSpeed());
 		}
 		const bool bCrossing = IsNegotiating() && bDriveModeActive;
 		const bool bRunning = bPerWheelCrossing && Executor && Executor->IsRunning();
@@ -1422,10 +1427,10 @@ float URammsCurbNegotiationController::PaintDebugPanel(const RammsCurb::FDebugPa
 			const FString								SpanText = FString::Printf(TEXT("last %.0f s"), Span);
 			P.Text(X + Width - P.Width(SpanText), Y, SpanText, FLinearColor(0.5f, 0.55f, 0.6f));
 			float			 G = Y;
-			const FGraphLine SpeedLines[] = { { EGraphSeries::Speed, Meas, TEXT("measured") }, { EGraphSeries::SpeedCommand, Cmd, TEXT("commanded") },
-				{ EGraphSeries::SpeedFloor, Flo, TEXT("floor"), true } };
+			const FGraphLine SpeedLines[] = { { EGraphSeries::Speed, Meas, TEXT("chassis") }, { EGraphSeries::RiderSpeed, FLinearColor(RiderColour), TEXT("rider") },
+				{ EGraphSeries::SpeedCommand, Cmd, TEXT("commanded") }, { EGraphSeries::SpeedFloor, Flo, TEXT("floor"), true } };
 			const FGraphMark Zero[] = { { 0.0f, FLinearColor(0.4f, 0.4f, 0.45f) } };
-			G = DrawGraph(P, X, G, Width, H, TEXT("chassis speed"), Samples, TFrom, Span, SpeedLines, Zero, 10.0f, TEXT("cm/s")) + Gap;
+			G = DrawGraph(P, X, G, Width, H, TEXT("ground speed (rider: at the seat)"), Samples, TFrom, Span, SpeedLines, Zero, 10.0f, TEXT("cm/s")) + Gap;
 			const FGraphLine TiltLines[] = { { EGraphSeries::Tilt, Meas, TEXT("measured") }, { EGraphSeries::TiltPlanned, Planned, TEXT("planned") } };
 			const FGraphMark TiltMarks[] = { { 0.0f, FLinearColor(0.4f, 0.4f, 0.45f) }, { Tuning.MaxPlannedTiltDeg, Lim } };
 			G = DrawGraph(P, X, G, Width, H, TEXT("base tilt (deg, limit dashed)"), Samples, TFrom, Span, TiltLines, TiltMarks, 2.0f, TEXT("deg")) + Gap;

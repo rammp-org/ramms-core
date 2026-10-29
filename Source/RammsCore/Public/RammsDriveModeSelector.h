@@ -97,6 +97,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
 	bool bApplyLinkageStance = true;
 
+	/** The initial mode's stance is taken as a stance change (one stage from
+	 *  where the actuators are, StanceRampSeconds at least) rather than at
+	 *  once: taken at once as the robot is put down, the legs' and seat's
+	 *  jump bounced it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
+	bool bRampInitialStance = true;
+
+	/** Linkage controllers (component names) a drive stance leaves alone: a
+	 *  linkage that is not a leg -- the seat's 5-bar, on the control surface
+	 *  for the panel's jog -- is not sent the stance's height and fore/aft. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
+	TArray<FName> StanceExcludedLinkages;
+
+	/** Whether a linkage axis (linkage.<name>.height / .translation) belongs
+	 *  to a controller in StanceExcludedLinkages. */
+	bool IsStanceExcludedAxis(FName AxisId) const;
+
 	/**
 	 * The least time (simulated seconds) each of a stance change's two stages
 	 * takes after the initial one: the actuators of a stage move from where

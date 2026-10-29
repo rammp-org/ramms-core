@@ -211,7 +211,10 @@ namespace RammsCurb
 	/** What the controller keeps between ticks for its telemetry. */
 	struct FRunTelemetry
 	{
-		FMotionWindow	 Motion;
+		FMotionWindow Motion;
+		/** The seat platform's pivot (FRammsCurbSeat::TiltMotor), along the
+		 *  chassis' heading: the rider's ground speed. */
+		FMotionWindow	 Rider;
 		FRunStatsTracker Stats;
 		/** Where the chassis was, and which way it faced, when the crossing
 		 *  began. */

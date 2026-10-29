@@ -138,6 +138,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool GetMotorVelocityCommand(FName MotorId, float& OutRadiansPerSecond) const;
 
+	/** The value last given to this motor through SetMotorCommand, in the
+	 *  robot's sense and clamped to its ControlRange -- for a profiled
+	 *  position servo the target, not the setpoint eased toward it. False when
+	 *  nothing has commanded it this session, or a velocity command or a
+	 *  release has since replaced that command. What a controller picking up
+	 *  a mechanism someone else left reads, rather than the joint's measured
+	 *  value: a loaded servo sits short of its command, and re-commanding
+	 *  where it sags would let it sag further each time. */
+	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
+	bool GetMotorCommand(FName MotorId, float& OutValue) const;
+
 	/** Retune the velocity loop and reset its integrators. Gains are the one
 	 *  thing here that has to be found against a running robot, and poking the
 	 *  property on a live component is not a supported thing to do. */
@@ -290,6 +301,26 @@ private:
 
 	/** Velocity-commanded motors that are position servos (warned once each). */
 	TSet<FName> WarnedVelocityOnPosition;
+
+	/** A position motor whose registry row profiles its commands
+	 *  (FRammsMotorSpec::MaxVelocity / MaxAcceleration): the target it was last
+	 *  given and the setpoint eased toward it, both in the robot's sense. */
+	struct FPositionProfile
+	{
+		double Target = 0.0;
+		double Setpoint = 0.0;
+		double Rate = 0.0;
+	};
+
+	/** Position motors under a profiled command, by Id. */
+	TMap<FName, FPositionProfile> PositionProfiles;
+
+	/** The value each motor was last given through SetMotorCommand (robot
+	 *  sense, clamped), by Id; see GetMotorCommand. */
+	TMap<FName, float> LastCommands;
+
+	/** Ease every profiled setpoint toward its target and command it. */
+	void StepPositionProfiles(float DeltaTime);
 
 	/** Gains in force for a motor: its own row's, else the base's defaults. */
 	FRammsVelocityGains GainsFor(FName MotorId) const;

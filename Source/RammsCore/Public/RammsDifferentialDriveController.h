@@ -102,7 +102,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Torque Control", meta = (ClampMin = "0.0"))
 	float ResistiveTorqueCoefficient = 0.5f;
 
-	/** Maximum turning speed (angular velocity) in degrees per second */
+	/** Maximum turning speed (angular velocity) in degrees per second. Torque
+	 *  control damps a turn faster than this; velocity control asks for it at
+	 *  full steer (0: the stick's steer mixed straight into MaxVelocity). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Torque Control", meta = (ClampMin = "0.0"))
 	float MaxTurningSpeed = 90.0f;
 

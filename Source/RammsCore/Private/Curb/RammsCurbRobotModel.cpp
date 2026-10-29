@@ -199,6 +199,29 @@ namespace RammsCurb
 		return C;
 	}
 
+	FVector FRobotModel::CenterOfMassAt(TConstArrayView<FVector2D> WheelXZ, const FVector2D& SeatPivot, double SeatPitchRad) const
+	{
+		FVector C = CenterOfMassAt(WheelXZ);
+		if (!Seat.bHas || MassKg <= 0.0)
+		{
+			return C;
+		}
+		const FVector2D D = SeatPivot - Seat.ZeroPivot;
+		C.X += Seat.MechanismMassKg / MassKg * D.X;
+		C.Z += Seat.MechanismMassKg / MassKg * D.Y;
+		if (Seat.PayloadMassKg > 0.0)
+		{
+			// The rider's lump: PayloadOffset from the pivot, turned with the
+			// platform (nose up takes a point above the pivot aft and down).
+			const double	Cs = FMath::Cos(SeatPitchRad), Sn = FMath::Sin(SeatPitchRad);
+			const FVector2D Off(Seat.PayloadOffset.X * Cs - Seat.PayloadOffset.Y * Sn, Seat.PayloadOffset.X * Sn + Seat.PayloadOffset.Y * Cs);
+			const FVector2D Moved = D + (Off - Seat.PayloadOffset);
+			C.X += Seat.PayloadMassKg / MassKg * Moved.X;
+			C.Z += Seat.PayloadMassKg / MassKg * Moved.Y;
+		}
+		return C;
+	}
+
 	void FRobotModel::BellyPoints(TArray<FVector2D>& Out, int32 Along, int32 Across) const
 	{
 		Out.Reset();
@@ -504,8 +527,14 @@ namespace RammsCurb
 	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FMeasuredWheel> Wheels, const FVector2D& Heading, double Acceleration, double Deceleration)
 	{
+		return MeasuredMargin(Model, Frame, LegXZ, Wheels, FMeasuredSeat(), Heading, Acceleration, Deceleration);
+	}
+
+	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
+		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, const FVector2D& Heading, double Acceleration, double Deceleration)
+	{
 		FPoseMargin Out;
-		Out.CenterOfMass = Frame.ToWorld(Model.CenterOfMassAt(LegXZ));
+		Out.CenterOfMass = Frame.ToWorld(Seat.bValid && Model.Seat.bHas ? Model.CenterOfMassAt(LegXZ, Seat.Pivot, Seat.PitchRad) : Model.CenterOfMassAt(LegXZ));
 		TArray<FVector2D, TInlineAllocator<8>> Contacts;
 		double								   Ground = 0.0;
 		for (int32 i = 0; i < Wheels.Num() && i < Model.Legs.Num(); ++i)

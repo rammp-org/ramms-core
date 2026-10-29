@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Ramms4BarLegSpec.h"
+#include "Ramms5BarLinkageSpec.h"
 #include "RammsCurbTerrain.h"
 #include "RammsHolonomicDriveTypes.h"
 #include "RammsCurbNegotiationTypes.generated.h"
@@ -148,6 +149,118 @@ struct RAMMSCORE_API FRammsCurbLeg
 	 *  times its legs by LegSpeed alone.) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb", meta = (ClampMin = "0.0"))
 	float MaxCrankRateRadS = 0.0f;
+};
+
+/**
+ * The seat mechanism, where the robot has one a crossing may move: a planar
+ * 5-bar in the chassis' x-z plane (Linkage; its two proximal motors on the
+ * chassis) whose shared endpoint carries the seat platform's pivot
+ * PivotBeyondEndpointCm further along arm A's distal link, and a motor at
+ * that pivot (TiltMotor) that pitches the platform. A crossing shifts the
+ * pivot fore and aft to keep the centre of mass inside the wheels on the
+ * ground where the legs alone would not -- so wheels the gait otherwise
+ * lifts only one after the other may be up together -- and pitches the
+ * platform against the base's pitch to keep the rider level. Left unset
+ * (no motors), the robot has no seat the crossing moves.
+ *
+ * Frames and signs are the 5-bar spec's: cm, x forward, z up, link angles
+ * from +x toward +z; TiltAngleSign maps the tilt motor's reading to the
+ * platform's pitch the way AngleSignA maps motor A's (-1 for a hinge about
+ * +Y, +1 about -Y). At the zero pose (every motor at 0) the platform is
+ * taken as level over the chassis.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsCurbSeat
+{
+	GENERATED_BODY()
+
+	/** The 5-bar and its two chassis motors. TranslationSign is +1: the
+	 *  linkage's x is the chassis' x. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat")
+	FRamms5BarLinkageSpec Linkage;
+
+	/** How far past the shared endpoint, along arm A's distal link, the
+	 *  platform's pivot sits (cm; 0: at the endpoint). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat")
+	float PivotBeyondEndpointCm = 0.0f;
+
+	/** The motor at the platform's pivot, pitching the platform relative to
+	 *  arm A's distal link; none: the platform turns with the link. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat")
+	FName TiltMotor;
+
+	/** +1 or -1: the sense of TiltMotor's reading as a platform pitch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float TiltAngleSign = -1.0f;
+
+	/** The most the platform is pitched relative to the chassis either way
+	 *  (deg), keeping the rider level under a planned base pitch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0", ClampMax = "80.0"))
+	float MaxPitchDeg = 50.0f;
+
+	/** The mass that moves with the pivot (kg): the mechanism's own, as a
+	 *  lump at the pivot (fit it from how the robot's centre of mass follows
+	 *  the pivot, the way a leg's MovingMassKg is). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat|Mass", meta = (ClampMin = "0.0"))
+	float MechanismMassKg = 0.0f;
+
+	/** The seat and rider (kg), a lump PayloadOffsetCm from the pivot in the
+	 *  platform's frame (x forward, z up; it turns with the platform's
+	 *  pitch). Both move the robot's centre of mass against
+	 *  FRammsCurbTuning::RobotMassKg, which must include them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat|Mass", meta = (ClampMin = "0.0"))
+	float PayloadMassKg = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat|Mass")
+	FVector2D PayloadOffsetCm = FVector2D(0.0, 40.0);
+
+	/** The height (cm, chassis frame) the pivot is held at through a
+	 *  crossing while it shifts fore and aft: low keeps the centre of mass
+	 *  low. 0, the default, holds the pivot's zero-pose height. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat")
+	float HeightCm = 0.0f;
+
+	/** How fast the pivot is shifted fore and aft (cm/s) toward the plan's
+	 *  pose; the motors' own profiles (FRammsMotorSpec::MaxVelocity) still
+	 *  bound it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float ShiftSpeedCmS = 30.0f;
+
+	/**
+	 * While the seat shifts aft against the chassis -- as it does once a
+	 * crossing is over, back to its drive stance -- it shifts no faster than
+	 * this (cm/s), and the drive speeds up by as much as it is shifting, so the
+	 * rider's own ground speed (the base's less the seat's) holds at the
+	 * planned speed rather than falling by the seat's shift. 0, the default:
+	 * the seat shifts aft at ShiftSpeedCmS and the drive keeps the planned
+	 * speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float AftSpeedUpCmS = 0.0f;
+
+	/**
+	 * While the seat shifts forward against the chassis -- as it does once a
+	 * crossing's fronts are across -- its shift adds to the rider's ground
+	 * speed. Where the two together would pass the crossing's drive speed
+	 * (FRammsCurbTuning::DriveSpeed), the drive slows by as much as the seat is
+	 * shifting, by up to this (cm/s) and no lower than the floor
+	 * (FRammsCurbTuning::MinSpeedFraction of it), so the rider goes no faster
+	 * than the approach. Below it the shift is left to make up the rider's
+	 * speed where the drive has slowed for the crossing. 0, the default: the
+	 * drive keeps the planned speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float ForeSlowDownCmS = 0.0f;
+
+	/** How fast the seat's shift speeds up and slows down (cm/s^2). At the
+	 *  drive's own Acceleration the drive can give up or make up the seat's
+	 *  speed as it changes (AftSpeedUpCmS, ForeSlowDownCmS) rather than a beat
+	 *  behind it. 0, the default: at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Seat", meta = (ClampMin = "0.0"))
+	float ShiftAccelCmS2 = 0.0f;
+
+	/** A seat the crossing moves: both 5-bar motors named. */
+	bool IsSet() const { return !Linkage.ProximalMotorA.IsNone() && !Linkage.ProximalMotorB.IsNone(); }
 };
 
 /** The step the robot is to cross. */
@@ -1058,8 +1171,9 @@ struct RAMMSCORE_API FRammsCurbDebugView
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
 	bool bRobot = false;
 
-	/** Strip charts of the chassis speed (measured, commanded, the floor),
-	 *  the base's tilt (measured, planned, the limit) and the stability margin
+	/** Strip charts of the ground speed (the chassis' measured, commanded and
+	 *  its floor, and the rider's at the seat platform's pivot), the base's
+	 *  tilt (measured, planned, the limit) and the stability margin
 	 *  (measured, planned), over the last GraphSeconds of simulated time: in
 	 *  the HUD's "Curb view" panel (IRammsHUDPanelProvider), else over the
 	 *  viewport. */

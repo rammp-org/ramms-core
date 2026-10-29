@@ -668,11 +668,30 @@ void URammsDifferentialDriveController::UpdateTorqueControl(float DeltaTime)
 
 void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
 {
-	// Convert joystick input to differential drive commands (velocity values)
-	FDifferentialDriveCommand VelocityCommand = URammsDifferentialDriveLibrary::JoystickToDifferentialDrive(
-		DriveInput,
-		MaxVelocity, // Max velocity in cm/s
-		InputDeadZone);
+	// Convert joystick input to differential drive commands (velocity values).
+	// With a MaxTurningSpeed, full steer asks for that yaw rate rather than
+	// MaxVelocity at the wheels: a turn in place at full wheel speed can ask
+	// more than the motors have against the tyres' scrub, and once both sides
+	// saturate they slip unevenly and the robot drifts while it turns.
+	FDifferentialDriveCommand VelocityCommand;
+	if (MaxTurningSpeed > 0.0f)
+	{
+		const FVector2D Input = URammsDifferentialDriveLibrary::ApplyDeadZone2D(DriveInput, InputDeadZone);
+		const float		Forward = FMath::Clamp(Input.Y, -1.0f, 1.0f) * MaxVelocity;
+		const float		Turn = FMath::Clamp(Input.X, -1.0f, 1.0f) * FMath::DegreesToRadians(MaxTurningSpeed) * TrackWidth * 0.5f;
+		VelocityCommand = FDifferentialDriveCommand(Forward + Turn, Forward - Turn);
+		// Over MaxVelocity on either side: both scaled alike, keeping the curvature.
+		const float Most = FMath::Max(FMath::Abs(VelocityCommand.LeftCommand), FMath::Abs(VelocityCommand.RightCommand));
+		if (Most > MaxVelocity && Most > UE_SMALL_NUMBER)
+		{
+			VelocityCommand.LeftCommand *= MaxVelocity / Most;
+			VelocityCommand.RightCommand *= MaxVelocity / Most;
+		}
+	}
+	else
+	{
+		VelocityCommand = URammsDifferentialDriveLibrary::JoystickToDifferentialDrive(DriveInput, MaxVelocity, InputDeadZone);
+	}
 
 	// Convert linear velocities to angular velocities
 	float LeftTargetAngularVel = VelocityCommand.LeftCommand / WheelRadius;

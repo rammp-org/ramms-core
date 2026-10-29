@@ -161,6 +161,10 @@ namespace RammsDrive
 		{
 			for (const FRammsControlAxis& Axis : Surface->DescribeControlSurface().Axes)
 			{
+				if (Selector.IsStanceExcludedAxis(Axis.Id))
+				{
+					continue;
+				}
 				const bool bHeight = Stance.bHasLinkageHeight && IsStanceAxis(Axis, RammsControlIds::Linkage::HeightSuffix());
 				const bool bTranslation = Stance.bHasLinkageTranslation && IsStanceAxis(Axis, RammsControlIds::Linkage::TranslationSuffix());
 				if (!bHeight && !bTranslation)
@@ -244,6 +248,8 @@ namespace RammsDrive
 
 namespace
 {
+	RammsDrive::FSwitchConfig ConfigOf(const URammsDriveModeSelector& S);
+
 	RammsDrive::FMotionSample SampleOf(const RammsDrive::FSelectorState* State)
 	{
 		return State ? RammsDrive::FMotionSample(State->Motion.IsValid(), State->Motion.GetMotion()) : RammsDrive::FMotionSample();
@@ -336,8 +342,20 @@ void URammsDriveModeSelector::SelectInitialMode()
 	}
 	const FString Carried = ActivateMode(Index, nullptr, 0.0);
 	State->Switcher.Reset(Index);
-	ApplyStanceFor(Modes[Index]);
-	UE_LOG(LogTemp, Log, TEXT("[DriveMode] '%s': initial mode %s, %s, stance at once"), *GetNameSafe(GetOwner()), *ModeName(ModeAt(Index)), *Carried);
+	bool bRamped = false;
+	if (bRampInitialStance && bApplyLinkageStance)
+	{
+		// The mode again: the switcher takes its stance in one stage from
+		// where the actuators are (a re-selection), ramped.
+		RammsDrive::FSelectorHost Host(*this);
+		bRamped = State->Switcher.Request(Host, Index, SampleOf(State.Get()), ConfigOf(*this));
+	}
+	if (!bRamped)
+	{
+		ApplyStanceFor(Modes[Index]);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[DriveMode] '%s': initial mode %s, %s, stance %s"), *GetNameSafe(GetOwner()), *ModeName(ModeAt(Index)), *Carried,
+		bRamped ? TEXT("ramped") : TEXT("at once"));
 }
 
 void URammsDriveModeSelector::GatherModes()
@@ -576,13 +594,26 @@ void URammsDriveModeSelector::TickComponent(float DeltaTime, ELevelTick TickType
 	State->Switcher.Tick(Host, Dt, SampleOf(State.Get()), ConfigOf(*this));
 }
 
+bool URammsDriveModeSelector::IsStanceExcludedAxis(FName AxisId) const
+{
+	const FString Id = AxisId.ToString();
+	for (const FName& Name : StanceExcludedLinkages)
+	{
+		if (!Name.IsNone() && Id.Contains(FString::Printf(TEXT(".%s."), *Name.ToString())))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 int32 URammsDriveModeSelector::CommandLinkageAxes(URammsRobotControlSurfaceComponent& Surface,
 	const TCHAR* IdSuffix, float Value, const TCHAR* What, bool bWarn) const
 {
 	int32 Commanded = 0;
 	for (const FRammsControlAxis& Axis : Surface.DescribeControlSurface().Axes)
 	{
-		if (!IsStanceAxis(Axis, IdSuffix))
+		if (!IsStanceAxis(Axis, IdSuffix) || IsStanceExcludedAxis(Axis.Id))
 		{
 			continue;
 		}

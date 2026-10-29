@@ -414,6 +414,8 @@ namespace RammsCurb
 		double			 SpeedCmS = 0.0;
 		bool			 bSpeedValid = false;
 		TArray<FExecLeg> Legs;
+		/** The seat as measured (bValid false on a robot without one). */
+		FMeasuredSeat Seat;
 		/** The terrain traced this tick ahead of and under each wheel (at
 		 *  ProbeAheadCm along Forward from its centre), for the terrain
 		 *  monitor, the landing check and swing clearance; none: those checks
@@ -430,6 +432,9 @@ namespace RammsCurb
 		TArray<double> LegX;
 		/** The drive speed (cm/s). */
 		double DriveSpeed = 0.0;
+		/** The seat's pivot fore/aft (cm, chassis frame) to hold it at, toward
+		 *  the plan's; meaningful on a robot whose seat shifts. */
+		double SeatX = 0.0;
 	};
 
 	/** One wheel's crossing, live. */
@@ -691,6 +696,7 @@ namespace RammsCurb
 			double Roll = 0.0;
 			double X[2] = { 0.0, 0.0 };
 			double V = 0.0;
+			double SeatX = 0.0;
 		};
 		FPlanAt Between(double SAt) const;
 		/** The plan's speed at travel SAt (cm/s), read no nearer its origin (or
@@ -731,6 +737,10 @@ namespace RammsCurb
 		/** The measured margin with Without (bit per leg) off the ground too, and
 		 *  With (bit per leg) on it. */
 		double MarginWithout(const FExecMeasure& Measure, uint32 Without, uint32 With = 0) const;
+		/** The measured dynamic margin (cm) on the wheels now carrying the
+		 *  robot with the seat's pivot held at SeatX (its crossing height, the
+		 *  platform's measured pitch); -1e9 with fewer than three. */
+		double SeatMargin(const FExecMeasure& Measure, double SeatX) const;
 		/** The least margin (cm) the plan's poses keep from now until wheel Leg
 		 *  has taken load -- the predicted airborne interval -- with it up, and
 		 *  every wheel landing late (up where the plan has it down by now) still
@@ -836,14 +846,34 @@ namespace RammsCurb
 		FPlannerInput		   In;
 		TUniquePtr<FPlanModel> M;
 		FCurbSchedule		   Plan;
-		TArray<FExecWheel>	   Wheels;
-		FExecCounts			   Counts;
-		FExecDiag			   Diag;
-		TArray<FString>		   Pending;
-		bool				   bRunning = false;
-		EExecPhase			   Phase = EExecPhase::Approach;
-		FString				   Status;
-		double				   Elapsed = 0.0;
+		/** The seat's commanded pivot fore/aft (cm), from where it was measured
+		 *  as the run began, stepped toward the plan's. */
+		double SeatCmdX = 0.0;
+		/** How fast SeatCmdX moved on the last tick (cm/s, + forward). */
+		double SeatCmdRate = 0.0;
+		bool   bSeatCmd = false;
+		/** The seat is being held short of the plan's fore/aft: where it is
+		 *  sent the wheels now carrying the robot would leave it under the live
+		 *  margin (logged on the change). */
+		bool bSeatHeld = false;
+		/** Until when (Elapsed, s) the chassis' steady offset is still being
+		 *  taken after the level-in: its move may still be settling as the
+		 *  attitude first reads level. */
+		double BOffsetUntil = -1.0;
+		/** The chassis command a tick ago (cm), for whether it is steady. */
+		double BCmdLagPrev = 0.0;
+		/** The travel (cm) the centre wheels' fore/aft was last logged at. */
+		double CentreLoggedS = -1.0e9;
+		/** The plan's seat fore/aft last logged (cm). */
+		double			   SeatPlanLogged = 1.0e9;
+		TArray<FExecWheel> Wheels;
+		FExecCounts		   Counts;
+		FExecDiag		   Diag;
+		TArray<FString>	   Pending;
+		bool			   bRunning = false;
+		EExecPhase		   Phase = EExecPhase::Approach;
+		FString			   Status;
+		double			   Elapsed = 0.0;
 		/** Travel along the plan's heading from its origin (cm), and the speed
 		 *  the robot is taken to have (cm/s). */
 		double S = 0.0;
@@ -877,6 +907,7 @@ namespace RammsCurb
 		double SEnd = 0.0;
 		double SettledAt = -1.0;
 		bool   bLoggedBaseWait = false;
+		bool   bLoggedSeatWait = false;
 		/** The next planned stop (sample), and whether the robot is resting at it
 		 *  (and since when). */
 		int32  NextStop = INDEX_NONE;

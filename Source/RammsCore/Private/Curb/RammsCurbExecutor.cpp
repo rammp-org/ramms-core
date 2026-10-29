@@ -168,6 +168,21 @@ namespace RammsCurb
 	FExecutor::FExecutor() = default;
 	FExecutor::~FExecutor() = default;
 
+	/** The seat is not sent where the wheels now carrying the robot would
+	 *  leave it under the live margin by this much (cm) over the minimum. */
+	constexpr double SeatHoldMarginCm = 1.0;
+	/** For this long (s) after the level-in reads level the chassis' steady
+	 *  offset from its command is still taken from the measure. */
+	constexpr double OffsetSettleSeconds = 0.75;
+	/** The time constant (s) the steady offset follows the measure with after
+	 *  that, while the chassis command is steady on every wheel. */
+	constexpr double OffsetFollowSeconds = 0.5;
+	/** The centre wheels' fore/aft is logged every this much travel (cm). */
+	constexpr double CentreLogCm = 10.0;
+	/** Settle ends only once the seat is within this (cm) of the plan's end
+	 *  fore/aft, sent and measured. */
+	constexpr double SeatSettleCm = 2.0;
+
 	bool FExecutor::IsSupport(int32 Leg) const
 	{
 		return Wheels.IsValidIndex(Leg)
@@ -257,6 +272,13 @@ namespace RammsCurb
 		BCmd = BCmdLag = Measure.OriginZ;
 		BOffset = 0.0;
 		bLevelInBegun = false;
+		BOffsetUntil = -1.0;
+		// The seat command begins again from this run's first measure (kept
+		// from the last run it would send the seat where that run left it).
+		bSeatCmd = false;
+		SeatCmdRate = 0.0;
+		bSeatHeld = false;
+		SeatPlanLogged = 1.0e9;
 		bLoweredDown = false;
 		LevelRampFrom = -1.0;
 		RampRate = RampAccel = 1.0;
@@ -299,6 +321,7 @@ namespace RammsCurb
 		SwingRaise = 0.0;
 		SettledAt = -1.0;
 		bLoggedBaseWait = false;
+		bLoggedSeatWait = false;
 		Diag = FExecDiag();
 		Prepare();
 		bRunning = true;
@@ -578,6 +601,7 @@ namespace RammsCurb
 		Out.Roll = FMath::Lerp(P0.RollDeg, P1.RollDeg, A);
 		Out.X[0] = FMath::Lerp(P0.X[0], P1.X[0], A);
 		Out.X[1] = FMath::Lerp(P0.X[1], P1.X[1], A);
+		Out.SeatX = FMath::Lerp(P0.SeatX, P1.SeatX, A);
 		Out.V = FMath::Lerp(P0.V, P1.V, U - K);
 		return Out;
 	}
@@ -876,7 +900,29 @@ namespace RammsCurb
 			const bool bFar = (With >> i) & 1u ? Wheels[i].PastEdgeCm >= 0.0 : Wheels[i].Plane == 1;
 			W.Gradient = (bFar ? M->GetTerrain().Far : M->GetTerrain().Near).Gradient;
 		}
-		const FPoseMargin R = MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
+		const FPoseMargin R =
+			MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Seat, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
+		return R.Support >= 3 ? R.DynamicCm : -1e9;
+	}
+
+	double FExecutor::SeatMargin(const FExecMeasure& Measure, double SeatX) const
+	{
+		const int32											  N = Wheels.Num();
+		TArray<FVector2D, TInlineAllocator<MaxPlanLegs>>	  XZ;
+		TArray<FMeasuredWheel, TInlineAllocator<MaxPlanLegs>> Ws;
+		for (int32 i = 0; i < N; ++i)
+		{
+			XZ.Add(Measure.Legs[i].XZ);
+			FMeasuredWheel& W = Ws.AddDefaulted_GetRef();
+			W.Centre = Measure.Legs[i].WheelWorld;
+			W.bSupport = IsSupport(i);
+			W.Gradient = (Wheels[i].Plane == 1 ? M->GetTerrain().Far : M->GetTerrain().Near).Gradient;
+		}
+		FMeasuredSeat Seat;
+		Seat.bValid = true;
+		Seat.Pivot = FVector2D(SeatX, In.Model.Seat.HeightCm);
+		Seat.PitchRad = Measure.Seat.bValid ? Measure.Seat.PitchRad : 0.0;
+		const FPoseMargin R = MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Seat, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
 		return R.Support >= 3 ? R.DynamicCm : -1e9;
 	}
 
@@ -928,18 +974,24 @@ namespace RammsCurb
 			OutWhy = FString::Printf(TEXT("the plan never has these off the ground together here (mask %x)"), Set);
 			return false;
 		}
+		// A centre wheel off its planned fore/aft (walking behind its plan) moves
+		// the support the lift was planned with: the lift then waits unless the
+		// robot, measured as it stands, keeps the planned margin with it up.
+		// (Blocking on the offset alone braked a descent to a stop for a centre
+		// wheel 2 cm behind its walk, with 18 cm of margin measured.)
 		const FPlanAt Here = Between(S);
+		const double  Margin = MarginWithout(Measure, Set);
 		for (int32 Side = 0; Side < 2; ++Side)
 		{
 			const int32 C = Centre[Side];
-			if (C != INDEX_NONE && C != Leg && FMath::Abs(Measure.Legs[C].XZ.X - Here.X[Side]) > PermitToleranceCm)
+			if (C != INDEX_NONE && C != Leg && FMath::Abs(Measure.Legs[C].XZ.X - Here.X[Side]) > PermitToleranceCm && Margin < T.MinStabilityMargin)
 			{
-				OutWhy = FString::Printf(TEXT("'%s' is %.1f cm off its planned fore/aft %.1f"), *In.Legs[C].Name.ToString(),
-					Measure.Legs[C].XZ.X - Here.X[Side], Here.X[Side]);
+				OutWhy = FString::Printf(TEXT("'%s' is %.1f cm off its planned fore/aft %.1f, and with it up the robot would stand %.2f cm "
+											  "inside its wheels (MinStabilityMargin %.1f)"),
+					*In.Legs[C].Name.ToString(), Measure.Legs[C].XZ.X - Here.X[Side], Here.X[Side], Margin, T.MinStabilityMargin);
 				return false;
 			}
 		}
-		const double Margin = MarginWithout(Measure, Set);
 		if (Margin < T.MinLiveStabilityMarginCm)
 		{
 			OutWhy = FString::Printf(TEXT("with it up the robot would stand %.2f cm inside its wheels (MinLiveStabilityMarginCm %.1f)"), Margin,
@@ -1433,6 +1485,16 @@ namespace RammsCurb
 		const int32 N = Wheels.Num();
 		Out.LegZ.SetNum(N);
 		Out.LegX.SetNum(N);
+		if (!bSeatCmd && bRunning && Measure.Legs.Num() == N && (Measure.Seat.bValid || !In.Model.Seat.bHas))
+		{
+			// The seat from where it stands, stepped toward the plan's from here
+			// -- taken from the first measure of the run (a tick before the run
+			// is on, or without the seat measured, would start it from the
+			// zero pose and send the seat there).
+			SeatCmdX = Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X;
+			bSeatCmd = true;
+		}
+		Out.SeatX = bSeatCmd ? SeatCmdX : (Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X);
 		if (!bRunning || Measure.Legs.Num() != N)
 		{
 			for (int32 i = 0; i < N; ++i)
@@ -2355,6 +2417,96 @@ namespace RammsCurb
 			Out.LegZ[i] = Wheels[i].CmdZ;
 			Out.LegX[i] = Wheels[i].CmdX;
 		}
+		// The seat: toward the plan's pivot fore/aft a little ahead of here --
+		// it shifts slower than the legs lift, so it is sent for where a coming
+		// pose wants it early enough to be there -- at the seat's shift speed.
+		// Until a wheel stands planted on the far side the lead sends it no
+		// further forward than the plan has it here: the plan holds the mass
+		// aft, over the wheels behind, while the fronts go over, and it moves
+		// forward once they stand across, not as the plan's crossing pose is
+		// neared.
+		if (In.Model.Seat.Shifts() && bSeatCmd)
+		{
+			const FModelSeat& Seat = In.Model.Seat;
+			const double	  SeatHere = Here.SeatX;
+			double			  Want = SeatHere;
+			if (Plan.bSeatPlanned)
+			{
+				// A planned seat is one it can follow, the plan verified with it
+				// there: followed a servo lag ahead, and past the plan's last
+				// sample on to where it goes once the crossing is over.
+				const double SeatAhead = S + FMath::Max(0.0, Measure.SpeedCmS) * T.ServoLagSeconds;
+				Want = SeatAhead >= Plan.Samples.Last().S ? Plan.SeatEndX : Between(SeatAhead).SeatX;
+			}
+			else
+			{
+				const double Lead = FMath::Min(40.0, FMath::Max(0.0, Measure.SpeedCmS) * (Seat.XRange.Y - Seat.XRange.X) / FMath::Max(1.0, Seat.ShiftSpeedCmS));
+				Want = Between(S + Lead).SeatX;
+				// The lead is for the forward move, so the lifts over the far
+				// contacts begin with the mass there; the move back aft at the end
+				// needs none, and taken early it brings the mass back while the
+				// last axle is still up. So the lead applies forward only.
+				if (Want < SeatHere)
+				{
+					Want = SeatHere;
+				}
+				bool bAcross = false;
+				for (const FExecWheel& W : Wheels)
+				{
+					bAcross |= W.Plane == 1 && (W.State == ERammsCurbWheelState::Planted || W.State == ERammsCurbWheelState::Loading);
+				}
+				if (!bAcross)
+				{
+					Want = FMath::Min(Want, SeatHere);
+				}
+			}
+			Want = FMath::Clamp(Want, Seat.XRange.X, Seat.XRange.Y);
+			// And only where the wheels now carrying the robot keep it inside the
+			// live margin with the seat there: the plan's seat is for the plan's
+			// support set, and a wheel still being set down (the level-in's
+			// rears, a landing) carries nothing yet. The seat waits for it, and
+			// moves on where moving makes the margin no worse.
+			// Aft, with the drive making up the rider's speed: no faster than it can.
+			const double ShiftRate = Want < SeatCmdX && Seat.AftSpeedUpCmS > 0.0 ? FMath::Min(Seat.ShiftSpeedCmS, Seat.AftSpeedUpCmS) : Seat.ShiftSpeedCmS;
+			double		 Next = StepTowards(SeatCmdX, Want, ShiftRate * Dt);
+			// Eased (ShiftAccelCmS2): its speed changed no faster than that, and
+			// slowed in time to stop at Want, so that the drive taking it up or
+			// giving it back keeps pace.
+			if (Seat.ShiftAccelCmS2 > 0.0 && Dt > 0.0)
+			{
+				const double Togo = Want - SeatCmdX;
+				const double Goal = FMath::Sign(Togo) * FMath::Min(ShiftRate, FMath::Sqrt(2.0 * Seat.ShiftAccelCmS2 * FMath::Abs(Togo)));
+				const double Rate = StepTowards(SeatCmdRate, Goal, Seat.ShiftAccelCmS2 * Dt);
+				Next = Rate * Togo >= 0.0 && FMath::Abs(Rate * Dt) >= FMath::Abs(Togo) ? Want : SeatCmdX + Rate * Dt;
+			}
+			bool bHold = false;
+			if (!FMath::IsNearlyEqual(Next, SeatCmdX, 1e-9))
+			{
+				const double MarginNext = SeatMargin(Measure, Next);
+				bHold = MarginNext < T.MinLiveStabilityMarginCm + SeatHoldMarginCm && MarginNext < SeatMargin(Measure, SeatCmdX) - 1e-6;
+			}
+			if (bHold != bSeatHeld)
+			{
+				bSeatHeld = bHold;
+				Log(bHold ? FString::Printf(TEXT("seat held at %+.1f cm: sent toward %+.1f, the wheels carrying the robot would leave it %.2f cm inside them (MinLiveStabilityMarginCm %.1f)"),
+								SeatCmdX, Want, SeatMargin(Measure, Next), T.MinLiveStabilityMarginCm)
+						  : FString::Printf(TEXT("seat released at %+.1f cm toward %+.1f"), SeatCmdX, Want));
+			}
+			const double SeatWas = SeatCmdX;
+			if (!bHold)
+			{
+				SeatCmdX = Next;
+			}
+			SeatCmdRate = Dt > 0.0 ? (SeatCmdX - SeatWas) / Dt : 0.0;
+			const double PlanHere = Here.SeatX;
+			if (FMath::Abs(PlanHere - SeatPlanLogged) >= 2.0)
+			{
+				SeatPlanLogged = PlanHere;
+				Log(FString::Printf(TEXT("seat: the plan has it at %+.1f cm here (%+.1f wanted), sent %+.1f, measured %+.1f"), PlanHere, Want, SeatCmdX,
+					Measure.Seat.bValid ? Measure.Seat.Pivot.X : 0.0));
+			}
+		}
+		Out.SeatX = SeatCmdX;
 
 		// The level-in is done once the ramp is complete and the support legs are
 		// on the terrain, and the attitude loop (on from there) has the base
@@ -2372,6 +2524,7 @@ namespace RammsCurb
 			{
 				Level.bLevelled = true;
 				BOffset = Measure.OriginZ - BCmdLag;
+				BOffsetUntil = Elapsed + OffsetSettleSeconds;
 				// How long it took against what the plan gave it (late by more than
 				// LateActionSeconds: counted).
 				const double Took = LevelInFrom >= 0.0 ? Elapsed - LevelInFrom : 0.0;
@@ -2383,6 +2536,50 @@ namespace RammsCurb
 					Level.FilteredAttitudeDeg.X, Level.FilteredAttitudeDeg.Y, PlannedAttitude.X, PlannedAttitude.Y, BOffset, Took, Planned,
 					bLate ? TEXT(", late") : TEXT("")));
 			}
+		}
+
+		// The steady offset follows the chassis for OffsetSettleSeconds after
+		// the level-in (a level-in that read level while the chassis was still
+		// on its way up left an offset that then read as the chassis off its
+		// command by that much the other way).
+		if (Level.bLevelled && Elapsed < BOffsetUntil)
+		{
+			BOffset = Measure.OriginZ - BCmdLag;
+		}
+		else if (Level.bLevelled)
+		{
+			// And it follows, slowly, while the command is steady and no wheel is
+			// being set down (a landing shifts the load): the legs' sag under
+			// load changes with the chassis height and with which wheels carry,
+			// and a lift permit is for what the chassis does against its command
+			// now, not for how the stance settled at the level-in.
+			bool bLanding = false;
+			for (const FExecWheel& W : Wheels)
+			{
+				bLanding |= W.State == ERammsCurbWheelState::Planting || W.State == ERammsCurbWheelState::Loading;
+			}
+			if (!bLanding && FMath::Abs(BCmdLag - BCmdLagPrev) < 0.05)
+			{
+				BOffset += (Measure.OriginZ - BCmdLag - BOffset) * FMath::Min(1.0, Dt / OffsetFollowSeconds);
+			}
+		}
+		BCmdLagPrev = BCmdLag;
+		// The centre wheels' fore/aft against the plan, every CentreLogCm of
+		// travel (for the run traces).
+		if (S - CentreLoggedS >= CentreLogCm)
+		{
+			CentreLoggedS = S;
+			FString Line = TEXT("centres:");
+			for (int32 Side = 0; Side < 2; ++Side)
+			{
+				const int32 Leg = Centre[Side];
+				if (Leg != INDEX_NONE && Wheels.IsValidIndex(Leg))
+				{
+					Line += FString::Printf(TEXT(" %s plan %+.1f sent %+.1f measured %+.1f;"), *In.Legs[Leg].Name.ToString(), Here.X[Side],
+						Wheels[Leg].CmdX, Measure.Legs[Leg].XZ.X);
+				}
+			}
+			Log(Line);
 		}
 
 		// Swing clearance: a clear wheel's rim, inside its window, nearer than
@@ -2512,6 +2709,20 @@ namespace RammsCurb
 				VTarget = FMath::Min(VTarget, Between(At).V);
 			}
 			VTarget = FMath::Min(VTarget, Between(LookTo).V);
+		}
+		// The seat shifting aft takes its speed off the rider's; the drive makes
+		// it up (FModelSeat::AftSpeedUpCmS). Shifting forward it adds its speed;
+		// the drive gives it up where the two together would pass the drive
+		// speed (FModelSeat::ForeSlowDownCmS), down to the floor
+		// (MinSpeedFraction).
+		if (In.Model.Seat.AftSpeedUpCmS > 0.0 && bSeatCmd && SeatCmdRate < 0.0 && VTarget < TNumericLimits<double>::Max())
+		{
+			VTarget += FMath::Min(-SeatCmdRate, In.Model.Seat.AftSpeedUpCmS);
+		}
+		if (In.Model.Seat.ForeSlowDownCmS > 0.0 && bSeatCmd && SeatCmdRate > 0.0)
+		{
+			const double Floor = FMath::Clamp(static_cast<double>(T.MinSpeedFraction), 0.0, 1.0) * T.DriveSpeed;
+			VTarget = FMath::Min(VTarget, FMath::Max(Floor, T.DriveSpeed - FMath::Min(SeatCmdRate, In.Model.Seat.ForeSlowDownCmS)));
 		}
 		Diag = FExecDiag();
 		Diag.Plan = VTarget;
@@ -2738,6 +2949,26 @@ namespace RammsCurb
 				bSettled = FMath::Abs(Measure.Legs[i].XZ.Y - Wheels[i].CmdZ) <= T.SettleTolerance + (IsSupport(i) ? M->Preload(i) : 0.0)
 					&& (!M->IsCentre(i) || FMath::Abs(Measure.Legs[i].XZ.X - Wheels[i].CmdX) <= T.SettleTolerance);
 			}
+			// And the seat where the plan's end has it (back aft), measured
+			// there: handed back while it is still on its way, the drive mode's
+			// stance change (the front corners up) and the seat's own move met
+			// and rocked the robot.
+			if (bSettled && In.Model.Seat.Shifts())
+			{
+				const double SeatEnd = Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX;
+				const bool	 bSeatThere = FMath::Abs(SeatCmdX - SeatEnd) <= SeatSettleCm
+					&& (!Measure.Seat.bValid || FMath::Abs(Measure.Seat.Pivot.X - SeatEnd) <= SeatSettleCm);
+				if (!bSeatThere)
+				{
+					bSettled = false;
+					if (!bLoggedSeatWait)
+					{
+						bLoggedSeatWait = true;
+						Log(FString::Printf(TEXT("settled but the seat is at %+.1f cm (sent %+.1f) on its way to %+.1f: rolling on until it is there"),
+							Measure.Seat.bValid ? Measure.Seat.Pivot.X : SeatCmdX, SeatCmdX, SeatEnd));
+					}
+				}
+			}
 			// And the base back at the plan's attitude (level by SEnd): the legs
 			// carry it round behind the plan, most of all at the end of a tilted
 			// plan's easing out. Rolling on in Settle until it is, for a while.
@@ -2929,6 +3160,7 @@ namespace RammsCurb
 			Out.LegZ[i] = W.CmdZ;
 			Out.LegX[i] = W.CmdX;
 		}
+		Out.SeatX = bSeatCmd ? SeatCmdX : (Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X); // the seat holds where it is
 		// Every leg on its target: its command there, and the leg where it was
 		// sent -- or short of it by up to its preload on the ground, or stopped
 		// short (a leg stalled against something gets no further). A wheel still
@@ -3492,7 +3724,7 @@ namespace RammsCurb
 					W.bSupport = E.IsSupport(i);
 					W.Gradient = (E.GetWheels()[i].Plane == 1 ? TrueT.Far : TrueT.Near).Gradient;
 				}
-				const FPoseMargin R = MeasuredMargin(In.Model, Meas.Frame, XZ, Ws, H, T.Acceleration, T.Deceleration);
+				const FPoseMargin R = MeasuredMargin(In.Model, Meas.Frame, XZ, Ws, Meas.Seat, H, T.Acceleration, T.Deceleration);
 				if (R.Support >= 3)
 				{
 					Out.MinMarginCm = FMath::Min(Out.MinMarginCm, R.DynamicCm);

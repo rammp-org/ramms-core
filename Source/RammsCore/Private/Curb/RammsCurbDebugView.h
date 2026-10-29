@@ -99,6 +99,9 @@ namespace RammsCurb
 		Speed,
 		SpeedCommand,
 		SpeedFloor,
+		/** The rider's ground speed, at the seat platform's pivot (cm/s): the
+		 *  chassis' plus the seat's own shift along it. */
+		RiderSpeed,
 		/** The base's inclination measured and planned (deg). */
 		Tilt,
 		TiltPlanned,
