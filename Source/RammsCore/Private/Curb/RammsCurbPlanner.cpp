@@ -103,10 +103,11 @@ namespace
 		return CVarCurbSlowBeforeTilt.GetValueOnAnyThread() != 0;
 	}
 
-	TAutoConsoleVariable<float> CVarCurbLandingApproach(TEXT("Ramms.Curb.LandingApproach"), 0.0f,
-		TEXT("Development: the planned chassis height moves at only LandingHeightShare of BaseHeightSpeed from this long (s) before a "
-			 "wheel's touchdown (as it does from the touchdown until LandingSettleSeconds after it has taken load); 0 (the default) "
-			 "from the touchdown, as before."),
+	TAutoConsoleVariable<float> CVarCurbLandingApproach(TEXT("Ramms.Curb.LandingApproach"), 0.3f,
+		TEXT("The planned chassis height moves at only LandingHeightShare of BaseHeightSpeed from this long (s, 0.3 the default) "
+			 "before a wheel's planned touchdown (as it does from the touchdown until LandingSettleSeconds after it has taken load): "
+			 "a wheel set down while the chassis comes down at full speed touches down early, its leg having less to reach, and is "
+			 "then pushed into the ground. 0: from the touchdown, as before."),
 		ECVF_Default);
 
 	double LandingApproachSeconds()
@@ -215,6 +216,17 @@ namespace
 	bool RiseEarlyOn()
 	{
 		return CVarCurbRiseEarly.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbLowerEarly(TEXT("Ramms.Curb.LowerEarly"), 1,
+		TEXT("1 (the default): down a curb the chassis lowers toward the height the crossing's landings need while its wheels are "
+			 "still on the top, before the first goes over the edge, rather than under each landing; 0: it lowers as each landing "
+			 "needs it (with Ramms.Curb.RiseEarly as up a curb), as before."),
+		ECVF_Default);
+
+	bool LowerEarlyOn()
+	{
+		return CVarCurbLowerEarly.GetValueOnAnyThread() != 0;
 	}
 
 	TAutoConsoleVariable<int32> CVarCurbWalkEarly(TEXT("Ramms.Curb.WalkEarly"), 1,
@@ -1506,7 +1518,7 @@ namespace RammsCurb
 		 *  every one. */
 		constexpr int32 SearchEvery = 2;
 		/** Rising early, the chassis keeps this much (cm) under a corridor's top
-		 *  where the corridor allows. */
+		 *  where the corridor allows; lowering early, over its floor. */
 		constexpr double RiseSlackCm = 2.0;
 		/** The grid search over the centre wheels' paths: stages this far apart
 		 *  (cm), fore/aft steps (cm), and the stretch of the chassis (cm, x)
@@ -5006,8 +5018,10 @@ namespace RammsCurb
 		// -- within each sample's own corridor -- so that it rises on every
 		// wheel before the first lift and holds there through the crossing
 		// rather than rising under each lift. After the last landing it settles
-		// as before.
-		if (bOk && RiseEarlyOn())
+		// as before. Down a curb, with Ramms.Curb.LowerEarly, it lowers early
+		// instead (below).
+		const bool bLowerEarly = bOk && !M.IsClimb() && LowerEarlyOn();
+		if (bOk && RiseEarlyOn() && !bLowerEarly)
 		{
 			double LastLoaded = LevelFromS;
 			for (const FWheelPlan& W : P.Wheels)
@@ -5070,6 +5084,54 @@ namespace RammsCurb
 			{
 				const double Ramp = Own[0] + (Wish[CNeed] - Own[0]) * static_cast<double>(c) / static_cast<double>(CNeed);
 				Wish[c] = FMath::Clamp(FMath::Max(Ramp, Own[c]), Bands[c].X, FMath::Max(Bands[c].X, Wish[c]));
+			}
+		}
+		// Lowering early (Ramms.Curb.LowerEarly), rising early's mirror down a
+		// curb: the chassis is asked down to the least any sample up to the
+		// last landing wishes -- within each sample's own corridor, RiseSlackCm
+		// over its floor where it can -- so that it lowers on the wheels still
+		// on the top, before the first goes over the edge, and rides low
+		// through the crossing, rather than lowering under each landing (where
+		// it moves at only LandingHeightShare of BaseHeightSpeed). A halt sets
+		// the lifted wheels down, which a lower chassis only makes easier to
+		// reach, so with bPlantOnHold it bounds nothing here.
+		if (bLowerEarly)
+		{
+			double LastLoaded = LevelFromS;
+			for (const FWheelPlan& W : P.Wheels)
+			{
+				LastLoaded = FMath::Max(LastLoaded, W.SLoaded);
+			}
+			const int32	   CEnd = FMath::Clamp(Index(LastLoaded) - K0, 0, Count - 1);
+			TArray<double> Own;
+			Own.SetNumUninitialized(CEnd + 1);
+			for (int32 c = 0; c <= CEnd; ++c)
+			{
+				Own[c] = Wish[c];
+			}
+			double Need = Wish[CEnd];
+			for (int32 c = CEnd - 1; c >= 1; --c)
+			{
+				Need = FMath::Min(Need, Wish[c]);
+				const double Bottom = FMath::Min(0.5 * (Bands[c].X + Bands[c].Y), Bands[c].X + RiseSlackCm);
+				Wish[c] = FMath::Clamp(Need, Bottom, Bands[c].Y);
+			}
+			// A ramp, as rising: the chassis lowers evenly from the level-in's
+			// height over the stretch before the first sample that wants the
+			// height of its own (each sample still at most what it wants itself).
+			int32 CNeed = CEnd;
+			for (int32 c = 1; c <= CEnd; ++c)
+			{
+				if (Own[c] <= Wish[c] + 0.5)
+				{
+					CNeed = c;
+					break;
+				}
+			}
+			for (int32 c = 1; c < CNeed; ++c)
+			{
+				const double Ramp = Own[0] + (Wish[CNeed] - Own[0]) * static_cast<double>(c) / static_cast<double>(CNeed);
+				Wish[c] = FMath::Clamp(FMath::Min(Ramp, Own[c]), FMath::Min(Bands[c].Y, Wish[c]), Bands[c].Y);
 			}
 		}
 		bool bPath = false;

@@ -96,6 +96,30 @@ public:
 	virtual void ClearVelocityDrive(FName MotorId) {}
 
 	/**
+	 * Ease a position actuator's command to Target (the joint's own sense)
+	 * every physics step, no faster than MaxVelocity and MaxAcceleration
+	 * (either 0: no limit of that kind), each new target reached along a line
+	 * over the time since the one before (RammsMotion::FFollower). The base
+	 * calls this with every command to a profiled motor. StartFrom, when
+	 * finite, is where a profile this backend is not already running starts,
+	 * at rest. False means the backend cannot, and the base steps the profile
+	 * itself once per game tick.
+	 *
+	 * The physics rate is the point, as for SetVelocityDrive: stepped once per
+	 * frame, the setpoint a position servo chases moves in a staircase at the
+	 * frame rate -- at 16 Hz a crank's jumps a quarter radian at a time -- and
+	 * whatever commands through it moves differently at every frame rate.
+	 */
+	virtual bool SetPositionProfile(FName MotorId, float Target, float MaxVelocity, float MaxAcceleration, float StartFrom)
+	{
+		return false;
+	}
+
+	/** Stop a profile SetPositionProfile started; the actuator keeps its last
+	 *  setpoint until it is commanded again. */
+	virtual void ClearPositionProfile(FName MotorId) {}
+
+	/**
 	 * Engage or release a Torque motor's parking brake: its joint held where it
 	 * stands, as a power chair's electromagnetic brakes hold its wheels while the
 	 * joystick is at centre. For backends whose wheels a drive cannot hold with

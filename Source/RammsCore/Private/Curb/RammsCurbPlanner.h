@@ -118,8 +118,9 @@ namespace RammsCurb
 	/** On a near surface sloping more than this (deg) the level-in begins as
 	 *  soon as the crossing does: the drive stance is least stable there. */
 	constexpr double EarlyLevelInSlopeDeg = 2.0;
-	/** From a wheel's touchdown until this long (s) after it has taken load,
-	 *  the planned chassis height moves at only this share of BaseHeightSpeed. */
+	/** From a wheel's touchdown (Ramms.Curb.LandingApproach before it) until
+	 *  this long (s) after it has taken load, the planned chassis height moves
+	 *  at only this share of BaseHeightSpeed. */
 	constexpr double LandingSettleSeconds = 0.3;
 	constexpr double LandingHeightShare = 0.25;
 	/** The least servo lag (s) a touchdown's approach is shaped by. */
