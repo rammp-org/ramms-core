@@ -671,6 +671,12 @@ bool URammsRobotBaseComponent::SimulatesMotorJoint(FName MotorId) const
 	return Backend_ ? Backend_->SimulatesMotorJoint(MotorId) : false;
 }
 
+bool URammsRobotBaseComponent::HasMotorBrake(FName MotorId) const
+{
+	EnsureBackend();
+	return Backend_ && Backend_->HasMotorBrake(MotorId);
+}
+
 bool URammsRobotBaseComponent::GetMotorTransform(FName MotorId, FTransform& OutWorld) const
 {
 	EnsureBackend();

@@ -245,6 +245,10 @@ namespace RammsDrive
 	 *  every drive mode's hold off, for A/B runs. */
 	bool HoldWhenIdleEnabled();
 
+	/** The development switch ramms.Drive.HoldBrakes (1 by default): 0 holds
+	 *  with torque alone where the backend has brakes too, for A/B runs. */
+	bool HoldBrakesEnabled();
+
 	/**
 	 * A drive mode's clock from one tick to the next: OutDt, the seconds since
 	 * the last tick (0 on the first); InOutFirst, the first tick's time (from

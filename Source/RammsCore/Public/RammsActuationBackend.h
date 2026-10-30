@@ -127,4 +127,10 @@ public:
 	 * it was set. False: this backend has no brake for the motor.
 	 */
 	virtual bool SetMotorBrake(FName MotorId, bool bEngaged) { return false; }
+
+	/** Whether SetMotorBrake would engage a brake on this motor now. Default
+	 *  false; a backend that brakes a motor whose joint it simulates
+	 *  (SimulatesMotorJoint) says so here, for a drive mode holding the robot
+	 *  still to close the brakes once its own hold has brought it to rest. */
+	virtual bool HasMotorBrake(FName MotorId) const { return false; }
 };

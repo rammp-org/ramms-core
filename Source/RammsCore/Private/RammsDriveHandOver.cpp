@@ -11,11 +11,23 @@ static TAutoConsoleVariable<int32> CVarRammsDriveHoldWhenIdle(
 		TEXT("development A/B runs only; the modes then leave their wheels to the control mode as before the hold)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRammsDriveHoldBrakes(
+	TEXT("ramms.Drive.HoldBrakes"),
+	1,
+	TEXT("Drive modes holding the robot still with torque: close the drive wheels' brakes once the hold has it at rest,\n")
+		TEXT("where the backend has them (1, the default), or hold with torque alone (0: development A/B runs only)."),
+	ECVF_Default);
+
 namespace RammsDrive
 {
 	bool HoldWhenIdleEnabled()
 	{
 		return CVarRammsDriveHoldWhenIdle.GetValueOnGameThread() != 0;
+	}
+
+	bool HoldBrakesEnabled()
+	{
+		return CVarRammsDriveHoldBrakes.GetValueOnGameThread() != 0;
 	}
 
 	double SmoothStep(double X)
