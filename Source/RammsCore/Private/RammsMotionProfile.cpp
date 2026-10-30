@@ -115,7 +115,7 @@ namespace RammsMotion
 		Interval = 0.0;
 	}
 
-	static TAutoConsoleVariable<float> CVarFollowDelayIntervals(TEXT("Ramms.Motor.FollowDelayIntervals"), FollowDelayIntervals,
+	static TAutoConsoleVariable<float> CVarFollowDelayIntervals(TEXT("Ramms.Motor.FollowDelayIntervals"), static_cast<float>(FollowDelayIntervals),
 		TEXT("How far (in command intervals) a physics-rate position profile runs behind its commands (RammsMotion::FFollower). "
 			 "More: smoother through uneven frames, slower to react. 0: eased toward the latest command at once."),
 		ECVF_Default);
