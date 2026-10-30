@@ -172,6 +172,18 @@ namespace
 			 "start, so negative is aft. Bounded by its 5-bar's reach and by the margin the robot keeps on it while its front "
 			 "sets down; tune per robot with ramms.Curb.PlanReplay."),
 		ECVF_Default);
+	TAutoConsoleVariable<int32> CVarCurbChoreographyUp(TEXT("Ramms.Curb.ChoreographyUp"), 1,
+		TEXT("1 (the default): up a curb the choreography also tries the descent's walk -- each centre wheel where it began "
+			 "but for a walk aft, to ChoreographyUpLiftCm, from as its own side's front corner begins to set down on the top to "
+			 "where it lifts, so that it comes to the face later and the front's landing and its lift have more of the travel "
+			 "between them -- and keeps it only where it plans a faster floor than the plan kept so far (the climb's own "
+			 "choreography or none). 0: up a curb, only ChoreographyFrontCm .. ChoreographyRearCm, as before."),
+		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbChoreographyUpLift(TEXT("Ramms.Curb.ChoreographyUpLiftCm"), -6.0f,
+		TEXT("Up a curb (Ramms.Curb.ChoreographyUp), where a centre wheel comes to lift: cm ahead of where it stood at the "
+			 "start, so negative is aft. Bounded by its 5-bar's reach and by the margin the robot keeps on it while its front "
+			 "sets down; tune per robot with ramms.Curb.PlanReplay."),
+		ECVF_Default);
 
 	bool ChoreographyOn()
 	{
@@ -180,6 +192,10 @@ namespace
 	bool ChoreographyDownOn()
 	{
 		return CVarCurbChoreographyDown.GetValueOnAnyThread() != 0;
+	}
+	bool ChoreographyUpOn()
+	{
+		return CVarCurbChoreographyUp.GetValueOnAnyThread() != 0;
 	}
 	double ChoreographyCm(const TAutoConsoleVariable<float>& Var)
 	{
@@ -7233,6 +7249,31 @@ namespace RammsCurb
 				{
 					Tried.Add(FString::Printf(TEXT("%s level but its floor %.1f cm/s is under %.2f of %s's %.1f: not kept"), *Kept.Name,
 						Kept.VFloor, PlantedWalkFloorShare(), *Best.Name, Best.VFloor));
+				}
+			}
+			// Up a curb (Ramms.Curb.ChoreographyUp) the walk as down one -- where
+			// they began but for the walk aft to lift, from as their front sets
+			// down -- tried as well, and kept only where it plans a faster floor
+			// than the plan kept so far: the walk is there for the speed.
+			FPlan Up;
+			if (M.IsClimb() && ChoreographyUpOn() && !Stopped()
+				&& PlanKnots(FKnot{ X0, X0 + ChoreographyCm(CVarCurbChoreographyUpLift), X0, X0 }, TEXT("choreography up"), Up,
+					/*bPerSide=*/true, /*bDropWalk=*/true))
+			{
+				WithSeat(Up);
+				const bool bFaster = IsOk(Up) && (!bHaveBest || !IsOk(Best) || Up.VFloor > Best.VFloor + 0.25);
+				Offer(Up, /*bMayKeep=*/false);
+				if (bFaster)
+				{
+					Tried.Add(FString::Printf(TEXT("kept %s: level, floor %.1f cm/s, its centre wheels walking %.1f cm on the ground (%s: %.1f cm/s)"),
+						*Up.Name, Up.VFloor, PlantedWalkCm(Up), *Best.Name, Best.VFloor));
+					Best = Up;
+					bChoreographed = true;
+				}
+				else if (IsOk(Up))
+				{
+					Tried.Add(FString::Printf(TEXT("%s level but its floor %.1f cm/s is no faster than %s's %.1f: not kept"), *Up.Name, Up.VFloor,
+						*Best.Name, Best.VFloor));
 				}
 			}
 		}
