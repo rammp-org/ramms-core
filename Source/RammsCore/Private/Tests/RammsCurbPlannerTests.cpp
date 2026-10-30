@@ -4202,4 +4202,68 @@ bool FRammsCurbPlannerChoreographyDown::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerChoreographyUp,
+	"Ramms.Curb.Planner.ChoreographyUp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerChoreographyUp::RunTest(const FString& Parameters)
+{
+	// Up a curb Ramms.Curb.ChoreographyUp tries the descent's walk as well and
+	// keeps it only where it plans a faster floor: a climb's floor is never
+	// lower with it, and where the walk is kept it is faster and stands each
+	// centre wheel where it began while its own front is up. Either way the
+	// plan verifies and crosses in the dry run with no wheel inside its window.
+	IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.ChoreographyUp"));
+	if (!TestNotNull(TEXT("Ramms.Curb.ChoreographyUp"), Var))
+	{
+		return true;
+	}
+	const int32 Was = Var->GetInt();
+	ON_SCOPE_EXIT
+	{
+		Var->Set(Was, ECVF_SetByCode);
+	};
+	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadRises") })
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
+		Var->Set(0, ECVF_SetByCode);
+		const RammsCurb::FCurbSchedule Off = RammsCurb::PlanCrossing(In);
+		Var->Set(1, ECVF_SetByCode);
+		const FString				   What = FString::Printf(TEXT("%s up"), Id);
+		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+		if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()) || !Off.IsValid() || S.Wheels.Num() != 6
+			|| S.Samples.Num() == 0)
+		{
+			continue;
+		}
+		const bool bWalked = S.Lines.ContainsByPredicate([](const FString& L) { return L.Contains(TEXT("centre wheels: choreography up")); });
+		AddInfo(FString::Printf(TEXT("%s: floor %.1f cm/s (%.1f without), %s"), *What, S.VFloor, Off.VFloor,
+			bWalked ? TEXT("the walk kept") : TEXT("the walk not kept")));
+		TestTrue(FString::Printf(TEXT("%s: a floor no lower than without"), *What), S.VFloor >= Off.VFloor - 0.05);
+		if (bWalked)
+		{
+			TestTrue(FString::Printf(TEXT("%s: kept only faster"), *What), S.VFloor > Off.VFloor + 0.25);
+			const int32 Fronts[2] = { PlanFL, PlanFR };
+			for (int32 Side = 0; Side < 2; ++Side)
+			{
+				const double X0 = S.Samples[0].X[Side];
+				const double SLand = S.Wheels[Fronts[Side]].SLand;
+				bool		 bStays = true;
+				for (const RammsCurb::FScheduleSample& Sm : S.Samples)
+				{
+					bStays = bStays && (Sm.S < S.LevelFromS || Sm.S >= SLand || Sm.X[Side] >= X0 - 0.05);
+				}
+				TestTrue(FString::Printf(TEXT("%s: centre %d no further aft while its front is up"), *What, Side), bStays);
+			}
+		}
+		PlanCheckWheels(*this, S, *What);
+		PlanCheckSamples(*this, In, S, *What);
+		PlanCheckRates(*this, In, S, *What);
+		const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, RammsCurb::FExecDryRunOptions());
+		TestTrue(FString::Printf(TEXT("%s: the dry run crosses (ended %s: %s)"), *What, RammsCurb::ExecPhaseName(R.EndPhase), *R.FaultWhy), R.bDone);
+		TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *What), R.KeepOffViolations, 0);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
