@@ -26,6 +26,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
+#include "GlobalRenderResources.h"
 #include "RammsRobotBaseComponent.h"
 #include "Rendering/DrawElements.h"
 #include "Rendering/SlateRenderer.h"

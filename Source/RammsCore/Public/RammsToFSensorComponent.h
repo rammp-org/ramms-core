@@ -7,6 +7,8 @@
 #include "RammsSensorRayTracer.h"
 #include "RammsToFSensorComponent.generated.h"
 
+struct FCollisionQueryParams;
+
 /** Operating mode for the ToF sensor */
 UENUM(BlueprintType)
 enum class EToFSensorMode : uint8

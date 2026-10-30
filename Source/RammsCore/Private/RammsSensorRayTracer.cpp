@@ -12,6 +12,7 @@
 #include "SceneInterface.h"
 #include "SceneViewExtension.h"
 #include "DataDrivenShaderPlatformInfo.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 // GPU sensor ray tracing requires the Renderer's TLAS access APIs
 // (FRayTracingScene::GetLayerView, UE::FXRenderingUtils::RayTracing::HasRayTracingScene,

@@ -8,6 +8,7 @@
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "DrawDebugHelpers.h"
 
 URammsDifferentialDriveController::URammsDifferentialDriveController()

@@ -5,6 +5,7 @@
 #include "Camera/CameraComponent.h"
 #include "KinovaGen3ControllerComponent.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "GripperControllerComponent.h"

@@ -4,6 +4,7 @@
 #include "Components/ChildActorComponent.h"
 #include "RammsControlContributor.h"
 #include "RammsRobotBaseComponent.h"
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "JsonObjectConverter.h"
 #include "TimerManager.h"
