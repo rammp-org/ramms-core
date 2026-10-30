@@ -6,7 +6,9 @@
 #include "Components/ActorComponent.h"
 #include "KinovaGen3ControllerComponent.generated.h"
 
+class USkeletalMesh;
 class USkeletalMeshComponent;
+struct FConstraintInstance;
 class URammsJointPoseAsset;
 
 /**

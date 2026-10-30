@@ -11,6 +11,7 @@
 #include "RammsDifferentialDriveController.generated.h"
 
 class UPrimitiveComponent;
+struct FBodyInstance;
 class URammsRobotBaseComponent;
 
 namespace RammsDrive

@@ -8,6 +8,8 @@
 #include "DrawDebugHelpers.h"
 #include "RammsIKLibrary.h"
 #include "RammsJointPoseAsset.h"
+#include "Engine/Engine.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "UObject/UnrealType.h"
