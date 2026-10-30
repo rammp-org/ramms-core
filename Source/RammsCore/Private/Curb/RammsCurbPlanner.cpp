@@ -160,9 +160,26 @@ namespace
 			 "dry runs held and tilted more. 0 (the default): at ChoreographyRearCm before a rear corner leaves the ground."),
 		ECVF_Default);
 
+	TAutoConsoleVariable<int32> CVarCurbChoreographyDown(TEXT("Ramms.Curb.ChoreographyDown"), 1,
+		TEXT("1 (the default): down a curb the choreography walks each centre wheel aft, to ChoreographyDownLiftCm, from as its "
+			 "own side's front corner begins to set down to where it lifts: it comes to the edge later, so the front's landing and "
+			 "its lift, which may not overlap, have more of the travel between them. It stands where it began while that front is "
+			 "up -- the front edge of what the robot stands on -- and lands, and stands for the rears' lift, where it began (a "
+			 "plan that does not stand so is not kept). 0: down a curb as up one (ChoreographyFrontCm .. ChoreographyRearCm)."),
+		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbChoreographyDownLift(TEXT("Ramms.Curb.ChoreographyDownLiftCm"), -8.0f,
+		TEXT("Down a curb (Ramms.Curb.ChoreographyDown), where a centre wheel comes to lift: cm ahead of where it stood at the "
+			 "start, so negative is aft. Bounded by its 5-bar's reach and by the margin the robot keeps on it while its front "
+			 "sets down; tune per robot with ramms.Curb.PlanReplay."),
+		ECVF_Default);
+
 	bool ChoreographyOn()
 	{
 		return CVarCurbChoreography.GetValueOnAnyThread() != 0;
+	}
+	bool ChoreographyDownOn()
+	{
+		return CVarCurbChoreographyDown.GetValueOnAnyThread() != 0;
 	}
 	double ChoreographyCm(const TAutoConsoleVariable<float>& Var)
 	{
@@ -2002,8 +2019,11 @@ namespace RammsCurb
 		void   SpeedEnvelope(FPlan& P) const;
 		/** bPerSide: each centre wheel's forward and aft stretches are its own
 		 *  side's front and rear corner's time off the ground (a curb met at an
-		 *  angle: one side's corners go first), not where both corners' overlap. */
-		bool CentrePathsKnots(FPlan& P, double XF, double XLift, double XLand, double XR, bool bSmooth, bool bPerSide = false) const;
+		 *  angle: one side's corners go first), not where both corners' overlap.
+		 *  bDropWalk (down a curb): the forward stretch ends as the front
+		 *  corner begins to set down (its SLand) rather than once it has taken
+		 *  load, so that the walk to XLift begins there. */
+		bool CentrePathsKnots(FPlan& P, double XF, double XLift, double XLand, double XR, bool bSmooth, bool bPerSide = false, bool bDropWalk = false) const;
 		void CentrePathsDp(FPlan& P) const;
 		/** Both centre wheels' paths searched together, on a grid of their
 		 *  pairs, over samples KA to KB, from and back to the paths there. */
@@ -4164,7 +4184,7 @@ namespace RammsCurb
 		TimeSpeed += FPlatformTime::Seconds() - Started;
 	}
 
-	bool FPlanner::CentrePathsKnots(FPlan& P, double XF, double XLift, double XLand, double XR, bool bSmooth, bool bPerSide) const
+	bool FPlanner::CentrePathsKnots(FPlan& P, double XF, double XLift, double XLand, double XR, bool bSmooth, bool bPerSide, bool bDropWalk) const
 	{
 		// Each centre wheel stands at least XF (cm past where it began) forward
 		// while either front corner is off the ground, at least -XR aft while
@@ -4202,7 +4222,8 @@ namespace RammsCurb
 		// (travel, cm): over both corners of an axle, where their stretches
 		// overlap (FrontB < FrontA: none); or, per side, that side's corner's
 		// own, so that at an angle each centre wheel walks forward as its own
-		// front goes over and aft as its own rear does.
+		// front goes over and aft as its own rear does. (bDropWalk: a front's
+		// ends as it begins to set down.)
 		auto Windows = [&](int32 OnSide, double& FrontA, double& FrontB, double& RearA, double& RearB, double& RearC) {
 			FrontA = RearA = RearC = -TNumericLimits<double>::Max();
 			FrontB = RearB = TNumericLimits<double>::Max();
@@ -4217,7 +4238,7 @@ namespace RammsCurb
 				if (M.Axle(i) == ERammsCurbAxle::Front)
 				{
 					FrontA = FMath::Max(FrontA, W.SLiftStart);
-					FrontB = FMath::Min(FrontB, W.SLoaded);
+					FrontB = FMath::Min(FrontB, bDropWalk ? W.SLand : W.SLoaded);
 					++NumFront;
 				}
 				else if (M.Axle(i) == ERammsCurbAxle::Rear)
@@ -7115,7 +7136,7 @@ namespace RammsCurb
 		// kept unless it does not verify or plans a floor more than
 		// SmoothWalkFloorShare under the other's. Returns whether either walk
 		// had paths; OutKept is the one kept.
-		auto PlanKnots = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide = false) {
+		auto PlanKnots = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide = false, bool bDropWalk = false) {
 			FPlan Walked[2];
 			bool  bWalked[2] = { false, false };
 			for (int32 Smooth = 0; Smooth < (WalkSmoothCm() > 0.0 ? 2 : 1); ++Smooth)
@@ -7126,7 +7147,7 @@ namespace RammsCurb
 				for (int32 Round = 0; Round < 4 && bOk; ++Round)
 				{
 					SpeedEnvelope(P);
-					bOk = CentrePathsKnots(P, K.XF, K.XLift, K.XLand, K.XR, Smooth == 1, bPerSide);
+					bOk = CentrePathsKnots(P, K.XF, K.XLift, K.XLand, K.XR, Smooth == 1, bPerSide, bDropWalk);
 					if (bOk && Round > 0)
 					{
 						P.bHeightOk = HeightPath(P);
@@ -7182,10 +7203,15 @@ namespace RammsCurb
 				}
 			}
 			X0 /= FMath::Max(1, Sides);
-			const FKnot Chor = { ChoreographyCm(CVarCurbChoreographyFront) - X0, ChoreographyCm(CVarCurbChoreographyLift) - X0,
-				ChoreographyCm(CVarCurbChoreographyLand) - X0, ChoreographyCm(CVarCurbChoreographyRear) - X0 };
+			// Down a curb (Ramms.Curb.ChoreographyDown): where they began but for
+			// the walk aft to lift, from as their front sets down.
+			const bool	bDown = !M.IsClimb() && ChoreographyDownOn();
+			const FKnot Chor = bDown
+				? FKnot{ X0, X0 + ChoreographyCm(CVarCurbChoreographyDownLift), X0, X0 }
+				: FKnot{ ChoreographyCm(CVarCurbChoreographyFront) - X0, ChoreographyCm(CVarCurbChoreographyLift) - X0,
+					  ChoreographyCm(CVarCurbChoreographyLand) - X0, ChoreographyCm(CVarCurbChoreographyRear) - X0 };
 			FPlan		Kept;
-			if (PlanKnots(Chor, TEXT("choreography"), Kept, /*bPerSide=*/true))
+			if (PlanKnots(Chor, bDown ? TEXT("choreography down") : TEXT("choreography"), Kept, /*bPerSide=*/true, /*bDropWalk=*/bDown))
 			{
 				// Weighed with its seat, as the no-walk plan was; a level one under
 				// the share is then not kept over it on its corridor or margin
