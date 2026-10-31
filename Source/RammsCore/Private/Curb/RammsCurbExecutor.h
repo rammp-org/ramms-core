@@ -374,6 +374,9 @@ namespace RammsCurb
 		Margin,
 		/** A clear wheel's rim too near the terrain under it: a hold. */
 		Swing,
+		/** The rider's stick (FExecutor::SetOperator): held part way, that share of
+		 *  the plan's speed; not held forward, a stop. */
+		Operator,
 	};
 
 	const TCHAR* ExecPhaseName(EExecPhase Phase);
@@ -621,6 +624,17 @@ namespace RammsCurb
 		 *  point while the far side is unconfirmed; the largest double for none. */
 		void SetExternalCap(double CmS) { ExternalCap = CmS; }
 
+		/** The rider's stick (the controller's FRammsCurbStick), for the ticks from
+		 *  here on: the speed capped at Scale (0..1) of the plan's; and with
+		 *  bPaused, the stick not held forward, the robot braked to rest at
+		 *  Deceleration -- the rate every planned pose keeps its margin under --
+		 *  with no lift and no level-in begun (fewer wheels are never up than the
+		 *  plan has), those under way finished, and no hold made or timed: the
+		 *  robot is not waiting on the crossing. Scale 1, not paused (as Begin
+		 *  leaves it): the plan's own. */
+		void SetOperator(double Scale, bool bPaused);
+		bool IsOperatorPaused() const { return bOperatorPaused; }
+
 		/** Stop the crossing (an abort, or a fault outside the executor): from
 		 *  the next tick the robot is braked to rest at Deceleration (twice that
 		 *  where a hard braking cap is already under the command), never over
@@ -663,6 +677,7 @@ namespace RammsCurb
 		EExecPhase			 GetPhase() const { return Phase; }
 		const FString&		 GetStatus() const { return Status; }
 		double				 GetS() const { return S; }
+		double				 GetEndS() const { return SEnd; }
 		double				 GetElapsed() const { return Elapsed; }
 		const FExecCounts&	 GetCounts() const { return Counts; }
 		const FExecDiag&	 GetDiag() const { return Diag; }
@@ -928,6 +943,9 @@ namespace RammsCurb
 		bool   bReachLowering = false;
 		double ReachLowerCm = 0.0;
 		double ExternalCap = TNumericLimits<double>::Max();
+		/** The rider's stick (SetOperator). */
+		double OperatorScale = 1.0;
+		bool   bOperatorPaused = false;
 		/** What last held the robot under the plan's speed (logged when it
 		 *  changes), and when. */
 		FString		   SlowBy;
@@ -998,6 +1016,12 @@ namespace RammsCurb
 		/** Lifts begun before a wheel they wait on (MustBeDownMask) had taken
 		 *  load. */
 		int32 EarlyLifts = 0;
+		/** Paused by the stick (FExecDryRunOptions::PauseAtTravelCm): lifts and
+		 *  level-ins begun meanwhile, how far (cm) the robot went on from where it
+		 *  was let go, and how long (s) it then stood at rest (under 0.5 cm/s). */
+		int32  BegunWhilePaused = 0;
+		double PausedTravelCm = 0.0;
+		double PausedRestSeconds = 0.0;
 		/** The least measured dynamic margin over the run (cm). */
 		double MinMarginCm = TNumericLimits<double>::Max();
 		/** The largest base tilt (deg) the support legs' errors give. */
@@ -1012,6 +1036,8 @@ namespace RammsCurb
 		 *  chassis' speed then (cm/s). */
 		TArray<double> FinalPastEdgeCm;
 		double		   FinalSpeedCmS = 0.0;
+		/** Where the executor has the crossing done (cm of travel along the plan). */
+		double DoneAtCm = 0.0;
 		/** The lines worth reading (blocked lifts, holds), and every line the
 		 *  executor logged. */
 		TArray<FString> Notes;
@@ -1130,6 +1156,13 @@ namespace RammsCurb
 		 *  StoppedRunSeconds, or for HaltRunSeconds in all (s). */
 		double HaltRunSeconds = 5.0;
 		double StoppedRunSeconds = 0.5;
+		/** The rider's stick (FExecutor::SetOperator): let go once the robot has
+		 *  gone this far along the plan (cm; the largest double never), and held
+		 *  forward again PauseSeconds later; the rest of the time held at
+		 *  StickScale of its travel. */
+		double PauseAtTravelCm = TNumericLimits<double>::Max();
+		double PauseSeconds = 0.0;
+		double StickScale = 1.0;
 		/** A re-plan the executor asks for (TakeReplanAsk) is made, from the
 		 *  robot as it stands then on the plan's terrain re-fitted, and adopted,
 		 *  as the controller does -- ReplanDelaySeconds later (the controller

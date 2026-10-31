@@ -263,6 +263,61 @@ struct RAMMSCORE_API FRammsCurbSeat
 	bool IsSet() const { return !Linkage.ProximalMotorA.IsNone() && !Linkage.ProximalMotorB.IsNone(); }
 };
 
+/**
+ * How the rider's stick drives a per-wheel crossing
+ * (URammsCurbNegotiationController::Stick). With bRequired, the crossing
+ * moves only while the stick is held forward: held part way, it goes at that
+ * share of the plan's speed; let go, or pushed any other way, it pauses --
+ * braked to rest at the crossing's Deceleration (the rate every planned pose
+ * keeps its margin under), no new lift or level-in begun, those under way
+ * finished, then held, the wheels braked -- and goes on when the stick is
+ * pushed forward again. Before any leg has moved for the curb, pulled back or
+ * pushed to the side for ReleaseSeconds cancels the crossing and hands the robot back to its
+ * drive mode; levelled in with no wheel yet lifted, held back for
+ * CancelHoldSeconds at rest does the same, the legs taken back to the drive
+ * stance; once a wheel has begun to cross, nothing but forward moves it.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsCurbStick
+{
+	GENERATED_BODY()
+
+	/** The crossing moves only while the stick is held forward; the per-axle
+	 *  gait, which does not read the stick, is not begun. Off, a crossing runs
+	 *  to Done on its own once begun, and the stick is not read (scripted or
+	 *  autonomous crossings). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick")
+	bool bRequired = true;
+
+	/** The stick pushed forward past this share of its travel (0..1), within
+	 *  ForwardSectorDeg of straight ahead, takes the crossing on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EngageFraction = 0.25f;
+
+	/** Held forward, the stick is let go once it has been under this share of
+	 *  its travel, or out of ForwardSectorDeg, for ReleaseSeconds: a hand that
+	 *  wavers (a tremor, a bump) does not stop the robot. Under this share in
+	 *  any direction, the stick is at rest. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ReleaseFraction = 0.15f;
+
+	/** How long (s) the stick must be out of forward to be let go (above); and
+	 *  pulled back or pushed to the side, before any leg has moved for the
+	 *  curb, to cancel the crossing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0"))
+	float ReleaseSeconds = 0.15f;
+
+	/** How far round from straight ahead (deg) the stick still reads forward;
+	 *  as far round from straight back, it reads back, and between, sideways. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0", ClampMax = "89.0"))
+	float ForwardSectorDeg = 30.0f;
+
+	/** Levelled in with no wheel yet lifted, the stick held back this long (s)
+	 *  with the robot at rest cancels the crossing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0"))
+	float CancelHoldSeconds = 0.75f;
+};
+
 /** The step the robot is to cross. */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbProfile
@@ -311,8 +366,8 @@ struct RAMMSCORE_API FRammsCurbProfile
 /** Where the manoeuvre is. Idle, Approach, Prepare, Settle, Done, Aborted and
  *  Faulted belong to both gaits; Lift, Shift, Advance and Plant are the
  *  per-axle gait's steps, each naming an axle (see
- *  URammsCurbNegotiationController::GetPhaseAxle); Cross and Hold are the
- *  per-wheel gait's, during which each wheel has its own state
+ *  URammsCurbNegotiationController::GetPhaseAxle); Cross, Hold and Paused are
+ *  the per-wheel gait's, during which each wheel has its own state
  *  (GetWheelStatus). */
 UENUM(BlueprintType)
 enum class ERammsCurbPhase : uint8
@@ -342,8 +397,10 @@ enum class ERammsCurbPhase : uint8
 	Settle UMETA(DisplayName = "Settle"),
 	Done   UMETA(DisplayName = "Done"),
 	/** Stopped on request: by Abort, after which the robot holds where it is
-	 *  (per wheel, once braked to rest at Tuning.Deceleration), or by
-	 *  selecting another drive mode, which takes the robot over. */
+	 *  (per wheel, once braked to rest at Tuning.Deceleration); by selecting
+	 *  another drive mode, which takes the robot over; or by the rider's stick
+	 *  before any wheel has lifted (FRammsCurbStick), after which the drive
+	 *  mode the crossing came from takes the robot back. */
 	Aborted UMETA(DisplayName = "Aborted"),
 	/** Stopped by one of its own checks: a tilt past MaxTiltDeg, a step that
 	 *  overran its timeout, a stall (FRammsCurbTuning::StallSeconds), or a
@@ -369,6 +426,10 @@ enum class ERammsCurbPhase : uint8
 	/** Per-wheel gait: braked and waiting, with a reason (a permit, a re-plan,
 	 *  the terrain), resuming when it clears. */
 	Hold UMETA(DisplayName = "Hold"),
+	/** Per-wheel gait: the rider's stick is not held forward
+	 *  (URammsCurbNegotiationController::Stick): braked to rest and waiting
+	 *  for it, for as long as it takes. */
+	Paused UMETA(DisplayName = "Paused"),
 };
 
 /** Which gait crosses the curb (FRammsCurbTuning::Gait; PerWheel by default). */

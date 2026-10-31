@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Curb/RammsCurbStick.h"
 #include "RammsCurbNegotiationTypes.h"
 
 /**
@@ -375,13 +376,14 @@ namespace RammsCurb
 	};
 
 	/** What the controller keeps between ticks to drive by: the stall watch,
-	 *  the watch on a stop at the commit point, and a feed for each leg's
-	 *  wheel, in Legs order. */
+	 *  the watch on a stop at the commit point, a feed for each leg's wheel, in
+	 *  Legs order, and the rider's stick. */
 	struct FDriveState
 	{
 		FStallWatch		   Stall;
 		FRestWatch		   CommitRest;
 		TArray<FWheelFeed> Feeds;
+		FStickGate		   Stick;
 	};
 
 	/** A first-order follower (time constant Lag) of Command, Dt on from

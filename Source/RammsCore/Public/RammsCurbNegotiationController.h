@@ -199,6 +199,28 @@ namespace RammsCurb
  * RammsCurb::PerAxleMaxApproachDeg off square. It refuses a start with any
  * wheel over ground more than Tuning.MinStepHeight off the near surface.
  *
+ * The rider drives the per-wheel crossing with the stick (Stick, on by
+ * default): while it runs it takes the drive controls every drive mode
+ * offers (drive.forward, drive.turn, drive.strafe), and it moves only while
+ * the stick is held forward -- held part way, at that share of the plan's
+ * speed. Let go, or pushed any other way, it pauses (phase Paused): braked
+ * to rest at Tuning.Deceleration, the rate every planned pose keeps its
+ * margin under, so that it can stop anywhere; no new lift or level-in
+ * begins, those under way finish (a lift to clear, a landing to loaded),
+ * the legs then hold and, once nothing moves, the wheels are held, braked
+ * where they have brakes -- for as long as it takes: a pause is no hold,
+ * times nothing out and restarts no hold's timeout. The stick held forward
+ * again goes on from there. Before any leg has moved for the curb, pulled
+ * back or pushed to the side for Stick.ReleaseSeconds cancels the
+ * crossing; levelled in with no wheel yet lifted, held back for
+ * Stick.CancelHoldSeconds, the robot at rest, does -- either way handing
+ * the robot back to the drive mode it came from (phase Aborted), which
+ * takes the legs back to its stance. Once a wheel has begun to cross,
+ * nothing but forward moves the robot: the plan is laid along one heading
+ * and cannot be backed out of. At Done the stick carries on into the drive
+ * mode handed back to. The per-axle gait does not read the stick, so it is
+ * not begun while the stick is required.
+ *
  * It is a drive mode ("curb"): while it runs, the other modes stand down and
  * it owns the wheels and cranks. Starting a manoeuvre selects it through the
  * robot's URammsDriveModeSelector -- on the move too: the crossing carries on
@@ -268,6 +290,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FRammsCurbSeat Seat;
 
+	/** How the rider's stick drives a per-wheel crossing (FRammsCurbStick):
+	 *  with Stick.bRequired, it moves only while the stick is held forward. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbStick Stick;
+
 	/** Drive mode to hand back to when done. None returns to whichever mode
 	 *  was active when the manoeuvre began. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
@@ -297,7 +324,8 @@ public:
 	 * Plan and start. False, with a reason, when the crossing cannot start
 	 * from here before any plan is made -- the robot cannot be measured or is
 	 * not on the near side, the active drive mode is moving it sideways (see
-	 * GetCarriableMotion), the profile is not one this gait takes -- and with
+	 * GetCarriableMotion), the profile is not one this gait takes, the per-axle
+	 * gait asked for with Stick.bRequired (it does not read the stick) -- and with
 	 * the per-axle gait (Tuning.Gait PerAxle), whose plan is made in the call,
 	 * when that plan refuses; nothing moves then. The per-wheel gait plans off
 	 * the game thread (a plan takes tens of milliseconds to a few seconds),
@@ -511,9 +539,12 @@ public:
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void DescribeControls(FRammsControlSurface& OutSurface) const override;
-	/** Only the debug view's switches are writable (the "Curb view" group). */
+	/** The debug view's switches are writable (the "Curb view" group), and
+	 *  while a crossing has the robot with Stick.bRequired, the drive controls
+	 *  (the stick; released, at rest). */
 	virtual bool  ApplyControl(FName Id, float Value) override;
 	virtual bool  TriggerControl(FName Id) override;
+	virtual bool  ReleaseControl(FName Id) override;
 	virtual bool  ReadControl(FName Id, float& OutValue) const override;
 	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
@@ -1015,6 +1046,13 @@ private:
 	 *  -- not a simulation reset or another mode selected, which let go at
 	 *  once. */
 	void Finish(ERammsCurbPhase EndPhase, const FString& Why, bool bRampDown = true);
+	/** The rider's stick, one tick of a per-wheel crossing (Stick): the share
+	 *  of the plan's speed it asks (OutScale) and whether it pauses the
+	 *  crossing. False when it has cancelled the crossing (handed back). */
+	bool StepStick(float DeltaTime, double& OutScale, bool& bOutPaused);
+	/** The rider has cancelled the crossing with the stick: handed back to
+	 *  the drive mode it came from. */
+	void CancelByRider(const FString& Why);
 	/** After a fault or an abort: one tick of braking the robot to rest, the
 	 *  legs holding their targets; the wheels braked once it is at rest. */
 	void  StepStopping(float DeltaTime);
@@ -1358,6 +1396,15 @@ private:
 	/** Seconds the crossing has been in Hold, and the executor's holds and
 	 *  planned stops already counted in the run stats. */
 	double HoldSeconds = 0.0;
+	/** The rider's stick as the drive controls last set it (X forward, Y
+	 *  turn, Z strafe; each -1..1); the crossing's seconds it has held the
+	 *  crossing paused (left out of the approach's and the crossing's
+	 *  timeouts), and how long the robot has stood paused with nothing moving
+	 *  (its wheels held from RammsCurb::PauseHoldSeconds on); why it pauses. */
+	FVector StickInput = FVector::ZeroVector;
+	double	StickPausedSeconds = 0.0;
+	double	PausedStillSeconds = 0.0;
+	FString StickWhy;
 	/** Seconds the chassis has run away: RunawayCmS faster than its command as
 	 *  the chassis can follow it (RunawayCommand: the command through
 	 *  RunawayLagSeconds), or rolling back faster than RollBackCmS. */

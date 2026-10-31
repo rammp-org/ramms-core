@@ -22,6 +22,7 @@
 #include "Ramms4BarKinematics.h"
 #include "Ramms5BarLinkageController.h"
 #include "RammsDriveHandOver.h"
+#include "RammsControlIds.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
@@ -147,6 +148,8 @@ namespace
 				return TEXT("Cross");
 			case ERammsCurbPhase::Hold:
 				return TEXT("Hold");
+			case ERammsCurbPhase::Paused:
+				return TEXT("Paused");
 			default:
 				return TEXT("Faulted");
 		}
@@ -3377,6 +3380,16 @@ bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile
 	{
 		return BeginPerWheel(Profile, OutReason);
 	}
+	// The per-axle gait does not read the rider's stick: with the stick
+	// required it would cross with no one holding it.
+	if (Stick.bRequired)
+	{
+		OutReason = TEXT("the per-axle gait does not read the rider's stick: not begun with Stick.bRequired (cross per wheel, or turn "
+						 "Stick.bRequired off)");
+		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
+		Status = OutReason;
+		return false;
+	}
 	if (!BuildPlan(Profile, OutReason))
 	{
 		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
@@ -3428,7 +3441,11 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 		Drive->Feeds.Init(RammsCurb::FWheelFeed(), Legs.Num());
 		Drive->Stall.Reset();
 		Drive->CommitRest.Reset();
+		Drive->Stick.Reset();
 	}
+	StickPausedSeconds = 0.0;
+	PausedStillSeconds = 0.0;
+	StickWhy.Reset();
 
 	// The per-wheel gait's speed trim starts at 0. (A seed from the drive mode's
 	// wheel speed commands found none on drive modes that command wheel torque,
@@ -3575,6 +3592,78 @@ void URammsCurbNegotiationController::Abort()
 		// does.
 		EndStopping(TEXT("Abort called while braking to rest: every wheel braked at once"));
 	}
+}
+
+bool URammsCurbNegotiationController::StepStick(float DeltaTime, double& OutScale, bool& bOutPaused)
+{
+	OutScale = 1.0;
+	bOutPaused = false;
+	if (!Stick.bRequired || !bPerWheelCrossing || !Drive)
+	{
+		return true;
+	}
+	RammsCurb::FStickGate&		  Gate = Drive->Stick;
+	const RammsCurb::EStickIntent Intent = Gate.Step(Stick, StickInput.X, StickInput.Y, StickInput.Z, DeltaTime);
+	// Where the crossing is: no leg yet moved for the curb (its plan still
+	// coming, or rolling up in the drive stance); levelled in, or levelling,
+	// with no wheel yet begun to cross; or crossing, to the end of Settle.
+	const bool bRunning = !bAwaitingPlan && Executor && Executor->IsRunning();
+	const bool bLegsMoved = bRunning && Executor->HasLevelInBegun();
+	const bool bCrossing = bRunning && (Executor->HasCrossingBegun() || Executor->GetPhase() == RammsCurb::EExecPhase::Settle);
+	if (Intent == RammsCurb::EStickIntent::Forward)
+	{
+		OutScale = Gate.GetScale();
+		StickWhy.Reset();
+		return true;
+	}
+	bOutPaused = true;
+	StickPausedSeconds += DeltaTime;
+	// Nothing moved for the curb yet: the rider turning or backing away from it
+	// -- once the stick has read so for ReleaseSeconds, as letting go is read,
+	// so that a stick on its way forward that passes off the axis, or a bump,
+	// does not cancel.
+	if (!bLegsMoved && (Intent == RammsCurb::EStickIntent::Back || Intent == RammsCurb::EStickIntent::Sideways))
+	{
+		const bool bBack = Intent == RammsCurb::EStickIntent::Back;
+		if (Gate.GetSeconds() >= Stick.ReleaseSeconds)
+		{
+			CancelByRider(bBack ? TEXT("the rider pulled the stick back before any leg moved")
+								: TEXT("the rider pushed the stick to the side before any leg moved"));
+			return false;
+		}
+		StickWhy = bBack ? TEXT("Paused: pulled back -- held so, it cancels the crossing")
+						 : TEXT("Paused: pushed to the side -- held so, it cancels the crossing");
+		return true;
+	}
+	if (Intent == RammsCurb::EStickIntent::Back && !bCrossing)
+	{
+		// Levelled in with no wheel lifted: held back, at rest, back out -- the
+		// drive mode takes the legs back to its stance.
+		const bool bAtRest = DriveSpeed <= 0.0f && Telemetry && Telemetry->Motion.IsFull()
+			&& FMath::Abs(Telemetry->Motion.GetSpeed()) < RammsCurb::StopSpeedCmS;
+		const bool bLevelled = Level && Level->bLevelled;
+		if (bAtRest && bLevelled && Gate.GetBackSeconds() >= Stick.CancelHoldSeconds)
+		{
+			CancelByRider(TEXT("the rider held the stick back with no wheel lifted: the legs back to the drive stance"));
+			return false;
+		}
+		StickWhy = bAtRest && bLevelled
+			? FString::Printf(TEXT("Paused: hold the stick back %.1f s more to cancel"), FMath::Max(0.0, Stick.CancelHoldSeconds - Gate.GetBackSeconds()))
+			: FString(TEXT("Paused: held back -- it cancels once the robot is at rest, levelled in"));
+		return true;
+	}
+	StickWhy = Intent == RammsCurb::EStickIntent::Back ? TEXT("Paused: a wheel has begun to cross, so it cannot back out -- push forward to finish")
+		: Intent == RammsCurb::EStickIntent::Sideways  ? TEXT("Paused: steering is locked while crossing -- push forward to go on")
+													   : TEXT("Paused: push the stick forward to go on");
+	return true;
+}
+
+void URammsCurbNegotiationController::CancelByRider(const FString& Why)
+{
+	// Nothing has crossed: the drive mode the crossing came from takes the robot
+	// back, its legs to that mode's stance (the selector's ramp).
+	bHandBackOnFinish = true;
+	Finish(ERammsCurbPhase::Aborted, FString::Printf(TEXT("cancelled: %s"), *Why), /*bRampDown=*/false);
 }
 
 void URammsCurbNegotiationController::EnterStep(int32 Index)
@@ -3888,6 +3977,9 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		bHandBackPending = true;
 	}
 	bDriveModeActive = bActive;
+	// The stick at rest either way: taken over, the selector carries over what
+	// the operator holds (after this); stood down, nothing reaches it.
+	StickInput = FVector::ZeroVector;
 	if (!bActive)
 	{
 		bHandBackPending = false;
@@ -5388,13 +5480,18 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 				RammsCurb::InclinationDeg(MeasuredPitchDeg, MeasuredRollDeg), MeasuredPitchDeg, MeasuredRollDeg, *Status, Tuning.MaxTiltDeg));
 		return;
 	}
-	// Timeouts: the approach, a hold, the whole crossing.
-	if (Phase == ERammsCurbPhase::Approach && Elapsed > Tuning.ApproachTimeout)
+	// Timeouts: the approach, a hold, the whole crossing -- none of them
+	// counting the time the rider's stick has held it paused.
+	const double Active = Elapsed - StickPausedSeconds;
+	if (Phase == ERammsCurbPhase::Approach && Active > Tuning.ApproachTimeout)
 	{
 		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("the approach took longer than %.0f s (%s)"), Tuning.ApproachTimeout, *Status));
 		return;
 	}
-	HoldSeconds = Phase == ERammsCurbPhase::Hold ? HoldSeconds + DeltaTime : 0.0;
+	// A pause is no hold, and leaves the time a hold has already run as it is:
+	// letting go of the stick and pushing it again does not restart the hold's
+	// timeout.
+	HoldSeconds = Phase == ERammsCurbPhase::Hold ? HoldSeconds + DeltaTime : (Phase == ERammsCurbPhase::Paused ? HoldSeconds : 0.0);
 	if (HoldSeconds > RammsCurb::HoldTimeoutSeconds)
 	{
 		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("held for %.1f s: %s"), HoldSeconds, *Status));
@@ -5447,7 +5544,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	if (Executor && Executor->IsRunning())
 	{
 		const double Limit = Tuning.ApproachTimeout + 2.0 * Schedule->PlannedCrossingSeconds + 10.0;
-		if (Elapsed > Limit)
+		if (Active > Limit)
 		{
 			Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("the crossing took longer than %.0f s (%s)"), Limit, *Status));
 			return;
@@ -5463,6 +5560,16 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 		return;
 	}
 
+	// The rider's stick: the share of the plan's speed it asks, or a pause; a
+	// cancel ends the crossing here.
+	double StickScale = 1.0;
+	bool   bStickPaused = false;
+	if (!StepStick(DeltaTime, StickScale, bStickPaused))
+	{
+		return;
+	}
+	const TCHAR* Planning = bPlanningAtRest ? TEXT("planning at rest") : TEXT("planning on the move");
+
 	// The plan of a crossing begun on the move.
 	if (bAwaitingPlan)
 	{
@@ -5473,6 +5580,11 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 			{
 				return;
 			}
+		}
+		if (bAwaitingPlan)
+		{
+			Phase = bStickPaused ? ERammsCurbPhase::Paused : ERammsCurbPhase::Approach;
+			Status = bStickPaused ? FString::Printf(TEXT("%s (%s)"), *StickWhy, Planning) : FString::Printf(TEXT("Approach: %s"), Planning);
 		}
 		if (bAwaitingPlan && bPlanningAtRest)
 		{
@@ -5529,6 +5641,13 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 				const float LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(), Tuning.TiltRateDegPerSec,
 					Tuning.TiltAccelDegPerSec2, Tuning.ServoLagSeconds, bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
 				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Tuning.Deceleration, DeltaTime);
+			}
+			// The rider's stick: let go, braked to rest; held part way, slowed to
+			// its share of the drive speed -- at Deceleration either way.
+			if (bStickPaused || StickScale < 1.0)
+			{
+				const float Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * Tuning.DriveSpeed;
+				DriveSpeed = FMath::Min(DriveSpeed, FMath::Max(Want, DriveSpeed - Tuning.Deceleration * DeltaTime));
 			}
 			DriveSpeed = FMath::Max(0.0f, FMath::Min(DriveSpeed, Cap));
 			const float YawRate = PerWheelSteering(DeltaTime, Cap);
@@ -5598,6 +5717,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	GatherExecMeasure(DeltaTime, M);
 	RecordDebugProbes(M);
 	RammsCurb::FExecCommand Cmd;
+	Executor->SetOperator(StickScale, bStickPaused);
 	Executor->Tick(M, *Level, Cmd);
 	CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
 	CommandSeat(Cmd.SeatX);
@@ -5679,6 +5799,13 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 			break;
 	}
 	Status = Executor->GetStatus();
+	// Paused by the rider's stick: whatever the executor is at (before Done, or
+	// a fault), the crossing waits on the rider.
+	if (bStickPaused && Executor->GetPhase() != RammsCurb::EExecPhase::Halted && Executor->GetPhase() != RammsCurb::EExecPhase::Done)
+	{
+		Phase = ERammsCurbPhase::Paused;
+		Status = StickWhy;
+	}
 	if (Telemetry)
 	{
 		const RammsCurb::FExecCounts& C = Executor->GetCounts();
@@ -5701,11 +5828,17 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	float	   WheelSpeed = DriveSpeed;
 	const auto ExecPhase = Executor->GetPhase();
 	const bool bStill = CVarRammsCurbRestHold.GetValueOnGameThread() != 0 && Telemetry && Telemetry->Motion.HasSample() && Cmd.DriveSpeed <= 0.0
-		&& (ExecPhase == RammsCurb::EExecPhase::Prepare || ExecPhase == RammsCurb::EExecPhase::Cross || ExecPhase == RammsCurb::EExecPhase::Hold);
+		&& (ExecPhase == RammsCurb::EExecPhase::Prepare || ExecPhase == RammsCurb::EExecPhase::Cross || ExecPhase == RammsCurb::EExecPhase::Hold
+			|| (bStickPaused && (ExecPhase == RammsCurb::EExecPhase::Approach || ExecPhase == RammsCurb::EExecPhase::Settle)));
 	if (bStill)
 	{
 		const FVector2D At = Telemetry->Motion.GetPosition();
-		if (!bRestHold)
+		// Paused by the rider, held where the chassis comes to rest, not where the
+		// command reached 0: the chassis runs on a drive lag past that, and held
+		// there it would be rolled back after every pause. Followed forward only:
+		// rolling back, it is brought back to where it stopped.
+		const bool bSettling = bStickPaused && Telemetry->Motion.IsFull() && Telemetry->Motion.GetSpeed() >= RammsCurb::StopSpeedCmS;
+		if (!bRestHold || bSettling)
 		{
 			bRestHold = true;
 			RestHoldAt = At;
@@ -5716,7 +5849,30 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	{
 		bRestHold = false;
 	}
-	CommandWheels(WheelSpeed, YawRate, static_cast<float>(SpeedTrim), static_cast<float>(LateralCmd));
+	// Paused by the rider with nothing moving -- at rest, no wheel lifting,
+	// landing or taking load, the level-in done or not begun -- for
+	// PauseHoldSeconds: every wheel held where it stands, braked where it has
+	// a brake, until the stick takes the robot on.
+	bool bQuiet = bStickPaused && bStill && Telemetry->Motion.IsFull() && FMath::Abs(Telemetry->Motion.GetSpeed()) < RammsCurb::StopSpeedCmS
+		&& (!Executor->HasLevelInBegun() || Level->bLevelled);
+	for (const RammsCurb::FExecWheel& W : Executor->GetWheels())
+	{
+		bQuiet = bQuiet && W.State != ERammsCurbWheelState::Lifting && W.State != ERammsCurbWheelState::Planting
+			&& W.State != ERammsCurbWheelState::Loading;
+	}
+	PausedStillSeconds = bQuiet ? PausedStillSeconds + DeltaTime : 0.0;
+	if (PausedStillSeconds >= RammsCurb::PauseHoldSeconds)
+	{
+		if (!bHoldingWheels)
+		{
+			HoldWheels();
+		}
+		StepWheelHold();
+	}
+	else
+	{
+		CommandWheels(WheelSpeed, YawRate, static_cast<float>(SpeedTrim), static_cast<float>(LateralCmd));
+	}
 	RecordRunTick(DeltaTime, LegError);
 	if (Executor->HasFault())
 	{
@@ -6928,6 +7084,37 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
 
+	// The rider's stick (Stick), while a crossing has the robot: the drive
+	// controls every drive mode offers, so that the stick a rider holds reaches
+	// whichever mode has the robot. Strafe too: pushed sideways is a pause.
+	if (bDriveModeActive && Stick.bRequired)
+	{
+		FRammsControlAxis Forward;
+		Forward.Id = RammsControlIds::Drive::Forward();
+		Forward.Group = RammsControlIds::Groups::Drive();
+		Forward.DisplayName = NSLOCTEXT("Ramms", "CurbStickForward", "Forward");
+		Forward.Kind = ERammsControlKind::Continuous;
+		Forward.Units = ERammsControlUnits::Normalized;
+		Forward.Range = FVector2D(-1.0, 1.0);
+		Forward.Order = 0;
+		Forward.PairedAxis = RammsControlIds::Drive::Turn();
+		OutSurface.Add(Forward);
+
+		FRammsControlAxis Turn = Forward;
+		Turn.Id = RammsControlIds::Drive::Turn();
+		Turn.DisplayName = NSLOCTEXT("Ramms", "CurbStickTurn", "Turn");
+		Turn.Order = 1;
+		Turn.PairedAxis = RammsControlIds::Drive::Forward();
+		OutSurface.Add(Turn);
+
+		FRammsControlAxis Strafe = Forward;
+		Strafe.Id = RammsControlIds::Drive::Strafe();
+		Strafe.DisplayName = NSLOCTEXT("Ramms", "CurbStickStrafe", "Strafe");
+		Strafe.Order = 2;
+		Strafe.PairedAxis = FName();
+		OutSurface.Add(Strafe);
+	}
+
 	// The debug view's switches (DebugView), a group of their own.
 	if (!DebugView.bExposeControls)
 	{
@@ -6975,8 +7162,30 @@ namespace
 	}
 } // namespace
 
+namespace
+{
+	/** The stick's component a drive control Id names (X forward, Y turn, Z
+	 *  strafe), else null. */
+	template <typename TVector>
+	auto StickAxis(TVector& Stick, FName Id) -> decltype(&Stick.X)
+	{
+		return Id == RammsControlIds::Drive::Forward() ? &Stick.X
+			: Id == RammsControlIds::Drive::Turn()	   ? &Stick.Y
+			: Id == RammsControlIds::Drive::Strafe()   ? &Stick.Z
+													   : nullptr;
+	}
+} // namespace
+
 bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 {
+	if (bDriveModeActive && Stick.bRequired)
+	{
+		if (double* Axis = StickAxis(StickInput, Id))
+		{
+			*Axis = FMath::Clamp(static_cast<double>(Value), -1.0, 1.0);
+			return true;
+		}
+	}
 	const int32 Index = FMath::RoundToInt(Value);
 	if (Id == ViewSensingControlId())
 	{
@@ -7017,8 +7226,29 @@ bool URammsCurbNegotiationController::TriggerControl(FName Id)
 	return false;
 }
 
+bool URammsCurbNegotiationController::ReleaseControl(FName Id)
+{
+	if (bDriveModeActive && Stick.bRequired)
+	{
+		if (double* Axis = StickAxis(StickInput, Id))
+		{
+			*Axis = 0.0;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) const
 {
+	if (bDriveModeActive && Stick.bRequired)
+	{
+		if (const double* Axis = StickAxis(StickInput, Id))
+		{
+			OutValue = static_cast<float>(*Axis);
+			return true;
+		}
+	}
 	if (Id == PhaseControlId())
 	{
 		OutValue = static_cast<float>(Phase);

@@ -277,7 +277,7 @@ namespace
 	}
 
 	constexpr uint8 OnTop = SDPG_Foreground;
-	constexpr uint8 InWorld = SDPG_World;
+	constexpr uint8 WorldDepth = SDPG_World;
 } // namespace
 
 // --- per tick -----------------------------------------------------------------------
@@ -508,7 +508,7 @@ void URammsCurbNegotiationController::DrawDebugSensing(const UWorld* World) cons
 			// whole ray starts TopZ up: drawn whole they hide the rest).
 			if (i % 40 == 0)
 			{
-				DrawDebugLine(World, FVector(P.XY, FMath::Min(P.TopZ, P.Z + 35.0)), FVector(P.XY, P.Z), RayColour, false, -1.0f, InWorld, 0.0f);
+				DrawDebugLine(World, FVector(P.XY, FMath::Min(P.TopZ, P.Z + 35.0)), FVector(P.XY, P.Z), RayColour, false, -1.0f, WorldDepth, 0.0f);
 			}
 			DrawDebugPoint(World, FVector(P.XY, P.Z + 0.5), 5.0f, Colour, false, -1.0f, OnTop);
 		}
@@ -541,7 +541,7 @@ void URammsCurbNegotiationController::DrawDebugSensing(const UWorld* World) cons
 	{
 		const FColor Colour = ProbeColour(P.ErrorCm, Tuning.TerrainMismatchCm);
 		const double End = P.bHit ? P.Z : P.BottomZ;
-		DrawDebugLine(World, FVector(P.XY, P.TopZ), FVector(P.XY, End), FColor(200, 200, 210), false, -1.0f, InWorld, 0.0f);
+		DrawDebugLine(World, FVector(P.XY, P.TopZ), FVector(P.XY, End), FColor(200, 200, 210), false, -1.0f, WorldDepth, 0.0f);
 		DrawDebugPoint(World, FVector(P.XY, End + 0.5), P.bHit ? 8.0f : 12.0f, P.bHit ? Colour : MissColour, false, -1.0f, OnTop);
 	}
 	for (const RammsCurb::FDebugProbe& P : S.Trail)
@@ -602,11 +602,11 @@ void URammsCurbNegotiationController::DrawDebugTerrain(const UWorld* World) cons
 		const double Step = 20.0;
 		for (double D = D0; D <= D1 + 0.01; D += Step)
 		{
-			DrawDebugLine(World, At(-HalfU, D, Plane), At(HalfU, D, Plane), Colour, false, -1.0f, InWorld, 0.0f);
+			DrawDebugLine(World, At(-HalfU, D, Plane), At(HalfU, D, Plane), Colour, false, -1.0f, WorldDepth, 0.0f);
 		}
 		for (double Ucm = -HalfU; Ucm <= HalfU + 0.01; Ucm += Step)
 		{
-			DrawDebugLine(World, At(Ucm, D0, Plane), At(Ucm, D1, Plane), Colour, false, -1.0f, InWorld, 0.0f);
+			DrawDebugLine(World, At(Ucm, D0, Plane), At(Ucm, D1, Plane), Colour, false, -1.0f, WorldDepth, 0.0f);
 		}
 	};
 	Grid(-NearDepth, 0.0, T.Near, NearGridColour);
@@ -618,7 +618,7 @@ void URammsCurbNegotiationController::DrawDebugTerrain(const UWorld* World) cons
 	DrawDebugLine(World, At(-HalfU, 0.0, T.Far, 0.8), At(HalfU, 0.0, T.Far, 0.8), EdgeColour, false, -1.0f, OnTop, 2.0f);
 	for (double Ucm = -HalfU; Ucm <= HalfU + 0.01; Ucm += 20.0)
 	{
-		DrawDebugLine(World, At(Ucm, 0.0, T.Near, 0.8), At(Ucm, 0.0, T.Far, 0.8), EdgeColour, false, -1.0f, InWorld, 0.0f);
+		DrawDebugLine(World, At(Ucm, 0.0, T.Near, 0.8), At(Ucm, 0.0, T.Far, 0.8), EdgeColour, false, -1.0f, WorldDepth, 0.0f);
 	}
 	DrawDebugDirectionalArrow(World, At(0.0, 0.0, T.Far, 2.0), At(0.0, 45.0, T.Far, 2.0), 12.0f, EdgeColour, false, -1.0f, OnTop, 2.0f);
 	if (T.bFarDepthObserved && T.FarDepthCm > 0.0f)
@@ -751,9 +751,9 @@ void URammsCurbNegotiationController::DrawDebugPlan(const UWorld* World) const
 			// The tyre's bottom at the height the lifted wheel is carried to.
 			const double  Bottom = Wheels[i].ZTop - Legs[i].WheelRadiusCm;
 			const FVector A(TrackAt(DUp), Bottom), B(TrackAt(DDown), Bottom);
-			DrawDebugLine(World, A, B, Colour, false, -1.0f, InWorld, 1.0f);
-			DrawDebugLine(World, A, Ground(DUp, 1.0), Colour, false, -1.0f, InWorld, 0.0f);
-			DrawDebugLine(World, B, Ground(DDown, 1.0), Colour, false, -1.0f, InWorld, 0.0f);
+			DrawDebugLine(World, A, B, Colour, false, -1.0f, WorldDepth, 1.0f);
+			DrawDebugLine(World, A, Ground(DUp, 1.0), Colour, false, -1.0f, WorldDepth, 0.0f);
+			DrawDebugLine(World, B, Ground(DDown, 1.0), Colour, false, -1.0f, WorldDepth, 0.0f);
 		}
 		// Lift and landing, where the chassis' travel puts this wheel then.
 		const FVector2D Lift = P0 + H * (W.SLiftStart - SNow);
