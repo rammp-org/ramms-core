@@ -3602,60 +3602,33 @@ bool URammsCurbNegotiationController::StepStick(float DeltaTime, double& OutScal
 	{
 		return true;
 	}
-	RammsCurb::FStickGate&		  Gate = Drive->Stick;
-	const RammsCurb::EStickIntent Intent = Gate.Step(Stick, StickInput.X, StickInput.Y, StickInput.Z, DeltaTime);
+	RammsCurb::FStickGate& Gate = Drive->Stick;
+	Gate.Step(Stick, StickInput.X, StickInput.Y, StickInput.Z, DeltaTime);
 	// Where the crossing is: no leg yet moved for the curb (its plan still
 	// coming, or rolling up in the drive stance); levelled in, or levelling,
 	// with no wheel yet begun to cross; or crossing, to the end of Settle.
-	const bool bRunning = !bAwaitingPlan && Executor && Executor->IsRunning();
-	const bool bLegsMoved = bRunning && Executor->HasLevelInBegun();
-	const bool bCrossing = bRunning && (Executor->HasCrossingBegun() || Executor->GetPhase() == RammsCurb::EExecPhase::Settle);
-	if (Intent == RammsCurb::EStickIntent::Forward)
+	const bool			   bRunning = !bAwaitingPlan && Executor && Executor->IsRunning();
+	RammsCurb::FStickStage Stage;
+	Stage.bLegsMoved = bRunning && Executor->HasLevelInBegun();
+	Stage.bCrossing = bRunning && (Executor->HasCrossingBegun() || Executor->GetPhase() == RammsCurb::EExecPhase::Settle);
+	Stage.bLevelled = Level && Level->bLevelled;
+	Stage.bAtRest = DriveSpeed <= 0.0f && Telemetry && Telemetry->Motion.IsFull() && FMath::Abs(Telemetry->Motion.GetSpeed()) < RammsCurb::StopSpeedCmS;
+	const RammsCurb::FStickDecision Decision = RammsCurb::DecideStick(Stick, Gate, Stage);
+	switch (Decision.Action)
 	{
-		OutScale = Gate.GetScale();
-		StickWhy.Reset();
-		return true;
-	}
-	bOutPaused = true;
-	StickPausedSeconds += DeltaTime;
-	// Nothing moved for the curb yet: the rider turning or backing away from it
-	// -- once the stick has read so for ReleaseSeconds, as letting go is read,
-	// so that a stick on its way forward that passes off the axis, or a bump,
-	// does not cancel.
-	if (!bLegsMoved && (Intent == RammsCurb::EStickIntent::Back || Intent == RammsCurb::EStickIntent::Sideways))
-	{
-		const bool bBack = Intent == RammsCurb::EStickIntent::Back;
-		if (Gate.GetSeconds() >= Stick.ReleaseSeconds)
-		{
-			CancelByRider(bBack ? TEXT("the rider pulled the stick back before any leg moved")
-								: TEXT("the rider pushed the stick to the side before any leg moved"));
+		case RammsCurb::EStickAction::Go:
+			OutScale = Decision.Scale;
+			StickWhy.Reset();
+			return true;
+		case RammsCurb::EStickAction::Cancel:
+			CancelByRider(Decision.Why);
 			return false;
-		}
-		StickWhy = bBack ? TEXT("Paused: pulled back -- held so, it cancels the crossing")
-						 : TEXT("Paused: pushed to the side -- held so, it cancels the crossing");
-		return true;
+		default:
+			bOutPaused = true;
+			StickPausedSeconds += DeltaTime;
+			StickWhy = Decision.Why;
+			return true;
 	}
-	if (Intent == RammsCurb::EStickIntent::Back && !bCrossing)
-	{
-		// Levelled in with no wheel lifted: held back, at rest, back out -- the
-		// drive mode takes the legs back to its stance.
-		const bool bAtRest = DriveSpeed <= 0.0f && Telemetry && Telemetry->Motion.IsFull()
-			&& FMath::Abs(Telemetry->Motion.GetSpeed()) < RammsCurb::StopSpeedCmS;
-		const bool bLevelled = Level && Level->bLevelled;
-		if (bAtRest && bLevelled && Gate.GetBackSeconds() >= Stick.CancelHoldSeconds)
-		{
-			CancelByRider(TEXT("the rider held the stick back with no wheel lifted: the legs back to the drive stance"));
-			return false;
-		}
-		StickWhy = bAtRest && bLevelled
-			? FString::Printf(TEXT("Paused: hold the stick back %.1f s more to cancel"), FMath::Max(0.0, Stick.CancelHoldSeconds - Gate.GetBackSeconds()))
-			: FString(TEXT("Paused: held back -- it cancels once the robot is at rest, levelled in"));
-		return true;
-	}
-	StickWhy = Intent == RammsCurb::EStickIntent::Back ? TEXT("Paused: a wheel has begun to cross, so it cannot back out -- push forward to finish")
-		: Intent == RammsCurb::EStickIntent::Sideways  ? TEXT("Paused: steering is locked while crossing -- push forward to go on")
-													   : TEXT("Paused: push the stick forward to go on");
-	return true;
 }
 
 void URammsCurbNegotiationController::CancelByRider(const FString& Why)
@@ -5491,7 +5464,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	// A pause is no hold, and leaves the time a hold has already run as it is:
 	// letting go of the stick and pushing it again does not restart the hold's
 	// timeout.
-	HoldSeconds = Phase == ERammsCurbPhase::Hold ? HoldSeconds + DeltaTime : (Phase == ERammsCurbPhase::Paused ? HoldSeconds : 0.0);
+	HoldSeconds = RammsCurb::StepHoldSeconds(Phase == ERammsCurbPhase::Hold, Phase == ERammsCurbPhase::Paused, HoldSeconds, DeltaTime);
 	if (HoldSeconds > RammsCurb::HoldTimeoutSeconds)
 	{
 		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("held for %.1f s: %s"), HoldSeconds, *Status));
