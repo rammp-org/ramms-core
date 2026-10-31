@@ -107,7 +107,8 @@ public:
 	 * asked back towards the angle the wheel stopped at, so on a slope the
 	 * robot stays where it stopped instead of rolling away (along a slope;
 	 * across one the omni wheels' rollers still creep -- HoldsRobotStill is
-	 * false). A command takes
+	 * false). Once every wheel is at rest the hold closes their brakes, where
+	 * the backend has them (ramms.Drive.HoldBrakes). A command takes
 	 * the wheels on from there at those same rates, the speed loops' integrals
 	 * (what held the slope's pull) carrying on. Nothing is held for the first
 	 * second after the mode's first tick: the robot is being put down as it
@@ -214,8 +215,17 @@ private:
 	/** The clock at its first tick: nothing is held for
 	 *  RammsDrive::SpawnSettleSeconds after it (the robot being put down). */
 	double FirstTickTime = -1.0;
+	/** The wheels the hold has braked (their parking brakes,
+	 *  URammsRobotBaseComponent::SetMotorBrake) once the robot came to rest
+	 *  under it; their speed loops are off while they are. */
+	TArray<FName> BrakedWheels;
 	/** Latch HoldAngles at the wheels' angles now. */
 	void LatchHold(URammsRobotBaseComponent& Base);
-	/** Each wheel's speed loop asked back towards its HoldAngles entry. */
+	/** Each wheel's speed loop asked back towards its HoldAngles entry, but
+	 *  for the braked ones. */
 	void CommandHold(URammsRobotBaseComponent& Base) const;
+	/** One tick of the hold's brakes: closed once every wheel is at rest
+	 *  (RammsDrive::BrakeAtRestCmS), opened again if a braked one turns
+	 *  (BrakeSlipCmS) for the speed loops to take it back from there. */
+	void StepHoldBrakes(URammsRobotBaseComponent& Base);
 };

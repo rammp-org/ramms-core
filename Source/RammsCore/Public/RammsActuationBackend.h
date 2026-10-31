@@ -124,7 +124,15 @@ public:
 	 * stands, as a power chair's electromagnetic brakes hold its wheels while the
 	 * joystick is at centre. For backends whose wheels a drive cannot hold with
 	 * torque (SimulatesMotorJoint false). Engaging an engaged brake keeps it where
-	 * it was set. False: this backend has no brake for the motor.
+	 * it was set. A backend whose brake can slip holds up to the motor's
+	 * FRammsMotorSpec::BrakeTorque. False: this backend has no brake for the
+	 * motor.
 	 */
 	virtual bool SetMotorBrake(FName MotorId, bool bEngaged) { return false; }
+
+	/** Whether SetMotorBrake would engage a brake on this motor now. Default
+	 *  false; a backend that brakes a motor whose joint it simulates
+	 *  (SimulatesMotorJoint) says so here, for a drive mode holding the robot
+	 *  still to close the brakes once its own hold has brought it to rest. */
+	virtual bool HasMotorBrake(FName MotorId) const { return false; }
 };

@@ -1138,13 +1138,22 @@ private:
 	 *  let go. */
 	bool		   bHoldingWheels = false;
 	TArray<double> WheelHoldAngles;
+	/** The wheels the hold has braked (their parking brakes,
+	 *  URammsRobotBaseComponent::SetMotorBrake) once the robot came to rest
+	 *  under it; their speed loops are off while they are. Opened when the
+	 *  wheels are driven or let go, or when they slip. */
+	TArray<FName> BrakedWheels;
 	/** The physics clock at the last tick the wheels were held with no
 	 *  crossing running (-1 otherwise): a reset is seen there too. */
 	double IdleHoldSimTime = -1.0;
 	/** Latch every wheel where it stands and hold it (bHoldingWheels). */
 	void HoldWheels();
-	/** One tick of holding the wheels latched. */
+	/** One tick of holding the wheels latched: on their brakes once the robot
+	 *  is at rest, where they have them (RammsDrive::BrakeAtRestCmS), each
+	 *  other wheel's speed loop asked back towards its angle. */
 	void StepWheelHold();
+	/** Open the brakes the hold closed (BrakedWheels). */
+	void ReleaseWheelBrakes();
 	/** Whether the drive mode ModeId holds the robot still with no command
 	 *  (IRammsDriveMode::HoldsRobotStill); and the first such mode, or None. */
 	bool  ModeHoldsStill(FName ModeId) const;

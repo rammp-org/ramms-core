@@ -3,6 +3,7 @@
 #include "RammsDriveHandOver.h"
 
 #include "HAL/IConsoleManager.h"
+#include "RammsRobotBaseComponent.h"
 
 static TAutoConsoleVariable<int32> CVarRammsDriveHoldWhenIdle(
 	TEXT("ramms.Drive.HoldWhenIdle"),
@@ -11,11 +12,52 @@ static TAutoConsoleVariable<int32> CVarRammsDriveHoldWhenIdle(
 		TEXT("development A/B runs only; the modes then leave their wheels to the control mode as before the hold)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRammsDriveHoldBrakes(
+	TEXT("ramms.Drive.HoldBrakes"),
+	1,
+	TEXT("Drive modes holding the robot still (the differential and holonomic drives, the curb crossing's holds): close\n")
+		TEXT("the wheels' brakes once the hold has it at rest, where the backend has them (1, the default), or hold with\n")
+			TEXT("torque alone (0: development A/B runs only)."),
+	ECVF_Default);
+
 namespace RammsDrive
 {
 	bool HoldWhenIdleEnabled()
 	{
 		return CVarRammsDriveHoldWhenIdle.GetValueOnGameThread() != 0;
+	}
+
+	bool HoldBrakesEnabled()
+	{
+		return CVarRammsDriveHoldBrakes.GetValueOnGameThread() != 0;
+	}
+
+	bool EngageBrakes(URammsRobotBaseComponent& Base, TConstArrayView<FName> Motors, TArray<FName>& InOutBraked)
+	{
+		if (!HoldBrakesEnabled())
+		{
+			return InOutBraked.Num() > 0;
+		}
+		for (const FName Motor : Motors)
+		{
+			if (!Motor.IsNone() && !InOutBraked.Contains(Motor) && Base.HasMotorBrake(Motor) && Base.SetMotorBrake(Motor, true))
+			{
+				// SetMotorBrake dropped its speed loop; what the loop last applied
+				// would otherwise go on beneath the brake.
+				Base.SetMotorCommand(Motor, 0.0f);
+				InOutBraked.Add(Motor);
+			}
+		}
+		return InOutBraked.Num() > 0;
+	}
+
+	void ReleaseBrakes(URammsRobotBaseComponent& Base, TArray<FName>& InOutBraked)
+	{
+		for (const FName Motor : InOutBraked)
+		{
+			Base.SetMotorBrake(Motor, false);
+		}
+		InOutBraked.Reset();
 	}
 
 	double SmoothStep(double X)

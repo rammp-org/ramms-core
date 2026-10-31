@@ -208,6 +208,10 @@ public:
 	 *  A controller closing its own loop on a wheel's angle checks this first. */
 	bool SimulatesMotorJoint(FName MotorId) const;
 
+	/** Whether SetMotorBrake would engage a brake on this motor now
+	 *  (IRammsActuationBackend::HasMotorBrake); false without a backend. */
+	bool HasMotorBrake(FName MotorId) const;
+
 	/** True if the registry contains a motor with this Id. */
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool HasMotor(FName MotorId) const;

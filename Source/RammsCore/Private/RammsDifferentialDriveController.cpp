@@ -248,9 +248,26 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	// same conditions the hold has; driving releases them first.
 	const bool bWantPark = bDriveModeActive && bHoldWhenIdle && !bCanHold && UsesBase() && RammsDrive::HoldWhenIdleEnabled()
 		&& !bHeldForStance && !IsOperatorCommanding() && !bCarryGrace && T - FirstTickTime >= RammsDrive::SpawnSettleSeconds;
+	// A torque hold closes the brakes where there are some (HasHoldBrakes) and
+	// keeps them closed for as long as it holds. Before it can hold -- the
+	// robot being put down at its spawn, its wheels going down (HoldForStance)
+	// -- they are closed too, as a power chair's stay closed until it is
+	// driven: left free there, a robot put down across a slope turned some
+	// 10 deg before anything held it. A brake does not spin a wheel in the air.
+	// It does resist a leg that carries its wheel fore/aft as the legs jump
+	// into the spawn's stance: a robot whose legs do that is dragged round
+	// against it (one turned 7.5 deg on level ground), and wants
+	// ramms.Drive.HoldBrakes 0.
+	const bool bHoldBrakes = bCanHold && HasHoldBrakes();
+	const bool bBrakeUntilHeld = bHoldBrakes && bDriveModeActive && bHoldWhenIdle && RammsDrive::HoldWhenIdleEnabled() && !IsOperatorCommanding()
+		&& !bCarryGrace && (bHeldForStance || T - FirstTickTime < RammsDrive::SpawnSettleSeconds);
+	const bool bHeldOnBrakes = bHoldBrakes && (bHold || bBrakeUntilHeld || (bHoldInactive && !bDriveModeActive));
 	if (!bWantPark)
 	{
-		SetParkingBrake(false);
+		if (!bHeldOnBrakes)
+		{
+			SetParkingBrake(false);
+		}
 		ParkFromSpeed = 0.0f;
 	}
 	else if (!bParkingBrake)
@@ -271,7 +288,7 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			SetParkingBrake(true);
 		}
 	}
-	if (bParkingBrake)
+	if (bParkingBrake && !bHeldOnBrakes)
 	{
 		// Held by the brakes: no wheel torque to fight them.
 		bIsBraking = true;
@@ -296,9 +313,28 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			BeginHold(Forward, Forward, Seed, Seed, bHandedOver);
 			SeedExpires = -1.0;
 			ReleaseElapsed = -1.0;
+			if (bParkingBrake)
+			{
+				// Begun on the brakes (closed until it could hold): the motors
+				// take the slope's pull handed over beneath them.
+				BrakedAlongTorque = Seed;
+			}
 		}
 		bIsBraking = true;
-		StepHold(Dt);
+		HoldStill(Dt, bHoldBrakes);
+	}
+	else if (bBrakeUntilHeld)
+	{
+		// Braked, no torque (the hold that follows starts from the brakes).
+		if (!bParkingBrake)
+		{
+			BrakedAlongTorque = 0.0;
+			SetParkingBrake(true);
+		}
+		bIsBraking = true;
+		BaseComponent->SetMotorCommand(LeftMotorId, 0.0f);
+		BaseComponent->SetMotorCommand(RightMotorId, 0.0f);
+		LeftWheelState.AppliedTorque = RightWheelState.AppliedTorque = 0.0f;
 	}
 	else if (bDriveModeActive && bHeldForStance)
 	{
@@ -345,7 +381,7 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			BeginHold(SmoothLeftRate, SmoothRightRate, 0.0, 0.0);
 		}
 		bIsBraking = true;
-		StepHold(Dt);
+		HoldStill(Dt, bHoldBrakes);
 	}
 	else
 	{
@@ -784,6 +820,52 @@ bool URammsDifferentialDriveController::CanHoldWithTorque() const
 	return UsesBase() && BaseComponent->SimulatesMotorJoint(LeftMotorId) && BaseComponent->SimulatesMotorJoint(RightMotorId);
 }
 
+bool URammsDifferentialDriveController::HasHoldBrakes() const
+{
+	return UsesBase() && RammsDrive::HoldBrakesEnabled() && BaseComponent->HasMotorBrake(LeftMotorId) && BaseComponent->HasMotorBrake(RightMotorId);
+}
+
+bool URammsDifferentialDriveController::IsHoldAtRest() const
+{
+	// The robot's way, not each wheel: the two turning against each other at
+	// rest is a slope across the robot turning it, which the brakes are for.
+	const double Slow = HoldBrakeSpeedCmS / FMath::Max(WheelRadius, 1.0f);
+	return HoldLeft->bActive && HoldRight->bActive && !HoldLeft->bFree && !HoldRight->bFree && HoldLeft->TargetRate == 0.0
+		&& HoldRight->TargetRate == 0.0 && FMath::Abs(0.5 * (SmoothLeftRate + SmoothRightRate)) < Slow;
+}
+
+void URammsDifferentialDriveController::HoldStill(double DeltaSeconds, bool bBrakes)
+{
+	const double Forward = 0.5 * (SmoothLeftRate + SmoothRightRate);
+	if (bBrakes && bParkingBrake && FMath::Abs(Forward) * FMath::Max(WheelRadius, 1.0f) > HoldBrakeSlipCmS)
+	{
+		// The brakes give way (a slope steeper than they hold): the hold takes
+		// the robot again from where it is and brakes it to rest.
+		SetParkingBrake(false);
+		BeginHold(Forward, Forward, BrakedAlongTorque, BrakedAlongTorque);
+	}
+	if (bBrakes && bParkingBrake)
+	{
+		// Braked: the motors go on holding the slope's pull beneath the brakes,
+		// and the hold's loop waits (its integral would only wind up against them).
+		const float Along = static_cast<float>(BrakedAlongTorque);
+		BaseComponent->SetMotorCommand(LeftMotorId, Along);
+		BaseComponent->SetMotorCommand(RightMotorId, Along);
+		// What it applies, for a release to hand on (ReleaseHold).
+		HoldLeft->LastTorque = HoldRight->LastTorque = BrakedAlongTorque;
+		LeftWheelState.AppliedTorque = RightWheelState.AppliedTorque = Along;
+		LeftWheelState.TargetAngularVelocity = RightWheelState.TargetAngularVelocity = 0.0f;
+		LeftIntegralError = RightIntegralError = 0.0f;
+		return;
+	}
+	StepHold(DeltaSeconds);
+	if (bBrakes && IsHoldAtRest())
+	{
+		BrakedAlongTorque = 0.5 * (HoldLeft->LastTorque + HoldRight->LastTorque);
+		SetParkingBrake(true);
+	}
+}
+
 bool URammsDifferentialDriveController::HoldsRobotStill() const
 {
 	return bHoldWhenIdle && CanHoldWithTorque() && RammsDrive::HoldWhenIdleEnabled();
@@ -859,6 +941,7 @@ void URammsDifferentialDriveController::HoldWheelsWhileInactive(bool bHold)
 		bHoldInactive = false;
 		HoldLeft->End();
 		HoldRight->End();
+		SetParkingBrake(false);
 		if (UsesBase())
 		{
 			for (const FName MotorId : { LeftMotorId, RightMotorId })
@@ -1321,11 +1404,9 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 	{
 		return;
 	}
-	if (!bActive)
-	{
-		// The next mode drives these wheels.
-		SetParkingBrake(false);
-	}
+	// Stood down, the next mode drives these wheels; activated, a hold of
+	// them while inactive ends and this mode's own begins afresh.
+	SetParkingBrake(false);
 	bDriveModeActive = bActive;
 	bHeldForStance = false;
 	bHoldInactive = false;

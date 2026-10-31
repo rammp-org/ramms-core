@@ -176,7 +176,11 @@ public:
 	 * VehicleMass and WheelRadius, so it runs only where the robot base's
 	 * backend simulates both drive wheels' joints -- reports their angles and
 	 * applies a torque in N.m (URammsRobotBaseComponent::SimulatesMotorJoint:
-	 * MuJoCo). On the Chaos backend, whose wheel torque is an acceleration
+	 * MuJoCo). Where that backend brakes both drive wheels too
+	 * (URammsRobotBaseComponent::HasMotorBrake: MuJoCo), the hold closes the
+	 * brakes once it has the robot at rest, and they hold it from then on --
+	 * on a slope across it too -- the motors beneath them holding the slope's
+	 * pull along its way. On the Chaos backend, whose wheel torque is an acceleration
 	 * change and whose wheels report no angle, and without a robot base, this
 	 * has no torque hold: the robot is held by its drive wheels' parking brakes
 	 * instead (ParkingBrakeSpeed), and HoldsRobotStill() is false.
@@ -475,8 +479,9 @@ public:
 	 *  over; bounded by a mode that carries more, there is nothing to keep
 	 *  within either. */
 	virtual bool BeginHandOver(const IRammsDriveMode& Other) override { return bDriveModeActive; }
-	/** While held, drives nothing: no torque, no brake (its wheels are still
-	 *  going down); they are held once down (bHoldWhenIdle). */
+	/** While held, drives nothing: no torque (its wheels are still going
+	 *  down), only the brakes closed where a torque hold closes them too
+	 *  (HasHoldBrakes); they are held once down (bHoldWhenIdle). */
 	virtual void HoldForStance(bool bHold) override { bHeldForStance = bHold && bDriveModeActive; }
 	/** bHoldWhenIdle, where the backend lets it hold (CanHoldWithTorque). */
 	virtual bool HoldsRobotStill() const override;
@@ -546,6 +551,29 @@ private:
 	/** The hold runs only on a robot base whose backend simulates both drive
 	 *  wheels' joints (their angles, a torque in N.m): its gains are physical. */
 	bool CanHoldWithTorque() const;
+	/** Both drive wheels have brakes there too (URammsRobotBaseComponent::HasMotorBrake:
+	 *  MuJoCo) and ramms.Drive.HoldBrakes is on: the hold brakes the robot to
+	 *  rest with torque and then closes them. A loop closed once a game tick
+	 *  holds a slope's pull along the robot; it gives way, by design
+	 *  (HoldTurnErrorCm), to a slope across it turning the robot about its
+	 *  wheels, which the brakes hold every physics step. */
+	bool HasHoldBrakes() const;
+	/** One tick of holding still (the hold, or HoldWheelsWhileInactive): the
+	 *  torque hold until it has both wheels at rest, then (bBrakes) the
+	 *  brakes, the motors beneath them holding BrakedAlongTorque. */
+	void HoldStill(double DeltaSeconds, bool bBrakes);
+	/** The hold has the robot at rest: its targets stopped, the robot's way
+	 *  (the treads' mean, smoothed) slower than HoldBrakeSpeedCmS. */
+	bool					IsHoldAtRest() const;
+	static constexpr double HoldBrakeSpeedCmS = 2.0;
+	/** Braked, the robot's way faster than this (cm/s): the brakes have given
+	 *  way, and the torque hold takes it again (HoldStill). */
+	static constexpr double HoldBrakeSlipCmS = 4.0;
+	/** What the hold held along the robot's way as the brakes closed (N.m,
+	 *  each wheel: the two sides' mean, a slope's pull). The motors go on
+	 *  holding it under the brakes, so letting go hands it on to the control
+	 *  mode as any hold's release does (ReleaseHold). */
+	double BrakedAlongTorque = 0.0;
 	/** A slope's pull handed over (SeedGroundSlope): each wheel's holding
 	 *  torque (N.m), for a hold begun before SeedExpires (the clock). */
 	double					SeedTorque = 0.0;

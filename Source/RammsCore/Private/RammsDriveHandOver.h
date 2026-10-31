@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "RammsDriveMotion.h"
 
+class URammsRobotBaseComponent;
+
 /**
  * Changing drive mode on the move, as plain C++ so that each piece can be
  * tested on made-up numbers. Not reflected, not exported.
@@ -244,6 +246,30 @@ namespace RammsDrive
 	/** The development switch ramms.Drive.HoldWhenIdle (1 by default): 0 turns
 	 *  every drive mode's hold off, for A/B runs. */
 	bool HoldWhenIdleEnabled();
+
+	/** The development switch ramms.Drive.HoldBrakes (1 by default): 0 holds
+	 *  with torque alone where the backend has brakes too, for A/B runs. */
+	bool HoldBrakesEnabled();
+
+	/** A drive mode holding the robot still closes its wheels' brakes once the
+	 *  robot moves slower than this (cm/s), and opens them again for its own
+	 *  hold to take the robot back if they let it move faster than
+	 *  BrakeSlipCmS: the differential drive's HoldBrakeSpeedCmS and
+	 *  HoldBrakeSlipCmS. */
+	constexpr double BrakeAtRestCmS = 2.0;
+	constexpr double BrakeSlipCmS = 4.0;
+
+	/**
+	 * Close the parking brake (URammsRobotBaseComponent::SetMotorBrake) of each
+	 * of Motors that has one, unless ramms.Drive.HoldBrakes is 0, each added
+	 * to InOutBraked; its motor applies nothing beneath it. A braked wheel is
+	 * held by its brake alone: it must not be commanded a speed as well (the
+	 * backend would open the brake for it). True if InOutBraked holds any.
+	 */
+	bool EngageBrakes(URammsRobotBaseComponent& Base, TConstArrayView<FName> Motors, TArray<FName>& InOutBraked);
+
+	/** Open every brake in InOutBraked, and empty it. */
+	void ReleaseBrakes(URammsRobotBaseComponent& Base, TArray<FName>& InOutBraked);
 
 	/**
 	 * A drive mode's clock from one tick to the next: OutDt, the seconds since

@@ -61,6 +61,14 @@ static TAutoConsoleVariable<int32> CVarRammsCurbSpeedTrimLevel(
 		TEXT("either way (1), or on a grade only (0, the default)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRammsCurbHoldBrakes(
+	TEXT("ramms.Curb.HoldBrakes"),
+	1,
+	TEXT("Curb crossing: close the wheels' brakes once the robot is at rest under a hold (planning at rest, after a\n")
+		TEXT("stop) where the backend has them (1, the default; off with ramms.Drive.HoldBrakes 0 too), or hold with the\n")
+			TEXT("wheels' speed loops alone (0: development A/B runs only)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarRammsCurbSideways(
 	TEXT("ramms.Curb.SidewaysDrive"),
 	1,
@@ -3900,6 +3908,7 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		{
 			StopWheels(/*bRelease=*/true);
 		}
+		ReleaseWheelBrakes();
 	}
 }
 
@@ -4363,6 +4372,8 @@ void URammsCurbNegotiationController::CommandWheels(float Speed, float YawRate, 
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
 	bHoldingWheels = false;
+	// A wheel driven at a speed is not braked; one left to roll free must not be.
+	ReleaseWheelBrakes();
 	// Drive on the main wheels whenever they are planted, as the differential
 	// mode does, side by side: a side whose main wheel is off the ground hands
 	// its drive to that side's fallback wheels (RammsCurb::DriveRoles).
@@ -4545,6 +4556,7 @@ void URammsCurbNegotiationController::StopWheels(bool bRelease)
 		return;
 	}
 	bHoldingWheels = false;
+	ReleaseWheelBrakes();
 	for (const FRammsCurbLeg& Leg : Legs)
 	{
 		Base->ClearMotorVelocityCommand(Leg.Wheel.MotorId);
@@ -4560,6 +4572,8 @@ void URammsCurbNegotiationController::HoldWheels()
 	{
 		return;
 	}
+	// Latched afresh where they are: braked again only once at rest.
+	ReleaseWheelBrakes();
 	WheelHoldAngles.SetNum(Legs.Num());
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
@@ -4569,6 +4583,15 @@ void URammsCurbNegotiationController::HoldWheels()
 	StepWheelHold();
 }
 
+void URammsCurbNegotiationController::ReleaseWheelBrakes()
+{
+	if (URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		RammsDrive::ReleaseBrakes(*Base, BrakedWheels);
+	}
+	BrakedWheels.Reset();
+}
+
 void URammsCurbNegotiationController::StepWheelHold()
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
@@ -4576,14 +4599,38 @@ void URammsCurbNegotiationController::StepWheelHold()
 	{
 		return;
 	}
-	// Each wheel's speed loop asked back towards the angle it was latched at
-	// (the loop's integral carries a slope's pull), in the motor's own sense.
-	// A backend that reports no angle reads 0 throughout: the wheel is held at
-	// rate 0, braked.
+	// At rest, the wheels' brakes take the robot where they have them -- an omni
+	// wheel's speed loop gives way to a slope's pull across its hub, and three
+	// braked corners turned off the heading hold it in place and heading. A
+	// brake that lets the robot move hands it back to the speed loops, from
+	// where it is.
+	const bool	 bMeasured = Telemetry && Telemetry->Motion.IsFull();
+	const double Moving = bMeasured ? FMath::Abs(Telemetry->Motion.GetSpeed()) : 0.0;
+	if (BrakedWheels.Num() > 0 && Moving > RammsDrive::BrakeSlipCmS)
+	{
+		ReleaseWheelBrakes();
+		for (int32 i = 0; i < Legs.Num() && i < WheelHoldAngles.Num(); ++i)
+		{
+			WheelHoldAngles[i] = Legs[i].Wheel.MotorId.IsNone() ? 0.0 : Base->GetMotorValue(Legs[i].Wheel.MotorId);
+		}
+	}
+	else if (BrakedWheels.Num() == 0 && bMeasured && Moving < RammsDrive::BrakeAtRestCmS && CVarRammsCurbHoldBrakes.GetValueOnGameThread() != 0)
+	{
+		TArray<FName, TInlineAllocator<8>> Motors;
+		for (const FRammsCurbLeg& Leg : Legs)
+		{
+			Motors.Add(Leg.Wheel.MotorId);
+		}
+		RammsDrive::EngageBrakes(*Base, Motors, BrakedWheels);
+	}
+	// Every other wheel's speed loop asked back towards the angle it was
+	// latched at (the loop's integral carries a slope's pull), in the motor's
+	// own sense. A backend that reports no angle reads 0 throughout: the wheel
+	// is held at rate 0, braked.
 	for (int32 i = 0; i < Legs.Num() && i < WheelHoldAngles.Num(); ++i)
 	{
 		const FName Motor = Legs[i].Wheel.MotorId;
-		if (Motor.IsNone())
+		if (Motor.IsNone() || BrakedWheels.Contains(Motor))
 		{
 			continue;
 		}
