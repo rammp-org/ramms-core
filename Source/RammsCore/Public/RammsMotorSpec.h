@@ -118,4 +118,15 @@ struct FRammsMotorSpec : public FTableRowBase
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Profile", meta = (ClampMin = "0.0"))
 	float MaxAcceleration = 0.0f;
+
+	/**
+	 * Torque motors with a parking brake (URammsRobotBaseComponent::SetMotorBrake):
+	 * the most the brake holds against, N.m about the joint (N for a slide).
+	 * A wheel's electromagnetic brake is rated on its own and usually holds
+	 * well over what the motor drives with. 0: the brake holds with what the
+	 * motor itself can apply. The MuJoCo backend's brake slips past it; the
+	 * Chaos backends hold with their brake's stiffness and do not read it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Motor|Brake", meta = (ClampMin = "0.0"))
+	float BrakeTorque = 0.0f;
 };
