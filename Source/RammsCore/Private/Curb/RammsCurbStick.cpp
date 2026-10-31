@@ -26,7 +26,7 @@ namespace RammsCurb
 		Intent = EStickIntent::LetGo;
 		Scale = 0.0;
 		OutSeconds = 0.0;
-		BackSeconds = 0.0;
+		Seconds = 0.0;
 	}
 
 	EStickIntent FStickGate::Step(const FRammsCurbStick& Settings, double Forward, double Turn, double Strafe, double Dt)
@@ -49,26 +49,27 @@ namespace RammsCurb
 			if (bStill)
 			{
 				Scale = FMath::Clamp(Forward, 0.0, 1.0);
-				return Intent;
 			}
-			if (OutSeconds < Settings.ReleaseSeconds)
+			if (bStill || OutSeconds < Settings.ReleaseSeconds)
 			{
-				// Wavering: on at the share it had.
+				// Held forward still -- or wavering, on at the share it had.
+				Seconds += Dt;
 				return Intent;
 			}
 		}
+		EStickIntent Now = EStickIntent::Forward;
 		if (bAhead && Forward >= Engage)
 		{
-			Intent = EStickIntent::Forward;
 			Scale = FMath::Clamp(Forward, 0.0, 1.0);
-			OutSeconds = 0.0;
-			BackSeconds = 0.0;
-			return Intent;
 		}
-		Intent = Size < Release || bAhead ? EStickIntent::LetGo : (Round >= 180.0 - Sector - 1e-9 ? EStickIntent::Back : EStickIntent::Sideways);
-		Scale = 0.0;
+		else
+		{
+			Now = Size < Release || bAhead ? EStickIntent::LetGo : (Round >= 180.0 - Sector - 1e-9 ? EStickIntent::Back : EStickIntent::Sideways);
+			Scale = 0.0;
+		}
 		OutSeconds = 0.0;
-		BackSeconds = Intent == EStickIntent::Back ? BackSeconds + Dt : 0.0;
+		Seconds = Now == Intent ? Seconds + Dt : Dt;
+		Intent = Now;
 		return Intent;
 	}
 } // namespace RammsCurb

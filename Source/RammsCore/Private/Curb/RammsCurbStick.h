@@ -54,14 +54,17 @@ namespace RammsCurb
 		/** Held forward, how far (0..1): the share of the plan's speed asked
 		 *  for; else 0. */
 		double GetScale() const { return Scale; }
-		/** How long (s) the stick has read back without a break. */
-		double GetBackSeconds() const { return BackSeconds; }
+		/** How long (s) the stick has read what it reads now, without a break. */
+		double GetSeconds() const { return Seconds; }
+		/** How long (s) the stick has read back without a break; 0 when it does
+		 *  not. */
+		double GetBackSeconds() const { return Intent == EStickIntent::Back ? Seconds : 0.0; }
 
 	private:
 		EStickIntent Intent = EStickIntent::LetGo;
 		double		 Scale = 0.0;
 		/** Held forward, how long (s) it has been out of forward. */
 		double OutSeconds = 0.0;
-		double BackSeconds = 0.0;
+		double Seconds = 0.0;
 	};
 } // namespace RammsCurb

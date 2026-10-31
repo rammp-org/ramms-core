@@ -208,17 +208,18 @@ namespace RammsCurb
  * margin under, so that it can stop anywhere; no new lift or level-in
  * begins, those under way finish (a lift to clear, a landing to loaded),
  * the legs then hold and, once nothing moves, the wheels are held, braked
- * where they have brakes -- for as long as it takes: a pause is no hold and
- * times nothing out. The stick held forward again goes on from there.
- * Before any leg has moved for the curb, pulled back or pushed to the side
- * cancels the crossing; levelled in with no wheel yet lifted, held back
- * for Stick.CancelHoldSeconds, the robot at rest, does -- either way
- * handing the robot back to the drive mode it came from (phase Aborted),
- * which takes the legs back to its stance. Once a wheel has begun to
- * cross, nothing but forward moves the robot: the plan is laid along one
- * heading and cannot be backed out of. At Done the stick carries on into
- * the drive mode handed back to. The per-axle gait does not read the
- * stick.
+ * where they have brakes -- for as long as it takes: a pause is no hold,
+ * times nothing out and restarts no hold's timeout. The stick held forward
+ * again goes on from there. Before any leg has moved for the curb, pulled
+ * back or pushed to the side for Stick.ReleaseSeconds cancels the
+ * crossing; levelled in with no wheel yet lifted, held back for
+ * Stick.CancelHoldSeconds, the robot at rest, does -- either way handing
+ * the robot back to the drive mode it came from (phase Aborted), which
+ * takes the legs back to its stance. Once a wheel has begun to cross,
+ * nothing but forward moves the robot: the plan is laid along one heading
+ * and cannot be backed out of. At Done the stick carries on into the drive
+ * mode handed back to. The per-axle gait does not read the stick, so it is
+ * not begun while the stick is required.
  *
  * It is a drive mode ("curb"): while it runs, the other modes stand down and
  * it owns the wheels and cranks. Starting a manoeuvre selects it through the
@@ -323,7 +324,8 @@ public:
 	 * Plan and start. False, with a reason, when the crossing cannot start
 	 * from here before any plan is made -- the robot cannot be measured or is
 	 * not on the near side, the active drive mode is moving it sideways (see
-	 * GetCarriableMotion), the profile is not one this gait takes -- and with
+	 * GetCarriableMotion), the profile is not one this gait takes, the per-axle
+	 * gait asked for with Stick.bRequired (it does not read the stick) -- and with
 	 * the per-axle gait (Tuning.Gait PerAxle), whose plan is made in the call,
 	 * when that plan refuses; nothing moves then. The per-wheel gait plans off
 	 * the game thread (a plan takes tens of milliseconds to a few seconds),

@@ -272,7 +272,7 @@ struct RAMMSCORE_API FRammsCurbSeat
  * keeps its margin under), no new lift or level-in begun, those under way
  * finished, then held, the wheels braked -- and goes on when the stick is
  * pushed forward again. Before any leg has moved for the curb, pulled back or
- * pushed to the side cancels the crossing and hands the robot back to its
+ * pushed to the side for ReleaseSeconds cancels the crossing and hands the robot back to its
  * drive mode; levelled in with no wheel yet lifted, held back for
  * CancelHoldSeconds at rest does the same, the legs taken back to the drive
  * stance; once a wheel has begun to cross, nothing but forward moves it.
@@ -282,7 +282,8 @@ struct RAMMSCORE_API FRammsCurbStick
 {
 	GENERATED_BODY()
 
-	/** The crossing moves only while the stick is held forward. Off, it runs
+	/** The crossing moves only while the stick is held forward; the per-axle
+	 *  gait, which does not read the stick, is not begun. Off, a crossing runs
 	 *  to Done on its own once begun, and the stick is not read (scripted or
 	 *  autonomous crossings). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick")
@@ -300,6 +301,9 @@ struct RAMMSCORE_API FRammsCurbStick
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float ReleaseFraction = 0.15f;
 
+	/** How long (s) the stick must be out of forward to be let go (above); and
+	 *  pulled back or pushed to the side, before any leg has moved for the
+	 *  curb, to cancel the crossing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0"))
 	float ReleaseSeconds = 0.15f;
 

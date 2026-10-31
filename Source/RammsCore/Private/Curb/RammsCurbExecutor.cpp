@@ -2691,7 +2691,8 @@ namespace RammsCurb
 			{
 				StopCap = BrakingSpeed(LagBrakingDistance(static_cast<float>(SStop - S), static_cast<float>(VHat), DriveLagSeconds),
 					T.Deceleration);
-				if (S >= SStop - 1.0 && VHat < HoldSpeedCmS)
+				// Not with the rider's stick let go: the re-pose waits for it.
+				if (S >= SStop - 1.0 && VHat < HoldSpeedCmS && !bOperatorPaused)
 				{
 					bDwelling = true;
 					DwellFor = 0.0;

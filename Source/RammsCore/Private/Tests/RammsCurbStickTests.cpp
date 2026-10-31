@@ -137,4 +137,34 @@ bool FRammsCurbStickBack::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbStickSeconds,
+	"Ramms.Curb.Stick.Seconds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbStickSeconds::RunTest(const FString& Parameters)
+{
+	// How long the stick has read what it reads: what a cancel waits on before
+	// any leg has moved (ReleaseSeconds), so that a stick on its way forward
+	// that passes off the axis does not cancel.
+	const FRammsCurbStick S;
+	FStickGate			  Gate;
+	// From rest, one tick off the axis on the way forward: sideways, but only
+	// for that tick.
+	StickIs(*this, TEXT("on the way forward, off the axis"), Gate.Step(S, 0.10, 0.12, 0.0, StickDt), EStickIntent::Sideways);
+	TestTrue(FString::Printf(TEXT("read so for one tick (%.3f s)"), Gate.GetSeconds()), Gate.GetSeconds() < S.ReleaseSeconds);
+	StickIs(*this, TEXT("then forward"), Gate.Step(S, 0.6, 0.1, 0.0, StickDt), EStickIntent::Forward);
+	TestTrue(FString::Printf(TEXT("forward afresh (%.3f s)"), Gate.GetSeconds()), FMath::IsNearlyEqual(Gate.GetSeconds(), StickDt));
+	StickHold(Gate, S, 0.6, 0.1, 0.0, 0.5);
+	TestTrue(FString::Printf(TEXT("forward for 0.5 s (%.3f)"), Gate.GetSeconds()), FMath::IsNearlyEqual(Gate.GetSeconds(), 0.5 + StickDt, 0.02));
+	// Pushed to the side and held: counted from the tick it reads so.
+	Gate.Reset();
+	StickIs(*this, TEXT("pushed to the side"), StickHold(Gate, S, 0.0, 0.8, 0.0, 0.2), EStickIntent::Sideways);
+	TestTrue(FString::Printf(TEXT("read so for 0.2 s (%.3f)"), Gate.GetSeconds()), FMath::IsNearlyEqual(Gate.GetSeconds(), 0.2, 0.02));
+	TestEqual(TEXT("not back"), Gate.GetBackSeconds(), 0.0);
+	// Swung round to the back: back, counted afresh.
+	StickIs(*this, TEXT("swung back"), Gate.Step(S, -0.8, 0.0, 0.0, StickDt), EStickIntent::Back);
+	TestTrue(FString::Printf(TEXT("back for a tick (%.3f)"), Gate.GetBackSeconds()), FMath::IsNearlyEqual(Gate.GetBackSeconds(), StickDt));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

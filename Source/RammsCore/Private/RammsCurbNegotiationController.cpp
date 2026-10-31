@@ -3380,6 +3380,16 @@ bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile
 	{
 		return BeginPerWheel(Profile, OutReason);
 	}
+	// The per-axle gait does not read the rider's stick: with the stick
+	// required it would cross with no one holding it.
+	if (Stick.bRequired)
+	{
+		OutReason = TEXT("the per-axle gait does not read the rider's stick: not begun with Stick.bRequired (cross per wheel, or turn "
+						 "Stick.bRequired off)");
+		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
+		Status = OutReason;
+		return false;
+	}
 	if (!BuildPlan(Profile, OutReason))
 	{
 		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
@@ -3606,15 +3616,25 @@ bool URammsCurbNegotiationController::StepStick(float DeltaTime, double& OutScal
 		StickWhy.Reset();
 		return true;
 	}
-	// Nothing moved for the curb yet: the rider turning or backing away from it.
-	if (!bLegsMoved && (Intent == RammsCurb::EStickIntent::Back || Intent == RammsCurb::EStickIntent::Sideways))
-	{
-		CancelByRider(Intent == RammsCurb::EStickIntent::Back ? TEXT("the rider pulled the stick back before any leg moved")
-															  : TEXT("the rider pushed the stick to the side before any leg moved"));
-		return false;
-	}
 	bOutPaused = true;
 	StickPausedSeconds += DeltaTime;
+	// Nothing moved for the curb yet: the rider turning or backing away from it
+	// -- once the stick has read so for ReleaseSeconds, as letting go is read,
+	// so that a stick on its way forward that passes off the axis, or a bump,
+	// does not cancel.
+	if (!bLegsMoved && (Intent == RammsCurb::EStickIntent::Back || Intent == RammsCurb::EStickIntent::Sideways))
+	{
+		const bool bBack = Intent == RammsCurb::EStickIntent::Back;
+		if (Gate.GetSeconds() >= Stick.ReleaseSeconds)
+		{
+			CancelByRider(bBack ? TEXT("the rider pulled the stick back before any leg moved")
+								: TEXT("the rider pushed the stick to the side before any leg moved"));
+			return false;
+		}
+		StickWhy = bBack ? TEXT("Paused: pulled back -- held so, it cancels the crossing")
+						 : TEXT("Paused: pushed to the side -- held so, it cancels the crossing");
+		return true;
+	}
 	if (Intent == RammsCurb::EStickIntent::Back && !bCrossing)
 	{
 		// Levelled in with no wheel lifted: held back, at rest, back out -- the
@@ -5468,7 +5488,10 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("the approach took longer than %.0f s (%s)"), Tuning.ApproachTimeout, *Status));
 		return;
 	}
-	HoldSeconds = Phase == ERammsCurbPhase::Hold ? HoldSeconds + DeltaTime : 0.0;
+	// A pause is no hold, and leaves the time a hold has already run as it is:
+	// letting go of the stick and pushing it again does not restart the hold's
+	// timeout.
+	HoldSeconds = Phase == ERammsCurbPhase::Hold ? HoldSeconds + DeltaTime : (Phase == ERammsCurbPhase::Paused ? HoldSeconds : 0.0);
 	if (HoldSeconds > RammsCurb::HoldTimeoutSeconds)
 	{
 		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("held for %.1f s: %s"), HoldSeconds, *Status));
@@ -5810,7 +5833,12 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	if (bStill)
 	{
 		const FVector2D At = Telemetry->Motion.GetPosition();
-		if (!bRestHold)
+		// Paused by the rider, held where the chassis comes to rest, not where the
+		// command reached 0: the chassis runs on a drive lag past that, and held
+		// there it would be rolled back after every pause. Followed forward only:
+		// rolling back, it is brought back to where it stopped.
+		const bool bSettling = bStickPaused && Telemetry->Motion.IsFull() && Telemetry->Motion.GetSpeed() >= RammsCurb::StopSpeedCmS;
+		if (!bRestHold || bSettling)
 		{
 			bRestHold = true;
 			RestHoldAt = At;
