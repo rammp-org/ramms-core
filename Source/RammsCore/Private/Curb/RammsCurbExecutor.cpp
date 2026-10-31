@@ -160,6 +160,8 @@ namespace RammsCurb
 				return TEXT("the robot measured too near the edge of its wheels (MinLiveStabilityMarginCm)");
 			case EExecTerm::Swing:
 				return TEXT("a clear wheel's rim too near the terrain under it");
+			case EExecTerm::Operator:
+				return TEXT("the rider's stick");
 			default:
 				return TEXT("the far side unconfirmed (the commit point)");
 		}
@@ -295,6 +297,8 @@ namespace RammsCurb
 		SlowAt = -1.0;
 		LatestAxle = ERammsCurbAxle::Front;
 		ExternalCap = TNumericLimits<double>::Max();
+		OperatorScale = 1.0;
+		bOperatorPaused = false;
 		// The runtime checks start afresh.
 		bFault = false;
 		FaultWhy.Reset();
@@ -378,6 +382,16 @@ namespace RammsCurb
 		Prepare();
 		Log(FString::Printf(TEXT("re-planned: %s; done at %.1f cm"), PlanClassName(Plan.Class), SEnd));
 		return true;
+	}
+
+	void FExecutor::SetOperator(double Scale, bool bPaused)
+	{
+		if (bRunning && !bHalted && bPaused != bOperatorPaused)
+		{
+			Log(bPaused ? FString(TEXT("pausing: the rider's stick is not held forward")) : FString(TEXT("the rider's stick held forward: going on")));
+		}
+		OperatorScale = FMath::Clamp(Scale, 0.0, 1.0);
+		bOperatorPaused = bPaused;
 	}
 
 	void FExecutor::Halt(const FString& Why)
@@ -930,6 +944,11 @@ namespace RammsCurb
 	{
 		const FWheelPlan&		P = Plan.Wheels[Leg];
 		const FRammsCurbTuning& T = In.Tuning;
+		if (bOperatorPaused)
+		{
+			OutWhy = TEXT("the rider's stick is not held forward");
+			return false;
+		}
 		if (!Level.bLevelled)
 		{
 			OutWhy = TEXT("the level-in is not done");
@@ -1631,8 +1650,8 @@ namespace RammsCurb
 		SwingRaise = SwingRaiseCm(Level);
 
 		// The level-in begins where the plan has it (at once on a slope, or for a
-		// stance that needs it).
-		if (!bLevelInBegun && (S >= Plan.LevelInFromS - 1e-6 || Plan.LevelInFromS <= 1e-6))
+		// stance that needs it) -- with the rider's stick held forward.
+		if (!bLevelInBegun && !bOperatorPaused && (S >= Plan.LevelInFromS - 1e-6 || Plan.LevelInFromS <= 1e-6))
 		{
 			bLevelInBegun = true;
 			LevelInFrom = Elapsed;
@@ -1808,7 +1827,8 @@ namespace RammsCurb
 				bLanding = bLanding || W.State == ERammsCurbWheelState::Planting || W.State == ERammsCurbWheelState::Loading;
 			}
 			const double Room = ReachRoom();
-			const bool	 bHeldBack = VCmd <= HoldSpeedCmS + 1.0 && (bHolding || Diag.TargetBy == EExecTerm::Deadline);
+			const bool	 bHeldBack = VCmd <= HoldSpeedCmS + 1.0
+				&& (bHolding || Diag.TargetBy == EExecTerm::Deadline || Diag.TargetBy == EExecTerm::Operator);
 			if (!bLanding)
 			{
 				ReachLowerCm = FMath::Max(0.0, FMath::Min(ReachLowerCm - ReachReleaseCmS * Dt, Between(S).B - BCmd));
@@ -2803,6 +2823,16 @@ namespace RammsCurb
 		}
 		Limit(StopCap, EExecTerm::PlannedStop);
 		Limit(ExternalCap, EExecTerm::External);
+		// The rider's stick: held part way, that share of the plan's speed; not
+		// held forward, a stop, braked at Deceleration (below).
+		if (bOperatorPaused)
+		{
+			Limit(0.0, EExecTerm::Operator);
+		}
+		else if (OperatorScale < 1.0 && Diag.Plan < TNumericLimits<double>::Max())
+		{
+			Limit(FMath::Max(0.0, OperatorScale) * Diag.Plan, EExecTerm::Operator);
+		}
 		// The runtime checks' caps: the base off its planned attitude, half the
 		// plan's speed; the measured margin under the floor, or a clear wheel's
 		// rim at the terrain, a stop (braked, for the margin, at half
@@ -2903,7 +2933,18 @@ namespace RammsCurb
 		const bool bWaitTerm = By == EExecTerm::Deadline || By == EExecTerm::Track || By == EExecTerm::External || By == EExecTerm::Margin
 			|| By == EExecTerm::Swing;
 		auto Waits = [&](double Under) { return Braking < Under || (VTarget < Under && bWaitTerm); };
-		if (!bHolding && VCmd <= HoldSpeedCmS && Waits(HoldSpeedCmS) && !bDwelling && bLevelInBegun && Phase != EExecPhase::Settle)
+		if (bOperatorPaused)
+		{
+			// Paused by the rider: whatever else would hold the robot waits with it,
+			// and is no hold -- the robot is not waiting on the crossing.
+			if (bHolding)
+			{
+				bHolding = false;
+				Log(TEXT("hold over: the rider's stick is not held forward"));
+				Phase = Level.bLevelled ? EExecPhase::Cross : EExecPhase::Prepare;
+			}
+		}
+		else if (!bHolding && VCmd <= HoldSpeedCmS && Waits(HoldSpeedCmS) && !bDwelling && bLevelInBegun && Phase != EExecPhase::Settle)
 		{
 			bHolding = true;
 			++Counts.Holds;
@@ -2999,6 +3040,10 @@ namespace RammsCurb
 		}
 
 		Status = ExecPhaseName(Phase);
+		if (bOperatorPaused)
+		{
+			Status += TEXT(", paused: the rider's stick is not held forward");
+		}
 		if (Phase == EExecPhase::Hold)
 		{
 			if (bMarginHold)
@@ -3396,6 +3441,8 @@ namespace RammsCurb
 			Was.Add(ERammsCurbWheelState::Planted);
 		}
 		double HaltedFrom = -1.0, LastCmd = Speed, StoppedFor = 0.0;
+		// The rider's stick: when it was let go (s; < 0 not yet), and where (cm).
+		double PausedFrom = -1.0, PausedAtS = 0.0;
 		// A re-plan made, waiting ReplanDelaySeconds to be adopted (as one made off
 		// the game thread does); after its adoption, until when its re-fitted
 		// surfaces' biases are watched against where those truly lie.
@@ -3412,6 +3459,14 @@ namespace RammsCurb
 			{
 				E.Halt(TEXT("aborted (dry run)"));
 			}
+			if (PausedFrom < 0.0 && E.GetS() >= Options.PauseAtTravelCm)
+			{
+				PausedFrom = Time;
+				PausedAtS = E.GetS();
+			}
+			const bool bPaused = PausedFrom >= 0.0 && Time < PausedFrom + Options.PauseSeconds;
+			E.SetOperator(Options.StickScale, bPaused);
+			const bool bLevelInWas = E.HasLevelInBegun();
 			// Halted and stopped, the controller ends the executor (the wheels
 			// braked): from there the legs hold their last commands.
 			if (E.IsHalted() && E.IsStopped())
@@ -3421,6 +3476,11 @@ namespace RammsCurb
 			else
 			{
 				E.Tick(Meas, Level, Cmd);
+				if (bPaused && !bLevelInWas && E.HasLevelInBegun())
+				{
+					++Out.BegunWhilePaused;
+					Note(FString::Printf(TEXT("%.2f s: the level-in began with the stick let go"), Time));
+				}
 				if (bFirstTick)
 				{
 					bFirstTick = false;
@@ -3511,6 +3571,11 @@ namespace RammsCurb
 				const ERammsCurbWheelState St = E.GetWheels()[i].State;
 				if (St == ERammsCurbWheelState::Lifting && Was[i] == ERammsCurbWheelState::Planted)
 				{
+					if (bPaused)
+					{
+						++Out.BegunWhilePaused;
+						Note(FString::Printf(TEXT("%.2f s: '%s' lifted with the stick let go"), Time, *In.Legs[i].Name.ToString()));
+					}
 					for (int32 j = 0; j < N; ++j)
 					{
 						if (((Plan.Wheels[i].MustBeDownMask >> j) & 1u) && E.GetWheels()[j].State != ERammsCurbWheelState::Planted)
@@ -3740,6 +3805,11 @@ namespace RammsCurb
 					bRisen = true;
 				}
 			}
+			if (bPaused)
+			{
+				Out.PausedTravelCm = FMath::Max(Out.PausedTravelCm, E.GetS() - PausedAtS);
+				Out.PausedRestSeconds += FMath::Abs(Speed) < 0.5 ? Dt : 0.0;
+			}
 			const bool bStopAhead = E.GetCounts().PlannedStops > 0 || Plan.PlannedStops > 0;
 			if (bRisen && !bStopAhead && HaltedFrom < 0.0)
 			{
@@ -3798,6 +3868,7 @@ namespace RammsCurb
 		Out.Counts = E.GetCounts();
 		Out.Seconds = Time;
 		Out.FinalSpeedCmS = Speed;
+		Out.DoneAtCm = E.GetEndS();
 		for (int32 i = 0; i < N; ++i)
 		{
 			const FVector	W = Meas.Legs[i].WheelWorld;

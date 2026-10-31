@@ -4266,4 +4266,88 @@ bool FRammsCurbPlannerChoreographyUp::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorStickPause,
+	"Ramms.Curb.Executor.StickPause",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorStickPause::RunTest(const FString& Parameters)
+{
+	// The rider lets go of the stick anywhere along a crossing: the robot brakes
+	// to rest at Deceleration -- which every planned pose keeps its margin under
+	// -- begins no lift and no level-in meanwhile, finishes those under way, and
+	// stands; held forward again two seconds later, it goes on and crosses. And
+	// held part way the whole time, it crosses slower, keeping the same.
+	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+	{
+		for (const bool bUp : { true, false })
+		{
+			const FString				   What = FString::Printf(TEXT("%s %s"), Id, bUp ? TEXT("up") : TEXT("down"));
+			const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+			const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+			if (!TestTrue(FString::Printf(TEXT("%s planned"), *What), S.IsValid()))
+			{
+				continue;
+			}
+			const RammsCurb::FExecDryRunResult Free = RammsCurb::ExecDryRun(In, S);
+			if (!TestTrue(FString::Printf(TEXT("%s: crosses with the stick held (%s)"), *What, *Free.FaultWhy), Free.bDone))
+			{
+				continue;
+			}
+			const FRammsCurbTuning& T = In.Tuning;
+			// Braked from the drive speed at Deceleration, the chassis a drive lag
+			// and a tick behind the command.
+			const double Braking = T.DriveSpeed * T.DriveSpeed / (2.0 * T.Deceleration) + T.DriveSpeed * 0.3 + 2.0;
+			auto		 Check = [&](const RammsCurb::FExecDryRunResult& R, const FString& How) {
+				TestTrue(FString::Printf(TEXT("%s: crosses (%.1f s, ended %s%s%s)"), *How, R.Seconds, RammsCurb::ExecPhaseName(R.EndPhase),
+							 R.bFaulted ? TEXT(": ") : TEXT(""), *R.FaultWhy),
+							R.bDone && !R.bFaulted);
+				TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *How), R.KeepOffViolations, 0);
+				TestEqual(FString::Printf(TEXT("%s: lifted wheels into the terrain"), *How), R.IntoTerrain, 0);
+				TestEqual(FString::Printf(TEXT("%s: ticks with a forbidden set off the ground"), *How), R.Counts.ForbiddenTicks, 0);
+				TestEqual(FString::Printf(TEXT("%s: ticks with a loaded wheel in its window"), *How), R.Counts.WindowTicks, 0);
+				TestEqual(FString::Printf(TEXT("%s: lifts before the wheels they wait on had landed"), *How), R.EarlyLifts, 0);
+				TestTrue(FString::Printf(TEXT("%s: the robot stands (least margin %.2f cm)"), *How, R.MinMarginCm),
+							R.MinMarginCm >= T.MinLiveStabilityMarginCm);
+				TestTrue(FString::Printf(TEXT("%s: the base within 2 deg of the plan (%.2f)"), *How, R.MaxTiltDeg), R.MaxTiltDeg <= 2.0);
+				TestEqual(FString::Printf(TEXT("%s: lifts or level-ins begun with the stick let go"), *How), R.BegunWhilePaused, 0);
+			};
+			const double SEnd = Free.DoneAtCm;
+			int32		 Runs = 0;
+			for (double At = 0.0; At < SEnd; At += 15.0)
+			{
+				RammsCurb::FExecDryRunOptions O;
+				O.PauseAtTravelCm = At;
+				O.PauseSeconds = 2.0;
+				const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, O);
+				const FString					   How = FString::Printf(TEXT("%s, let go at %.0f cm"), *What, At);
+				Check(R, How);
+				// Let go within its braking distance of the end, it is done before it
+				// stops (and the drive mode it hands back to brakes it).
+				if (At + Braking < SEnd)
+				{
+					TestTrue(FString::Printf(TEXT("%s: came to rest (%.2f s at rest)"), *How, R.PausedRestSeconds), R.PausedRestSeconds >= 0.5);
+				}
+				TestTrue(FString::Printf(TEXT("%s: stopped within its braking distance (%.1f cm, %.1f allowed)"), *How, R.PausedTravelCm, Braking),
+					R.PausedTravelCm <= Braking);
+				if (HasAnyErrors())
+				{
+					for (const FString& L : R.Log)
+					{
+						AddInfo(FString::Printf(TEXT("%s log: %s"), *How, *L));
+					}
+					return true;
+				}
+				++Runs;
+			}
+			AddInfo(FString::Printf(TEXT("%s: let go at %d points along %.0f cm, each paused 2 s and crossed"), *What, Runs, SEnd));
+			RammsCurb::FExecDryRunOptions Half;
+			Half.StickScale = 0.5;
+			const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Half);
+			Check(R, What + TEXT(", held half way"));
+			TestTrue(FString::Printf(TEXT("%s, held half way: slower (%.1f s against %.1f)"), *What, R.Seconds, Free.Seconds), R.Seconds > Free.Seconds + 1.0);
+		}
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
