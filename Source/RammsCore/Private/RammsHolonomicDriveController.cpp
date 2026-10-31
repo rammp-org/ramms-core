@@ -106,6 +106,12 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 	// command nobody issued for it.
 	Command = FVector::ZeroVector;
 	ResetSwitching();
+	if (URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		// Whatever held the wheels before holds them no more: this mode's own
+		// hold, or the switch it was stood down for, brakes them afresh.
+		RammsDrive::ReleaseBrakes(*Base, BrakedWheels);
+	}
 	if (!bActive)
 	{
 		// Zero the wheels once rather than leaving them spinning at whatever
@@ -183,6 +189,10 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 		// waits out the spawn's second again.
 		bHoldingStill = false;
 		HoldAngles.Reset();
+		if (Base)
+		{
+			RammsDrive::ReleaseBrakes(*Base, BrakedWheels);
+		}
 		if (Base && bHoldInactive)
 		{
 			LatchHold(*Base);
@@ -194,6 +204,7 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	{
 		// Stood down at rest while the next mode's wheels go down: these still
 		// carry the robot, held where they are.
+		StepHoldBrakes(*Base);
 		CommandHold(*Base);
 		return;
 	}
@@ -252,11 +263,13 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 			LatchHold(*Base);
 			bHoldingStill = true;
 		}
+		StepHoldBrakes(*Base);
 		CommandHold(*Base);
 		bDrivingMotors = true;
 		return;
 	}
 	bHoldingStill = false;
+	RammsDrive::ReleaseBrakes(*Base, BrakedWheels);
 	if (bIdle && !bDrivingMotors)
 	{
 		// Nothing commanded and nothing left running: leave the motors alone so
@@ -310,7 +323,7 @@ void URammsHolonomicDriveController::CommandHold(URammsRobotBaseComponent& Base)
 	for (int32 i = 0; i < Resolved.Wheels.Num() && i < HoldAngles.Num(); ++i)
 	{
 		const FName Motor = Resolved.Wheels[i].MotorId;
-		if (!Motor.IsNone())
+		if (!Motor.IsNone() && !BrakedWheels.Contains(Motor))
 		{
 			RammsDrive::FWheelHold Hold;
 			Hold.Latch(HoldAngles[i]);
@@ -338,6 +351,7 @@ void URammsHolonomicDriveController::HoldWheelsWhileInactive(bool bHold)
 	{
 		// Let go, as standing down does.
 		bHoldInactive = false;
+		RammsDrive::ReleaseBrakes(*Base, BrakedWheels);
 		for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
 		{
 			if (!Wheel.MotorId.IsNone())
@@ -346,6 +360,37 @@ void URammsHolonomicDriveController::HoldWheelsWhileInactive(bool bHold)
 				Base->SetMotorCommand(Wheel.MotorId, 0.0f);
 			}
 		}
+	}
+}
+
+void URammsHolonomicDriveController::StepHoldBrakes(URammsRobotBaseComponent& Base)
+{
+	// The hubs' own rates say whether the robot is at rest: three or more omni
+	// wheels rolling along different lines fix the base's motion between them,
+	// so all of them still is the robot still -- and a braked hub turning is
+	// its brake letting the robot go.
+	const double Radius = FMath::Max(Resolved.WheelRadiusCm, 0.1f);
+	double		 Fastest = 0.0;
+	for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
+	{
+		if (!Wheel.MotorId.IsNone())
+		{
+			Fastest = FMath::Max(Fastest, FMath::Abs(static_cast<double>(Base.GetMotorVelocity(Wheel.MotorId))) * Radius);
+		}
+	}
+	if (BrakedWheels.Num() > 0 && Fastest > RammsDrive::BrakeSlipCmS)
+	{
+		RammsDrive::ReleaseBrakes(Base, BrakedWheels);
+		LatchHold(Base);
+	}
+	else if (BrakedWheels.Num() == 0 && Fastest < RammsDrive::BrakeAtRestCmS)
+	{
+		TArray<FName, TInlineAllocator<8>> Motors;
+		for (const FRammsOmniWheelSpec& Wheel : Resolved.Wheels)
+		{
+			Motors.Add(Wheel.MotorId);
+		}
+		RammsDrive::EngageBrakes(Base, Motors, BrakedWheels);
 	}
 }
 
