@@ -72,4 +72,68 @@ namespace RammsCurb
 		Intent = Now;
 		return Intent;
 	}
+
+	FStickDecision DecideStick(const FRammsCurbStick& Settings, const FStickGate& Gate, const FStickStage& Stage)
+	{
+		FStickDecision	   Out;
+		const EStickIntent Intent = Gate.GetIntent();
+		if (Intent == EStickIntent::Forward)
+		{
+			Out.Action = EStickAction::Go;
+			Out.Scale = Gate.GetScale();
+			return Out;
+		}
+		const bool bBack = Intent == EStickIntent::Back;
+		// Nothing moved for the curb yet: the rider turning or backing away from
+		// it -- once the stick has read so for ReleaseSeconds, as letting go is
+		// read, so that a stick on its way forward that passes off the axis, or
+		// a bump, does not cancel.
+		if (!Stage.bLegsMoved && (bBack || Intent == EStickIntent::Sideways))
+		{
+			if (Gate.GetSeconds() >= Settings.ReleaseSeconds)
+			{
+				Out.Action = EStickAction::Cancel;
+				Out.Why = bBack ? TEXT("the rider pulled the stick back before any leg moved")
+								: TEXT("the rider pushed the stick to the side before any leg moved");
+				return Out;
+			}
+			Out.Why = bBack ? TEXT("Paused: pulled back -- held so, it cancels the crossing")
+							: TEXT("Paused: pushed to the side -- held so, it cancels the crossing");
+			return Out;
+		}
+		// Levelled in with no wheel lifted: held back, at rest, back out -- the
+		// drive mode takes the legs back to its stance.
+		if (bBack && !Stage.bCrossing)
+		{
+			const bool bReady = Stage.bAtRest && Stage.bLevelled;
+			if (bReady && Gate.GetBackSeconds() >= Settings.CancelHoldSeconds)
+			{
+				Out.Action = EStickAction::Cancel;
+				Out.Why = TEXT("the rider held the stick back with no wheel lifted: the legs back to the drive stance");
+				return Out;
+			}
+			Out.Why = bReady ? FString::Printf(TEXT("Paused: hold the stick back %.1f s more to cancel"),
+								   FMath::Max(0.0, Settings.CancelHoldSeconds - Gate.GetBackSeconds()))
+							 : FString(TEXT("Paused: held back -- it cancels once the robot is at rest, levelled in"));
+			return Out;
+		}
+		if (bBack)
+		{
+			Out.Why = TEXT("Paused: a wheel has begun to cross, so it cannot back out -- push forward to finish");
+		}
+		else if (Intent == EStickIntent::Sideways)
+		{
+			Out.Why = TEXT("Paused: steering is locked while crossing -- push forward to go on");
+		}
+		else
+		{
+			Out.Why = TEXT("Paused: push the stick forward to go on");
+		}
+		return Out;
+	}
+
+	double StepHoldSeconds(bool bHolding, bool bPaused, double Seconds, double Dt)
+	{
+		return bHolding ? Seconds + Dt : (bPaused ? Seconds : 0.0);
+	}
 } // namespace RammsCurb

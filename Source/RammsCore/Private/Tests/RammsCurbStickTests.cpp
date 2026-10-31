@@ -167,4 +167,148 @@ bool FRammsCurbStickSeconds::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace
+{
+	using RammsCurb::EStickAction;
+	using RammsCurb::FStickDecision;
+	using RammsCurb::FStickStage;
+
+	const TCHAR* StickActionName(EStickAction Action)
+	{
+		return Action == EStickAction::Go ? TEXT("go") : Action == EStickAction::Cancel ? TEXT("cancel")
+																						: TEXT("pause");
+	}
+
+	/** The gate held at (Forward, Turn, Strafe) for Seconds, then what the stick does at
+	 *  Stage; checked to be Want, its line to hold Says. */
+	FStickDecision StickDecides(FAutomationTestBase& Test, const TCHAR* What, FStickGate& Gate, const FRammsCurbStick& S, double Forward, double Turn, double Strafe,
+		double Seconds, const FStickStage& Stage, EStickAction Want, const TCHAR* Says = nullptr)
+	{
+		StickHold(Gate, S, Forward, Turn, Strafe, Seconds);
+		const FStickDecision D = RammsCurb::DecideStick(S, Gate, Stage);
+		Test.TestEqual(FString::Printf(TEXT("%s: %s (%s)"), What, StickActionName(D.Action), *D.Why), FString(StickActionName(D.Action)),
+			FString(StickActionName(Want)));
+		if (Says)
+		{
+			Test.TestTrue(FString::Printf(TEXT("%s: says '%s' (%s)"), What, Says, *D.Why), D.Why.Contains(Says));
+		}
+		return D;
+	}
+
+	FStickStage StickStageOf(bool bLegsMoved, bool bCrossing, bool bLevelled, bool bAtRest)
+	{
+		FStickStage Out;
+		Out.bLegsMoved = bLegsMoved;
+		Out.bCrossing = bCrossing;
+		Out.bLevelled = bLevelled;
+		Out.bAtRest = bAtRest;
+		return Out;
+	}
+} // namespace
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbStickDecide,
+	"Ramms.Curb.Stick.Decide",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbStickDecide::RunTest(const FString& Parameters)
+{
+	// What the stick does to a crossing at each stage: the controller acts on
+	// exactly this (URammsCurbNegotiationController's StepStick).
+	const FRammsCurbStick S;
+	const FStickStage	  Rolling = StickStageOf(false, false, false, false);
+	const FStickStage	  StandingStill = StickStageOf(false, false, false, true);
+	const FStickStage	  Levelling = StickStageOf(true, false, false, true);
+	const FStickStage	  LevelledMoving = StickStageOf(true, false, true, false);
+	const FStickStage	  LevelledAtRest = StickStageOf(true, false, true, true);
+	const FStickStage	  Crossing = StickStageOf(true, true, true, true);
+	FStickGate			  Gate;
+
+	// Held forward, at any stage: go, at the share pushed.
+	for (const FStickStage& Stage : { Rolling, Levelling, LevelledAtRest, Crossing })
+	{
+		Gate.Reset();
+		const FStickDecision D = StickDecides(*this, TEXT("held forward"), Gate, S, 0.6, 0.1, 0.0, 0.2, Stage, EStickAction::Go);
+		TestEqual(TEXT("at the share pushed"), D.Scale, 0.6);
+	}
+	// Let go, at any stage: a pause, never a cancel, however long.
+	for (const FStickStage& Stage : { Rolling, StandingStill, Levelling, LevelledAtRest, Crossing })
+	{
+		Gate.Reset();
+		StickDecides(*this, TEXT("let go"), Gate, S, 0.0, 0.0, 0.0, 5.0, Stage, EStickAction::Pause, TEXT("push the stick forward"));
+	}
+
+	// Before any leg has moved: back or sideways cancels once read so for
+	// ReleaseSeconds -- a tick or two passing through does not.
+	Gate.Reset();
+	StickDecides(*this, TEXT("rolling in, one tick off the axis"), Gate, S, 0.10, 0.12, 0.0, StickDt, Rolling, EStickAction::Pause,
+		TEXT("held so, it cancels"));
+	StickDecides(*this, TEXT("then forward"), Gate, S, 0.6, 0.0, 0.0, StickDt, Rolling, EStickAction::Go);
+	Gate.Reset();
+	StickDecides(*this, TEXT("rolling in, pushed to the side 0.1 s"), Gate, S, 0.0, 0.8, 0.0, 0.1, Rolling, EStickAction::Pause);
+	StickDecides(*this, TEXT("rolling in, pushed to the side 0.2 s"), Gate, S, 0.0, 0.8, 0.0, 0.1, Rolling, EStickAction::Cancel,
+		TEXT("pushed the stick to the side"));
+	Gate.Reset();
+	StickDecides(*this, TEXT("standing, pulled back 0.1 s"), Gate, S, -0.8, 0.0, 0.0, 0.1, StandingStill, EStickAction::Pause,
+		TEXT("pulled back"));
+	StickDecides(*this, TEXT("standing, pulled back 0.2 s"), Gate, S, -0.8, 0.0, 0.0, 0.1, StandingStill, EStickAction::Cancel,
+		TEXT("pulled the stick back"));
+	// From held forward, back is read only once it has been out of forward for
+	// ReleaseSeconds, and then needs ReleaseSeconds more to cancel.
+	Gate.Reset();
+	StickHold(Gate, S, 0.8, 0.0, 0.0, 0.2);
+	StickDecides(*this, TEXT("rolling in, forward to back 0.2 s"), Gate, S, -0.8, 0.0, 0.0, 0.2, Rolling, EStickAction::Pause);
+	StickDecides(*this, TEXT("rolling in, forward to back 0.35 s"), Gate, S, -0.8, 0.0, 0.0, 0.15, Rolling, EStickAction::Cancel);
+
+	// Levelling in, or levelled and still rolling to rest: back pauses, and
+	// waits to cancel for both.
+	Gate.Reset();
+	StickDecides(*this, TEXT("levelling, held back 3 s"), Gate, S, -0.8, 0.0, 0.0, 3.0, Levelling, EStickAction::Pause, TEXT("once the robot is at rest"));
+	Gate.Reset();
+	StickDecides(*this, TEXT("levelled, rolling, held back 3 s"), Gate, S, -0.8, 0.0, 0.0, 3.0, LevelledMoving, EStickAction::Pause,
+		TEXT("once the robot is at rest"));
+	// Levelled in at rest: back held CancelHoldSeconds cancels, counting down.
+	Gate.Reset();
+	StickDecides(*this, TEXT("levelled at rest, held back 0.4 s"), Gate, S, -0.8, 0.0, 0.0, 0.4, LevelledAtRest, EStickAction::Pause,
+		TEXT("more to cancel"));
+	StickDecides(*this, TEXT("levelled at rest, held back 0.8 s"), Gate, S, -0.8, 0.0, 0.0, 0.4, LevelledAtRest, EStickAction::Cancel,
+		TEXT("held the stick back"));
+	// Sideways once a leg has moved: a pause, never a cancel.
+	Gate.Reset();
+	StickDecides(*this, TEXT("levelled, pushed to the side 3 s"), Gate, S, 0.0, 0.8, 0.0, 3.0, LevelledAtRest, EStickAction::Pause,
+		TEXT("steering is locked"));
+
+	// Crossing: back and sideways pause, never cancel, however long.
+	Gate.Reset();
+	StickDecides(*this, TEXT("crossing, held back 5 s"), Gate, S, -0.8, 0.0, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("cannot back out"));
+	Gate.Reset();
+	StickDecides(*this, TEXT("crossing, pushed to the side 5 s"), Gate, S, 0.0, 0.8, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("steering is locked"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbStickHoldTimeout,
+	"Ramms.Curb.Stick.HoldTimeout",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbStickHoldTimeout::RunTest(const FString& Parameters)
+{
+	// A hold's time is kept, not restarted, through a pause: letting go and
+	// pushing again cannot keep a stuck crossing from its hold timeout.
+	double Seconds = 0.0;
+	auto   Run = [&Seconds](bool bHolding, bool bPaused, double For) {
+		  for (int32 i = FMath::RoundToInt(For / StickDt); i > 0; --i)
+		  {
+			  Seconds = RammsCurb::StepHoldSeconds(bHolding, bPaused, Seconds, StickDt);
+		  }
+	};
+	Run(true, false, 3.0);
+	TestTrue(FString::Printf(TEXT("held 3 s (%.3f)"), Seconds), FMath::IsNearlyEqual(Seconds, 3.0, 0.02));
+	Run(false, true, 10.0);
+	TestTrue(FString::Printf(TEXT("paused 10 s: still 3 (%.3f)"), Seconds), FMath::IsNearlyEqual(Seconds, 3.0, 0.02));
+	Run(true, false, 2.5);
+	TestTrue(FString::Printf(TEXT("held again 2.5 s: 5.5, past a 5 s timeout (%.3f)"), Seconds), Seconds > 5.0);
+	Run(false, false, StickDt);
+	TestEqual(TEXT("the hold over: 0"), Seconds, 0.0);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

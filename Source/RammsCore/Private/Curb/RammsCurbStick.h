@@ -67,4 +67,53 @@ namespace RammsCurb
 		double OutSeconds = 0.0;
 		double Seconds = 0.0;
 	};
+
+	/** Where a crossing is, for what the stick does to it. */
+	struct FStickStage
+	{
+		/** A leg has moved for the curb: the level-in has begun. */
+		bool bLegsMoved = false;
+		/** A wheel has begun to cross, or every wheel is across (settling). */
+		bool bCrossing = false;
+		/** The level-in is done. */
+		bool bLevelled = false;
+		/** The robot is at rest: its command at 0 and its chassis measured still. */
+		bool bAtRest = false;
+	};
+
+	/** What the stick does to a crossing on a tick. */
+	enum class EStickAction : uint8
+	{
+		/** Go on, at FStickDecision::Scale of the plan's speed. */
+		Go,
+		/** Brake to rest and wait (the crossing's phase Paused). */
+		Pause,
+		/** End the crossing and hand the robot back to its drive mode. */
+		Cancel,
+	};
+
+	struct FStickDecision
+	{
+		EStickAction Action = EStickAction::Pause;
+		/** Go: the share of the plan's speed the stick asks. */
+		double Scale = 0.0;
+		/** Pause: the status line, saying why and what the stick does next;
+		 *  Cancel: why, for the log. */
+		FString Why;
+	};
+
+	/**
+	 * What the stick, as Gate reads it now, does to a crossing at Stage. Held
+	 * forward, go at its share. Before any leg has moved for the curb, back or
+	 * sideways read for ReleaseSeconds cancels. Levelled in with no wheel yet
+	 * lifted, back read for CancelHoldSeconds with the robot at rest cancels.
+	 * Anything else -- let go, or any direction once a wheel has begun to
+	 * cross -- pauses.
+	 */
+	FStickDecision DecideStick(const FRammsCurbStick& Settings, const FStickGate& Gate, const FStickStage& Stage);
+
+	/** A crossing's hold time (s) one tick of Dt on: counted while it holds,
+	 *  kept as it is while the rider's stick pauses it (letting go and pushing
+	 *  again does not restart a hold's timeout), and 0 otherwise. */
+	double StepHoldSeconds(bool bHolding, bool bPaused, double Seconds, double Dt);
 } // namespace RammsCurb
