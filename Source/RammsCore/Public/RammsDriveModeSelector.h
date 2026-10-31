@@ -93,6 +93,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
 	FName InitialModeId;
 
+	/**
+	 * The modes CycleMode (the drive.mode action: a controller's mode button)
+	 * steps through, in this order; ones not on this robot are skipped. Empty
+	 * means every mode, in the offered order.
+	 *
+	 * A mode left out is never cycled into, and while it is active the cycle
+	 * refuses: it is left by its own controls. That is how a mode button
+	 * stays clear of a curb crossing, which selecting another mode aborts
+	 * wherever its wheels are, and of the low-level mode, where the stick
+	 * drives nothing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
+	TArray<FName> CycleModeIds;
+
 	/** Also drive the 5-bar linkages to the incoming mode's stance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive Mode")
 	bool bApplyLinkageStance = true;
@@ -171,7 +185,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Drive Mode")
 	bool SetActiveMode(FName ModeId);
 
-	/** Next mode in the offered order, wrapping. */
+	/** Next mode in CycleModeIds (else the offered order), wrapping. False when
+	 *  there is no other mode to go to, or the active mode is not in the cycle. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Drive Mode")
 	bool CycleMode();
 

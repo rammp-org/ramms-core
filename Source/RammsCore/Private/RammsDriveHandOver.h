@@ -656,4 +656,13 @@ namespace RammsDrive
 		double				   Elapsed = 0.0;
 		FString				   Status;
 	};
+
+	/**
+	 * The mode a mode button steps to (URammsDriveModeSelector::CycleMode): the
+	 * index in Offered (the robot's modes, in order) of the one after Active in
+	 * CycleIds -- ids not offered skipped -- or, CycleIds empty, after Active in
+	 * Offered (the first when Active is INDEX_NONE). INDEX_NONE when the cycle
+	 * has fewer than two modes, or Active is not in a CycleIds cycle.
+	 */
+	int32 NextInCycle(const TArray<FName>& Offered, const TArray<FName>& CycleIds, int32 Active);
 } // namespace RammsDrive

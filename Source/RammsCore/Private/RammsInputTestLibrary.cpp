@@ -2,6 +2,7 @@
 
 #include "RammsInputTestLibrary.h"
 
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 
 #if WITH_EDITOR
@@ -9,6 +10,7 @@
 	#include "InputKeyEventArgs.h"
 
 TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>> URammsInputTestLibrary::InjectedKeys;
+TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>> URammsInputTestLibrary::InjectedAxes;
 
 bool URammsInputTestLibrary::SetKeyDown(APlayerController* PlayerController, FName KeyName, bool bDown)
 {
@@ -50,15 +52,64 @@ bool URammsInputTestLibrary::IsKeyDown(APlayerController* PlayerController, FNam
 	return PlayerController && Key.IsValid() && PlayerController->IsInputKeyDown(Key);
 }
 
+bool URammsInputTestLibrary::SetAxisKey(APlayerController* PlayerController, FName KeyName, float Value)
+{
+	const FKey Key(KeyName);
+	if (!PlayerController || !Key.IsValid() || !Key.IsAxis1D())
+	{
+		return false;
+	}
+	// One sample, as a pad's driver sends one per change: the key's state
+	// holds until the next (UPlayerInput keeps an axis with no samples).
+	const UWorld*	   World = PlayerController->GetWorld();
+	FInputKeyEventArgs Args(
+		/*Viewport=*/nullptr,
+		IPlatformInputDeviceMapper::Get().GetDefaultInputDevice(),
+		Key,
+		Value,
+		World ? World->GetDeltaSeconds() : 0.0f,
+		/*NumSamples=*/1,
+		FPlatformTime::Cycles64());
+	PlayerController->InputKey(Args);
+
+	if (Value != 0.0f)
+	{
+		InjectedAxes.FindOrAdd(PlayerController).Add(Key);
+	}
+	else if (TSet<FKey>* Moved = InjectedAxes.Find(PlayerController))
+	{
+		Moved->Remove(Key);
+		if (Moved->IsEmpty())
+		{
+			InjectedAxes.Remove(PlayerController);
+		}
+	}
+	return true;
+}
+
 void URammsInputTestLibrary::ReleaseAllInjectedKeys(APlayerController* PlayerController)
 {
 	// Drop entries whose controller has gone; nothing can release those.
-	for (auto It = InjectedKeys.CreateIterator(); It; ++It)
+	for (TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>>* Injected : { &InjectedKeys, &InjectedAxes })
 	{
-		if (!It.Key().IsValid())
+		for (auto It = Injected->CreateIterator(); It; ++It)
 		{
-			It.RemoveCurrent();
+			if (!It.Key().IsValid())
+			{
+				It.RemoveCurrent();
+			}
 		}
+	}
+
+	if (const TSet<FKey>* Moved = InjectedAxes.Find(PlayerController))
+	{
+		// Copy: SetAxisKey mutates the set as it centres.
+		const TSet<FKey> Axes = *Moved;
+		for (const FKey& Key : Axes)
+		{
+			SetAxisKey(PlayerController, Key.GetFName(), 0.0f);
+		}
+		InjectedAxes.Remove(PlayerController);
 	}
 
 	const TSet<FKey>* Found = InjectedKeys.Find(PlayerController);
