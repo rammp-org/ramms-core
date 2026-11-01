@@ -190,6 +190,17 @@ void URammsMebotCurbController::SetDriveModeActive(bool bActive)
 	bModeActive = bActive;
 	LastSimTime = -1.0;
 	bHandBackWarned = false;
+	if (bActive && !bStartPending)
+	{
+		// Selected by hand (the panel, the mode button) rather than by a start: start the crossing it is for. With
+		// none to run -- no curb ahead, or one it cannot cross -- it says why and hands straight back.
+		FString Why;
+		if (!StartCrossing(Why))
+		{
+			UE_LOG(LogRammsMebotCurb, Warning, TEXT("%s: curb crossing refused: %s"), *GetNameSafe(GetOwner()), *Why);
+			Status = Why;
+		}
+	}
 	if (!bActive)
 	{
 		if (IsCrossing())
@@ -758,11 +769,21 @@ void URammsMebotCurbController::Step(float Dt)
 			Arrive(SupportAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 3.0f, bClimb ? ERammsMebotCurbPhase::RearDown : ERammsMebotCurbPhase::Lower);
 			break;
 		case ERammsMebotCurbPhase::Lower:
-			if (!Moving())
+		{
+			// Lowering on the braked drive wheels swings them on their arms, which can roll the robot back: if the
+			// rear omni wheels came back over the edge, creep on until they are past it again before setting them down.
+			const bool bPast = SupportAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 3.0f;
+			if (PhaseValue == 0.0f && Moving())
 			{
-				EnterPhase(ERammsMebotCurbPhase::RearDown);
+				break;
 			}
+			if (PhaseValue == 0.0f && !bPast && FMath::IsNearlyZero(DriveCmS))
+			{
+				DriveAt(Config.CreepSpeedCmS, true, bPowered);
+			}
+			Arrive(bPast, ERammsMebotCurbPhase::RearDown);
 			break;
+		}
 		case ERammsMebotCurbPhase::RearDown:
 			if (StepTouchdown(Dt))
 			{

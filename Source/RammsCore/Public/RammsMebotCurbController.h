@@ -192,8 +192,9 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
  * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one), and a
  * finished or stopped crossing hands back to ReturnModeId once both drive wheels are on the ground. Stopped
  * with them up, nothing in that mode would hold the robot, so it holds the wheels (the powered front omni
- * wheels' hubs at rest) and leaves the lifts to the operator until they are down. Selected by hand, with no
- * crossing to run, it hands straight back; another mode being selected aborts it.
+ * wheels' hubs at rest) and leaves the lifts to the operator until they are down. Selected by hand (a panel,
+ * the mode button) it starts the crossing ahead, as curb.negotiate does; with none to run it says why (the
+ * status) and hands straight back. Another mode being selected aborts it.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsMebotCurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
