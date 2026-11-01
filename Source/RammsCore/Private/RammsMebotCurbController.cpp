@@ -366,9 +366,11 @@ void URammsMebotCurbController::Finish(bool bAborted, const FString& Why)
 	Phase = bAborted ? ERammsMebotCurbPhase::Aborted : ERammsMebotCurbPhase::Done;
 	Status = Why;
 	// Braked where it stands, it hands back on the next tick: the other mode holds it from there. Stopped with
-	// the drive wheels up, that mode would hold nothing that touches the ground: it holds on the front omni
-	// wheels' hubs until the operator has the drive wheels down.
-	bHoldUntilDown = !DriveWheelsDown();
+	// the drive wheels up (lifted and not yet touched down: a wheel a few millimetres over the curb reads as on
+	// it), that mode would hold nothing that carries load: it holds on the front omni wheels' hubs until the
+	// operator has the drive wheels down.
+	bHoldUntilDown = bDriveWheelsUp;
+	bHoldContact[0] = bHoldContact[1] = false;
 	HoldWheels(bHoldUntilDown);
 	// The lifts stay where they are; the rear keeps its trim.
 	if (bLevel)
@@ -427,7 +429,7 @@ void URammsMebotCurbController::TickComponent(float DeltaTime, ELevelTick TickTy
 	}
 	// Nothing to run (finished, stopped, or the mode selected by hand): hand back, unless a crossing stopped with
 	// the drive wheels up and they are not down yet.
-	if (bHoldUntilDown && !DriveWheelsDown())
+	if (bHoldUntilDown && !DriveWheelsLoaded())
 	{
 		return;
 	}
@@ -450,6 +452,7 @@ void URammsMebotCurbController::Begin()
 	}
 	RearTrimRad = 0.0f;
 	bLevel = true;
+	bDriveWheelsUp = false;
 	SettleLeft = 0.0f;
 	HoldWheels();
 	PhaseLog.Reset();
@@ -489,6 +492,7 @@ void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
 			StartTouchdown(ESupport::Front, FarZ);
 			break;
 		case ERammsMebotCurbPhase::DriveUp:
+			bDriveWheelsUp = true; // until their touchdown is done
 			bOk = StartHeights({ { ESupport::Drive, Lift } }, 0.5f);
 			break;
 		case ERammsMebotCurbPhase::DriveOver:
@@ -730,6 +734,7 @@ void URammsMebotCurbController::Step(float Dt)
 		case ERammsMebotCurbPhase::DriveDown:
 			if (StepTouchdown(Dt))
 			{
+				bDriveWheelsUp = false;
 				EnterPhase(bPowered ? ERammsMebotCurbPhase::RearUp : ERammsMebotCurbPhase::PullAft);
 			}
 			break;
@@ -1135,19 +1140,34 @@ bool URammsMebotCurbController::IsCrossing() const
 	return Phase != ERammsMebotCurbPhase::Idle && Phase != ERammsMebotCurbPhase::Done && Phase != ERammsMebotCurbPhase::Aborted;
 }
 
-bool URammsMebotCurbController::DriveWheelsDown() const
+bool URammsMebotCurbController::DriveWheelsLoaded()
 {
-	for (FName Name : { Config.DriveWheelLeftBody, Config.DriveWheelRightBody })
+	// Each on the ground under it and lowered on past where it first met it by half the preload: carrying load,
+	// not hovering a few millimetres over it.
+	const FName							Wheels[2] = { Config.DriveWheelLeftBody, Config.DriveWheelRightBody };
+	const int32							Elevators[2] = { ElevatorL, ElevatorR };
+	const RammsMebotCurb::FSupportTable Table = MebotCurbTable(Config.DriveTable);
+	bool								bLoaded = true;
+	for (int32 i = 0; i < 2; ++i)
 	{
-		const USceneComponent* Wheel = Body(Name);
+		const USceneComponent* Wheel = Body(Wheels[i]);
 		float				   Ground = 0.0f;
 		if (!Wheel || !SurfaceZ(Wheel->GetComponentLocation(), Ground)
 			|| Wheel->GetComponentLocation().Z - Config.DriveWheelRadiusCm - Ground > Config.TouchToleranceCm)
 		{
-			return false;
+			bHoldContact[i] = false;
+			bLoaded = false;
+			continue;
 		}
+		const float Height = Table.HeightAt(Base->GetMotorValue(Lifts[Elevators[i]].Motor));
+		if (!bHoldContact[i])
+		{
+			bHoldContact[i] = true;
+			HoldContactCm[i] = Height;
+		}
+		bLoaded &= Height <= HoldContactCm[i] - 0.5f * Config.TouchPreloadCm;
 	}
-	return true;
+	return bLoaded;
 }
 
 float URammsMebotCurbController::HeightNow(ESupport S) const

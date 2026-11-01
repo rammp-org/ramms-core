@@ -315,7 +315,7 @@ private:
 	TArray<int32>				   LiftsOf(ESupport S) const;
 	float						   TranslatorReachCm() const;
 	bool						   IsCrossing() const;
-	bool						   DriveWheelsDown() const; // both on the ground under them
+	bool						   DriveWheelsLoaded(); // both down on the ground under them, taking load
 
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
@@ -325,6 +325,9 @@ private:
 	bool				 bModeActive = false;
 	bool				 bStartPending = false;	 // asked to start; begins once the mode is active
 	bool				 bHoldUntilDown = false; // stopped with the drive wheels up: no hand-back until they are down
+	bool				 bDriveWheelsUp = false; // lifted by this crossing, not yet touched down again
+	bool				 bHoldContact[2] = { false, false };
+	float				 HoldContactCm[2] = { 0.0f, 0.0f }; // each drive wheel's table height where it met the ground
 	bool				 bHandBackWarned = false;
 	bool				 bPowered = false; // the front omni wheels have hub motors
 	bool				 bClimb = true;
