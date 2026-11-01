@@ -8,6 +8,40 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "DrawDebugHelpers.h"
+#include "RammsDriveMode.h"
+
+namespace
+{
+	/** The motors an active drive mode on Self's robot claims (a curb crossing's lifts while it runs). This
+	 *  controller leaves them alone and follows them meanwhile, so it takes them back where they stand
+	 *  instead of from its own stale ramp. */
+	TSet<FName> MebotMotorsClaimedByActiveMode(const UActorComponent* Self)
+	{
+		TSet<FName>	  Out;
+		const AActor* Owner = Self ? Self->GetOwner() : nullptr;
+		if (!Owner)
+		{
+			return Out;
+		}
+		for (UActorComponent* C : Owner->GetComponents())
+		{
+			const IRammsDriveMode*			Mode = Cast<IRammsDriveMode>(C);
+			const IRammsControlContributor* Contributor = Cast<IRammsControlContributor>(C);
+			if (C != Self && Mode && Contributor && Mode->IsDriveModeActive())
+			{
+				TArray<FName> Ids;
+				Contributor->GetClaimedMotorIds(Ids);
+				Out.Append(Ids);
+			}
+		}
+		return Out;
+	}
+
+	bool MebotMotorYielded(const UActorComponent* Self, FName MotorId)
+	{
+		return !MotorId.IsNone() && MebotMotorsClaimedByActiveMode(Self).Contains(MotorId);
+	}
+} // namespace
 
 UMebotControllerComponent::UMebotControllerComponent()
 {
@@ -610,9 +644,18 @@ USkeletalMeshComponent* UMebotControllerComponent::GetOwnerSkeletalMesh()
 
 void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 {
-	const bool bViaBase = IsUsingRobotBase();
+	const bool		  bViaBase = IsUsingRobotBase();
+	const TSet<FName> Yielded = bViaBase ? MebotMotorsClaimedByActiveMode(this) : TSet<FName>();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
+		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
+		{
+			// Another mode drives it: follow it, writing nothing.
+			const float Degrees = FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
+			Motor.CurrentAngle = Motor.TargetAngle = Motor.bInvertDirection ? -Degrees : Degrees;
+			Motor.bPendingApply = false;
+			continue;
+		}
 		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone())))
 		{
 			const bool bMoving = !FMath::IsNearlyEqual(Motor.CurrentAngle, Motor.TargetAngle);
@@ -643,9 +686,17 @@ void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 
 void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
 {
-	const bool bViaBase = IsUsingRobotBase();
+	const bool		  bViaBase = IsUsingRobotBase();
+	const TSet<FName> Yielded = bViaBase ? MebotMotorsClaimedByActiveMode(this) : TSet<FName>();
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
+		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
+		{
+			// Another mode drives it: follow it, writing nothing.
+			Motor.CurrentPosition = Motor.TargetPosition = RobotBase->GetMotorValue(Motor.ResolvedMotorId);
+			Motor.bPendingApply = false;
+			continue;
+		}
 		if (Motor.bEnabled && (Motor.CachedConstraint || (bViaBase && !Motor.ResolvedMotorId.IsNone())))
 		{
 			const bool bMoving = !FMath::IsNearlyEqual(Motor.CurrentPosition, Motor.TargetPosition);
@@ -962,11 +1013,17 @@ void UMebotControllerComponent::DescribeControls(FRammsControlSurface& OutSurfac
 
 bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
 {
+	// A motor another mode drives (a curb crossing's lifts) refuses commands until it is back.
 	const FName Constraint = ConstraintFor(Id);
+	const bool	bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& M : AngularMotors)
 	{
 		if (M.ConstraintName == Constraint)
 		{
+			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			{
+				return false;
+			}
 			if (!M.bEnabled)
 			{
 				SetAngularMotorEnabled(Constraint, true);
@@ -979,6 +1036,10 @@ bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
 	{
 		if (M.ConstraintName == Constraint)
 		{
+			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			{
+				return false;
+			}
 			if (!M.bEnabled)
 			{
 				SetLinearMotorEnabled(Constraint, true);
@@ -992,11 +1053,17 @@ bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
 
 bool UMebotControllerComponent::ReleaseControl(FName Id)
 {
+	// Nor does it let go of one: the other mode holds it.
 	const FName Constraint = ConstraintFor(Id);
+	const bool	bViaBase = IsUsingRobotBase();
 	for (const FAngularMotorConfig& M : AngularMotors)
 	{
 		if (M.ConstraintName == Constraint)
 		{
+			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			{
+				return false;
+			}
 			SetAngularMotorEnabled(Constraint, false);
 			return !M.bEnabled; // stays enabled when the backend can't let go
 		}
@@ -1005,6 +1072,10 @@ bool UMebotControllerComponent::ReleaseControl(FName Id)
 	{
 		if (M.ConstraintName == Constraint)
 		{
+			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			{
+				return false;
+			}
 			SetLinearMotorEnabled(Constraint, false);
 			return !M.bEnabled;
 		}
