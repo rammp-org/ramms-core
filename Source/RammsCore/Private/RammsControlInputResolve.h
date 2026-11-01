@@ -15,8 +15,8 @@ namespace RammsControlInput
 	 * A Stick binding's targets on Surface. Ids holds what X / Y / Z would feed
 	 * as a plain Axis binding (ControlId, ControlIdY, ControlIdZ, wildcards
 	 * expanded); on return X feeds the control the surface pairs with
-	 * ControlIdY, when it pairs it with one that is on the surface, and Z only
-	 * what X and Y do not.
+	 * ControlIdY, when it pairs it with one that is on the surface, Z only
+	 * what X and Y do not, and none of them a control the surface lacks.
 	 */
 	void ResolveStick(const FRammsControlSurface& Surface, FName ControlIdY, TArray<FName> (&Ids)[3]);
 

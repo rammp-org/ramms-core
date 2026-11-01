@@ -94,16 +94,25 @@ bool FRammsInputStickPairing::RunTest(const FString& Parameters)
 		FString(TEXT("drive.turn|drive.forward|")));
 	TestEqual(TEXT("partner not on the surface: X is ControlId"),
 		InputStickOn(InputSurface({ InputDriveAxis(InputForward(), InputStrafe()), InputDriveAxis(InputTurn(), NAME_None) })), FString(TEXT("drive.turn|drive.forward|")));
-	// No forward on the surface (the low-level mode): nothing re-routed.
-	TestEqual(TEXT("no drive axes"), InputStickOn(FRammsControlSurface()), FString(TEXT("drive.turn|drive.forward|")));
+	// No drive axes on the surface (the low-level mode): the stick drives
+	// nothing, so their coming back is a change a held stick waits out.
+	TestEqual(TEXT("no drive axes: nothing"), InputStickOn(FRammsControlSurface()), FString(TEXT("||")));
+	TestEqual(TEXT("only forward: X drives nothing"), InputStickOn(InputSurface({ InputDriveAxis(InputForward(), NAME_None) })), FString(TEXT("|drive.forward|")));
 
 	// Z drops only what X or Y feed: a twist bound elsewhere keeps its control.
-	TArray<FName> Ids[3] = { { InputTurn() }, { InputForward() }, { InputTurn(), FName(TEXT("camera.orbit_yaw")) } };
-	RammsControlInput::ResolveStick(Holonomic, InputForward(), Ids);
+	const FName			 Orbit(TEXT("camera.orbit_yaw"));
+	FRammsControlSurface HolonomicCamera = Holonomic, DifferentialCamera = Differential;
+	HolonomicCamera.Add(InputDriveAxis(Orbit, NAME_None));
+	DifferentialCamera.Add(InputDriveAxis(Orbit, NAME_None));
+	TArray<FName> Ids[3] = { { InputTurn() }, { InputForward() }, { InputTurn(), Orbit } };
+	RammsControlInput::ResolveStick(HolonomicCamera, InputForward(), Ids);
 	TestEqual(TEXT("holonomic, Z also bound to the camera: both kept"), Ids[2].Num(), 2);
-	RammsControlInput::ResolveStick(Differential, InputForward(), Ids);
+	RammsControlInput::ResolveStick(DifferentialCamera, InputForward(), Ids);
 	TestTrue(TEXT("differential, Z also bound to the camera: the camera kept, the turn dropped"),
-		Ids[2].Num() == 1 && Ids[2][0] == FName(TEXT("camera.orbit_yaw")));
+		Ids[2].Num() == 1 && Ids[2][0] == Orbit);
+	TArray<FName> NoCamera[3] = { { InputTurn() }, { InputForward() }, { InputTurn(), Orbit } };
+	RammsControlInput::ResolveStick(Holonomic, InputForward(), NoCamera);
+	TestTrue(TEXT("holonomic, the camera not on the surface: dropped"), NoCamera[2].Num() == 1 && NoCamera[2][0] == InputTurn());
 	return true;
 }
 
@@ -160,6 +169,13 @@ bool FRammsDriveCycleMode::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a missing id skipped"), NextInCycle(Offered, WithMissing, 0), 1);
 	TestEqual(TEXT("one mode on the robot: nothing to cycle"), NextInCycle({ FName(TEXT("differential")) }, Riding, 0), INDEX_NONE);
 	TestEqual(TEXT("one listed mode: nothing to cycle"), NextInCycle(Offered, { FName(TEXT("differential")) }, 1), INDEX_NONE);
+
+	// Mid-switch, from where it is going: a switch into a mode left out is not
+	// cancelled, and one between riding modes steps on from the incoming one.
+	TestEqual(TEXT("differential switching to a curb crossing: refused"), NextInCycle(Offered, Riding, 1, 3), INDEX_NONE);
+	TestEqual(TEXT("differential switching to holonomic: back to differential"), NextInCycle(Offered, Riding, 1, 0), 1);
+	TestEqual(TEXT("a curb crossing handing back to differential: refused until it has"), NextInCycle(Offered, Riding, 3, INDEX_NONE), INDEX_NONE);
+	TestEqual(TEXT("no list, switching to low level: on to curb"), NextInCycle(Offered, None, 1, 2), 3);
 	return true;
 }
 

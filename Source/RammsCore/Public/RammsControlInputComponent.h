@@ -34,7 +34,11 @@ struct FInputActionInstance;
  * A stick held off centre when the surface changes what one of its axes
  * drives (X from strafe to turn, as a switch from a holonomic mode to a
  * differential one does) sends that axis nothing until it comes back to
- * centre: a stick held sideways to strafe does not become a turn.
+ * centre: a stick held sideways to strafe does not become a turn. A control
+ * on the surface only counts, so a mode where the stick drives nothing and
+ * back is such a change too. What a binding commanded and no longer drives is
+ * released then (unless another binding holds it), and letting go of a
+ * binding releases only what it commanded.
  *
  * InjectAction lets touch panels and tests feed an action as if a key were
  * held, through the same path.
@@ -93,6 +97,8 @@ private:
 		bool										bHeld = false;
 		bool										bFired = false;
 		bool										bAwaitCentre[3] = { false, false, false };
+		TSet<FName>									Commanded;									 // what it set and holds
+		ERammsControlSource							PressSource = ERammsControlSource::Keyboard; // the device that pressed it
 	};
 
 	struct FInjection
@@ -112,9 +118,14 @@ private:
 	void	 OnCompleted(int32 Slot, const FInputActionInstance& Instance);
 	float	 Component(const FVector& V, int32 Axis) const { return Axis == 0 ? static_cast<float>(V.X) : (Axis == 1 ? static_cast<float>(V.Y) : static_cast<float>(V.Z)); }
 
-	/** Who drives Slot's action now: Gamepad when a gamepad key mapped to it is
-	 *  off rest and no keyboard key is down, else Source. */
+	/** Who drives Slot's action: Gamepad when a gamepad key mapped to it is off
+	 *  rest and no keyboard key is down, Source when a keyboard key is; with
+	 *  neither, the device that pressed it (Source when none did). */
 	ERammsControlSource SourceOf(const FSlot& Slot) const;
+	bool				DeviceOf(const FSlot& Slot, ERammsControlSource& OutSource) const; // false: no mapped key is active
+
+	/** Slot no longer drives Id: released, unless another binding still holds it. */
+	void LetGo(FSlot& Slot, FName Id);
 
 	UPROPERTY(Transient)
 	TObjectPtr<UObject> Sink; // implements IRammsControlSink (+ IRammsControlSurfaceProvider)
