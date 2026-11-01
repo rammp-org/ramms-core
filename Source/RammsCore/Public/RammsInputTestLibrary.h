@@ -52,9 +52,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Input Test")
 	static bool IsKeyDown(APlayerController* PlayerController, FName KeyName);
 
+	/**
+	 * Move an analog key -- a gamepad stick or trigger axis ("Gamepad_LeftX",
+	 * "Gamepad_LeftY", "Gamepad_RightX") -- to Value, as a gamepad reports it.
+	 *
+	 * It stays there until set again (an axis with no new sample keeps its
+	 * state, as a pad held still does), and the stick's 2-D key
+	 * (Gamepad_Left2D) follows its X and Y. So a test pushes a stick once and
+	 * lets go with 0, and Enhanced Input sees the key itself: its dead zone,
+	 * the mapping's swizzles, and which device drove the action.
+	 *
+	 * @return False when the controller is null or the name is not an analog key.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Input Test",
+		meta = (ToolTip = "Move an analog key (a stick axis) for tests. Editor only."))
+	static bool SetAxisKey(APlayerController* PlayerController, FName KeyName, float Value);
+
 	/** Release every key this library pressed on this controller and is still
-	 *  holding. A test that fails partway would otherwise leave a key stuck
-	 *  down, and the next test inherits it. */
+	 *  holding, and put every axis it moved back to 0. A test that fails
+	 *  partway would otherwise leave a key stuck down, and the next test
+	 *  inherits it. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Input Test")
 	static void ReleaseAllInjectedKeys(APlayerController* PlayerController);
 
@@ -67,5 +84,7 @@ private:
 	 *  left tracking them. Weak keys, so a controller that goes away with a
 	 *  key held does not keep it alive. */
 	static TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>> InjectedKeys;
+	/** Axes moved off 0 through SetAxisKey, per controller, likewise. */
+	static TMap<TWeakObjectPtr<APlayerController>, TSet<FKey>> InjectedAxes;
 #endif
 };

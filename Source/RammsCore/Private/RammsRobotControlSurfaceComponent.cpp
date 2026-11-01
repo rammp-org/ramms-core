@@ -416,7 +416,10 @@ bool URammsRobotControlSurfaceComponent::TriggerAction_Implementation(FName Id, 
 {
 	EnsureBuilt();
 	const FRammsControlAxis* Axis = Surface.Find(Id);
-	if (!Axis || !Axis->IsAction() || !MayDrive(Id, Source))
+	// An Action fires; an Enum steps to its next choice where its owner offers
+	// that -- the drive-mode selector's, for a controller's mode button.
+	const bool bTriggerable = Axis && (Axis->IsAction() || (Axis->Kind == ERammsControlKind::Enum && !Axis->bReadOnly));
+	if (!bTriggerable || !MayDrive(Id, Source))
 	{
 		return false;
 	}

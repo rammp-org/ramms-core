@@ -860,15 +860,46 @@ bool URammsDriveModeSelector::SetActiveMode(FName ModeId)
 	return State->Switcher.Request(Host, Wanted, SampleOf(State.Get()), Config);
 }
 
+int32 RammsDrive::NextInCycle(const TArray<FName>& Offered, const TArray<FName>& CycleIds, int32 Active, int32 Pending)
+{
+	TArray<int32> Cycle;
+	if (CycleIds.IsEmpty())
+	{
+		for (int32 i = 0; i < Offered.Num(); ++i)
+		{
+			Cycle.Add(i);
+		}
+	}
+	for (const FName& Id : CycleIds)
+	{
+		if (const int32 i = Offered.Find(Id); i != INDEX_NONE)
+		{
+			Cycle.AddUnique(i);
+		}
+	}
+	// A mode outside the list is left by its own controls, and a switch into
+	// one is not cancelled. With no list every mode is in the cycle, and none
+	// active starts at the first.
+	const int32 At = Cycle.Find(Pending != INDEX_NONE ? Pending : Active);
+	if (Cycle.Num() < 2 || (At == INDEX_NONE && !CycleIds.IsEmpty()))
+	{
+		return INDEX_NONE;
+	}
+	return Cycle[(At + 1) % Cycle.Num()];
+}
+
 bool URammsDriveModeSelector::CycleMode()
 {
-	if (Modes.Num() < 2)
+	// Index for index with Modes, which ActiveIndex counts in.
+	TArray<FName> Offered;
+	for (UActorComponent* Component : Modes)
 	{
-		return false;
+		const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component);
+		Offered.Add(Mode ? Mode->GetDriveModeId() : NAME_None);
 	}
-	const int32			   Next = (ActiveIndex() + 1) % Modes.Num();
-	const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Modes[Next]);
-	return Mode && SetActiveMode(Mode->GetDriveModeId());
+	const int32 Pending = IsSwitchingMode() ? State->Switcher.GetPending() : INDEX_NONE;
+	const int32 Next = RammsDrive::NextInCycle(Offered, CycleModeIds, ActiveIndex(), Pending);
+	return Next != INDEX_NONE && SetActiveMode(Offered[Next]);
 }
 
 // --- control surface -----------------------------------------------------------

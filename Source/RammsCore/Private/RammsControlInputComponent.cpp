@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsControlInputComponent.h"
+#include "RammsControlInputResolve.h"
 #include "RammsControlSink.h"
 #include "RammsControlSurfaceProvider.h"
 #include "EnhancedInputComponent.h"
@@ -11,6 +12,34 @@
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+
+void RammsControlInput::ResolveStick(const FRammsControlSurface& Surface, FName ControlIdY, TArray<FName> (&Ids)[3])
+{
+	// X: whatever the surface pairs with Y's control -- the live drive mode's
+	// own stick -- else ControlId's; Z: only what X and Y do not already feed.
+	const FRammsControlAxis* Y = Surface.Find(ControlIdY);
+	if (Y && !Y->PairedAxis.IsNone() && Surface.Find(Y->PairedAxis))
+	{
+		Ids[0] = { Y->PairedAxis };
+	}
+	// Only controls on the surface: one that leaves it (the low-level mode
+	// drives nothing) and comes back is a change, which a held stick waits out.
+	for (TArray<FName>& Axis : Ids)
+	{
+		Axis.RemoveAll([&Surface](const FName& Id) { return !Surface.Find(Id); });
+	}
+	Ids[2].RemoveAll([&Ids](const FName& Id) { return Ids[0].Contains(Id) || Ids[1].Contains(Id); });
+}
+
+float RammsControlInput::StepCentre(bool& bAwait, float Value)
+{
+	if (!bAwait)
+	{
+		return Value;
+	}
+	bAwait = FMath::Abs(Value) > CentreBand;
+	return 0.0f;
+}
 
 URammsControlInputComponent::URammsControlInputComponent()
 {
@@ -121,9 +150,104 @@ void URammsControlInputComponent::ResolveSlots()
 			continue;
 		}
 		const FRammsControlInputBinding& B = Map->Bindings[Slot.Index];
-		Slot.Ids[0] = Expand(B.ControlId);
-		Slot.Ids[1] = Expand(B.ControlIdY);
-		Slot.Ids[2] = Expand(B.ControlIdZ);
+		TArray<FName>					 Ids[3] = { Expand(B.ControlId), Expand(B.ControlIdY), Expand(B.ControlIdZ) };
+		const bool						 bStick = B.Mode == ERammsControlInputMode::Stick;
+		if (bStick)
+		{
+			RammsControlInput::ResolveStick(CachedSurface, B.ControlIdY, Ids);
+		}
+		for (int32 a = 0; a < 3; ++a)
+		{
+			// A stick held off centre while what it drives changes: nothing to
+			// the new control until it has been back to centre.
+			if (bStick && Slot.bHeld && Ids[a] != Slot.Ids[a])
+			{
+				Slot.bAwaitCentre[a] = true;
+			}
+			Slot.Ids[a] = MoveTemp(Ids[a]);
+		}
+		// What it commanded and drives no more is let go: a turn carried into
+		// a new mode must not outlive the stick that now strafes.
+		TArray<FName> Dropped;
+		for (const TPair<FName, FCommand>& Held : Slot.Commanded)
+		{
+			const FName Id = Held.Key;
+			if (!Slot.Ids[0].Contains(Id) && !Slot.Ids[1].Contains(Id) && !Slot.Ids[2].Contains(Id))
+			{
+				Dropped.Add(Id);
+			}
+		}
+		for (const FName& Id : Dropped)
+		{
+			LetGo(Slot, Id);
+		}
+	}
+}
+
+bool URammsControlInputComponent::MergedCommand(FName Id, FCommand& Out) const
+{
+	// The largest value any binding holding it sends: a stick at rest beside
+	// a held key (or a stick whose other axis moves) sends 0, which must not
+	// cancel the key.
+	bool bAny = false;
+	for (const FSlot& Slot : Slots)
+	{
+		if (const FCommand* C = Slot.Commanded.Find(Id))
+		{
+			if (!bAny || FMath::Abs(C->Value) > FMath::Abs(Out.Value))
+			{
+				Out = *C;
+			}
+			bAny = true;
+		}
+	}
+	return bAny;
+}
+
+bool URammsControlInputComponent::Command(FSlot& Slot, FName Id, float Value, ERammsControlSource From)
+{
+	Slot.Commanded.Add(Id, { Value, From });
+	FCommand Merged;
+	MergedCommand(Id, Merged);
+	const bool bOk = IRammsControlSink::Execute_SetAxis(Sink, Id, Merged.Value, Merged.Source);
+	if (bOk)
+	{
+		HeldAxes.Add(Id, Merged.Source);
+	}
+	else
+	{
+		Slot.Commanded.Remove(Id);
+	}
+	if (bLogCommands)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ControlInput] %s = %.3f (this binding %.3f) -> %s"), *Id.ToString(), Merged.Value, Value, bOk ? TEXT("ok") : TEXT("refused"));
+	}
+	return bOk;
+}
+
+void URammsControlInputComponent::LetGo(FSlot& Slot, FName Id)
+{
+	Slot.Commanded.Remove(Id);
+	// Another binding holding it drives it on, at its own value.
+	FCommand Merged;
+	if (MergedCommand(Id, Merged))
+	{
+		if (Sink && IRammsControlSink::Execute_SetAxis(Sink, Id, Merged.Value, Merged.Source))
+		{
+			HeldAxes.Add(Id, Merged.Source);
+		}
+		return;
+	}
+	// As the source that holds it; one this component never set, as its own.
+	const ERammsControlSource* HeldAs = HeldAxes.Find(Id);
+	if (Sink)
+	{
+		IRammsControlSink::Execute_ReleaseAxis(Sink, Id, HeldAs ? *HeldAs : Source);
+	}
+	HeldAxes.Remove(Id);
+	if (bLogCommands)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ControlInput] release %s"), *Id.ToString());
 	}
 }
 
@@ -185,13 +309,20 @@ void URammsControlInputComponent::TryBind()
 		switch (B.Mode)
 		{
 			case ERammsControlInputMode::Action:
+				// Fired on the first Triggered of a press (OnTriggered), not on
+				// Started, so that a Hold trigger on the mapping holds it back.
+				// Started notes the device, for a trigger that fires on release.
 				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Started, [this, s](const FInputActionInstance& I) { OnStarted(s, I); }).GetHandle());
+				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Triggered, [this, s](const FInputActionInstance& I) { OnTriggered(s, I); }).GetHandle());
+				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Completed, [this, s](const FInputActionInstance& I) { OnCompleted(s, I); }).GetHandle());
+				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Canceled, [this, s](const FInputActionInstance& I) { OnCompleted(s, I); }).GetHandle());
 				break;
 			case ERammsControlInputMode::IncrementRate:
 				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Started, [this, s](const FInputActionInstance& I) { OnStarted(s, I); }).GetHandle());
 				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Triggered, [this, s](const FInputActionInstance& I) { OnTriggered(s, I); }).GetHandle());
 				break;
 			case ERammsControlInputMode::Axis:
+			case ERammsControlInputMode::Stick:
 			default:
 				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Triggered, [this, s](const FInputActionInstance& I) { OnTriggered(s, I); }).GetHandle());
 				BindingHandles.Add(EIC->BindActionInstanceLambda(B.Action, ETriggerEvent::Completed, [this, s](const FInputActionInstance& I) { OnCompleted(s, I); }).GetHandle());
@@ -233,12 +364,19 @@ void URammsControlInputComponent::Unbind()
 	// Let go of everything this driver was holding.
 	if (Sink)
 	{
-		for (const FName& Id : HeldAxes)
+		for (const TPair<FName, ERammsControlSource>& Held : HeldAxes)
 		{
-			IRammsControlSink::Execute_ReleaseAxis(Sink, Id, Source);
+			IRammsControlSink::Execute_ReleaseAxis(Sink, Held.Key, Held.Value);
 		}
 	}
 	HeldAxes.Reset();
+	for (FSlot& Slot : Slots)
+	{
+		Slot.bHeld = Slot.bFired = false;
+		Slot.bAwaitCentre[0] = Slot.bAwaitCentre[1] = Slot.bAwaitCentre[2] = false;
+		Slot.Commanded.Reset();
+		Slot.PressSource = Source;
+	}
 	IncrementTargets.Reset();
 	Injections.Reset();
 	BoundInputComponent = nullptr;
@@ -340,7 +478,8 @@ void URammsControlInputComponent::OnStarted(int32 SlotIndex, const FInputActionI
 	{
 		return;
 	}
-	const FSlot&				 Slot = Slots[SlotIndex];
+	ResolveSlots(); // another callback this input frame may have changed the surface
+	FSlot&						 Slot = Slots[SlotIndex];
 	const URammsControlInputMap* Map = Slot.Map.Get();
 	if (!Map || !Map->Bindings.IsValidIndex(Slot.Index))
 	{
@@ -349,14 +488,8 @@ void URammsControlInputComponent::OnStarted(int32 SlotIndex, const FInputActionI
 	const FRammsControlInputBinding& B = Map->Bindings[Slot.Index];
 	if (B.Mode == ERammsControlInputMode::Action)
 	{
-		for (const FName& Id : Slot.Ids[0])
-		{
-			const bool bOk = IRammsControlSink::Execute_TriggerAction(Sink, Id, Source);
-			if (bLogCommands)
-			{
-				UE_LOG(LogTemp, Log, TEXT("[ControlInput] trigger %s -> %s"), *Id.ToString(), bOk ? TEXT("ok") : TEXT("refused"));
-			}
-		}
+		ERammsControlSource Device = Source;
+		Slot.PressSource = DeviceOf(Slot, Device) ? Device : Source;
 	}
 	else if (B.Mode == ERammsControlInputMode::IncrementRate)
 	{
@@ -377,19 +510,49 @@ void URammsControlInputComponent::OnTriggered(int32 SlotIndex, const FInputActio
 	{
 		return;
 	}
-	const FSlot&				 Slot = Slots[SlotIndex];
+	ResolveSlots(); // another callback this input frame may have changed the surface
+	FSlot&						 Slot = Slots[SlotIndex];
 	const URammsControlInputMap* Map = Slot.Map.Get();
 	if (!Map || !Map->Bindings.IsValidIndex(Slot.Index))
 	{
 		return;
 	}
 	const FRammsControlInputBinding& B = Map->Bindings[Slot.Index];
-	const FVector					 Value = Instance.GetValue().Get<FVector>();
-	const float						 Dt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+	const ERammsControlSource		 From = SourceOf(Slot);
+	if (B.Mode == ERammsControlInputMode::Action)
+	{
+		// Once per press: Triggered repeats while a plain button is held.
+		if (Slot.bFired)
+		{
+			return;
+		}
+		Slot.bFired = true;
+		for (const FName& Id : Slot.Ids[0])
+		{
+			const bool bOk = IRammsControlSink::Execute_TriggerAction(Sink, Id, From);
+			if (bLogCommands)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[ControlInput] trigger %s -> %s"), *Id.ToString(), bOk ? TEXT("ok") : TEXT("refused"));
+			}
+		}
+		return;
+	}
+	const FVector Value = Instance.GetValue().Get<FVector>();
+	const float	  Dt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+	// Held until Completed, which IncrementRate is not bound to.
+	Slot.bHeld = B.Mode != ERammsControlInputMode::IncrementRate;
 
 	for (int32 a = 0; a < 3; ++a)
 	{
-		const float V = Component(Value, a) * B.Scale;
+		// Waiting for centre, it sends nothing at all -- not even a 0, which
+		// would take the control from whoever drives it -- up to and including
+		// the sample that ends the wait.
+		const bool	bWaiting = Slot.bAwaitCentre[a];
+		const float V = RammsControlInput::StepCentre(Slot.bAwaitCentre[a], Component(Value, a)) * B.Scale;
+		if (bWaiting)
+		{
+			continue;
+		}
 		for (const FName& Id : Slot.Ids[a])
 		{
 			if (B.Mode == ERammsControlInputMode::IncrementRate)
@@ -405,21 +568,13 @@ void URammsControlInputComponent::OnTriggered(int32 SlotIndex, const FInputActio
 				{
 					*Target = Axis.Clamp(*Target);
 				}
-				IRammsControlSink::Execute_SetAxis(Sink, Id, *Target, Source);
+				IRammsControlSink::Execute_SetAxis(Sink, Id, *Target, From);
 				// A held Position target is not "held" in the spring-back sense:
 				// letting go leaves the motor where it is.
 			}
-			else // Axis
+			else // Axis, Stick: merged with any other binding on the control
 			{
-				const bool bOk = IRammsControlSink::Execute_SetAxis(Sink, Id, V, Source);
-				if (bOk)
-				{
-					HeldAxes.Add(Id);
-				}
-				if (bLogCommands)
-				{
-					UE_LOG(LogTemp, Verbose, TEXT("[ControlInput] %s = %.3f -> %s"), *Id.ToString(), V, bOk ? TEXT("ok") : TEXT("refused"));
-				}
+				Command(Slot, Id, V, From);
 			}
 		}
 	}
@@ -431,17 +586,70 @@ void URammsControlInputComponent::OnCompleted(int32 SlotIndex, const FInputActio
 	{
 		return;
 	}
-	const FSlot& Slot = Slots[SlotIndex];
-	for (int32 a = 0; a < 3; ++a)
+	ResolveSlots(); // another callback this input frame may have changed the surface
+	FSlot&						 Slot = Slots[SlotIndex];
+	const URammsControlInputMap* Map = Slot.Map.Get();
+	const bool					 bAction = Map && Map->Bindings.IsValidIndex(Slot.Index) && Map->Bindings[Slot.Index].Mode == ERammsControlInputMode::Action;
+	Slot.bHeld = Slot.bFired = false;
+	Slot.bAwaitCentre[0] = Slot.bAwaitCentre[1] = Slot.bAwaitCentre[2] = false;
+	Slot.PressSource = Source;
+	if (bAction)
 	{
-		for (const FName& Id : Slot.Ids[a])
+		return; // nothing held
+	}
+	// Only what this binding commanded: a control it was waiting to drive is
+	// someone else's.
+	TArray<FName> Held;
+	Slot.Commanded.GetKeys(Held);
+	for (const FName& Id : Held)
+	{
+		LetGo(Slot, Id);
+	}
+}
+
+ERammsControlSource URammsControlInputComponent::SourceOf(const FSlot& Slot) const
+{
+	// The device driving it now, else the one that pressed it (a trigger that
+	// fires on release finds its key already up), else Source.
+	ERammsControlSource Device = Source;
+	return DeviceOf(Slot, Device) ? Device : Slot.PressSource;
+}
+
+bool URammsControlInputComponent::DeviceOf(const FSlot& Slot, ERammsControlSource& OutSource) const
+{
+	// The keys mapped to the action say which device drives it: a keyboard key
+	// down is Source's, else a gamepad key off rest is the gamepad's. Neither
+	// (an injection: a touch panel, a test) is no answer. Only for the
+	// player's own devices -- a component told to report another source
+	// reports it.
+	const APlayerController*				  PC = BoundPC.Get();
+	const UEnhancedInputLocalPlayerSubsystem* Subsystem = BoundSubsystem.Get();
+	const URammsControlInputMap*			  Map = Slot.Map.Get();
+	OutSource = Source;
+	if (Source != ERammsControlSource::Keyboard || !PC || !Subsystem || !Map || !Map->Bindings.IsValidIndex(Slot.Index))
+	{
+		return true;
+	}
+	bool bGamepad = false;
+	for (const FKey& Key : Subsystem->QueryKeysMappedToAction(Map->Bindings[Slot.Index].Action))
+	{
+		if (!Key.IsGamepadKey())
 		{
-			IRammsControlSink::Execute_ReleaseAxis(Sink, Id, Source);
-			HeldAxes.Remove(Id);
-			if (bLogCommands)
+			if (!Key.IsAnalog() && PC->IsInputKeyDown(Key))
 			{
-				UE_LOG(LogTemp, Verbose, TEXT("[ControlInput] release %s"), *Id.ToString());
+				return true;
 			}
 		}
+		else if (!bGamepad)
+		{
+			bGamepad = Key.IsAxis1D() ? PC->GetInputAnalogKeyState(Key) != 0.0f
+				: Key.IsAnalog()	  ? !PC->GetInputVectorKeyState(Key).IsZero()
+									  : PC->IsInputKeyDown(Key);
+		}
 	}
+	if (bGamepad)
+	{
+		OutSource = ERammsControlSource::Gamepad;
+	}
+	return bGamepad;
 }

@@ -21,12 +21,26 @@ struct FInputActionInstance;
  * Put it on a pawn that has a control sink (its URammsRobotControlSurfaceComponent)
  * and give it one or more URammsControlInputMap assets. Whenever the pawn is
  * possessed by a local player it adds each map's mapping context, binds every
- * action in the map and forwards to the sink with Source = Keyboard (or
- * Gamepad): Axis bindings set the axis and release it on Completed,
- * Action bindings fire on Started, IncrementRate bindings move a Position /
- * Velocity target at a rate while held. It unbinds and releases everything on
- * unpossess. Nothing is wired by name: the map speaks control Ids, so the same
- * component and the same context serve every robot family.
+ * action in the map and forwards to the sink with Source = Keyboard, or
+ * Gamepad for an action a gamepad key drives: Axis bindings set the axis and
+ * release it on Completed, Stick bindings too, their X following the drive
+ * mode's pairing, Action bindings fire once per press, when the action first
+ * triggers (so a Hold trigger on the mapping makes a button need holding),
+ * IncrementRate bindings move a Position / Velocity target at a rate while
+ * held. It unbinds and releases everything on unpossess. Nothing is wired by
+ * name: the map speaks control Ids, so the same component and the same
+ * context serve every robot family.
+ *
+ * A stick held off centre when the surface changes what one of its axes
+ * drives (X from strafe to turn, as a switch from a holonomic mode to a
+ * differential one does) sends that axis nothing until it comes back to
+ * centre: a stick held sideways to strafe does not become a turn. A control
+ * on the surface only counts, so a mode where the stick drives nothing and
+ * back is such a change too. What a binding commanded and no longer drives is
+ * released then (unless another binding holds it), and letting go of a
+ * binding releases only what it commanded. Bindings on the same control
+ * combine: it gets the largest value any of them sends, so a held key and a
+ * stick do not overwrite each other with zeros.
  *
  * InjectAction lets touch panels and tests feed an action as if a key were
  * held, through the same path.
@@ -43,7 +57,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Input")
 	TArray<TObjectPtr<URammsControlInputMap>> InputMaps;
 
-	/** Reported to the sink for arbitration. */
+	/** Reported to the sink for arbitration. Keyboard, the default, stands for
+	 *  the player's own devices: an action a gamepad key drives (and no
+	 *  keyboard key) reports Gamepad. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Input")
 	ERammsControlSource Source = ERammsControlSource::Keyboard;
 
@@ -74,12 +90,24 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	/** A value a binding sends a control, and as whom. */
+	struct FCommand
+	{
+		float				Value = 0.0f;
+		ERammsControlSource Source = ERammsControlSource::Keyboard;
+	};
+
 	/** One map binding resolved against the sink's surface. */
 	struct FSlot
 	{
 		TWeakObjectPtr<const URammsControlInputMap> Map;
 		int32										Index = INDEX_NONE;
 		TArray<FName>								Ids[3]; // X / Y / Z targets after wildcard expansion
+		bool										bHeld = false;
+		bool										bFired = false;
+		bool										bAwaitCentre[3] = { false, false, false };
+		TMap<FName, FCommand>						Commanded;									 // what it drives and holds, at its last value
+		ERammsControlSource							PressSource = ERammsControlSource::Keyboard; // the device that pressed it
 	};
 
 	struct FInjection
@@ -99,6 +127,22 @@ private:
 	void	 OnCompleted(int32 Slot, const FInputActionInstance& Instance);
 	float	 Component(const FVector& V, int32 Axis) const { return Axis == 0 ? static_cast<float>(V.X) : (Axis == 1 ? static_cast<float>(V.Y) : static_cast<float>(V.Z)); }
 
+	/** Who drives Slot's action: Gamepad when a gamepad key mapped to it is off
+	 *  rest and no keyboard key is down, Source when a keyboard key is; with
+	 *  neither, the device that pressed it (Source when none did). */
+	ERammsControlSource SourceOf(const FSlot& Slot) const;
+	bool				DeviceOf(const FSlot& Slot, ERammsControlSource& OutSource) const; // false: no mapped key is active
+
+	/** Slot sends Id Value: the control gets the largest value any binding
+	 *  holding it sends (MergedCommand), so a key and a stick on one control
+	 *  combine instead of overwriting each other. False when the sink refuses. */
+	bool Command(FSlot& Slot, FName Id, float Value, ERammsControlSource From);
+	bool MergedCommand(FName Id, FCommand& Out) const;
+
+	/** Slot no longer drives Id: the others holding it drive it on, else it is
+	 *  released. */
+	void LetGo(FSlot& Slot, FName Id);
+
 	UPROPERTY(Transient)
 	TObjectPtr<UObject> Sink; // implements IRammsControlSink (+ IRammsControlSurfaceProvider)
 
@@ -110,7 +154,7 @@ private:
 	TArray<TWeakObjectPtr<const UInputMappingContext>> AddedContexts;
 	TArray<FSlot>									   Slots;
 	TMap<FName, float>								   IncrementTargets;
-	TSet<FName>										   HeldAxes;
+	TMap<FName, ERammsControlSource>				   HeldAxes; // and the source each is held as
 	TArray<FInjection>								   Injections;
 	int32											   SurfaceVersionSeen = -1;
 	mutable FRammsControlSurface					   CachedSurface;
