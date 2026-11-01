@@ -169,8 +169,9 @@ void URammsControlInputComponent::ResolveSlots()
 		// What it commanded and drives no more is let go: a turn carried into
 		// a new mode must not outlive the stick that now strafes.
 		TArray<FName> Dropped;
-		for (const FName& Id : Slot.Commanded)
+		for (const TPair<FName, FCommand>& Held : Slot.Commanded)
 		{
+			const FName Id = Held.Key;
 			if (!Slot.Ids[0].Contains(Id) && !Slot.Ids[1].Contains(Id) && !Slot.Ids[2].Contains(Id))
 			{
 				Dropped.Add(Id);
@@ -183,16 +184,59 @@ void URammsControlInputComponent::ResolveSlots()
 	}
 }
 
+bool URammsControlInputComponent::MergedCommand(FName Id, FCommand& Out) const
+{
+	// The largest value any binding holding it sends: a stick at rest beside
+	// a held key (or a stick whose other axis moves) sends 0, which must not
+	// cancel the key.
+	bool bAny = false;
+	for (const FSlot& Slot : Slots)
+	{
+		if (const FCommand* C = Slot.Commanded.Find(Id))
+		{
+			if (!bAny || FMath::Abs(C->Value) > FMath::Abs(Out.Value))
+			{
+				Out = *C;
+			}
+			bAny = true;
+		}
+	}
+	return bAny;
+}
+
+bool URammsControlInputComponent::Command(FSlot& Slot, FName Id, float Value, ERammsControlSource From)
+{
+	Slot.Commanded.Add(Id, { Value, From });
+	FCommand Merged;
+	MergedCommand(Id, Merged);
+	const bool bOk = IRammsControlSink::Execute_SetAxis(Sink, Id, Merged.Value, Merged.Source);
+	if (bOk)
+	{
+		HeldAxes.Add(Id, Merged.Source);
+	}
+	else
+	{
+		Slot.Commanded.Remove(Id);
+	}
+	if (bLogCommands)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ControlInput] %s = %.3f (this binding %.3f) -> %s"), *Id.ToString(), Merged.Value, Value, bOk ? TEXT("ok") : TEXT("refused"));
+	}
+	return bOk;
+}
+
 void URammsControlInputComponent::LetGo(FSlot& Slot, FName Id)
 {
 	Slot.Commanded.Remove(Id);
-	// Another binding holding it still drives it.
-	for (const FSlot& Other : Slots)
+	// Another binding holding it drives it on, at its own value.
+	FCommand Merged;
+	if (MergedCommand(Id, Merged))
 	{
-		if (Other.Commanded.Contains(Id))
+		if (Sink && IRammsControlSink::Execute_SetAxis(Sink, Id, Merged.Value, Merged.Source))
 		{
-			return;
+			HeldAxes.Add(Id, Merged.Source);
 		}
+		return;
 	}
 	// As the source that holds it; one this component never set, as its own.
 	const ERammsControlSource* HeldAs = HeldAxes.Find(Id);
@@ -528,18 +572,9 @@ void URammsControlInputComponent::OnTriggered(int32 SlotIndex, const FInputActio
 				// A held Position target is not "held" in the spring-back sense:
 				// letting go leaves the motor where it is.
 			}
-			else // Axis, Stick
+			else // Axis, Stick: merged with any other binding on the control
 			{
-				const bool bOk = IRammsControlSink::Execute_SetAxis(Sink, Id, V, From);
-				if (bOk)
-				{
-					HeldAxes.Add(Id, From);
-					Slot.Commanded.Add(Id);
-				}
-				if (bLogCommands)
-				{
-					UE_LOG(LogTemp, Verbose, TEXT("[ControlInput] %s = %.3f -> %s"), *Id.ToString(), V, bOk ? TEXT("ok") : TEXT("refused"));
-				}
+				Command(Slot, Id, V, From);
 			}
 		}
 	}
@@ -564,7 +599,9 @@ void URammsControlInputComponent::OnCompleted(int32 SlotIndex, const FInputActio
 	}
 	// Only what this binding commanded: a control it was waiting to drive is
 	// someone else's.
-	for (const FName& Id : Slot.Commanded.Array())
+	TArray<FName> Held;
+	Slot.Commanded.GetKeys(Held);
+	for (const FName& Id : Held)
 	{
 		LetGo(Slot, Id);
 	}

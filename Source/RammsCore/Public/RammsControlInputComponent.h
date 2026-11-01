@@ -38,7 +38,9 @@ struct FInputActionInstance;
  * on the surface only counts, so a mode where the stick drives nothing and
  * back is such a change too. What a binding commanded and no longer drives is
  * released then (unless another binding holds it), and letting go of a
- * binding releases only what it commanded.
+ * binding releases only what it commanded. Bindings on the same control
+ * combine: it gets the largest value any of them sends, so a held key and a
+ * stick do not overwrite each other with zeros.
  *
  * InjectAction lets touch panels and tests feed an action as if a key were
  * held, through the same path.
@@ -88,6 +90,13 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	/** A value a binding sends a control, and as whom. */
+	struct FCommand
+	{
+		float				Value = 0.0f;
+		ERammsControlSource Source = ERammsControlSource::Keyboard;
+	};
+
 	/** One map binding resolved against the sink's surface. */
 	struct FSlot
 	{
@@ -97,7 +106,7 @@ private:
 		bool										bHeld = false;
 		bool										bFired = false;
 		bool										bAwaitCentre[3] = { false, false, false };
-		TSet<FName>									Commanded;									 // what it set and holds
+		TMap<FName, FCommand>						Commanded;									 // what it drives and holds, at its last value
 		ERammsControlSource							PressSource = ERammsControlSource::Keyboard; // the device that pressed it
 	};
 
@@ -124,7 +133,14 @@ private:
 	ERammsControlSource SourceOf(const FSlot& Slot) const;
 	bool				DeviceOf(const FSlot& Slot, ERammsControlSource& OutSource) const; // false: no mapped key is active
 
-	/** Slot no longer drives Id: released, unless another binding still holds it. */
+	/** Slot sends Id Value: the control gets the largest value any binding
+	 *  holding it sends (MergedCommand), so a key and a stick on one control
+	 *  combine instead of overwriting each other. False when the sink refuses. */
+	bool Command(FSlot& Slot, FName Id, float Value, ERammsControlSource From);
+	bool MergedCommand(FName Id, FCommand& Out) const;
+
+	/** Slot no longer drives Id: the others holding it drive it on, else it is
+	 *  released. */
 	void LetGo(FSlot& Slot, FName Id);
 
 	UPROPERTY(Transient)
