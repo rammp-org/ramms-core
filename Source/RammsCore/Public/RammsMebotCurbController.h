@@ -189,8 +189,11 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
  * braked, pull the chassis over them. The sprung rear's lift is trimmed against the chassis's pitch.
  *
  * Controls: curb.negotiate (start, at a curb ahead within ScanAheadCm), curb.abort, curb.phase. It is the
- * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one) and a
- * finished crossing hands back to ReturnModeId; another mode being selected aborts it.
+ * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one), and a
+ * finished or stopped crossing hands back to ReturnModeId once both drive wheels are on the ground. Stopped
+ * with them up, nothing in that mode would hold the robot, so it holds the wheels (the powered front omni
+ * wheels' hubs at rest) and leaves the lifts to the operator until they are down. Selected by hand, with no
+ * crossing to run, it hands straight back; another mode being selected aborts it.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsMebotCurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
@@ -211,7 +214,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	bool StartCrossing(FString& OutReason);
 
-	/** Stop where it is: the lifts hold, the drive wheels brake. */
+	/** Stop where it is: the lifts hold, the drive wheels brake. It hands back once the drive wheels are down. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
 	void Abort(const FString& Reason);
 
@@ -291,7 +294,7 @@ private:
 	void StartTouchdown(ESupport Support, float LevelZ);
 	bool StepTouchdown(float Dt);
 	void DriveAt(float SpeedCmS, bool bDriveWheels, bool bFrontOmni);
-	void HoldWheels();
+	void HoldWheels(bool bFrontHubsToo = false); // the front omni wheels' hubs freewheel unless asked
 	void ReleaseWheels();
 	void StepLifts(float Dt);
 
@@ -301,6 +304,7 @@ private:
 	bool						   SurfaceZ(const FVector& At, float& OutZ) const;
 	float						   Along(const FVector& P) const;  // past the edge along the heading (cm, negative before it)
 	float						   SupportAlong(ESupport S) const; // the pair's mean hub
+	float						   LaggingAlong(ESupport S) const; // the pair's hub further back
 	float						   Radius(ESupport S) const;
 	float						   Gap(ESupport S, float LevelZ) const; // the higher wheel's bottom above LevelZ
 	float						   HeightNow(ESupport S) const;			// its table height at the joint's angle
@@ -309,6 +313,9 @@ private:
 	const FRammsMebotSupportTable& TableOf(ESupport S) const;
 	bool						   AngleFor(ESupport S, float HeightCm, float& OutAngle, FString& OutWhy) const;
 	TArray<int32>				   LiftsOf(ESupport S) const;
+	float						   TranslatorReachCm() const;
+	bool						   IsCrossing() const;
+	bool						   DriveWheelsDown() const; // both on the ground under them
 
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
@@ -316,8 +323,9 @@ private:
 	ERammsMebotCurbPhase Phase = ERammsMebotCurbPhase::Idle;
 	FString				 Status;
 	bool				 bModeActive = false;
-	bool				 bStartPending = false; // asked to start; begins once the mode is active
-	bool				 bHandingBack = false;
+	bool				 bStartPending = false;	 // asked to start; begins once the mode is active
+	bool				 bHoldUntilDown = false; // stopped with the drive wheels up: no hand-back until they are down
+	bool				 bHandBackWarned = false;
 	bool				 bPowered = false; // the front omni wheels have hub motors
 	bool				 bClimb = true;
 	float				 StepCm = 0.0f;			  // signed: positive up
@@ -337,6 +345,7 @@ private:
 	float	 TouchLevelZ = 0.0f;
 	int32	 TouchStage = 0; // 0 lowering to contact, 1 preload, 2 settle
 	float	 TouchTargetCm = 0.0f;
+	float	 TouchPlanCm = 0.0f; // the first target: the search goes no more than 4 cm past it
 
 	// Driving (cm/s along the heading; 0 holds).
 	float		  DriveCmS = 0.0f;

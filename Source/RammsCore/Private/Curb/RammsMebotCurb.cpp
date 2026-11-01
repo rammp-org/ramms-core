@@ -88,47 +88,121 @@ namespace RammsMebotCurb
 	bool FindStep(TFunctionRef<bool(float, float&)> SurfaceAt, float FromCm, float ToCm, float StepCm, float MinStepCm, FStep& OutStep,
 		FString& OutReason)
 	{
-		float NearZ = 0.0f;
-		if (!SurfaceAt(FromCm, NearZ))
+		// An edge is a run of sample intervals steeper than 1:4, all rising or all falling: a curb's face is near
+		// vertical, a ramp 1:12 or gentler, so a ramp never adds up to a step however long it runs. Its height is
+		// the run's rise, from the ground just before it to the ground just after, and the far level must hold for
+		// LevelCheckCm past it: a strip, or a second step, is not a curb.
+		constexpr float SteepSlope = 0.25f;
+		constexpr float LevelCheckCm = 10.0f;
+		constexpr float LevelToleranceCm = 1.0f;
+		const auto		Sample = [&](float D, float& OutZ) {
+			 if (SurfaceAt(D, OutZ))
+			 {
+				 return true;
+			 }
+			 OutReason = FString::Printf(TEXT("no ground %.0f cm along the scan"), D);
+			 return false;
+		};
+		float PrevD = FromCm, PrevZ = 0.0f;
+		if (!Sample(FromCm, PrevZ))
 		{
-			OutReason = TEXT("no ground under the start of the scan");
 			return false;
 		}
-		const auto Stepped = [&](float D, float& OutZ) { return SurfaceAt(D, OutZ) && FMath::Abs(OutZ - NearZ) >= MinStepCm; };
-		float	   Prev = FromCm;
-		for (float D = FromCm + StepCm; D <= ToCm + KINDA_SMALL_NUMBER; D += StepCm)
+		float RunD = FromCm, RunZ = PrevZ; // where the current run began
+		int32 RunSign = 0;				   // +1 rising, -1 falling, 0 no run
+		bool  bFound = false;
+		for (float D = FromCm + StepCm; D <= ToCm + LevelCheckCm + 100.0f; D += StepCm)
+		{
+			if (RunSign == 0 && PrevD >= ToCm - KINDA_SMALL_NUMBER)
+			{
+				break; // no edge begins within the scan
+			}
+			float Z = 0.0f;
+			if (!Sample(D, Z))
+			{
+				return false;
+			}
+			const float Dz = Z - PrevZ;
+			const int32 Sign = FMath::Abs(Dz) > SteepSlope * StepCm ? (Dz > 0.0f ? 1 : -1) : 0;
+			if (Sign != 0 && Sign == RunSign)
+			{
+				PrevD = D;
+				PrevZ = Z;
+				continue; // the run goes on
+			}
+			if (RunSign != 0 && FMath::Abs(PrevZ - RunZ) >= MinStepCm)
+			{
+				bFound = true; // the run ended at PrevD, high enough to be a step
+				break;
+			}
+			RunSign = Sign; // a run, or level ground, from PrevD
+			RunD = PrevD;
+			RunZ = PrevZ;
+			PrevD = D;
+			PrevZ = Z;
+		}
+		if (!bFound)
+		{
+			OutReason = FString::Printf(TEXT("no step of %.0f cm or more within %.0f cm"), MinStepCm, ToCm - FromCm);
+			return false;
+		}
+		const float NearZ = RunZ, FarZ = PrevZ;
+		for (float D = PrevD + StepCm; D <= PrevD + LevelCheckCm + KINDA_SMALL_NUMBER; D += StepCm)
 		{
 			float Z = 0.0f;
-			if (!Stepped(D, Z))
+			if (!Sample(D, Z))
 			{
-				Prev = D;
-				continue;
+				return false;
 			}
-			// The edge lies between Prev (near level) and D (stepped): bisect it to a millimetre.
-			float A = Prev, B = D;
-			while (B - A > 0.1f)
+			if (FMath::Abs(Z - FarZ) > LevelToleranceCm)
 			{
-				const float M = 0.5f * (A + B);
-				float		Zm = 0.0f;
-				(Stepped(M, Zm) ? B : A) = M;
+				OutReason = FString::Printf(TEXT("the ground %.0f cm past the %.1f cm edge at %.0f cm is %.1f cm off its level: not a curb"),
+					D - PrevD, FarZ - NearZ, RunD, Z - FarZ);
+				return false;
 			}
-			float FarZ = Z;
-			SurfaceAt(B + FMath::Max(5.0f, StepCm), FarZ);
-			OutStep.EdgeDistCm = 0.5f * (A + B);
-			OutStep.HeightCm = FarZ - NearZ;
-			OutStep.NearZ = NearZ;
-			return true;
 		}
-		OutReason = FString::Printf(TEXT("no step of %.0f cm or more within %.0f cm"), MinStepCm, ToCm - FromCm);
-		return false;
+		// The edge lies in the run: bisect it, to a millimetre, where the ground is past half the rise.
+		const float Half = 0.5f * FMath::Abs(FarZ - NearZ);
+		float		A = RunD, B = PrevD;
+		while (B - A > 0.1f)
+		{
+			const float M = 0.5f * (A + B);
+			float		Zm = 0.0f;
+			if (!Sample(M, Zm))
+			{
+				return false;
+			}
+			((Zm - NearZ) * RunSign >= Half ? B : A) = M;
+		}
+		OutStep.EdgeDistCm = 0.5f * (A + B);
+		OutStep.HeightCm = FarZ - NearZ;
+		OutStep.NearZ = NearZ;
+		return true;
 	}
 
 	bool RearLiftAllowed(const FRearLiftCheck& In, FString& OutReason)
 	{
-		if (!In.bDriveWheelsDown)
+		for (int32 i = 0; i < 2; ++i)
 		{
-			OutReason = TEXT("the drive wheels are not both down on the far level");
-			return false;
+			const TCHAR* Side = i ? TEXT("right") : TEXT("left");
+			if (In.PastEdgeCm[i] < 0.0f)
+			{
+				OutReason = FString::Printf(TEXT("the %s drive wheel is %.1f cm short of the edge"), Side, -In.PastEdgeCm[i]);
+				return false;
+			}
+			if (!In.bGroundFound[i] || FMath::Abs(In.GroundCm[i]) > 0.5f * FMath::Abs(In.StepCm))
+			{
+				OutReason = In.bGroundFound[i]
+					? FString::Printf(TEXT("the ground under the %s drive wheel is %.1f cm off the far level"), Side, In.GroundCm[i])
+					: FString::Printf(TEXT("no ground under the %s drive wheel"), Side);
+				return false;
+			}
+			if (In.GapCm[i] > In.TouchToleranceCm || In.GapCm[i] < -(In.PreloadCm + In.TouchToleranceCm))
+			{
+				OutReason = FString::Printf(TEXT("the %s drive wheel is %.1f cm %s the far level, not down on it"), Side, FMath::Abs(In.GapCm[i]),
+					In.GapCm[i] > 0.0f ? TEXT("above") : TEXT("below"));
+				return false;
+			}
 		}
 		for (int32 i = 0; i < 2; ++i)
 		{

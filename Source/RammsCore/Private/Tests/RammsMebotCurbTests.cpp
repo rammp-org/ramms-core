@@ -106,6 +106,44 @@ bool FRammsMebotCurbStepTest::RunTest(const FString& Parameters)
 
 	const auto Nothing = [](float, float&) { return false; };
 	TestFalse(TEXT("no ground"), RammsMebotCurb::FindStep(Nothing, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
+
+	// A 5% ramp climbs 7.5 cm over the scan, never steeply: no step.
+	const auto Ramp = [](float D, float& Z) {
+		Z = 0.05f * D;
+		return true;
+	};
+	TestFalse(TEXT("a ramp is no step"), RammsMebotCurb::FindStep(Ramp, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
+
+	// The ramp, then a 12 cm curb at 80.5 cm: its height is the face's, not the climb from the start.
+	const auto RampCurb = [](float D, float& Z) {
+		Z = 0.05f * D + (D >= 80.5f ? 12.0f : 0.0f);
+		return true;
+	};
+	TestTrue(TEXT("a curb at the top of a ramp"), RammsMebotCurb::FindStep(RampCurb, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
+	TestNearlyEqual(TEXT("at its edge"), Step.EdgeDistCm, 80.5f, 0.1f);
+	TestNearlyEqual(TEXT("the face's height"), Step.HeightCm, 12.0f, 0.2f);
+	TestNearlyEqual(TEXT("the ramp's level before it"), Step.NearZ, 4.0f, 0.2f);
+
+	// No ground from 30 to 50 cm, then a platform: refused, not taken as a curb at 50.
+	const auto Gap = [](float D, float& Z) {
+		Z = D < 50.0f ? 0.0f : 10.0f;
+		return D < 30.0f || D >= 50.0f;
+	};
+	TestFalse(TEXT("missing ground refuses"), RammsMebotCurb::FindStep(Gap, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
+	TestTrue(TEXT("and says where"), Why.Contains(TEXT("no ground 30 cm")));
+
+	// A 15 cm strip 4 cm wide, the road again past it: not a curb, up or down.
+	const auto Strip = [](float D, float& Z) {
+		Z = D >= 60.0f && D < 64.0f ? 15.0f : 0.0f;
+		return true;
+	};
+	TestFalse(TEXT("a strip is not a curb"), RammsMebotCurb::FindStep(Strip, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
+	TestTrue(TEXT("its far side is not level"), Why.Contains(TEXT("not a curb")));
+	const auto Thin = [](float D, float& Z) {
+		Z = D >= 59.0f && D < 61.0f ? 15.0f : 0.0f; // up and down between two samples' neighbours
+		return true;
+	};
+	TestFalse(TEXT("a thin strip is not a curb"), RammsMebotCurb::FindStep(Thin, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
 	return true;
 }
 
@@ -114,15 +152,41 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsMebotCurbRuleTest, "Ramms.Curb.Mebot.Rear
 bool FRammsMebotCurbRuleTest::RunTest(const FString& Parameters)
 {
 	RammsMebotCurb::FRearLiftCheck C;
-	C.bDriveWheelsDown = true;
+	C.StepCm = 15.0f;
+	for (int32 i = 0; i < 2; ++i)
+	{
+		C.PastEdgeCm[i] = 12.0f;
+		C.bGroundFound[i] = true;
+		C.GroundCm[i] = 0.1f;
+	}
+	C.GapCm[0] = 0.3f;
+	C.GapCm[1] = -0.9f; // pressed in by the preload
 	C.TranslatorCm[0] = C.TranslatorCm[1] = -30.0f;
 	C.ComAheadOfAxleCm = 7.0f;
 	FString Why;
 	TestTrue(TEXT("down, aft, centre of mass ahead"), RammsMebotCurb::RearLiftAllowed(C, Why));
 
-	RammsMebotCurb::FRearLiftCheck NotDown = C;
-	NotDown.bDriveWheelsDown = false;
-	TestFalse(TEXT("not down"), RammsMebotCurb::RearLiftAllowed(NotDown, Why));
+	RammsMebotCurb::FRearLiftCheck Short = C;
+	Short.PastEdgeCm[1] = -2.0f;
+	TestFalse(TEXT("one wheel short of the edge"), RammsMebotCurb::RearLiftAllowed(Short, Why));
+	TestTrue(TEXT("names it"), Why.Contains(TEXT("right drive wheel")));
+
+	// Climbing, a wheel still on the road: 15 cm under the far level, its ground too.
+	RammsMebotCurb::FRearLiftCheck OnRoad = C;
+	OnRoad.GroundCm[0] = -15.0f;
+	OnRoad.GapCm[0] = -15.0f;
+	TestFalse(TEXT("a wheel over the near level"), RammsMebotCurb::RearLiftAllowed(OnRoad, Why));
+	RammsMebotCurb::FRearLiftCheck Below = C;
+	Below.GapCm[0] = -15.0f;
+	TestFalse(TEXT("a wheel below the far level"), RammsMebotCurb::RearLiftAllowed(Below, Why));
+
+	RammsMebotCurb::FRearLiftCheck Up = C;
+	Up.GapCm[1] = 2.0f;
+	TestFalse(TEXT("a wheel not down"), RammsMebotCurb::RearLiftAllowed(Up, Why));
+
+	RammsMebotCurb::FRearLiftCheck NoGround = C;
+	NoGround.bGroundFound[0] = false;
+	TestFalse(TEXT("no ground under a wheel"), RammsMebotCurb::RearLiftAllowed(NoGround, Why));
 
 	RammsMebotCurb::FRearLiftCheck NotAft = C;
 	NotAft.TranslatorCm[1] = 0.0f;

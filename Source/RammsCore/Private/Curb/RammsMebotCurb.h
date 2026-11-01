@@ -46,17 +46,27 @@ namespace RammsMebotCurb
 	};
 
 	/**
-	 * The first step of at least MinStepCm along the line from FromCm to ToCm, sampled every StepCm and
-	 * its edge refined by bisection to a millimetre; its height is the far level a little past the edge
-	 * minus the level at FromCm. False, with the reason, when there is none or the ground is not found.
+	 * The first step of at least MinStepCm whose edge begins between FromCm and ToCm, sampled every StepCm:
+	 * a run of intervals steeper than 1:4 (so a ramp is never a step), its height the ground just after the
+	 * run minus the ground just before, its edge bisected to a millimetre. The far level must hold, within a
+	 * centimetre, for 10 cm past the run. False, with the reason, when there is no step, the ground past it
+	 * is not level (a strip, a second step) or the ground is missing at any sample up to there.
 	 */
 	bool FindStep(TFunctionRef<bool(float DistCm, float& OutZ)> SurfaceAt, float FromCm, float ToCm, float StepCm, float MinStepCm,
 		FStep& OutStep, FString& OutReason);
 
-	/** The rule before the rear omni wheels come up, as measured. */
+	/** The rule before the rear omni wheels come up, as measured. Pairs are left, right. */
 	struct FRearLiftCheck
 	{
-		bool  bDriveWheelsDown = false; // both on the far level
+		// Each drive wheel: its hub past the edge along the heading, and the ground under its hub and its bottom,
+		// both from the far level (cm).
+		float PastEdgeCm[2] = { 0.0f, 0.0f };
+		bool  bGroundFound[2] = { false, false };
+		float GroundCm[2] = { 0.0f, 0.0f };
+		float GapCm[2] = { 0.0f, 0.0f };
+		float StepCm = 0.0f;		   // the ground under a wheel is the far level within half the step
+		float TouchToleranceCm = 0.8f; // a bottom this far above the far level is down on it,
+		float PreloadCm = 1.0f;		   // and this far (and the tolerance) below it, pressed in
 		float TranslatorCm[2] = { 0.0f, 0.0f };
 		float AftCm = -30.0f; // where the translators are taken for it
 		float AftToleranceCm = 5.0f;
@@ -64,8 +74,9 @@ namespace RammsMebotCurb
 		float MinComMarginCm = 3.0f;
 	};
 
-	/** The rear omni wheels are not lifted until both drive wheels are on the far level, translated aft
-	 *  and down, with the centre of mass ahead of their axle. False, with the reason, when not. */
+	/** The rear omni wheels are not lifted until both drive wheels are past the edge, over the far level and
+	 *  down on it, translated aft, with the centre of mass ahead of their axle. False, with the reason, when
+	 *  not. */
 	bool RearLiftAllowed(const FRearLiftCheck& In, FString& OutReason);
 
 	/** The centre of mass along the heading from the chassis-fixed mass and the two drive assemblies

@@ -165,9 +165,14 @@ void URammsMebotCurbController::GetClaimedMotorIds(TArray<FName>& OutIds) const
 	{
 		OutIds.Append({ Config.FrontOmniLeft, Config.FrontOmniRight });
 	}
-	for (const FLift& L : Lifts)
+	// The lifts only while a crossing runs: stopped, they are the operator's (the MeBot controller takes them
+	// where they stand).
+	if (bStartPending || IsCrossing())
 	{
-		OutIds.Add(L.Motor);
+		for (const FLift& L : Lifts)
+		{
+			OutIds.Add(L.Motor);
+		}
 	}
 }
 
@@ -184,17 +189,17 @@ void URammsMebotCurbController::SetDriveModeActive(bool bActive)
 	}
 	bModeActive = bActive;
 	LastSimTime = -1.0;
+	bHandBackWarned = false;
 	if (!bActive)
 	{
-		const bool bCrossing = Phase != ERammsMebotCurbPhase::Idle && Phase != ERammsMebotCurbPhase::Done && Phase != ERammsMebotCurbPhase::Aborted;
-		if (bCrossing)
+		if (IsCrossing())
 		{
 			Phase = ERammsMebotCurbPhase::Aborted;
 			Status = TEXT("another drive mode was selected");
 			UE_LOG(LogRammsMebotCurb, Warning, TEXT("%s: curb crossing aborted: %s"), *GetNameSafe(GetOwner()), *Status);
 		}
 		bStartPending = false;
-		bHandingBack = false;
+		bHoldUntilDown = false;
 		ReleaseWheels();
 	}
 }
@@ -254,9 +259,14 @@ bool URammsMebotCurbController::SelectMode(FName ModeId)
 
 bool URammsMebotCurbController::StartCrossing(FString& OutReason)
 {
-	if (Phase != ERammsMebotCurbPhase::Idle && Phase != ERammsMebotCurbPhase::Done && Phase != ERammsMebotCurbPhase::Aborted)
+	if (IsCrossing() || bStartPending)
 	{
 		OutReason = TEXT("a crossing is already under way");
+		return false;
+	}
+	if (bModeActive && bHoldUntilDown)
+	{
+		OutReason = TEXT("the last crossing stopped with the drive wheels up: lower them first");
 		return false;
 	}
 	if (!Base || !Base->HasBackend())
@@ -338,11 +348,16 @@ bool URammsMebotCurbController::StartCrossing(FString& OutReason)
 
 void URammsMebotCurbController::Abort(const FString& Reason)
 {
-	const bool bCrossing = Phase != ERammsMebotCurbPhase::Idle && Phase != ERammsMebotCurbPhase::Done && Phase != ERammsMebotCurbPhase::Aborted;
-	bStartPending = false;
-	if (bCrossing)
+	if (IsCrossing())
 	{
 		Finish(true, Reason);
+	}
+	else if (bStartPending)
+	{
+		// Not begun: nothing has moved, and with nothing to run the mode hands back.
+		bStartPending = false;
+		Phase = ERammsMebotCurbPhase::Aborted;
+		Status = Reason;
 	}
 }
 
@@ -350,7 +365,11 @@ void URammsMebotCurbController::Finish(bool bAborted, const FString& Why)
 {
 	Phase = bAborted ? ERammsMebotCurbPhase::Aborted : ERammsMebotCurbPhase::Done;
 	Status = Why;
-	HoldWheels();
+	// Braked where it stands, it hands back on the next tick: the other mode holds it from there. Stopped with
+	// the drive wheels up, that mode would hold nothing that touches the ground: it holds on the front omni
+	// wheels' hubs until the operator has the drive wheels down.
+	bHoldUntilDown = !DriveWheelsDown();
+	HoldWheels(bHoldUntilDown);
 	// The lifts stay where they are; the rear keeps its trim.
 	if (bLevel)
 	{
@@ -363,9 +382,11 @@ void URammsMebotCurbController::Finish(bool bAborted, const FString& Why)
 		L.Goal = L.Cmd;
 	}
 	SettleLeft = 0.0f;
-	UE_LOG(LogRammsMebotCurb, Log, TEXT("%s: curb crossing %s: %s"), *GetNameSafe(GetOwner()), bAborted ? TEXT("aborted") : TEXT("done"), *Why);
-	// Braked where it stands, it hands back: the other mode holds it from there.
-	bHandingBack = true;
+	if (bHoldUntilDown)
+	{
+		Status += TEXT(" (the drive wheels are up: holding until they are down; the lifts are free)");
+	}
+	UE_LOG(LogRammsMebotCurb, Log, TEXT("%s: curb crossing %s: %s"), *GetNameSafe(GetOwner()), bAborted ? TEXT("aborted") : TEXT("done"), *Status);
 }
 
 void URammsMebotCurbController::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -375,30 +396,46 @@ void URammsMebotCurbController::TickComponent(float DeltaTime, ELevelTick TickTy
 	{
 		return;
 	}
+	// The backend's clock when it keeps one (a simulator behind real time is slower than the game); the game's
+	// when it does not.
+	float		 Dt = DeltaTime;
 	const double Now = Base->GetSimulationTime();
-	float		 Dt = LastSimTime < 0.0 ? 0.0f : static_cast<float>(Now - LastSimTime);
-	LastSimTime = Now;
-	if (Dt < 0.0f)
+	if (Now >= 0.0)
 	{
-		Finish(true, TEXT("the simulation was reset"));
-		return;
+		Dt = LastSimTime < 0.0 ? 0.0f : static_cast<float>(Now - LastSimTime);
+		LastSimTime = Now;
+		if (Dt < 0.0f)
+		{
+			if (IsCrossing())
+			{
+				Finish(true, TEXT("the simulation was reset"));
+			}
+			return;
+		}
 	}
 	Dt = FMath::Min(Dt, 0.1f);
-	if (bHandingBack)
-	{
-		bHandingBack = false;
-		SelectMode(ReturnModeId);
-		return;
-	}
 	if (bStartPending)
 	{
 		bStartPending = false;
 		Begin();
 		return;
 	}
-	if (Phase != ERammsMebotCurbPhase::Idle && Phase != ERammsMebotCurbPhase::Done && Phase != ERammsMebotCurbPhase::Aborted)
+	if (IsCrossing())
 	{
 		Step(Dt);
+		return;
+	}
+	// Nothing to run (finished, stopped, or the mode selected by hand): hand back, unless a crossing stopped with
+	// the drive wheels up and they are not down yet.
+	if (bHoldUntilDown && !DriveWheelsDown())
+	{
+		return;
+	}
+	bHoldUntilDown = false;
+	if (!SelectMode(ReturnModeId) && !bHandBackWarned)
+	{
+		bHandBackWarned = true;
+		UE_LOG(LogRammsMebotCurb, Warning, TEXT("%s: the curb mode cannot hand back to '%s'"), *GetNameSafe(GetOwner()), *ReturnModeId.ToString());
 	}
 }
 
@@ -465,11 +502,7 @@ void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
 			}
 			else
 			{
-				FRammsMotorSpec Spec;
-				const float		Reach = Base->GetMotorSpec(Config.TranslatorLeft, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y
-						? Spec.ControlRange.Y - 1.0f
-						: 39.0f;
-				const float		To = FMath::Min(Reach, Lifts[TranslatorL].Cmd + (Past - SupportAlong(ESupport::Drive)));
+				const float To = FMath::Min(TranslatorReachCm(), Lifts[TranslatorL].Cmd + (Past - LaggingAlong(ESupport::Drive)));
 				StartMove({ { TranslatorL, To }, { TranslatorR, To } }, 0.5f);
 			}
 			break;
@@ -484,9 +517,22 @@ void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
 			break;
 		case ERammsMebotCurbPhase::RearUp:
 		{
-			// The rule, before the rear omni wheels come up.
+			// The rule, before the rear omni wheels come up: each drive wheel past the edge, over the far level and
+			// down on it.
 			RammsMebotCurb::FRearLiftCheck Check;
-			Check.bDriveWheelsDown = Gap(ESupport::Drive, FarZ) <= Config.TouchToleranceCm;
+			const FName					   Wheels[2] = { Config.DriveWheelLeftBody, Config.DriveWheelRightBody };
+			for (int32 i = 0; i < 2; ++i)
+			{
+				const FVector Hub = BodyPos(Wheels[i]);
+				float		  Ground = 0.0f;
+				Check.PastEdgeCm[i] = Along(Hub);
+				Check.bGroundFound[i] = SurfaceZ(Hub, Ground);
+				Check.GroundCm[i] = Ground - FarZ;
+				Check.GapCm[i] = static_cast<float>(Hub.Z) - Config.DriveWheelRadiusCm - FarZ;
+			}
+			Check.StepCm = StepCm;
+			Check.TouchToleranceCm = Config.TouchToleranceCm;
+			Check.PreloadCm = Config.TouchPreloadCm;
 			Check.TranslatorCm[0] = Base->GetMotorValue(Config.TranslatorLeft);
 			Check.TranslatorCm[1] = Base->GetMotorValue(Config.TranslatorRight);
 			Check.AftCm = Config.AftCm;
@@ -498,8 +544,8 @@ void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
 				Finish(true, TEXT("rear-lift rule not met: ") + Why);
 				return;
 			}
-			PhaseLog.Add(FString::Printf(TEXT("        rear-lift rule met: drive wheels down, translators %.1f / %.1f cm, centre of mass %+.1f cm ahead of their axle"),
-				Check.TranslatorCm[0], Check.TranslatorCm[1], Check.ComAheadOfAxleCm));
+			PhaseLog.Add(FString::Printf(TEXT("        rear-lift rule met: drive wheels down %.1f / %.1f cm past the edge, translators %.1f / %.1f cm, centre of mass %+.1f cm ahead of their axle"),
+				Check.PastEdgeCm[0], Check.PastEdgeCm[1], Check.TranslatorCm[0], Check.TranslatorCm[1], Check.ComAheadOfAxleCm));
 			UE_LOG(LogRammsMebotCurb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
 			// The rear leaves the ground: its trim goes into its command.
 			Lifts[RearLiftLift].Cmd += RearTrimRad;
@@ -646,7 +692,7 @@ void URammsMebotCurbController::Step(float Dt)
 				// The front omni wheels' speed, commanded here: forward until the drive wheels are at their mark,
 				// then held at zero (left to freewheel, the robot would coast on: nothing else holds it with the
 				// drive wheels up). Stopped there with the translators aft, it settles, then the drive wheels go down.
-				const bool	bThere = SupportAlong(ESupport::Drive) >= PhaseValue;
+				const bool	bThere = LaggingAlong(ESupport::Drive) >= PhaseValue;
 				const float W = bThere ? 0.0f : Config.CreepSpeedCmS / Config.FrontOmniRadiusCm;
 				Base->SetMotorVelocityCommand(Config.FrontOmniLeft, W);
 				Base->SetMotorVelocityCommand(Config.FrontOmniRight, W);
@@ -662,7 +708,23 @@ void URammsMebotCurbController::Step(float Dt)
 			}
 			else if (!Moving())
 			{
-				EnterPhase(ERammsMebotCurbPhase::DriveDown);
+				// The translators carried the drive wheels over: down once both hubs are at the mark. Short of it
+				// (the chassis gave as they moved), on by the shortfall, as far as the translators reach.
+				const float Short = PhaseValue - LaggingAlong(ESupport::Drive);
+				const float Reach = TranslatorReachCm();
+				if (Short <= 0.5f)
+				{
+					EnterPhase(ERammsMebotCurbPhase::DriveDown);
+				}
+				else if (Lifts[TranslatorL].Cmd >= Reach - 0.01f)
+				{
+					Finish(true, FString::Printf(TEXT("the translators' reach leaves the drive wheels %.1f cm short of their mark"), Short));
+				}
+				else
+				{
+					const float To = FMath::Min(Reach, Lifts[TranslatorL].Cmd + Short);
+					StartMove({ { TranslatorL, To }, { TranslatorR, To } }, 0.5f);
+				}
 			}
 			break;
 		case ERammsMebotCurbPhase::DriveDown:
@@ -827,7 +889,7 @@ void URammsMebotCurbController::StartTouchdown(ESupport Support, float LevelZ)
 	TouchSupport = Support;
 	TouchLevelZ = LevelZ;
 	TouchStage = 0;
-	TouchTargetCm = HeightNow(Support) - Gap(Support, LevelZ); // lowered by the measured gap
+	TouchTargetCm = TouchPlanCm = HeightNow(Support) - Gap(Support, LevelZ); // lowered by the measured gap
 	if (!StartHeights({ { Support, TouchTargetCm } }, 0.3f))
 	{
 		Finish(true, Status);
@@ -860,9 +922,9 @@ bool URammsMebotCurbController::StepTouchdown(float Dt)
 			}
 			return false;
 		}
-		// Not yet: 5 mm further, up to 4 cm past the plan.
+		// Not yet: 5 mm further, up to 4 cm past the plan (measured from the plan: the support follows each step).
 		TouchTargetCm -= 0.5f;
-		if (TouchTargetCm < HeightNow(TouchSupport) - 4.0f || !StartHeights({ { TouchSupport, TouchTargetCm } }, 0.2f))
+		if (TouchTargetCm < TouchPlanCm - 4.0f || !StartHeights({ { TouchSupport, TouchTargetCm } }, 0.2f))
 		{
 			Finish(true, FString::Printf(TEXT("the %s did not touch down (%.1f cm above the level)"), TouchSupport == ESupport::Drive ? TEXT("drive wheels") : TouchSupport == ESupport::Front ? TEXT("front omni wheels")
 																																															   : TEXT("rear omni wheels"),
@@ -894,7 +956,7 @@ void URammsMebotCurbController::DriveAt(float SpeedCmS, bool bDrive, bool bFront
 	}
 }
 
-void URammsMebotCurbController::HoldWheels()
+void URammsMebotCurbController::HoldWheels(bool bFrontHubsToo)
 {
 	if (!Base)
 	{
@@ -907,11 +969,12 @@ void URammsMebotCurbController::HoldWheels()
 	{
 		Base->ClearMotorVelocityCommand(M); // a braked wheel is held by its brake alone
 	}
-	if (!RammsDrive::EngageBrakes(*Base, Drive, Braked))
+	RammsDrive::EngageBrakes(*Base, Drive, Braked);
+	for (FName M : Drive)
 	{
-		for (FName M : Drive)
+		if (!Braked.Contains(M))
 		{
-			Base->SetMotorVelocityCommand(M, 0.0f);
+			Base->SetMotorVelocityCommand(M, 0.0f); // no brake: its speed loop holds it at rest
 		}
 	}
 	if (bPowered)
@@ -919,7 +982,14 @@ void URammsMebotCurbController::HoldWheels()
 		for (FName M : { Config.FrontOmniLeft, Config.FrontOmniRight })
 		{
 			Base->ClearMotorVelocityCommand(M);
-			Base->SetMotorCommand(M, 0.0f); // freewheel
+			if (bFrontHubsToo)
+			{
+				Base->SetMotorVelocityCommand(M, 0.0f);
+			}
+			else
+			{
+				Base->SetMotorCommand(M, 0.0f); // freewheel
+			}
 		}
 	}
 }
@@ -1006,6 +1076,19 @@ float URammsMebotCurbController::SupportAlong(ESupport S) const
 	}
 }
 
+float URammsMebotCurbController::LaggingAlong(ESupport S) const
+{
+	switch (S)
+	{
+		case ESupport::Drive:
+			return FMath::Min(Along(BodyPos(Config.DriveWheelLeftBody)), Along(BodyPos(Config.DriveWheelRightBody)));
+		case ESupport::Front:
+			return FMath::Min(Along(BodyPos(Config.FrontOmniLeftBody)), Along(BodyPos(Config.FrontOmniRightBody)));
+		default:
+			return FMath::Min(Along(BodyPos(Config.RearOmniLeftBody)), Along(BodyPos(Config.RearOmniRightBody)));
+	}
+}
+
 float URammsMebotCurbController::Radius(ESupport S) const
 {
 	return S == ESupport::Drive ? Config.DriveWheelRadiusCm : S == ESupport::Front ? Config.FrontOmniRadiusCm
@@ -1039,6 +1122,32 @@ TArray<int32> URammsMebotCurbController::LiftsOf(ESupport S) const
 		default:
 			return { RearLiftLift };
 	}
+}
+
+float URammsMebotCurbController::TranslatorReachCm() const
+{
+	FRammsMotorSpec Spec;
+	return Base && Base->GetMotorSpec(Config.TranslatorLeft, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y ? Spec.ControlRange.Y - 1.0f : 39.0f;
+}
+
+bool URammsMebotCurbController::IsCrossing() const
+{
+	return Phase != ERammsMebotCurbPhase::Idle && Phase != ERammsMebotCurbPhase::Done && Phase != ERammsMebotCurbPhase::Aborted;
+}
+
+bool URammsMebotCurbController::DriveWheelsDown() const
+{
+	for (FName Name : { Config.DriveWheelLeftBody, Config.DriveWheelRightBody })
+	{
+		const USceneComponent* Wheel = Body(Name);
+		float				   Ground = 0.0f;
+		if (!Wheel || !SurfaceZ(Wheel->GetComponentLocation(), Ground)
+			|| Wheel->GetComponentLocation().Z - Config.DriveWheelRadiusCm - Ground > Config.TouchToleranceCm)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 float URammsMebotCurbController::HeightNow(ESupport S) const
