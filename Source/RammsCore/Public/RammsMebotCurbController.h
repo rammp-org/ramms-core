@@ -192,8 +192,11 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
  * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one), and a
  * finished or stopped crossing hands back to ReturnModeId once both drive wheels are on the ground. Stopped
  * with them up, nothing in that mode would hold the robot, so it holds the wheels (the powered front omni
- * wheels' hubs at rest) and leaves the lifts to the operator until they are down. Selected by hand, with no
- * crossing to run, it hands straight back; another mode being selected aborts it.
+ * wheels' hubs at rest) and leaves the lifts to the operator until they are down. Selected by hand (a panel,
+ * the mode button) it starts the crossing ahead, as curb.negotiate does; with none to run it says why (the
+ * status) and hands straight back. As a selector's initial mode it starts nothing and hands back. Another mode
+ * being selected aborts it. The rear-lift rule's mass model has the robot's arm stowed: where the control
+ * surface has one, a crossing stows it (arm.stow) and holds its arm.* rate axes at rest until it ends.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsMebotCurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
@@ -296,6 +299,9 @@ private:
 	void DriveAt(float SpeedCmS, bool bDriveWheels, bool bFrontOmni);
 	void HoldWheels(bool bFrontHubsToo = false); // the front omni wheels' hubs freewheel unless asked
 	void ReleaseWheels();
+	void StowArm();				   // arm.stow, and the arm's rate axes gathered for HoldArm
+	void HoldArm();				   // those axes at rest under this controller's source: no operator input moves the arm
+	bool SwitchedToByHand() const; // activated by a switch from another mode, not as the initial mode
 	void StepLifts(float Dt);
 
 	// Sensing.
@@ -354,6 +360,7 @@ private:
 	float		  DriveCmS = 0.0f;
 	bool		  bDriveWheels = false, bDriveFront = false;
 	TArray<FName> Braked;
+	TArray<FName> ArmAxes; // the arm's rate axes, held at rest while a crossing runs
 	double		  LastSimTime = -1.0;
 	float		  PhaseValue = 0.0f; // a phase's own number (a translator goal, a target distance)
 

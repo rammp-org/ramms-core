@@ -190,6 +190,17 @@ void URammsMebotCurbController::SetDriveModeActive(bool bActive)
 	bModeActive = bActive;
 	LastSimTime = -1.0;
 	bHandBackWarned = false;
+	if (bActive && !bStartPending && SwitchedToByHand())
+	{
+		// Selected by hand (the panel, the mode button) rather than by a start: start the crossing it is for. With
+		// none to run -- no curb ahead, or one it cannot cross -- it says why and hands straight back.
+		FString Why;
+		if (!StartCrossing(Why))
+		{
+			UE_LOG(LogRammsMebotCurb, Warning, TEXT("%s: curb crossing refused: %s"), *GetNameSafe(GetOwner()), *Why);
+			Status = Why;
+		}
+	}
 	if (!bActive)
 	{
 		if (IsCrossing())
@@ -202,6 +213,20 @@ void URammsMebotCurbController::SetDriveModeActive(bool bActive)
 		bHoldUntilDown = false;
 		ReleaseWheels();
 	}
+}
+
+bool URammsMebotCurbController::SwitchedToByHand() const
+{
+	// Mid-switch the selector still reports the mode it is leaving. The initial selection, as the robot is put
+	// down, leaves none: that is not an operator asking to cross.
+	const AActor*				   Owner = GetOwner();
+	const URammsDriveModeSelector* Selector = Owner ? Owner->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
+	if (!Selector)
+	{
+		return false;
+	}
+	const FName From = Selector->GetActiveModeId();
+	return !From.IsNone() && From != GetDriveModeId();
 }
 
 bool URammsMebotCurbController::SelectMode(FName ModeId)
@@ -372,6 +397,7 @@ void URammsMebotCurbController::Finish(bool bAborted, const FString& Why)
 	bHoldUntilDown = bDriveWheelsUp;
 	bHoldContact[0] = bHoldContact[1] = false;
 	HoldWheels(bHoldUntilDown);
+	ArmAxes.Reset(); // the arm is the operator's again once the hold lapses
 	// The lifts stay where they are; the rear keeps its trim.
 	if (bLevel)
 	{
@@ -456,7 +482,54 @@ void URammsMebotCurbController::Begin()
 	SettleLeft = 0.0f;
 	HoldWheels();
 	PhaseLog.Reset();
+	StowArm();
 	EnterPhase(ERammsMebotCurbPhase::Level);
+}
+
+void URammsMebotCurbController::StowArm()
+{
+	// The rear-lift rule's mass model has the arm stowed. Where the robot has an arm on its control surface, it is
+	// stowed (arm.stow) as the crossing starts and its rate axes (arm.*) held at rest under this controller's source
+	// until the end, so no operator input moves it in between.
+	ArmAxes.Reset();
+	URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this);
+	if (!Surface)
+	{
+		return;
+	}
+	bool bStow = false;
+	for (const FRammsControlAxis& Axis : Surface->DescribeControlSurface().Axes)
+	{
+		if (!Axis.Id.ToString().StartsWith(TEXT("arm.")))
+		{
+			continue;
+		}
+		if (Axis.Kind == ERammsControlKind::Continuous && !Axis.bReadOnly)
+		{
+			ArmAxes.Add(Axis.Id);
+		}
+		bStow |= Axis.Id == FName("arm.stow");
+	}
+	if (bStow && Surface->TriggerControl(FName("arm.stow"), ERammsControlSource::Autonomy))
+	{
+		PhaseLog.Add(TEXT("        the arm stowed for the crossing"));
+	}
+	HoldArm();
+}
+
+void URammsMebotCurbController::HoldArm()
+{
+	if (ArmAxes.Num() == 0)
+	{
+		return;
+	}
+	if (URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
+	{
+		for (const FName Id : ArmAxes)
+		{
+			Surface->SetControl(Id, 0.0f, ERammsControlSource::Autonomy);
+		}
+	}
 }
 
 void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
@@ -596,6 +669,7 @@ void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
 void URammsMebotCurbController::Step(float Dt)
 {
 	PhaseSeconds += Dt;
+	HoldArm();
 	StepLifts(Dt);
 
 	// Driving: the drive wheels (and the powered front omni wheels) at the speed asked; nothing else commanded.
@@ -755,14 +829,40 @@ void URammsMebotCurbController::Step(float Dt)
 			}
 			break;
 		case ERammsMebotCurbPhase::RearOver:
-			Arrive(SupportAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 3.0f, bClimb ? ERammsMebotCurbPhase::RearDown : ERammsMebotCurbPhase::Lower);
+			Arrive(LaggingAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 3.0f, bClimb ? ERammsMebotCurbPhase::RearDown : ERammsMebotCurbPhase::Lower);
 			break;
 		case ERammsMebotCurbPhase::Lower:
-			if (!Moving())
+		{
+			// Lowering on the braked drive wheels swings them on their arms, which can roll the robot back: if a rear
+			// omni wheel came back over the edge, creep on until both are past it again, braked and settled there,
+			// before setting them down. PhaseValue: 0 lowering or creeping, 1 settling where they were past.
+			const bool bPast = LaggingAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 3.0f;
+			if (Moving())
 			{
-				EnterPhase(ERammsMebotCurbPhase::RearDown);
+				break;
 			}
+			if (PhaseValue == 0.0f)
+			{
+				if (bPast)
+				{
+					HoldWheels();
+					SettleLeft = 0.8f;
+					PhaseValue = 1.0f;
+				}
+				else if (FMath::IsNearlyZero(DriveCmS))
+				{
+					DriveAt(Config.CreepSpeedCmS, true, bPowered);
+				}
+				break;
+			}
+			if (!bPast)
+			{
+				PhaseValue = 0.0f; // rolled back while settling: creep on again
+				break;
+			}
+			EnterPhase(ERammsMebotCurbPhase::RearDown);
 			break;
+		}
 		case ERammsMebotCurbPhase::RearDown:
 			if (StepTouchdown(Dt))
 			{
