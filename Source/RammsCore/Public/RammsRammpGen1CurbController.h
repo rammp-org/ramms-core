@@ -306,43 +306,43 @@ private:
 	void StepLifts(float Dt);
 
 	// Sensing.
-	USceneComponent*			   Body(FName Name) const;
-	FVector						   BodyPos(FName Name) const;
-	bool						   SurfaceZ(const FVector& At, float& OutZ) const;
-	float						   Along(const FVector& P) const;  // past the edge along the heading (cm, negative before it)
-	float						   SupportAlong(ESupport S) const; // the pair's mean hub
-	float						   LaggingAlong(ESupport S) const; // the pair's hub further back
-	float						   Radius(ESupport S) const;
-	float						   Gap(ESupport S, float LevelZ) const; // the higher wheel's bottom above LevelZ
-	float						   HeightNow(ESupport S) const;			// its table height at the joint's angle
-	float						   PitchRad() const;					// positive nose up
-	float						   ComAheadOfAxleCm() const;
+	USceneComponent*				   Body(FName Name) const;
+	FVector							   BodyPos(FName Name) const;
+	bool							   SurfaceZ(const FVector& At, float& OutZ) const;
+	float							   Along(const FVector& P) const;  // past the edge along the heading (cm, negative before it)
+	float							   SupportAlong(ESupport S) const; // the pair's mean hub
+	float							   LaggingAlong(ESupport S) const; // the pair's hub further back
+	float							   Radius(ESupport S) const;
+	float							   Gap(ESupport S, float LevelZ) const; // the higher wheel's bottom above LevelZ
+	float							   HeightNow(ESupport S) const;			// its table height at the joint's angle
+	float							   PitchRad() const;					// positive nose up
+	float							   ComAheadOfAxleCm() const;
 	const FRammsRammpGen1SupportTable& TableOf(ESupport S) const;
-	bool						   AngleFor(ESupport S, float HeightCm, float& OutAngle, FString& OutWhy) const;
-	TArray<int32>				   LiftsOf(ESupport S) const;
-	float						   TranslatorReachCm() const;
-	bool						   IsCrossing() const;
-	bool						   DriveWheelsLoaded(); // both down on the ground under them, taking load
+	bool							   AngleFor(ESupport S, float HeightCm, float& OutAngle, FString& OutWhy) const;
+	TArray<int32>					   LiftsOf(ESupport S) const;
+	float							   TranslatorReachCm() const;
+	bool							   IsCrossing() const;
+	bool							   DriveWheelsLoaded(); // both down on the ground under them, taking load
 
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
 
 	ERammsRammpGen1CurbPhase Phase = ERammsRammpGen1CurbPhase::Idle;
-	FString				 Status;
-	bool				 bModeActive = false;
-	bool				 bStartPending = false;	 // asked to start; begins once the mode is active
-	bool				 bHoldUntilDown = false; // stopped with the drive wheels up: no hand-back until they are down
-	bool				 bDriveWheelsUp = false; // lifted by this crossing, not yet touched down again
-	bool				 bHoldContact[2] = { false, false };
-	float				 HoldContactCm[2] = { 0.0f, 0.0f }; // each drive wheel's table height where it met the ground
-	bool				 bHandBackWarned = false;
-	bool				 bPowered = false; // the front omni wheels have hub motors
-	bool				 bClimb = true;
-	float				 StepCm = 0.0f;			  // signed: positive up
-	float				 CrossingHeightCm = 0.0f; // above the lower level, from the reference pose
-	float				 NearZ = 0.0f, FarZ = 0.0f;
-	FVector				 EdgePoint = FVector::ZeroVector;
-	FVector				 Heading = FVector::ForwardVector;
+	FString					 Status;
+	bool					 bModeActive = false;
+	bool					 bStartPending = false;	 // asked to start; begins once the mode is active
+	bool					 bHoldUntilDown = false; // stopped with the drive wheels up: no hand-back until they are down
+	bool					 bDriveWheelsUp = false; // lifted by this crossing, not yet touched down again
+	bool					 bHoldContact[2] = { false, false };
+	float					 HoldContactCm[2] = { 0.0f, 0.0f }; // each drive wheel's table height where it met the ground
+	bool					 bHandBackWarned = false;
+	bool					 bPowered = false; // the front omni wheels have hub motors
+	bool					 bClimb = true;
+	float					 StepCm = 0.0f;			  // signed: positive up
+	float					 CrossingHeightCm = 0.0f; // above the lower level, from the reference pose
+	float					 NearZ = 0.0f, FarZ = 0.0f;
+	FVector					 EdgePoint = FVector::ZeroVector;
+	FVector					 Heading = FVector::ForwardVector;
 
 	FLift Lifts[NumLifts];
 	float SettleLeft = 0.0f;
@@ -364,6 +364,9 @@ private:
 	TArray<FName> ArmAxes; // the arm's rate axes, held at rest while a crossing runs
 	double		  LastSimTime = -1.0;
 	float		  PhaseValue = 0.0f; // a phase's own number (a translator goal, a target distance)
+
+	// Body's lookups: it runs many times a tick, on a pawn with hundreds of components.
+	mutable TMap<FName, TWeakObjectPtr<USceneComponent>> BodyCache;
 
 	TArray<FString> PhaseLog;
 };

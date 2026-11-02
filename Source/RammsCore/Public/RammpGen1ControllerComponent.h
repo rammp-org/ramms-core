@@ -330,11 +330,14 @@ private:
 	// Get skeletal mesh from owner
 	USkeletalMeshComponent* GetOwnerSkeletalMesh();
 
-	// Update all angular motors
-	void UpdateAngularMotors(float DeltaTime);
+	// Update all angular motors (Yielded: the base motors another active mode drives)
+	void UpdateAngularMotors(float DeltaTime, const TSet<FName>& Yielded);
 
 	// Update all linear motors
-	void UpdateLinearMotors(float DeltaTime);
+	void UpdateLinearMotors(float DeltaTime, const TSet<FName>& Yielded);
+
+	// The base's simulation clock at the last tick (s; negative before the first, or with no clock)
+	double LastSimTime = -1.0;
 
 	// Apply angular motor settings to constraint
 	void ApplyAngularMotorSettings(FAngularMotorConfig& Motor);

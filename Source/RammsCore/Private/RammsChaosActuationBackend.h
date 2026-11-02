@@ -66,7 +66,6 @@ private:
 		int32 Axis = 0;
 		FName ChildBone;
 		FName ParentBone;
-		bool  bTakenOver = false;
 		/** The last commanded target, to wake the bodies when it changes. */
 		bool  bCommanded = false;
 		float LastCommand = 0.0f;
@@ -86,8 +85,13 @@ private:
 																								   *  coordinate, on the constraint's own axes. */
 	bool GetConstraintFrames(const FConstraintInstance& CI, const FConstraintMotor& Info, FTransform& OutParentFrameWorld, FTransform& OutChildFrameWorld) const;
 
-	/** Hand the constraint over from a URammpGen1ControllerComponent on the owner, once. */
+	/** Hand the constraint over from a URammpGen1ControllerComponent on the owner that drives it directly. On every
+	 *  command, not just the first: commanded through its own controls, that controller enables its motor again. */
 	void TakeOverFromRammpGen1Controller(FConstraintMotor& Info);
+
+	/** The owner's URammpGen1ControllerComponent, looked up once. */
+	TWeakObjectPtr<class URammpGen1ControllerComponent> RammpGen1Controller;
+	bool												bLookedForRammpGen1Controller = false;
 
 	TWeakObjectPtr<class URammsRobotBaseComponent> BaseComp;
 	TWeakObjectPtr<USkeletalMeshComponent>		   Mesh;

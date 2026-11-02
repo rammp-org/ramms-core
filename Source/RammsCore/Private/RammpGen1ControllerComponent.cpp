@@ -205,8 +205,25 @@ void URammpGen1ControllerComponent::TickComponent(float DeltaTime, ELevelTick Ti
 
 	RefreshConstraintCache();
 
-	UpdateAngularMotors(DeltaTime);
-	UpdateLinearMotors(DeltaTime);
+	// Ramp at the backend's clock when it keeps one: a simulator behind real time
+	// is slower than the game, and MaxSpeed is the mechanism's rate in sim time.
+	// The game's clock otherwise (Chaos).
+	float	   Dt = DeltaTime;
+	const bool bViaBase = IsUsingRobotBase();
+	if (bViaBase)
+	{
+		const double Now = RobotBase->GetSimulationTime();
+		if (Now >= 0.0)
+		{
+			// A reset sends the clock back: no step across it.
+			Dt = (LastSimTime < 0.0 || Now < LastSimTime) ? 0.0f : static_cast<float>(Now - LastSimTime);
+			LastSimTime = Now;
+		}
+	}
+	// Which base motors another active mode drives, gathered once a tick.
+	const TSet<FName> Yielded = bViaBase ? RammpGen1MotorsClaimedByActiveMode(this) : TSet<FName>();
+	UpdateAngularMotors(Dt, Yielded);
+	UpdateLinearMotors(Dt, Yielded);
 	DrawDebugVisualization();
 }
 
@@ -384,11 +401,14 @@ float URammpGen1ControllerComponent::GetAngularMotorCurrentAngle(FName MotorName
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			// The joint's angle in the motor's own sense, that of TargetAngle: an
+			// inverted motor drives the joint to -TargetAngle.
+			const float Sign = Motor.bInvertDirection ? -1.0f : 1.0f;
 			if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
 			{
 				// The base reads the joint in radians (constraint angle on Chaos,
 				// position actuator's joint on MuJoCo).
-				return FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
+				return Sign * FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
 			}
 			// Const getter callable from Blueprint at any point in the frame: resolve from
 			// the mesh's CURRENT physics state instead of trusting the tick-time cache,
@@ -400,23 +420,24 @@ float URammpGen1ControllerComponent::GetAngularMotorCurrentAngle(FName MotorName
 			{
 				return 0.0f;
 			}
-			// Get current angular state from constraint
+			// Get current angular state from constraint: the drive turns about X for
+			// twist, Y for swing 2 and Z for swing 1 (ApplyAngularMotorSettings).
 			float CurrentAngle = 0.0f;
 			switch (Motor.ControlAxis)
 			{
 				case EMotorAxis::X:
-					CurrentAngle = Constraint->GetCurrentSwing1();
+					CurrentAngle = Constraint->GetCurrentTwist();
 					break;
 				case EMotorAxis::Y:
 					CurrentAngle = Constraint->GetCurrentSwing2();
 					break;
 				case EMotorAxis::Z:
-					CurrentAngle = Constraint->GetCurrentTwist();
+					CurrentAngle = Constraint->GetCurrentSwing1();
 					break;
 			}
 			// Chaos reports the constraint angles in radians; this API is degrees
 			// on both paths (TargetAngle is degrees).
-			return FMath::RadiansToDegrees(CurrentAngle);
+			return Sign * FMath::RadiansToDegrees(CurrentAngle);
 		}
 	}
 	return 0.0f;
@@ -474,8 +495,9 @@ void URammpGen1ControllerComponent::ReinitializeMotors()
 	{
 		Motor.bPendingApply = true;
 	}
-	UpdateAngularMotors(0.0f);
-	UpdateLinearMotors(0.0f);
+	const TSet<FName> Yielded = bViaBase ? RammpGen1MotorsClaimedByActiveMode(this) : TSet<FName>();
+	UpdateAngularMotors(0.0f, Yielded);
+	UpdateLinearMotors(0.0f, Yielded);
 
 	if (bEnableDebugLog)
 	{
@@ -642,10 +664,9 @@ USkeletalMeshComponent* URammpGen1ControllerComponent::GetOwnerSkeletalMesh()
 	return Owner->FindComponentByClass<USkeletalMeshComponent>();
 }
 
-void URammpGen1ControllerComponent::UpdateAngularMotors(float DeltaTime)
+void URammpGen1ControllerComponent::UpdateAngularMotors(float DeltaTime, const TSet<FName>& Yielded)
 {
-	const bool		  bViaBase = IsUsingRobotBase();
-	const TSet<FName> Yielded = bViaBase ? RammpGen1MotorsClaimedByActiveMode(this) : TSet<FName>();
+	const bool bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
 		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
@@ -684,10 +705,9 @@ void URammpGen1ControllerComponent::UpdateAngularMotors(float DeltaTime)
 	}
 }
 
-void URammpGen1ControllerComponent::UpdateLinearMotors(float DeltaTime)
+void URammpGen1ControllerComponent::UpdateLinearMotors(float DeltaTime, const TSet<FName>& Yielded)
 {
-	const bool		  bViaBase = IsUsingRobotBase();
-	const TSet<FName> Yielded = bViaBase ? RammpGen1MotorsClaimedByActiveMode(this) : TSet<FName>();
+	const bool bViaBase = IsUsingRobotBase();
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
 		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))

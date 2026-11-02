@@ -190,14 +190,14 @@ bool FRammsChaosActuationBackend::GetConstraintFrames(const FConstraintInstance&
 
 void FRammsChaosActuationBackend::TakeOverFromRammpGen1Controller(FConstraintMotor& Info)
 {
-	if (Info.bTakenOver)
+	if (!bLookedForRammpGen1Controller)
 	{
-		return;
+		bLookedForRammpGen1Controller = true;
+		const URammsRobotBaseComponent* Base = BaseComp.Get();
+		AActor*							Owner = Base ? Base->GetOwner() : nullptr;
+		RammpGen1Controller = Owner ? Owner->FindComponentByClass<URammpGen1ControllerComponent>() : nullptr;
 	}
-	Info.bTakenOver = true;
-	const URammsRobotBaseComponent* Base = BaseComp.Get();
-	AActor*							Owner = Base ? Base->GetOwner() : nullptr;
-	URammpGen1ControllerComponent*	MC = Owner ? Owner->FindComponentByClass<URammpGen1ControllerComponent>() : nullptr;
+	URammpGen1ControllerComponent* MC = RammpGen1Controller.Get();
 	// A RammpGen1Controller routing through the base is the caller, not a rival.
 	if (!MC || MC->IsUsingRobotBase())
 	{

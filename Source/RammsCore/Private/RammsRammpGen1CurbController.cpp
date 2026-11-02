@@ -36,9 +36,58 @@ namespace
 		return Out;
 	}
 
+	/** The phase's label. Its UMETA DisplayName is editor-only metadata: a packaged build would show the raw name
+	 *  ("FrontUp") in the status, the phase log and the curb.phase labels. */
+	const TCHAR* RammpGen1CurbPhaseLabel(ERammsRammpGen1CurbPhase P)
+	{
+		using EPhase = ERammsRammpGen1CurbPhase;
+		switch (P)
+		{
+			case EPhase::Idle:
+				return TEXT("Idle");
+			case EPhase::Level:
+				return TEXT("Chassis to crossing height");
+			case EPhase::Approach:
+				return TEXT("Approach");
+			case EPhase::FrontUp:
+				return TEXT("Front omni wheels up");
+			case EPhase::ToEdge:
+				return TEXT("Drive to the edge");
+			case EPhase::FrontDown:
+				return TEXT("Front omni wheels down");
+			case EPhase::DriveUp:
+				return TEXT("Drive wheels up");
+			case EPhase::DriveOver:
+				return TEXT("Drive wheels over the edge");
+			case EPhase::DriveDown:
+				return TEXT("Drive wheels down");
+			case EPhase::PullAft:
+				return TEXT("Drive wheels aft");
+			case EPhase::RearUp:
+				return TEXT("Rear omni wheels up");
+			case EPhase::RearOver:
+				return TEXT("Rear omni wheels over the edge");
+			case EPhase::Lower:
+				return TEXT("Chassis down");
+			case EPhase::RearDown:
+				return TEXT("Rear omni wheels down");
+			case EPhase::ClearEdge:
+				return TEXT("Clear the edge");
+			case EPhase::Recentre:
+				return TEXT("Translators to centre");
+			case EPhase::Restore:
+				return TEXT("Driving pose");
+			case EPhase::Done:
+				return TEXT("Done");
+			case EPhase::Aborted:
+				return TEXT("Aborted");
+		}
+		return TEXT("?");
+	}
+
 	FString RammpGen1CurbPhaseName(ERammsRammpGen1CurbPhase P)
 	{
-		return StaticEnum<ERammsRammpGen1CurbPhase>()->GetDisplayNameTextByValue(static_cast<int64>(P)).ToString();
+		return RammpGen1CurbPhaseLabel(P);
 	}
 } // namespace
 
@@ -112,7 +161,7 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 	const UEnum* PhaseEnum = StaticEnum<ERammsRammpGen1CurbPhase>();
 	for (int32 i = 0; i < PhaseEnum->NumEnums() - 1; ++i)
 	{
-		State.EnumLabels.Add(PhaseEnum->GetDisplayNameTextByIndex(i));
+		State.EnumLabels.Add(FText::FromString(RammpGen1CurbPhaseLabel(static_cast<ERammsRammpGen1CurbPhase>(PhaseEnum->GetValueByIndex(i)))));
 	}
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
@@ -326,8 +375,8 @@ bool URammsRammpGen1CurbController::StartCrossing(FString& OutReason)
 		OutReason = TEXT("the chassis has no heading");
 		return false;
 	}
-	const FVector		  From = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
-	const auto			  SurfaceAt = [this, From, Fwd](float D, float& OutZ) { return SurfaceZ(From + Fwd * D, OutZ); };
+	const FVector			  From = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
+	const auto				  SurfaceAt = [this, From, Fwd](float D, float& OutZ) { return SurfaceZ(From + Fwd * D, OutZ); };
 	RammsRammpGen1Curb::FStep Found;
 	if (!RammsRammpGen1Curb::FindStep(SurfaceAt, 0.0f, Config.ScanAheadCm, 2.0f, Config.MinStepCm, Found, OutReason))
 	{
@@ -342,7 +391,7 @@ bool URammsRammpGen1CurbController::StartCrossing(FString& OutReason)
 	const RammsRammpGen1Curb::FSupportTable Drive = RammpGen1CurbTable(Config.DriveTable), Front = RammpGen1CurbTable(Config.FrontTable),
 											Rear = RammpGen1CurbTable(Config.RearTable);
 	const RammsRammpGen1Curb::FSupportTable* Tables[] = { &Drive, &Front, &Rear };
-	float								 Height = 0.0f;
+	float									 Height = 0.0f;
 	if (!RammsRammpGen1Curb::CrossingHeight(Tables, Found.HeightCm, Config.ClearanceCm, Config.BellyClearanceCm, Config.FrameMarginCm, Height,
 			OutReason))
 	{
@@ -480,6 +529,13 @@ void URammsRammpGen1CurbController::Begin()
 	bLevel = true;
 	bDriveWheelsUp = false;
 	SettleLeft = 0.0f;
+	// The wheel radii divide the drive speeds (cm/s to rad/s); the editor's ClampMin does not stop a script or a
+	// Blueprint setting 0.
+	if (Config.DriveWheelRadiusCm <= 0.0f || Config.FrontOmniRadiusCm <= 0.0f)
+	{
+		Finish(true, TEXT("the curb config's wheel radii must be above 0"));
+		return; // the lifts hold where they stand
+	}
 	HoldWheels();
 	PhaseLog.Reset();
 	StowArm();
@@ -600,7 +656,7 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 			// The rule, before the rear omni wheels come up: each drive wheel past the edge, over the far level and
 			// down on it.
 			RammsRammpGen1Curb::FRearLiftCheck Check;
-			const FName					   Wheels[2] = { Config.DriveWheelLeftBody, Config.DriveWheelRightBody };
+			const FName						   Wheels[2] = { Config.DriveWheelLeftBody, Config.DriveWheelRightBody };
 			for (int32 i = 0; i < 2; ++i)
 			{
 				const FVector Hub = BodyPos(Wheels[i]);
@@ -1129,6 +1185,13 @@ void URammsRammpGen1CurbController::ReleaseWheels()
 
 USceneComponent* URammsRammpGen1CurbController::Body(FName Name) const
 {
+	if (const TWeakObjectPtr<USceneComponent>* Cached = BodyCache.Find(Name))
+	{
+		if (USceneComponent* C = Cached->Get())
+		{
+			return C;
+		}
+	}
 	if (const AActor* Owner = GetOwner())
 	{
 		TInlineComponentArray<USceneComponent*> Scene(Owner);
@@ -1136,6 +1199,7 @@ USceneComponent* URammsRammpGen1CurbController::Body(FName Name) const
 		{
 			if (C && C->GetFName() == Name)
 			{
+				BodyCache.Add(Name, C);
 				return C;
 			}
 		}
@@ -1249,10 +1313,10 @@ bool URammsRammpGen1CurbController::DriveWheelsLoaded()
 {
 	// Each on the ground under it and lowered on past where it first met it by half the preload: carrying load,
 	// not hovering a few millimetres over it.
-	const FName							Wheels[2] = { Config.DriveWheelLeftBody, Config.DriveWheelRightBody };
-	const int32							Elevators[2] = { ElevatorL, ElevatorR };
+	const FName								Wheels[2] = { Config.DriveWheelLeftBody, Config.DriveWheelRightBody };
+	const int32								Elevators[2] = { ElevatorL, ElevatorR };
 	const RammsRammpGen1Curb::FSupportTable Table = RammpGen1CurbTable(Config.DriveTable);
-	bool								bLoaded = true;
+	bool									bLoaded = true;
 	for (int32 i = 0; i < 2; ++i)
 	{
 		const USceneComponent* Wheel = Body(Wheels[i]);

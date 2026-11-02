@@ -57,8 +57,8 @@ bool FRammsRammpGen1CurbHeightTest::RunTest(const FString& Parameters)
 {
 	const RammsRammpGen1Curb::FSupportTable	 Long = RammpGen1CurbLinearTable(15.0f, 15.0f), Short = RammpGen1CurbLinearTable(5.0f, 14.0f);
 	const RammsRammpGen1Curb::FSupportTable* Both[] = { &Long, &Short };
-	float								 H = 0.0f;
-	FString								 Why;
+	float									 H = 0.0f;
+	FString									 Why;
 	// 12 cm, 3 cm clearance, a 5 cm belly with 2 cm margin: the frame needs 9, Long's lift 0 and Short's 10;
 	// the lower level is in reach from 14 (Short): band 10..14, a quarter up = 11.
 	TestTrue(TEXT("12 cm works"), RammsRammpGen1Curb::CrossingHeight(Both, 12.0f, 3.0f, 5.0f, 2.0f, H, Why));
@@ -84,7 +84,7 @@ bool FRammsRammpGen1CurbStepTest::RunTest(const FString& Parameters)
 		return true;
 	};
 	RammsRammpGen1Curb::FStep Step;
-	FString				  Why;
+	FString					  Why;
 	TestTrue(TEXT("finds the curb"), RammsRammpGen1Curb::FindStep(Up, 0.0f, 150.0f, 2.0f, 3.0f, Step, Why));
 	TestNearlyEqual(TEXT("its edge to a millimetre"), Step.EdgeDistCm, 73.4f, 0.1f);
 	TestNearlyEqual(TEXT("its height"), Step.HeightCm, 15.0f, 1e-3f);
@@ -209,7 +209,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbControlsTest, "Ramms.Curb.Ra
 bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)
 {
 	URammsRammpGen1CurbController* C = NewObject<URammsRammpGen1CurbController>(GetTransientPackage());
-	FRammsControlSurface	   Surface;
+	FRammsControlSurface		   Surface;
 	C->DescribeControls(Surface);
 	TArray<FName> Ids;
 	for (const FRammsControlAxis& A : Surface.Axes)
