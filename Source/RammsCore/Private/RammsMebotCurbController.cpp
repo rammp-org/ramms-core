@@ -566,6 +566,9 @@ void URammsMebotCurbController::EnterPhase(ERammsMebotCurbPhase Next)
 			break;
 		case ERammsMebotCurbPhase::DriveUp:
 			bDriveWheelsUp = true; // until their touchdown is done
+			// The front omni wheels' hubs hold the robot from here: braked, the drive wheels grip the road as their
+			// arms swing them up and push the chassis back, and once they are off it nothing else stops it rolling.
+			HoldWheels(true);
 			bOk = StartHeights({ { ESupport::Drive, Lift } }, 0.5f);
 			break;
 		case ERammsMebotCurbPhase::DriveOver:
@@ -974,8 +977,10 @@ void URammsMebotCurbController::StepLifts(float Dt)
 	if (bLevel)
 	{
 		// The sprung rear sags as it takes load: its lift trimmed against the pitch (nose up: the rear is low,
-		// its wheels go down), inside the motor's range.
-		RearTrimRad += Config.LevelGain * PitchRad() * Dt;
+		// its wheels go down), no faster than the lift can move (not the last move's rate, which a short move
+		// leaves near zero) and inside the motor's range.
+		const float MaxStep = Lifts[RearLiftLift].MaxRate * Dt;
+		RearTrimRad += FMath::Clamp(Config.LevelGain * PitchRad() * Dt, -MaxStep, MaxStep);
 		FRammsMotorSpec Spec;
 		if (Base->GetMotorSpec(Config.RearLift, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
 		{
