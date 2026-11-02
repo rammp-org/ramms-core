@@ -172,9 +172,10 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Crossing", meta = (ClampMin = "10.0"))
 	float ScanAheadCm = 150.0f;
 	/** The sprung rear's lift is trimmed against the chassis's pitch while its wheels are down (rad/s per
-	 *  rad of pitch). */
+	 *  rad of pitch), no faster than RearLiftSpeedDegS. It has to level the chassis while the translators
+	 *  re-centre after a climb, or the rear sags as the drive wheels move forward and the frame meets the curb. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Crossing", meta = (ClampMin = "0.0"))
-	float LevelGain = 2.0f;
+	float LevelGain = 8.0f;
 };
 
 /**
