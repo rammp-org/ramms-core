@@ -977,8 +977,9 @@ void URammsMebotCurbController::StepLifts(float Dt)
 	if (bLevel)
 	{
 		// The sprung rear sags as it takes load: its lift trimmed against the pitch (nose up: the rear is low,
-		// its wheels go down), no faster than the lift moves and inside the motor's range.
-		const float MaxStep = Lifts[RearLiftLift].Rate * Dt;
+		// its wheels go down), no faster than the lift can move (not the last move's rate, which a short move
+		// leaves near zero) and inside the motor's range.
+		const float MaxStep = Lifts[RearLiftLift].MaxRate * Dt;
 		RearTrimRad += FMath::Clamp(Config.LevelGain * PitchRad() * Dt, -MaxStep, MaxStep);
 		FRammsMotorSpec Spec;
 		if (Base->GetMotorSpec(Config.RearLift, Spec) && Spec.ControlRange.X < Spec.ControlRange.Y)
