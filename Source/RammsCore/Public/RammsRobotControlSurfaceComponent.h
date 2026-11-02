@@ -16,7 +16,7 @@ class IRammsControlContributor;
  * The robot's control surface: one component per robot actor that
  *
  *  - gathers every IRammsControlContributor on the actor (differential
- *    drive, MeBot lift controller, 5-bar linkages, camera, arm...) and merges
+ *    drive, RAMMP Gen1 lift controller, 5-bar linkages, camera, arm...) and merges
  *    their descriptions into one FRammsControlSurface,
  *  - appends a raw "Motors" group for every RobotBase registry motor no
  *    contributor claims (type / range / units from FRammsMotorSpec), so a
@@ -57,7 +57,7 @@ public:
 	 * Also gather contributors from actors held by this actor's
 	 * UChildActorComponents.
 	 *
-	 * A child actor is how a robot is composed out of robots -- the Mebot
+	 * A child actor is how a robot is composed out of robots -- the RAMMP Gen1
 	 * carries its arm that way -- and from the driver's side that arm is part
 	 * of the machine, not a separate one. Gathering only from the owner left
 	 * those controls with nowhere to be published: the arm simulated, carried

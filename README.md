@@ -95,7 +95,7 @@ This helps ensure that consistent code formatting is applied.
  |---|---|
  | `URammsDifferentialDriveController` | Differential drive controller for powered wheelchair simulation |
  | `URammsDifferentialDriveLibrary` | Blueprint function library with differential drive helpers |
- | `UMebotControllerComponent` | MEBot wheelchair base with linear and angular actuator control |
+ | `URammpGen1ControllerComponent` | RAMMP Gen1 wheelchair base with linear and angular actuator control |
 
 ### Manipulation
 

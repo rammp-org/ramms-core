@@ -6,14 +6,14 @@
 #include "CoreMinimal.h"
 #include "RammsControlContributor.h"
 #include "RammsDriveMode.h"
-#include "RammsMebotCurbController.generated.h"
+#include "RammsRammpGen1CurbController.generated.h"
 
 class URammsRobotBaseComponent;
 class USceneComponent;
 
-/** Where a MeBot curb crossing is (curb.phase). */
+/** Where a RAMMP Gen1 curb crossing is (curb.phase). */
 UENUM(BlueprintType)
-enum class ERammsMebotCurbPhase : uint8
+enum class ERammsRammpGen1CurbPhase : uint8
 {
 	Idle	  UMETA(DisplayName = "Idle"),
 	Level	  UMETA(DisplayName = "Chassis to crossing height"),
@@ -36,10 +36,10 @@ enum class ERammsMebotCurbPhase : uint8
 	Aborted	  UMETA(DisplayName = "Aborted"),
 };
 
-/** One support's height table (see RammsMebotCurb::FSupportTable): its wheels' bottom height (cm, chassis
+/** One support's height table (see RammsRammpGen1Curb::FSupportTable): its wheels' bottom height (cm, chassis
  *  level) from the reference pose as its joint turns (rad), unloaded. Written from the MJCF. */
 USTRUCT(BlueprintType)
-struct RAMMSCORE_API FRammsMebotSupportTable
+struct RAMMSCORE_API FRammsRammpGen1SupportTable
 {
 	GENERATED_BODY()
 
@@ -50,10 +50,10 @@ struct RAMMSCORE_API FRammsMebotSupportTable
 	TArray<float> HeightCm;
 };
 
-/** The MeBot's geometry, motors and crossing settings. ramms-sim's Scripts/mebot_mujoco/make_mebot_pawn.py
- *  writes them from mujoco/mebot (export_curb_config.py); the defaults are its names. */
+/** The RAMMP Gen1's geometry, motors and crossing settings. ramms-sim's Scripts/rammp_gen1_mujoco/make_rammp_gen1_pawn.py
+ *  writes them from mujoco/rammp_gen1 (export_curb_config.py); the defaults are its names. */
 USTRUCT(BlueprintType)
-struct RAMMSCORE_API FRammsMebotCurbConfig
+struct RAMMSCORE_API FRammsRammpGen1CurbConfig
 {
 	GENERATED_BODY()
 
@@ -77,7 +77,7 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
 	FName TranslatorRight = "translator_r";
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Motors")
 	FName FrontArm = "front_arm";
-	/** The rear support's driven joint (on the MeBot, the suspension arm the rear actuator turns). */
+	/** The rear support's driven joint (on the RAMMP Gen1, the suspension arm the rear actuator turns). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Motors")
 	FName RearLift = "rear_lift";
 
@@ -108,11 +108,11 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry", meta = (ClampMin = "0.0"))
 	float BellyClearanceCm = 5.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry")
-	FRammsMebotSupportTable DriveTable;
+	FRammsRammpGen1SupportTable DriveTable;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry")
-	FRammsMebotSupportTable FrontTable;
+	FRammsRammpGen1SupportTable FrontTable;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Geometry")
-	FRammsMebotSupportTable RearTable;
+	FRammsRammpGen1SupportTable RearTable;
 
 	// --- the mass model for the rear-lift rule: the chassis-fixed mass (rider included) and its centre of
 	// mass ahead of the chassis origin, and each drive assembly, which rides its translator
@@ -179,8 +179,8 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
 };
 
 /**
- * The MeBot's curb crossing: a stop-and-step sequence with a level chassis, the reference being ramms-sim's
- * mujoco/mebot/curb_sequence.py. The chassis rides just under the curb's height (from every support's reach)
+ * The RAMMP Gen1 curb controller (URammsCurbNegotiationController is Gen2's): a stop-and-step sequence
+ * with a level chassis, the reference being ramms-sim's mujoco/rammp_gen1/curb_sequence.py. The chassis rides just under the curb's height (from every support's reach)
  * so its frame clears the edge; each pair of supports -- front omni wheels, drive wheels, rear omni wheels --
  * is lifted over the edge and set down in turn, every touchdown lowered from the wheels' measured height to
  * contact and a little past. The rule: the rear omni wheels are not lifted until both drive wheels are down
@@ -200,15 +200,15 @@ struct RAMMSCORE_API FRammsMebotCurbConfig
  * surface has one, a crossing stows it (arm.stow) and holds its arm.* rate axes at rest until it ends.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsMebotCurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
+class RAMMSCORE_API URammsRammpGen1CurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
 {
 	GENERATED_BODY()
 
 public:
-	URammsMebotCurbController();
+	URammsRammpGen1CurbController();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
-	FRammsMebotCurbConfig Config;
+	FRammsRammpGen1CurbConfig Config;
 
 	/** The drive mode a finished crossing hands back to. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
@@ -223,7 +223,7 @@ public:
 	void Abort(const FString& Reason);
 
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
-	ERammsMebotCurbPhase GetPhase() const { return Phase; }
+	ERammsRammpGen1CurbPhase GetPhase() const { return Phase; }
 
 	/** The last crossing's outcome, or why it stopped. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
@@ -287,7 +287,7 @@ private:
 	// The sequence.
 	void Begin();
 	void Step(float Dt);
-	void EnterPhase(ERammsMebotCurbPhase Next);
+	void EnterPhase(ERammsRammpGen1CurbPhase Next);
 	void Finish(bool bAborted, const FString& Why);
 	bool SelectMode(FName ModeId);
 
@@ -317,7 +317,7 @@ private:
 	float						   HeightNow(ESupport S) const;			// its table height at the joint's angle
 	float						   PitchRad() const;					// positive nose up
 	float						   ComAheadOfAxleCm() const;
-	const FRammsMebotSupportTable& TableOf(ESupport S) const;
+	const FRammsRammpGen1SupportTable& TableOf(ESupport S) const;
 	bool						   AngleFor(ESupport S, float HeightCm, float& OutAngle, FString& OutWhy) const;
 	TArray<int32>				   LiftsOf(ESupport S) const;
 	float						   TranslatorReachCm() const;
@@ -327,7 +327,7 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
 
-	ERammsMebotCurbPhase Phase = ERammsMebotCurbPhase::Idle;
+	ERammsRammpGen1CurbPhase Phase = ERammsRammpGen1CurbPhase::Idle;
 	FString				 Status;
 	bool				 bModeActive = false;
 	bool				 bStartPending = false;	 // asked to start; begins once the mode is active

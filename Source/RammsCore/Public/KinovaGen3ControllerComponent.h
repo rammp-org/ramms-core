@@ -34,7 +34,7 @@ enum class EArmControlMode : uint8
 
 /**
  * Reference frame the IK target is tracked in. Decides what happens when the
- * arm's base moves (arm mounted on a driving vehicle / MeBot):
+ * arm's base moves (arm mounted on a driving vehicle / RAMMP Gen1):
  *  - World: the target is a fixed world pose (a door handle, a shelf). The
  *    arm continuously compensates for base motion to keep reaching it.
  *  - Base: the target rides the arm's mount — it keeps the same pose relative
@@ -290,7 +290,7 @@ public:
 	 * iterating (cm); never looser than IKPositionTolerance. A solve stopped as
 	 * soon as it was within IKPositionTolerance left each frame's solution
 	 * anywhere in that band -- the band moving with the target, the arm stepping
-	 * about in it: with 1 cm the MeBot's end effector shook 3.8 mm RMS (11 mm at
+	 * about in it: with 1 cm the RAMMP Gen1's end effector shook 3.8 mm RMS (11 mm at
 	 * worst) while it moved, at 0.05 cm 0.7 mm (3.4 mm), at the same frame time.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver|Common", meta = (ClampMin = "0.001"))
@@ -331,12 +331,12 @@ public:
 	 * become slow bounded motion instead of near-instant full-arm swings — swinging
 	 * the arm's inertia at full drive stiffness kicks large reaction torques into
 	 * the vehicle chassis (measured: a 2.5 mm EE nudge commanding a 45° joint-1
-	 * sweep spun the stationary MeBot chassis at 575 deg/s). 0 = unlimited.
+	 * sweep spun the stationary RAMMP Gen1 chassis at 575 deg/s). 0 = unlimited.
 	 *
 	 * The default matches the Gen3's joint speed (FRevoluteJointConfig::MaxAngularSpeed,
 	 * 69.91 deg/s). Below it the cap, not the joints, limits how fast the arm can follow a
 	 * moving target: at 45 deg/s the Map_ArmTest arm lagged its 25 cm/s circular target by
-	 * ~30 cm; at 70 it tracks within ~2 cm, and the MeBot chassis disturbance while the
+	 * ~30 cm; at 70 it tracks within ~2 cm, and the RAMMP Gen1 chassis disturbance while the
 	 * arm moves is unchanged (~1.8 deg/s RMS).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arm|Control|End Effector|Solver", meta = (ClampMin = "0.0"))

@@ -6,7 +6,7 @@ Development-only script — not part of the public API.
 Run in UE Editor Python console:
     from urdf._probe_animpose import run; run()
 
-Probes both gen3_6dof (simple serial chain) and mebot (complex w/ cycles).
+Probes both gen3_6dof (simple serial chain) and rammp_gen1 (complex w/ cycles).
 Prints local + world transforms for all bones and compares with constraint Pos2.
 """
 
@@ -21,9 +21,9 @@ ASSETS = [
         "phys_asset": "/RammsAssets/Robots/KinovaGen3/Arm/SkeletalMeshes/gen3_6dof_PhysicsAsset",
     },
     {
-        "label": "MeBot",
-        "skel_mesh": "/RammsAssets/Robots/RAMMP/Base/SkeletalMeshes/mebot",
-        "phys_asset": "/RammsAssets/Robots/RAMMP/Base/SkeletalMeshes/mebot_PhysicsAsset",
+        "label": "RAMMP Gen1",
+        "skel_mesh": "/RammsAssets/Robots/RAMMP/Base/SkeletalMeshes/rammp_gen1",
+        "phys_asset": "/RammsAssets/Robots/RAMMP/Base/SkeletalMeshes/rammp_gen1_PhysicsAsset",
     },
 ]
 

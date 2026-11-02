@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "RammsControlContributor.h"
-#include "MebotControllerComponent.generated.h"
+#include "RammpGen1ControllerComponent.generated.h"
 
 class USkeletalMeshComponent;
 struct FConstraintInstance;
@@ -183,7 +183,7 @@ struct FLinearMotorConfig
 class URammsRobotBaseComponent;
 
 /**
- * Rate-limited position targets for the chair's lift / linkage actuators
+ * Rate-limited position targets for the RAMMP Gen1 chair's lift / linkage actuators
  * (drive-motor elevators, drive-plate translators, caster arms), addressed
  * by their physics-asset constraint name (angles in degrees, travel in cm).
  *
@@ -194,79 +194,79 @@ class URammsRobotBaseComponent;
  * drives the constraints directly, as it always has.
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API UMebotControllerComponent : public UActorComponent, public IRammsControlContributor
+class RAMMSCORE_API URammpGen1ControllerComponent : public UActorComponent, public IRammsControlContributor
 {
 	GENERATED_BODY()
 
 public:
-	UMebotControllerComponent();
+	URammpGen1ControllerComponent();
 
 	// Route motors through the owner's RammsRobotBaseComponent (by MotorId, or
 	// the registry motor whose ChaosName is the constraint) when it has a
 	// backend; otherwise drive the constraints directly.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller")
 	bool bUseRobotBase = true;
 
 	// True while motors are being routed through the robot base component.
-	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller")
 	bool IsUsingRobotBase() const;
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	// Set target angle for a specific angular motor by name
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetAngularMotorTarget(FName MotorName, float TargetAngle);
 
 	// Set target position for a specific linear motor by name
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetLinearMotorTarget(FName MotorName, float TargetPosition);
 
 	// Set max speed for a specific angular motor (degrees per second)
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetAngularMotorMaxSpeed(FName MotorName, float MaxSpeed);
 
 	// Set max speed for a specific linear motor (cm per second)
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetLinearMotorMaxSpeed(FName MotorName, float MaxSpeed);
 
 	// Set speed multiplier for a specific angular motor (0.0 to 1.0)
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetAngularMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier);
 
 	// Set speed multiplier for a specific linear motor (0.0 to 1.0)
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetLinearMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier);
 
 	// Enable or disable a specific angular motor by name
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetAngularMotorEnabled(FName MotorName, bool bEnabled);
 
 	// Enable or disable a specific linear motor by name
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void SetLinearMotorEnabled(FName MotorName, bool bEnabled);
 
 	// Get current angle for a specific angular motor
-	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller")
 	float GetAngularMotorCurrentAngle(FName MotorName) const;
 
 	// Get current position for a specific linear motor
-	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller")
 	float GetLinearMotorCurrentPosition(FName MotorName) const;
 
 	// Reinitialize all motor constraints (useful if constraints are added at runtime)
-	UFUNCTION(BlueprintCallable, Category = "Mebot Controller")
+	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void ReinitializeMotors();
 
 	// Get debug info string for a motor
-	UFUNCTION(BlueprintPure, Category = "Mebot Controller|Debug")
+	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller|Debug")
 	FString GetMotorDebugInfo() const;
 
 	// Get all angular motor configurations
-	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller")
 	TArray<FAngularMotorConfig> GetAngularMotors() const { return AngularMotors; }
 
 	// Get all linear motor configurations
-	UFUNCTION(BlueprintPure, Category = "Mebot Controller")
+	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller")
 	TArray<FLinearMotorConfig> GetLinearMotors() const { return LinearMotors; }
 
 protected:
@@ -274,31 +274,31 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	// Angular motor configurations
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller|Motors")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller|Motors")
 	TArray<FAngularMotorConfig> AngularMotors;
 
 	// Linear motor configurations
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller|Motors")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller|Motors")
 	TArray<FLinearMotorConfig> LinearMotors;
 
 	// If true, automatically find and cache constraint components at BeginPlay
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller")
 	bool bAutoFindConstraints;
 
 	// If true, automatically find the skeletal mesh component on the owner
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller")
 	bool bAutoFindSkeletalMesh;
 
 	// Enable debug logging
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller|Debug")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller|Debug")
 	bool bEnableDebugLog;
 
 	// Show debug visualization of motor positions
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller|Debug")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller|Debug")
 	bool bShowMotorGizmos;
 
 	// Size of the motor gizmos
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mebot Controller|Debug", meta = (ClampMin = "1.0", ClampMax = "200.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RAMMP Gen1 Controller|Debug", meta = (ClampMin = "1.0", ClampMax = "200.0"))
 	float GizmoSize;
 
 private:

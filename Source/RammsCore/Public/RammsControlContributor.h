@@ -82,7 +82,7 @@ public:
 	 * no-op by default, so a contributor that has not implemented it cannot
 	 * honour a suspension. Answering true by default made the low-level drive
 	 * mode believe everything had stood down while components that never
-	 * implemented it -- the MeBot controller among them -- went on claiming
+	 * implemented it -- the RAMMP Gen1 controller among them -- went on claiming
 	 * and writing their motors, which is precisely what bClaimAllActuators
 	 * promises not to happen.
 	 *

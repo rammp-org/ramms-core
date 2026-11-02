@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "MebotControllerComponent.h"
+#include "RammpGen1ControllerComponent.h"
 #include "GripperControllerComponent.generated.h"
 
 class USkeletalMeshComponent;

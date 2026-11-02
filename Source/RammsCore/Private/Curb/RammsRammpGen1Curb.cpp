@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Curb/RammsMebotCurb.h"
+#include "Curb/RammsRammpGen1Curb.h"
 
-namespace RammsMebotCurb
+namespace RammsRammpGen1Curb
 {
 	bool FSupportTable::IsValid() const
 	{
@@ -227,4 +227,4 @@ namespace RammsMebotCurb
 		const float Total = FixedMassKg + 2.0f * DriveAssemblyKg;
 		return Total > 0.0f ? (FixedMassKg * FixedDistCm + DriveAssemblyKg * (LeftDistCm + RightDistCm)) / Total : 0.0f;
 	}
-} // namespace RammsMebotCurb
+} // namespace RammsRammpGen1Curb

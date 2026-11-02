@@ -26,7 +26,7 @@ struct FConstraintInstance;
  *    linear actuator commanded/read in cm along it, otherwise an angular one
  *    (twist = X, swing2 = Y, swing1 = Z) commanded/read in radians. Drive
  *    stiffness / damping / force limit come from the base component's
- *    Chaos settings. If the owner also carries a UMebotControllerComponent
+ *    Chaos settings. If the owner also carries a URammpGen1ControllerComponent
  *    that lists the same constraint, that entry is disabled on first command
  *    so the two don't fight over the drive target.
  *
@@ -86,8 +86,8 @@ private:
 																								   *  coordinate, on the constraint's own axes. */
 	bool GetConstraintFrames(const FConstraintInstance& CI, const FConstraintMotor& Info, FTransform& OutParentFrameWorld, FTransform& OutChildFrameWorld) const;
 
-	/** Hand the constraint over from a UMebotControllerComponent on the owner, once. */
-	void TakeOverFromMebotController(FConstraintMotor& Info);
+	/** Hand the constraint over from a URammpGen1ControllerComponent on the owner, once. */
+	void TakeOverFromRammpGen1Controller(FConstraintMotor& Info);
 
 	TWeakObjectPtr<class URammsRobotBaseComponent> BaseComp;
 	TWeakObjectPtr<USkeletalMeshComponent>		   Mesh;
