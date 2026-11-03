@@ -218,7 +218,10 @@ public:
 	 * the moment it is driven again. Without them a robot stopped on a ramp rolls back
 	 * down it. Until they close the drive brakes to rest (ApplyBrakes), auto-braking
 	 * or not; this is above BrakingVelocityThreshold, where that braking stops, so the
-	 * robot is caught rather than left creeping.
+	 * robot is caught rather than left creeping. With the brake ramp (BrakeDeceleration),
+	 * the drive brakes stiffen once it has come to rest, and the parking brakes close at the
+	 * latest three quarters of a second after it, however fast the robot still creeps: down a
+	 * slope, the drive brakes alone hold it short of rest.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
 	float ParkingBrakeSpeed = 6.0f;
@@ -540,6 +543,17 @@ private:
 	double BrakeRampForward = 0.0;
 	double BrakeRampTurn = 0.0;
 	double BrakeRampElapsed = 0.0;
+	/** How long (s) the ramp's targets have been at rest. */
+	double BrakeRampRestSeconds = 0.0;
+	/** Down a slope, damping at BrakeTorque holds the wheels short of rest: the 1:8 ramp's pull
+	 *  kept the chair creeping at 10-17 cm/s, above ParkingBrakeSpeed, for up to two seconds. Once
+	 *  the ramp is at rest the damping rises, to BrakeRestDampingScale times BrakeTorque over
+	 *  BrakeRestStiffenSeconds, bringing the creep down to where the parking brakes close; failing
+	 *  that, they close BrakeRestCloseSeconds after it came to rest, however fast it creeps
+	 *  (closing them at once from a creep jolted the chair 1.6 deg). */
+	static constexpr double BrakeRestDampingScale = 5.0;
+	static constexpr double BrakeRestStiffenSeconds = 0.25;
+	static constexpr double BrakeRestCloseSeconds = 0.75;
 	/** One tick of the brake ramp, begun from the wheels' smoothed rates if not under way: each
 	 *  target brought DeltaSeconds nearer rest, and never more than half a rad/s further from
 	 *  rest than the wheels' smoothed rates (slowed harder by a bump or a wall, they are not

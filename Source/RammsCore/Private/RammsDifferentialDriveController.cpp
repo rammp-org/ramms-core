@@ -283,7 +283,10 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 		}
 		const bool bSlow = FMath::Max(FMath::Abs(LeftWheelState.LinearVelocity), FMath::Abs(RightWheelState.LinearVelocity)) < ParkingBrakeSpeed;
 		const bool bTurnedBack = FMath::Abs(ParkFromSpeed) > ParkingBrakeSpeed && Forward * ParkFromSpeed < 0.0f;
-		if (bSlow || bTurnedBack)
+		// The brake ramp at rest a while: a slope's pull can hold the robot short of
+		// ParkingBrakeSpeed under the drive brakes alone.
+		const bool bRampAtRest = bBrakeRamp && BrakeRampRestSeconds >= BrakeRestCloseSeconds;
+		if (bSlow || bTurnedBack || bRampAtRest)
 		{
 			SetParkingBrake(true);
 		}
@@ -1256,6 +1259,7 @@ void URammsDifferentialDriveController::StepBrakeRamp(double DeltaSeconds, doubl
 		BrakeRampForward = 0.5 * (SmoothLeftRate + SmoothRightRate);
 		BrakeRampTurn = 0.5 * (SmoothRightRate - SmoothLeftRate);
 		BrakeRampElapsed = 0.0;
+		BrakeRampRestSeconds = 0.0;
 	}
 	else
 	{
@@ -1280,6 +1284,7 @@ void URammsDifferentialDriveController::StepBrakeRamp(double DeltaSeconds, doubl
 	const double Turn = 0.5 * (SmoothRightRate - SmoothLeftRate);
 	BrakeRampForward = Toward(BrakeRampForward, Forward);
 	BrakeRampTurn = Toward(BrakeRampTurn, Turn);
+	BrakeRampRestSeconds = BrakeRampForward == 0.0 && BrakeRampTurn == 0.0 ? BrakeRampRestSeconds + DeltaSeconds : 0.0;
 	OutLeft = BrakeRampForward - BrakeRampTurn;
 	OutRight = BrakeRampForward + BrakeRampTurn;
 }
@@ -1293,9 +1298,13 @@ void URammsDifferentialDriveController::ApplyBrakes(float DeltaSeconds)
 
 	double LeftTarget = 0.0;
 	double RightTarget = 0.0;
+	float  Damping = BrakeTorque;
 	if (BrakeDeceleration > 0.0f)
 	{
 		StepBrakeRamp(DeltaSeconds, LeftTarget, RightTarget);
+		// At rest, stiffening: a slope's pull is not left to creep the robot on (BrakeRestDampingScale).
+		const double Stiffen = FMath::Min(1.0, BrakeRampRestSeconds / BrakeRestStiffenSeconds);
+		Damping = BrakeTorque * static_cast<float>(1.0 + (BrakeRestDampingScale - 1.0) * Stiffen);
 	}
 
 	// Base-component path: damping torque proportional to the spin velocity off
@@ -1304,11 +1313,11 @@ void URammsDifferentialDriveController::ApplyBrakes(float DeltaSeconds)
 	// command to the motor's range).
 	if (UsesBase())
 	{
-		auto BrakeMotor = [this, BrakeDeadband](FName MotorId, FRammsWheelState& WheelState, double Target) {
+		auto BrakeMotor = [this, BrakeDeadband, Damping](FName MotorId, FRammsWheelState& WheelState, double Target) {
 			const float Error = WheelState.AngularVelocity - static_cast<float>(Target);
 			if (FMath::Abs(Error) > BrakeDeadband)
 			{
-				const float BrakeCmd = -Error * BrakeTorque;
+				const float BrakeCmd = -Error * Damping;
 				BaseComponent->SetMotorCommand(MotorId, BrakeCmd);
 				WheelState.AppliedTorque = BrakeCmd;
 			}
@@ -1330,7 +1339,7 @@ void URammsDifferentialDriveController::ApplyBrakes(float DeltaSeconds)
 
 	// Direct Chaos path: the damping torque about the body's whole angular velocity,
 	// scaled to the share of the wheel's spin that is off the ramp.
-	auto BrakeBody = [this, BrakeDeadband](FName BoneName, FRammsWheelState& WheelState, double Target, const TCHAR* Side) {
+	auto BrakeBody = [this, BrakeDeadband, Damping](FName BoneName, FRammsWheelState& WheelState, double Target, const TCHAR* Side) {
 		FBodyInstance* BodyInst = GetBoneBodyInstance(BoneName);
 		if (!BodyInst || !BodyInst->IsInstanceSimulatingPhysics())
 		{
@@ -1344,14 +1353,14 @@ void URammsDifferentialDriveController::ApplyBrakes(float DeltaSeconds)
 		{
 			// The ramp only ever lies between rest and the wheel's spin, so this is 0..1.
 			const float	  OffRamp = FMath::Abs(Spin) > KINDA_SMALL_NUMBER ? FMath::Clamp(Error / Spin, 0.0f, 1.0f) : 1.0f;
-			const FVector DampingTorque = -AngVel * BrakeTorque * OffRamp * 100.0f; // Convert to UE units
+			const FVector DampingTorque = -AngVel * Damping * OffRamp * 100.0f; // Convert to UE units
 			BodyInst->AddTorqueInRadians(DampingTorque, false, true);
-			WheelState.AppliedTorque = -FMath::Sign(WheelState.AngularVelocity) * BrakeTorque * OffRamp;
+			WheelState.AppliedTorque = -FMath::Sign(WheelState.AngularVelocity) * Damping * OffRamp;
 
 			if (bEnableDebugLogging)
 			{
 				UE_LOG(LogTemp, Log, TEXT("[DiffDrive] Applying %s brake: Damping=%.3f Nm (AngVel: %.3f rad/s, ramp %.3f rad/s)"),
-					Side, BrakeTorque * OffRamp, WheelState.AngularVelocity, Target);
+					Side, Damping * OffRamp, WheelState.AngularVelocity, Target);
 			}
 		}
 		else
