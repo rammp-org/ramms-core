@@ -241,7 +241,7 @@ void UVanDoorComponent::UpdateDoorConstraint()
 			*TargetLinear.ToString(), NormalizedTime);
 	}
 
-	// Set constraint target position (same as Mebot linear motor control)
+	// Set constraint target position (same as RAMMP Gen1 linear motor control)
 	CachedConstraint->SetLinearPositionTarget(TargetLinear);
 	CachedConstraint->SetLinearVelocityTarget(FVector::ZeroVector);
 }

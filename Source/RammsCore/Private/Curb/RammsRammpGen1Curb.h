@@ -6,10 +6,10 @@
 #include "Templates/Function.h"
 
 /**
- * The MeBot curb crossing's arithmetic, kept free of the engine so it is tested on its own
- * (URammsMebotCurbController runs it; ramms-sim's mujoco/mebot/curb_sequence.py is the reference).
+ * The RAMMP Gen1 curb crossing's arithmetic, kept free of the engine so it is tested on its own
+ * (URammsRammpGen1CurbController runs it; ramms-sim's mujoco/rammp_gen1/curb_sequence.py is the reference).
  */
-namespace RammsMebotCurb
+namespace RammsRammpGen1Curb
 {
 	/** A support's height table: how far its wheels' bottom rises (cm, chassis level) from the reference
 	 *  pose as its joint turns (rad). Heights fall as the angle rises (positive puts the wheels down). */
@@ -82,4 +82,4 @@ namespace RammsMebotCurb
 	/** The centre of mass along the heading from the chassis-fixed mass and the two drive assemblies
 	 *  (which ride the translators), each at its distance along the heading. */
 	float CentreOfMass(float FixedMassKg, float FixedDistCm, float DriveAssemblyKg, float LeftDistCm, float RightDistCm);
-} // namespace RammsMebotCurb
+} // namespace RammsRammpGen1Curb

@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "MebotControllerComponent.h"
+#include "RammpGen1ControllerComponent.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsMotorSpec.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -15,7 +15,7 @@ namespace
 	/** The motors an active drive mode on Self's robot claims (a curb crossing's lifts while it runs). This
 	 *  controller leaves them alone and follows them meanwhile, so it takes them back where they stand
 	 *  instead of from its own stale ramp. */
-	TSet<FName> MebotMotorsClaimedByActiveMode(const UActorComponent* Self)
+	TSet<FName> RammpGen1MotorsClaimedByActiveMode(const UActorComponent* Self)
 	{
 		TSet<FName>	  Out;
 		const AActor* Owner = Self ? Self->GetOwner() : nullptr;
@@ -37,13 +37,13 @@ namespace
 		return Out;
 	}
 
-	bool MebotMotorYielded(const UActorComponent* Self, FName MotorId)
+	bool RammpGen1MotorYielded(const UActorComponent* Self, FName MotorId)
 	{
-		return !MotorId.IsNone() && MebotMotorsClaimedByActiveMode(Self).Contains(MotorId);
+		return !MotorId.IsNone() && RammpGen1MotorsClaimedByActiveMode(Self).Contains(MotorId);
 	}
 } // namespace
 
-UMebotControllerComponent::UMebotControllerComponent()
+URammpGen1ControllerComponent::URammpGen1ControllerComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	bAutoFindConstraints = true;
@@ -97,7 +97,7 @@ UMebotControllerComponent::UMebotControllerComponent()
 	LinearMotors.Add(RightTranslator);
 }
 
-void UMebotControllerComponent::BeginPlay()
+void URammpGen1ControllerComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
@@ -111,17 +111,17 @@ void UMebotControllerComponent::BeginPlay()
 
 	if (bEnableDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("MebotController: Initialized with %d angular motors and %d linear motors (robot base: %s)"),
+		UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Initialized with %d angular motors and %d linear motors (robot base: %s)"),
 			AngularMotors.Num(), LinearMotors.Num(), IsUsingRobotBase() ? TEXT("yes") : TEXT("no"));
 	}
 }
 
-bool UMebotControllerComponent::IsUsingRobotBase() const
+bool URammpGen1ControllerComponent::IsUsingRobotBase() const
 {
 	return bUseRobotBase && RobotBase && RobotBase->HasBackend();
 }
 
-FName UMebotControllerComponent::BaseMotorId(FName ConstraintName, FName ExplicitMotorId) const
+FName URammpGen1ControllerComponent::BaseMotorId(FName ConstraintName, FName ExplicitMotorId) const
 {
 	if (!RobotBase)
 	{
@@ -135,7 +135,7 @@ FName UMebotControllerComponent::BaseMotorId(FName ConstraintName, FName Explici
 	return RobotBase->FindMotorIdByChaosName(ConstraintName);
 }
 
-void UMebotControllerComponent::ResolveRobotBase()
+void URammpGen1ControllerComponent::ResolveRobotBase()
 {
 	if (!bUseRobotBase)
 	{
@@ -165,7 +165,7 @@ void UMebotControllerComponent::ResolveRobotBase()
 	// the registry" is still known on a later re-resolve). Motors the registry
 	// doesn't list keep driving their constraint directly.
 	auto Warn = [this](FName ConstraintName, FName ExplicitId) {
-		UE_LOG(LogTemp, Warning, TEXT("MebotController: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
+		UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: no registry motor on '%s' for constraint '%s'%s — driving it directly."),
 			*RobotBase->GetName(), *ConstraintName.ToString(),
 			ExplicitId.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (explicit MotorId '%s' is not in the registry)"), *ExplicitId.ToString()));
 	};
@@ -185,10 +185,10 @@ void UMebotControllerComponent::ResolveRobotBase()
 			Warn(Motor.ConstraintName, Motor.MotorId);
 		}
 	}
-	UE_LOG(LogTemp, Log, TEXT("MebotController: routing motors through robot base '%s'."), *RobotBase->GetName());
+	UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: routing motors through robot base '%s'."), *RobotBase->GetName());
 }
 
-void UMebotControllerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void URammpGen1ControllerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	Super::EndPlay(EndPlayReason);
 
@@ -199,18 +199,35 @@ void UMebotControllerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason
 	}
 }
 
-void UMebotControllerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void URammpGen1ControllerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	RefreshConstraintCache();
 
-	UpdateAngularMotors(DeltaTime);
-	UpdateLinearMotors(DeltaTime);
+	// Ramp at the backend's clock when it keeps one: a simulator behind real time
+	// is slower than the game, and MaxSpeed is the mechanism's rate in sim time.
+	// The game's clock otherwise (Chaos).
+	float	   Dt = DeltaTime;
+	const bool bViaBase = IsUsingRobotBase();
+	if (bViaBase)
+	{
+		const double Now = RobotBase->GetSimulationTime();
+		if (Now >= 0.0)
+		{
+			// A reset sends the clock back: no step across it.
+			Dt = (LastSimTime < 0.0 || Now < LastSimTime) ? 0.0f : static_cast<float>(Now - LastSimTime);
+			LastSimTime = Now;
+		}
+	}
+	// Which base motors another active mode drives, gathered once a tick.
+	const TSet<FName> Yielded = bViaBase ? RammpGen1MotorsClaimedByActiveMode(this) : TSet<FName>();
+	UpdateAngularMotors(Dt, Yielded);
+	UpdateLinearMotors(Dt, Yielded);
 	DrawDebugVisualization();
 }
 
-void UMebotControllerComponent::SetAngularMotorTarget(FName MotorName, float TargetAngle)
+void URammpGen1ControllerComponent::SetAngularMotorTarget(FName MotorName, float TargetAngle)
 {
 	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FAngularMotorConfig& Motor : AngularMotors)
@@ -223,16 +240,16 @@ void UMebotControllerComponent::SetAngularMotorTarget(FName MotorName, float Tar
 
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Set angular motor '%s' target to %.2f degrees"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Set angular motor '%s' target to %.2f degrees"),
 					*MotorName.ToString(), TargetAngle);
 			}
 			return;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("MebotController: Angular motor '%s' not found"), *MotorName.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Angular motor '%s' not found"), *MotorName.ToString());
 }
 
-void UMebotControllerComponent::SetLinearMotorTarget(FName MotorName, float TargetPosition)
+void URammpGen1ControllerComponent::SetLinearMotorTarget(FName MotorName, float TargetPosition)
 {
 	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FLinearMotorConfig& Motor : LinearMotors)
@@ -245,16 +262,16 @@ void UMebotControllerComponent::SetLinearMotorTarget(FName MotorName, float Targ
 
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Set linear motor '%s' target to %.2f cm"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Set linear motor '%s' target to %.2f cm"),
 					*MotorName.ToString(), TargetPosition);
 			}
 			return;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("MebotController: Linear motor '%s' not found"), *MotorName.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Linear motor '%s' not found"), *MotorName.ToString());
 }
 
-void UMebotControllerComponent::SetAngularMotorMaxSpeed(FName MotorName, float MaxSpeed)
+void URammpGen1ControllerComponent::SetAngularMotorMaxSpeed(FName MotorName, float MaxSpeed)
 {
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
@@ -265,16 +282,16 @@ void UMebotControllerComponent::SetAngularMotorMaxSpeed(FName MotorName, float M
 
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Set angular motor '%s' max speed to %.2f deg/s"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Set angular motor '%s' max speed to %.2f deg/s"),
 					*MotorName.ToString(), Motor.MaxSpeed);
 			}
 			return;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("MebotController: Angular motor '%s' not found"), *MotorName.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Angular motor '%s' not found"), *MotorName.ToString());
 }
 
-void UMebotControllerComponent::SetLinearMotorMaxSpeed(FName MotorName, float MaxSpeed)
+void URammpGen1ControllerComponent::SetLinearMotorMaxSpeed(FName MotorName, float MaxSpeed)
 {
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
@@ -285,16 +302,16 @@ void UMebotControllerComponent::SetLinearMotorMaxSpeed(FName MotorName, float Ma
 
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Set linear motor '%s' max speed to %.2f cm/s"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Set linear motor '%s' max speed to %.2f cm/s"),
 					*MotorName.ToString(), Motor.MaxSpeed);
 			}
 			return;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("MebotController: Linear motor '%s' not found"), *MotorName.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Linear motor '%s' not found"), *MotorName.ToString());
 }
 
-void UMebotControllerComponent::SetAngularMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier)
+void URammpGen1ControllerComponent::SetAngularMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier)
 {
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
@@ -305,16 +322,16 @@ void UMebotControllerComponent::SetAngularMotorSpeedMultiplier(FName MotorName, 
 
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Set angular motor '%s' speed multiplier to %.2f"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Set angular motor '%s' speed multiplier to %.2f"),
 					*MotorName.ToString(), Motor.SpeedMultiplier);
 			}
 			return;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("MebotController: Angular motor '%s' not found"), *MotorName.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Angular motor '%s' not found"), *MotorName.ToString());
 }
 
-void UMebotControllerComponent::SetLinearMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier)
+void URammpGen1ControllerComponent::SetLinearMotorSpeedMultiplier(FName MotorName, float SpeedMultiplier)
 {
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
@@ -325,16 +342,16 @@ void UMebotControllerComponent::SetLinearMotorSpeedMultiplier(FName MotorName, f
 
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Set linear motor '%s' speed multiplier to %.2f"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Set linear motor '%s' speed multiplier to %.2f"),
 					*MotorName.ToString(), Motor.SpeedMultiplier);
 			}
 			return;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("MebotController: Linear motor '%s' not found"), *MotorName.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Linear motor '%s' not found"), *MotorName.ToString());
 }
 
-void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEnabled)
+void URammpGen1ControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEnabled)
 {
 	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FAngularMotorConfig& Motor : AngularMotors)
@@ -345,7 +362,7 @@ void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEn
 			{
 				// The backend can't let go (e.g. an actuator with no off switch):
 				// saying "disabled" would be a lie — the motor keeps holding.
-				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
+				UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: the robot base cannot release motor '%s' (%s); leaving it enabled."),
 					*Motor.ResolvedMotorId.ToString(), *MotorName.ToString());
 				return;
 			}
@@ -357,7 +374,7 @@ void UMebotControllerComponent::SetAngularMotorEnabled(FName MotorName, bool bEn
 	}
 }
 
-void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEnabled)
+void URammpGen1ControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEnabled)
 {
 	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick
 	for (FLinearMotorConfig& Motor : LinearMotors)
@@ -366,7 +383,7 @@ void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEna
 		{
 			if (!bEnabled && IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone() && !RobotBase->ReleaseMotor(Motor.ResolvedMotorId))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("MebotController: the robot base cannot release motor '%s' (%s); leaving it enabled."),
+				UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: the robot base cannot release motor '%s' (%s); leaving it enabled."),
 					*Motor.ResolvedMotorId.ToString(), *MotorName.ToString());
 				return;
 			}
@@ -378,17 +395,20 @@ void UMebotControllerComponent::SetLinearMotorEnabled(FName MotorName, bool bEna
 	}
 }
 
-float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) const
+float URammpGen1ControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) const
 {
 	for (const FAngularMotorConfig& Motor : AngularMotors)
 	{
 		if (Motor.ConstraintName == MotorName)
 		{
+			// The joint's angle in the motor's own sense, that of TargetAngle: an
+			// inverted motor drives the joint to -TargetAngle.
+			const float Sign = Motor.bInvertDirection ? -1.0f : 1.0f;
 			if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
 			{
 				// The base reads the joint in radians (constraint angle on Chaos,
 				// position actuator's joint on MuJoCo).
-				return FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
+				return Sign * FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
 			}
 			// Const getter callable from Blueprint at any point in the frame: resolve from
 			// the mesh's CURRENT physics state instead of trusting the tick-time cache,
@@ -400,29 +420,30 @@ float UMebotControllerComponent::GetAngularMotorCurrentAngle(FName MotorName) co
 			{
 				return 0.0f;
 			}
-			// Get current angular state from constraint
+			// Get current angular state from constraint: the drive turns about X for
+			// twist, Y for swing 2 and Z for swing 1 (ApplyAngularMotorSettings).
 			float CurrentAngle = 0.0f;
 			switch (Motor.ControlAxis)
 			{
 				case EMotorAxis::X:
-					CurrentAngle = Constraint->GetCurrentSwing1();
+					CurrentAngle = Constraint->GetCurrentTwist();
 					break;
 				case EMotorAxis::Y:
 					CurrentAngle = Constraint->GetCurrentSwing2();
 					break;
 				case EMotorAxis::Z:
-					CurrentAngle = Constraint->GetCurrentTwist();
+					CurrentAngle = Constraint->GetCurrentSwing1();
 					break;
 			}
 			// Chaos reports the constraint angles in radians; this API is degrees
 			// on both paths (TargetAngle is degrees).
-			return FMath::RadiansToDegrees(CurrentAngle);
+			return Sign * FMath::RadiansToDegrees(CurrentAngle);
 		}
 	}
 	return 0.0f;
 }
 
-float UMebotControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) const
+float URammpGen1ControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) const
 {
 	for (const FLinearMotorConfig& Motor : LinearMotors)
 	{
@@ -443,7 +464,7 @@ float UMebotControllerComponent::GetLinearMotorCurrentPosition(FName MotorName) 
 	return 0.0f;
 }
 
-void UMebotControllerComponent::ReinitializeMotors()
+void URammpGen1ControllerComponent::ReinitializeMotors()
 {
 	ResolveRobotBase();
 	FindConstraints();
@@ -474,18 +495,19 @@ void UMebotControllerComponent::ReinitializeMotors()
 	{
 		Motor.bPendingApply = true;
 	}
-	UpdateAngularMotors(0.0f);
-	UpdateLinearMotors(0.0f);
+	const TSet<FName> Yielded = bViaBase ? RammpGen1MotorsClaimedByActiveMode(this) : TSet<FName>();
+	UpdateAngularMotors(0.0f, Yielded);
+	UpdateLinearMotors(0.0f, Yielded);
 
 	if (bEnableDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("MebotController: Motors reinitialized"));
+		UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Motors reinitialized"));
 	}
 }
 
-FString UMebotControllerComponent::GetMotorDebugInfo() const
+FString URammpGen1ControllerComponent::GetMotorDebugInfo() const
 {
-	FString Info = TEXT("=== Mebot Motor Status ===\n\nAngular Motors:\n");
+	FString Info = TEXT("=== RAMMP Gen1 Motor Status ===\n\nAngular Motors:\n");
 
 	const bool bViaBase = IsUsingRobotBase();
 	for (const FAngularMotorConfig& Motor : AngularMotors)
@@ -520,7 +542,7 @@ FString UMebotControllerComponent::GetMotorDebugInfo() const
 	return Info;
 }
 
-void UMebotControllerComponent::RefreshConstraintCache()
+void URammpGen1ControllerComponent::RefreshConstraintCache()
 {
 	// Mirror FindConstraints(): only auto-acquire the mesh when configured to.
 	if (!IsValid(CachedSkeletalMesh) && bAutoFindSkeletalMesh)
@@ -553,7 +575,7 @@ void UMebotControllerComponent::RefreshConstraintCache()
 	}
 }
 
-void UMebotControllerComponent::FindConstraints()
+void URammpGen1ControllerComponent::FindConstraints()
 {
 	// Find the skeletal mesh first
 	if (bAutoFindSkeletalMesh)
@@ -563,14 +585,14 @@ void UMebotControllerComponent::FindConstraints()
 
 	if (!CachedSkeletalMesh)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MebotController: No SkeletalMeshComponent found on '%s'"),
+		UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: No SkeletalMeshComponent found on '%s'"),
 			*GetOwner()->GetName());
 		return;
 	}
 
 	if (bEnableDebugLog)
 	{
-		UE_LOG(LogTemp, Log, TEXT("MebotController: Found skeletal mesh '%s'"),
+		UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Found skeletal mesh '%s'"),
 			*CachedSkeletalMesh->GetName());
 	}
 
@@ -584,13 +606,13 @@ void UMebotControllerComponent::FindConstraints()
 		{
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Found angular motor constraint '%s' in physics asset"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Found angular motor constraint '%s' in physics asset"),
 					*Motor.ConstraintName.ToString());
 			}
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("MebotController: Angular motor constraint '%s' not found in physics asset"),
+			UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Angular motor constraint '%s' not found in physics asset"),
 				*Motor.ConstraintName.ToString());
 		}
 	}
@@ -605,19 +627,19 @@ void UMebotControllerComponent::FindConstraints()
 		{
 			if (bEnableDebugLog)
 			{
-				UE_LOG(LogTemp, Log, TEXT("MebotController: Found linear motor constraint '%s' in physics asset"),
+				UE_LOG(LogTemp, Log, TEXT("RammpGen1Controller: Found linear motor constraint '%s' in physics asset"),
 					*Motor.ConstraintName.ToString());
 			}
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("MebotController: Linear motor constraint '%s' not found in physics asset"),
+			UE_LOG(LogTemp, Warning, TEXT("RammpGen1Controller: Linear motor constraint '%s' not found in physics asset"),
 				*Motor.ConstraintName.ToString());
 		}
 	}
 }
 
-USkeletalMeshComponent* UMebotControllerComponent::GetOwnerSkeletalMesh()
+USkeletalMeshComponent* URammpGen1ControllerComponent::GetOwnerSkeletalMesh()
 {
 	AActor* Owner = GetOwner();
 	if (!Owner)
@@ -642,10 +664,9 @@ USkeletalMeshComponent* UMebotControllerComponent::GetOwnerSkeletalMesh()
 	return Owner->FindComponentByClass<USkeletalMeshComponent>();
 }
 
-void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
+void URammpGen1ControllerComponent::UpdateAngularMotors(float DeltaTime, const TSet<FName>& Yielded)
 {
-	const bool		  bViaBase = IsUsingRobotBase();
-	const TSet<FName> Yielded = bViaBase ? MebotMotorsClaimedByActiveMode(this) : TSet<FName>();
+	const bool bViaBase = IsUsingRobotBase();
 	for (FAngularMotorConfig& Motor : AngularMotors)
 	{
 		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
@@ -684,10 +705,9 @@ void UMebotControllerComponent::UpdateAngularMotors(float DeltaTime)
 	}
 }
 
-void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
+void URammpGen1ControllerComponent::UpdateLinearMotors(float DeltaTime, const TSet<FName>& Yielded)
 {
-	const bool		  bViaBase = IsUsingRobotBase();
-	const TSet<FName> Yielded = bViaBase ? MebotMotorsClaimedByActiveMode(this) : TSet<FName>();
+	const bool bViaBase = IsUsingRobotBase();
 	for (FLinearMotorConfig& Motor : LinearMotors)
 	{
 		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
@@ -725,7 +745,7 @@ void UMebotControllerComponent::UpdateLinearMotors(float DeltaTime)
 	}
 }
 
-void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& Motor)
+void URammpGen1ControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& Motor)
 {
 	// Through the robot base: the interpolated angle (degrees, inverted if
 	// asked) becomes a Position command in radians; the backend owns the
@@ -780,7 +800,7 @@ void UMebotControllerComponent::ApplyAngularMotorSettings(FAngularMotorConfig& M
 	}
 }
 
-void UMebotControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Motor)
+void URammpGen1ControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Motor)
 {
 	// Through the robot base: the interpolated travel (cm) is the Position command.
 	if (IsUsingRobotBase() && !Motor.ResolvedMotorId.IsNone())
@@ -832,7 +852,7 @@ void UMebotControllerComponent::ApplyLinearMotorSettings(FLinearMotorConfig& Mot
 	}
 }
 
-void UMebotControllerComponent::DrawDebugVisualization()
+void URammpGen1ControllerComponent::DrawDebugVisualization()
 {
 	if (!bShowMotorGizmos || !CachedSkeletalMesh)
 	{
@@ -933,18 +953,18 @@ void UMebotControllerComponent::DrawDebugVisualization()
 
 // --- control surface -----------------------------------------------------------
 
-FName UMebotControllerComponent::ControlIdFor(FName ConstraintName)
+FName URammpGen1ControllerComponent::ControlIdFor(FName ConstraintName)
 {
 	return *FString::Printf(TEXT("lift.%s"), *ConstraintName.ToString());
 }
 
-FName UMebotControllerComponent::ConstraintFor(FName ControlId)
+FName URammpGen1ControllerComponent::ConstraintFor(FName ControlId)
 {
 	FString S = ControlId.ToString();
 	return S.RemoveFromStart(TEXT("lift.")) ? FName(*S) : NAME_None;
 }
 
-void UMebotControllerComponent::DescribeControls(FRammsControlSurface& OutSurface) const
+void URammpGen1ControllerComponent::DescribeControls(FRammsControlSurface& OutSurface) const
 {
 	const bool bViaBase = IsUsingRobotBase();
 	auto GroupFor = [](FName Constraint) { return Constraint.ToString().Contains(TEXT("caster")) ? FName("Casters") : FName("Lift"); };
@@ -1011,7 +1031,7 @@ void UMebotControllerComponent::DescribeControls(FRammsControlSurface& OutSurfac
 	}
 }
 
-bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
+bool URammpGen1ControllerComponent::ApplyControl(FName Id, float Value)
 {
 	// A motor another mode drives (a curb crossing's lifts) refuses commands until it is back.
 	const FName Constraint = ConstraintFor(Id);
@@ -1020,7 +1040,7 @@ bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
 	{
 		if (M.ConstraintName == Constraint)
 		{
-			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			if (bViaBase && RammpGen1MotorYielded(this, M.ResolvedMotorId))
 			{
 				return false;
 			}
@@ -1036,7 +1056,7 @@ bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
 	{
 		if (M.ConstraintName == Constraint)
 		{
-			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			if (bViaBase && RammpGen1MotorYielded(this, M.ResolvedMotorId))
 			{
 				return false;
 			}
@@ -1051,7 +1071,7 @@ bool UMebotControllerComponent::ApplyControl(FName Id, float Value)
 	return false;
 }
 
-bool UMebotControllerComponent::ReleaseControl(FName Id)
+bool URammpGen1ControllerComponent::ReleaseControl(FName Id)
 {
 	// Nor does it let go of one: the other mode holds it.
 	const FName Constraint = ConstraintFor(Id);
@@ -1060,7 +1080,7 @@ bool UMebotControllerComponent::ReleaseControl(FName Id)
 	{
 		if (M.ConstraintName == Constraint)
 		{
-			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			if (bViaBase && RammpGen1MotorYielded(this, M.ResolvedMotorId))
 			{
 				return false;
 			}
@@ -1072,7 +1092,7 @@ bool UMebotControllerComponent::ReleaseControl(FName Id)
 	{
 		if (M.ConstraintName == Constraint)
 		{
-			if (bViaBase && MebotMotorYielded(this, M.ResolvedMotorId))
+			if (bViaBase && RammpGen1MotorYielded(this, M.ResolvedMotorId))
 			{
 				return false;
 			}
@@ -1083,7 +1103,7 @@ bool UMebotControllerComponent::ReleaseControl(FName Id)
 	return false;
 }
 
-bool UMebotControllerComponent::ReadControl(FName Id, float& OutValue) const
+bool URammpGen1ControllerComponent::ReadControl(FName Id, float& OutValue) const
 {
 	const FName Constraint = ConstraintFor(Id);
 	for (const FAngularMotorConfig& M : AngularMotors)
@@ -1105,7 +1125,7 @@ bool UMebotControllerComponent::ReadControl(FName Id, float& OutValue) const
 	return false;
 }
 
-void UMebotControllerComponent::GetClaimedMotorIds(TArray<FName>& OutIds) const
+void URammpGen1ControllerComponent::GetClaimedMotorIds(TArray<FName>& OutIds) const
 {
 	for (const FAngularMotorConfig& M : AngularMotors)
 	{
@@ -1123,7 +1143,7 @@ void UMebotControllerComponent::GetClaimedMotorIds(TArray<FName>& OutIds) const
 	}
 }
 
-bool UMebotControllerComponent::ReadTarget(FName Id, float& OutTarget) const
+bool URammpGen1ControllerComponent::ReadTarget(FName Id, float& OutTarget) const
 {
 	// The motor configs hold the commanded target (SetAngularMotorTarget /
 	// SetLinearMotorTarget write it), whichever path set it.

@@ -91,7 +91,7 @@ struct RAMMSCORE_API FKinematicJointConfig
  *
  * Designed for UI visualization of robots — no physics simulation, just direct bone
  * manipulation. Supports both revolute (rotation) and prismatic (translation) joints,
- * making it suitable for robotic arms (Kinova Gen3), mobile bases (Mebot), and
+ * making it suitable for robotic arms (Kinova Gen3), mobile bases (RAMMP Gen1), and
  * other articulated mechanisms.
  *
  * Automatically discovers ALL UPoseableMeshComponents on the owning actor and

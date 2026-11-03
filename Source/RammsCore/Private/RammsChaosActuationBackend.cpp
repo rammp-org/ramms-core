@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsChaosActuationBackend.h"
-#include "MebotControllerComponent.h"
+#include "RammpGen1ControllerComponent.h"
 #include "RammsRobotBaseComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
@@ -188,17 +188,17 @@ bool FRammsChaosActuationBackend::GetConstraintFrames(const FConstraintInstance&
 	return true;
 }
 
-void FRammsChaosActuationBackend::TakeOverFromMebotController(FConstraintMotor& Info)
+void FRammsChaosActuationBackend::TakeOverFromRammpGen1Controller(FConstraintMotor& Info)
 {
-	if (Info.bTakenOver)
+	if (!bLookedForRammpGen1Controller)
 	{
-		return;
+		bLookedForRammpGen1Controller = true;
+		const URammsRobotBaseComponent* Base = BaseComp.Get();
+		AActor*							Owner = Base ? Base->GetOwner() : nullptr;
+		RammpGen1Controller = Owner ? Owner->FindComponentByClass<URammpGen1ControllerComponent>() : nullptr;
 	}
-	Info.bTakenOver = true;
-	const URammsRobotBaseComponent* Base = BaseComp.Get();
-	AActor*							Owner = Base ? Base->GetOwner() : nullptr;
-	UMebotControllerComponent*		MC = Owner ? Owner->FindComponentByClass<UMebotControllerComponent>() : nullptr;
-	// A MebotController routing through the base is the caller, not a rival.
+	URammpGen1ControllerComponent* MC = RammpGen1Controller.Get();
+	// A RammpGen1Controller routing through the base is the caller, not a rival.
 	if (!MC || MC->IsUsingRobotBase())
 	{
 		return;
@@ -209,7 +209,7 @@ void FRammsChaosActuationBackend::TakeOverFromMebotController(FConstraintMotor& 
 		if (M.ConstraintName == Info.ConstraintName && M.bEnabled)
 		{
 			MC->SetAngularMotorEnabled(Info.ConstraintName, false);
-			UE_LOG(LogTemp, Log, TEXT("RammsChaosActuationBackend: constraint '%s' is now driven through the robot base; disabled the matching MebotController angular motor."), *Info.ConstraintName.ToString());
+			UE_LOG(LogTemp, Log, TEXT("RammsChaosActuationBackend: constraint '%s' is now driven through the robot base; disabled the matching RammpGen1Controller angular motor."), *Info.ConstraintName.ToString());
 		}
 	}
 	for (const FLinearMotorConfig& M : MC->GetLinearMotors())
@@ -217,7 +217,7 @@ void FRammsChaosActuationBackend::TakeOverFromMebotController(FConstraintMotor& 
 		if (M.ConstraintName == Info.ConstraintName && M.bEnabled)
 		{
 			MC->SetLinearMotorEnabled(Info.ConstraintName, false);
-			UE_LOG(LogTemp, Log, TEXT("RammsChaosActuationBackend: constraint '%s' is now driven through the robot base; disabled the matching MebotController linear motor."), *Info.ConstraintName.ToString());
+			UE_LOG(LogTemp, Log, TEXT("RammsChaosActuationBackend: constraint '%s' is now driven through the robot base; disabled the matching RammpGen1Controller linear motor."), *Info.ConstraintName.ToString());
 		}
 	}
 }
@@ -239,7 +239,7 @@ void FRammsChaosActuationBackend::SetCommand(FName MotorId, float Value)
 		{
 			return;
 		}
-		TakeOverFromMebotController(*Info);
+		TakeOverFromRammpGen1Controller(*Info);
 		const URammsRobotBaseComponent* Base = BaseComp.Get();
 		const float						Stiffness = Base ? Base->ChaosPositionDriveStiffness : 100000.0f;
 		const float						Damping = Base ? Base->ChaosPositionDriveDamping : 10000.0f;
@@ -309,7 +309,7 @@ void FRammsChaosActuationBackend::SetCommand(FName MotorId, float Value)
 	}
 	// Nothing to apply: an AddTorque wakes the body even at zero, and a parked
 	// robot woken by its idle drive every frame fell asleep and woke again
-	// between them, each wake a jolt (the MeBot rocked at ~2-4 Hz). Torque
+	// between them, each wake a jolt (the RAMMP Gen1 rocked at ~2-4 Hz). Torque
 	// motors apply per frame, so skipping a zero command changes nothing else.
 	if (FMath::IsNearlyZero(Value))
 	{

@@ -46,6 +46,8 @@ namespace RammsCurb
 } // namespace RammsCurb
 
 /**
+ * The RAMMP Gen2 curb controller (the lift-drive base; URammsRammpGen1CurbController is Gen1's).
+ *
  * Climbs or descends a curb by coordinating every leg and wheel of a robot
  * whose wheels each hang on a leg that can lift it: three axles, the corner
  * wheels on crank-driven 4-bars and the centre wheels on 5-bars, with drive
