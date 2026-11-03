@@ -150,6 +150,26 @@ public:
 	float BrakingVelocityThreshold = 5.0f;
 
 	/**
+	 * How hard (cm/s^2) the drive brakes slow the robot, with the input at centre: auto-braking
+	 * (bEnableAutoBraking), and on the way to the parking brakes (ParkingBrakeSpeed). The two
+	 * drive wheels are brought to rest down a ramp of rate at this deceleration, rather than as
+	 * hard as BrakeTorque can stop them, as a power chair's controller decelerates when its stick
+	 * is let go. BrakeTorque becomes the gain that keeps each wheel on the ramp. Without
+	 * the ramp, the Chaos chair stopped from 1.8 m/s in 0.2 s, at over 1 g, and pitched 7.5 deg
+	 * onto its front casters. A turn under way slows at the same rate. Downhill, the ramp holds
+	 * the robot to it: the wheels run on ahead of the ramp, and BrakeTorque brakes them harder.
+	 * 0 brakes as hard as BrakeTorque can, as before. The torque hold (bHoldWhenIdle where the
+	 * backend simulates the wheels' joints: MuJoCo) brakes on its own profile instead.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
+	float BrakeDeceleration = 150.0f;
+
+	/** How long (s) braking takes to reach BrakeDeceleration from none, so that letting go of the
+	 *  stick does not jerk the robot (0: at once). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
+	float BrakeRampInSeconds = 0.25f;
+
+	/**
 	 * With the input at centre, bring the robot to rest -- both drive wheels
 	 * braked together from its forward speed, at no more than 30 cm/s^2
 	 * (twice that while a slope pulls them on; a turn under way stops) --
@@ -421,8 +441,9 @@ private:
 	/** Check if braking should be applied */
 	bool ShouldApplyBrakes() const;
 
-	/** Apply brake torque to both wheels */
-	void ApplyBrakes();
+	/** Apply brake torque to both wheels, DeltaSeconds since the last tick (the brake ramp:
+	 *  BrakeDeceleration). */
+	void ApplyBrakes(float DeltaSeconds);
 
 	/** Debug log current state */
 	void DebugLogState();
@@ -509,6 +530,21 @@ private:
 	/** Engage / release both drive wheels' parking brakes through the base;
 	 *  engaged only if both take it. */
 	void SetParkingBrake(bool bEngage);
+
+	/** The brake ramp (BrakeDeceleration): braking under way, its target rates (rad/s:
+	 *  forward, the wheels' mean, and turning, half their difference, right less left), and how
+	 *  long (s) it has braked. bBrakeRampStepped: ApplyBrakes stepped it this tick; a tick
+	 *  that does not ends it. */
+	bool   bBrakeRamp = false;
+	bool   bBrakeRampStepped = false;
+	double BrakeRampForward = 0.0;
+	double BrakeRampTurn = 0.0;
+	double BrakeRampElapsed = 0.0;
+	/** One tick of the brake ramp, begun from the wheels' smoothed rates if not under way: each
+	 *  target brought DeltaSeconds nearer rest, and never more than half a rad/s further from
+	 *  rest than the wheels' smoothed rates (slowed harder by a bump or a wall, they are not
+	 *  driven back up to it). The target rate (rad/s) of each wheel out. */
+	void StepBrakeRamp(double DeltaSeconds, double& OutLeft, double& OutRight);
 
 	/** A motion handed over by the selector, pulled towards (SeedMotion). */
 	TPimplPtr<RammsDrive::FCarry> Carry;
