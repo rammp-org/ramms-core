@@ -585,4 +585,115 @@ bool FRammsDriveHoldClockReset::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsDriveHoldRampedIn,
+	"Ramms.Drive.Hold.RampedIn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsDriveHoldRampedIn::RunTest(const FString& Parameters)
+{
+	// A hold whose gains ease its braking in (RampInSeconds, the controller's
+	// BrakeRampInSeconds): braking from 8 rad/s at 50 rad/s^2 eased in over
+	// 0.1 s, the target slows a quarter of the full step over the first of
+	// 25 ms ticks, the full step from the fourth on; without, the full step at
+	// once. The wheel is read on its target throughout.
+	const RammsDrive::FTorqueHoldGains Eased = RammsDrive::TorqueHoldGains(1.0, 100.0, 10.0, 500.0, 0.1);
+	const RammsDrive::FTorqueHoldGains AtOnce = RammsDrive::TorqueHoldGains(1.0, 100.0, 10.0, 500.0);
+	TestNearlyEqual(TEXT("gains: the ramp-in kept"), Eased.RampInSeconds, 0.1, 1e-12);
+	TestNearlyEqual(TEXT("gains: none unless given"), AtOnce.RampInSeconds, 0.0, 1e-12);
+	const double Dt = 0.025;
+	const double FullStep = Eased.Decel * Dt;
+	RammsDrive::FTorqueHold Hold;
+	Hold.Begin(0.0, 8.0);
+	double Was = Hold.TargetRate;
+	Hold.Step(Hold.Target, Hold.TargetRate, Dt, Eased);
+	TestNearlyEqual(TEXT("eased: a quarter of the full step over the first tick"), Was - Hold.TargetRate, 0.25 * FullStep, 1e-9);
+	for (int32 k = 0; k < 2; ++k)
+	{
+		Hold.Step(Hold.Target, Hold.TargetRate, Dt, Eased);
+	}
+	Was = Hold.TargetRate;
+	Hold.Step(Hold.Target, Hold.TargetRate, Dt, Eased);
+	TestNearlyEqual(TEXT("eased: the full step from the fourth tick"), Was - Hold.TargetRate, FullStep, 1e-9);
+	RammsDrive::FTorqueHold Plain;
+	Plain.Begin(0.0, 8.0);
+	Plain.Step(0.0, 8.0, Dt, AtOnce);
+	TestNearlyEqual(TEXT("not eased in: the full step at once"), 8.0 - Plain.TargetRate, FullStep, 1e-9);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsDriveHoldSettlesWhereItStops,
+	"Ramms.Drive.Hold.SettlesWhereItStops",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsDriveHoldSettlesWhereItStops::RunTest(const FString& Parameters)
+{
+	// An eased hold braked harder than its wheel grips: the wheel skids (reads
+	// slower than its target: the target follows it down), the target comes to
+	// rest, and the robot's way spins the wheel up again past the target's
+	// stop. Settling, the target follows it on -- never back, at most
+	// SettleMaxRad, within SettleSeconds -- and the integral wound up behind
+	// the braking is let go of (what it began with kept), so the robot is
+	// held where it stops, not pulled back. A wheel a slope pulls on ahead of its target (not caught
+	// up to first) is held at the target's stop, as before.
+	const RammsDrive::FTorqueHoldGains G = RammsDrive::TorqueHoldGains(1.0, 100.0, 10.0, 300.0);
+	const double					   Dt = 0.025;
+	RammsDrive::FTorqueHold			   Hold;
+	Hold.Begin(0.0, 6.0, 0.0, true);
+	TestEqual(TEXT("eased: settles the way it was braked from"), Hold.SettleSign, 1.0);
+	// Skidding: read at 1 rad/s under a target near 6.
+	Hold.Step(0.15, 1.0, Dt, G);
+	TestTrue(TEXT("skidding: the target caught up to the wheel"), Hold.bCaughtUpThisBraking && Hold.TargetRate <= 1.5 + 1e-9);
+	// Braked on to rest, the wheel read on its target.
+	for (int32 k = 0; k < 40 && Hold.TargetRate != 0.0; ++k)
+	{
+		Hold.Step(Hold.Target, Hold.TargetRate, Dt, G);
+	}
+	TestEqual(TEXT("the target at rest"), Hold.TargetRate, 0.0);
+	const double Stop = Hold.Target;
+	// The wheel spun up past the stop, the integral behind the braking.
+	Hold.Integral = -5.0;
+	Hold.Step(Stop + 0.1, 1.0, Dt, G);
+	TestNearlyEqual(TEXT("running on past the stop: the target follows it"), Hold.Target, Stop + 0.1, 1e-9);
+	TestTrue(FString::Printf(TEXT("...the integral behind the braking let go of (%.3f)"), Hold.Integral), Hold.Integral >= 0.0);
+	Hold.Step(Stop + 0.05, -0.5, Dt, G);
+	TestNearlyEqual(TEXT("rolling back: the target stays where it got to"), Hold.Target, Stop + 0.1, 1e-9);
+	Hold.Step(Stop + 1.0, 2.0, Dt, G);
+	TestNearlyEqual(TEXT("far on: followed at most SettleMaxRad"), Hold.Target, Stop + RammsDrive::FTorqueHold::SettleMaxRad, 1e-9);
+	for (int32 k = 0; k < FMath::CeilToInt(RammsDrive::FTorqueHold::SettleSeconds / Dt) + 1; ++k)
+	{
+		Hold.Step(Hold.Target, 0.0, Dt, G);
+	}
+	TestEqual(TEXT("after SettleSeconds: settled"), Hold.SettleSign, 0.0);
+
+	// Pulled on (a slope), never caught up: held at the target's stop.
+	RammsDrive::FTorqueHold Pulled;
+	Pulled.Begin(0.0, 6.0, 0.0, true);
+	for (int32 k = 0; k < 40 && Pulled.TargetRate != 0.0; ++k)
+	{
+		Pulled.Step(Pulled.Target, Pulled.TargetRate + 1.0, Dt, G);
+	}
+	TestTrue(TEXT("pulled on: so marked"), Pulled.bPulledThisBraking);
+	const double PulledStop = Pulled.Target;
+	Pulled.Step(PulledStop + 0.1, 1.0, Dt, G);
+	TestNearlyEqual(TEXT("pulled on: the target stays at its stop"), Pulled.Target, PulledStop, 1e-9);
+
+	// Not eased: no settling (a hold begun from a hand-over keeps its own).
+	RammsDrive::FTorqueHold Plain;
+	Plain.Begin(0.0, 6.0);
+	TestEqual(TEXT("not eased: no settling"), Plain.SettleSign, 0.0);
+
+	// Begun on a slope's pull handed over (an integral to start with): settling
+	// lets go of what wound up behind the braking, not of that.
+	RammsDrive::FTorqueHold Seeded;
+	Seeded.Begin(0.0, 6.0, -3.0, true);
+	for (int32 k = 0; k < 40 && Seeded.TargetRate != 0.0; ++k)
+	{
+		Seeded.Step(Seeded.Target, Seeded.TargetRate, Dt, G);
+	}
+	Seeded.Integral = -5.0;
+	Seeded.Step(Seeded.Target + 0.05, 0.5, Dt, G);
+	TestTrue(FString::Printf(TEXT("seeded: the slope's pull kept (%.3f, began -3)"), Seeded.Integral), FMath::IsNearlyEqual(Seeded.Integral, -3.0, 1e-9));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

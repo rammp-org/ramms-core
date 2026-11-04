@@ -332,7 +332,11 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			const double Forward = 0.5 * (SmoothLeftRate + SmoothRightRate);
 			const bool	 bHandedOver = SeedExpires >= 0.0 && T <= SeedExpires;
 			const double Seed = bHandedOver ? SeedTorque : 0.0;
-			BeginHold(Forward, Forward, Seed, Seed, bHandedOver);
+			// Eased to rest, and settled where the robot stops (FTorqueHold::SettleSeconds),
+			// with the brake ramp (BrakeDeceleration) too: braked that hard the wheels run
+			// on past the target's stop, and the loop pulled the robot back over a
+			// centimetre after it stopped.
+			BeginHold(Forward, Forward, Seed, Seed, bHandedOver || BrakeDeceleration > 0.0f);
 			SeedExpires = -1.0;
 			ReleaseElapsed = -1.0;
 			if (bParkingBrake)
@@ -816,8 +820,14 @@ void URammsDifferentialDriveController::StepHold(double DeltaSeconds)
 		}
 		return Most;
 	};
-	const RammsDrive::FTorqueHoldGains GainsL = RammsDrive::TorqueHoldGains(Inertia, HoldTorque(LeftMotorId, LeftMotorParams), Radius, HoldDecelerationCmS2);
-	const RammsDrive::FTorqueHoldGains GainsR = RammsDrive::TorqueHoldGains(Inertia, HoldTorque(RightMotorId, RightMotorParams), Radius, HoldDecelerationCmS2);
+	// Braked to rest as the brake ramp brakes (BrakeDeceleration, eased in over
+	// BrakeRampInSeconds and, the stick let go, eased out as long), so a robot stops
+	// alike on either backend; without the ramp, gently, as before (HoldDecelerationCmS2).
+	const bool	 bRamp = BrakeDeceleration > 0.0f;
+	const double Decel = bRamp ? static_cast<double>(BrakeDeceleration) : HoldDecelerationCmS2;
+	const double RampIn = bRamp ? static_cast<double>(BrakeRampInSeconds) : 0.0;
+	const RammsDrive::FTorqueHoldGains GainsL = RammsDrive::TorqueHoldGains(Inertia, HoldTorque(LeftMotorId, LeftMotorParams), Radius, Decel, RampIn, RampIn);
+	const RammsDrive::FTorqueHoldGains GainsR = RammsDrive::TorqueHoldGains(Inertia, HoldTorque(RightMotorId, RightMotorParams), Radius, Decel, RampIn, RampIn);
 	// The two sides held as one robot: braked alike, on their mean rate, and
 	// neither turning it back by more than HoldTurnErrorCm of tread travel
 	// against the other.

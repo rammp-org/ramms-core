@@ -361,17 +361,27 @@ namespace RammsDrive
 		/** The wheel's share of the robot (kg m^2): the target's braking is fed
 		 *  forward as this times its deceleration. */
 		double Inertia = 0.0;
+		/** How long (s) the target's braking takes to reach Decel from none
+		 *  once a hold begins (0: at once), as a power chair's controller
+		 *  eases into braking when its stick is let go. */
+		double RampInSeconds = 0.0;
+		/** A hold begun eased (FTorqueHold::bEaseToRest): how long (s) from
+		 *  rest at Decel its target starts easing off (0: BrakeTaperSeconds). */
+		double TaperSeconds = 0.0;
 	};
 
 	/** Gains for a wheel carrying InertiaKgM2 of the robot (its share of the
 	 *  mass times the radius squared) with a motor of MaxTorqueNm: a loop of
 	 *  about 6 rad/s, damped 0.8, its integral over half a second; the target
-	 *  braking at DecelCmS2 over a wheel of RadiusCm. */
-	FTorqueHoldGains TorqueHoldGains(double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2);
+	 *  braking at DecelCmS2 over a wheel of RadiusCm, reaching it over
+	 *  RampInSeconds, eased off (if eased) from TaperSeconds of rest. */
+	FTorqueHoldGains TorqueHoldGains(
+		double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2, double RampInSeconds = 0.0, double TaperSeconds = 0.0);
 
 	/**
 	 * A torque-driven wheel held still: Begin from its angle and rate now;
-	 * the target then brakes to rest at the gains' Decel -- twice that while
+	 * the target then brakes to rest at the gains' Decel (reached over their
+	 * RampInSeconds) -- twice that while
 	 * the wheel runs on ahead of it, or as fast as the wheel slows if that is
 	 * faster (CatchUpRadS) -- and stays there, and
 	 * Step gives the torque that holds the wheel on it (proportional, rate and
@@ -404,7 +414,8 @@ namespace RammsDrive
 		 *  as hard as the gains' Decel. */
 		static constexpr double PulledOnDecelScale = 2.0;
 		/** A hold begun eased (bEaseToRest) has its target's braking eased
-		 *  off as it comes to rest: once its rate is within this long (s) of
+		 *  off as it comes to rest: once its rate is within this long (s; the
+		 *  gains' TaperSeconds where they give one) of
 		 *  rest at its deceleration, it slows in proportion to what is left
 		 *  (a first-order approach), never below BrakeTaperFloor of the
 		 *  deceleration. A target stopped in one step leaves a loop closed
@@ -413,6 +424,20 @@ namespace RammsDrive
 		 *  a stop from speed). */
 		static constexpr double BrakeTaperSeconds = 0.3;
 		static constexpr double BrakeTaperFloor = 0.15;
+		/** A hold begun eased, its braking done without a slope pulling the
+		 *  wheel on: a wheel that runs on past where its target stopped (the
+		 *  robot braked harder than its tyres grip, its wheels' reading
+		 *  swinging through rest for a tick and stopping the target there) is
+		 *  held where it comes to rest rather than pulled back to the
+		 *  target's stop: for SettleSeconds after the target stops, the
+		 *  target follows the wheel on the way it was braked from (never
+		 *  back), at most SettleMaxRad, the integral kept from pushing it back
+		 *  (what it wound up behind the braking; what it began with stays).
+		 *  Pulled back, a robot braked at
+		 *  750 cm/s^2 on MuJoCo rolled back over a centimetre at 10 cm/s
+		 *  after it stopped. */
+		static constexpr double SettleSeconds = 0.5;
+		static constexpr double SettleMaxRad = 0.4;
 
 		bool bActive = false;
 		/** Let go of: turning far off its target (FreeSpinRadS), and the ticks
@@ -433,9 +458,29 @@ namespace RammsDrive
 		 *  a slope has pulled the wheel on ahead of its target in, where easing
 		 *  off would only let it run further (bPulledThisBraking: held for the
 		 *  rest of the braking, so a wheel read noisily either side of its
-		 *  target does not ease the braking off and on). */
-		bool bEaseToRest = false;
-		bool bPulledThisBraking = false;
+		 *  target does not ease the braking off and on; and only once pulled on
+		 *  PulledOnTicks ticks running, PulledTicks the count: braked hard on
+		 *  MuJoCo, a wheel's reading ran a tick ahead of its target on the flat;
+		 *  and not once its target has been caught up to it (CatchUpRadS,
+		 *  bCaughtUpThisBraking): a wheel braked harder than its tyre grips
+		 *  skids, its target follows it down, and the robot's way spins it up
+		 *  again ahead of the target -- the robot running on, not a slope). */
+		static constexpr int32 PulledOnTicks = 3;
+		bool				   bEaseToRest = false;
+		bool				   bPulledThisBraking = false;
+		int32				   PulledTicks = 0;
+		bool				   bCaughtUpThisBraking = false;
+		/** How long (s) the target has been braking since Begin (the gains'
+		 *  RampInSeconds). */
+		double BrakingSeconds = 0.0;
+		/** Settling (SettleSeconds): the way (+1, -1) an eased hold braked the
+		 *  wheel from (0: none, or settled); how long (s) its target has been at
+		 *  rest (-1: not yet) and how far (rad) it has followed the wheel since. */
+		double SettleSign = 0.0;
+		double SettleElapsed = -1.0;
+		double SettledRad = 0.0;
+		/** The integral (N.m) Begin started the loop with. */
+		double BeganIntegral = 0.0;
 
 		/** Hold from Angle (rad), braking from Rate (rad/s); Integral (N.m) is
 		 *  what the loop starts holding with -- a slope's pull already known

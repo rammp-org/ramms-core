@@ -161,7 +161,8 @@ public:
 	 * under way slows at the same rate. Downhill, the ramp holds the robot to it: the wheels run
 	 * on ahead of the ramp, and BrakeTorque brakes them harder. 0 brakes as hard as BrakeTorque
 	 * can, as before. The torque hold (bHoldWhenIdle where the backend simulates the wheels'
-	 * joints: MuJoCo) brakes on its own profile instead.
+	 * joints: MuJoCo) brakes its target to rest at this deceleration too, eased in over
+	 * BrakeRampInSeconds; at 0 it brakes gently (30 cm/s^2), as before.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
 	float BrakeDeceleration = 750.0f;
