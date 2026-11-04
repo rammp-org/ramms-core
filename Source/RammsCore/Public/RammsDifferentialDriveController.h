@@ -155,19 +155,21 @@ public:
 	 * drive wheels are brought to rest down a ramp of rate at this deceleration, rather than as
 	 * hard as BrakeTorque can stop them, as a power chair's controller decelerates when its stick
 	 * is let go. BrakeTorque becomes the gain that keeps each wheel on the ramp. Without
-	 * the ramp, the Chaos chair stopped from 1.8 m/s in 0.2 s, at over 1 g, and pitched 7.5 deg
-	 * onto its front casters. A turn under way slows at the same rate. Downhill, the ramp holds
-	 * the robot to it: the wheels run on ahead of the ramp, and BrakeTorque brakes them harder.
-	 * 0 brakes as hard as BrakeTorque can, as before. The torque hold (bHoldWhenIdle where the
-	 * backend simulates the wheels' joints: MuJoCo) brakes on its own profile instead.
+	 * the ramp, the Chaos chair stopped from 1.8 m/s in 0.2 s, at over 1 g, and pitched up to 8 deg
+	 * onto its front casters. At the default it stops from 1.8 m/s in about half a metre, peaking
+	 * at about 0.7 g (the wheels lag the ramp, then catch it up), pitching under a degree. A turn
+	 * under way slows at the same rate. Downhill, the ramp holds the robot to it: the wheels run
+	 * on ahead of the ramp, and BrakeTorque brakes them harder. 0 brakes as hard as BrakeTorque
+	 * can, as before. The torque hold (bHoldWhenIdle where the backend simulates the wheels'
+	 * joints: MuJoCo) brakes on its own profile instead.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
-	float BrakeDeceleration = 150.0f;
+	float BrakeDeceleration = 750.0f;
 
 	/** How long (s) braking takes to reach BrakeDeceleration from none, so that letting go of the
 	 *  stick does not jerk the robot (0: at once). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
-	float BrakeRampInSeconds = 0.25f;
+	float BrakeRampInSeconds = 0.1f;
 
 	/**
 	 * With the input at centre, bring the robot to rest -- both drive wheels
