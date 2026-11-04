@@ -358,7 +358,8 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 
 		if (bIsBraking)
 		{
-			ApplyBrakes(Dt > 0.0 ? static_cast<float>(Dt) : DeltaTime);
+			// The physics clock's step: 0 when it has not advanced, and nor does the brake ramp.
+			ApplyBrakes(static_cast<float>(Dt));
 		}
 		else
 		{
@@ -1251,13 +1252,23 @@ bool URammsDifferentialDriveController::ShouldApplyBrakes() const
 
 void URammsDifferentialDriveController::StepBrakeRamp(double DeltaSeconds, double& OutLeft, double& OutRight)
 {
+	// The wheels' forward and turning rates (rad/s), each the further from rest of the smoothed
+	// rate and this tick's: one tick's reading of a loaded wheel can be a rad/s low, and a ramp
+	// pulled down to it would brake harder than the ramp; the smoothed rate lags a wheel still
+	// speeding up when the stick is let go, and a ramp begun from it would brake at once, before
+	// BrakeRampInSeconds. Opposite signs (a rate passing through rest) take the smoothed one.
+	auto FurtherFromRest = [](double Smoothed, double Now) {
+		return Smoothed * Now > 0.0 && FMath::Abs(Now) > FMath::Abs(Smoothed) ? Now : Smoothed;
+	};
+	const double Forward = FurtherFromRest(0.5 * (SmoothLeftRate + SmoothRightRate), 0.5 * (LeftWheelState.AngularVelocity + RightWheelState.AngularVelocity));
+	const double Turn = FurtherFromRest(0.5 * (SmoothRightRate - SmoothLeftRate), 0.5 * (RightWheelState.AngularVelocity - LeftWheelState.AngularVelocity));
 	if (!bBrakeRamp)
 	{
-		// From the smoothed rates: one tick's reading of a loaded wheel can be a rad/s off, and
-		// a ramp begun from it would brake the two sides differently and turn the robot.
+		// From the two sides' mean, not each wheel's own: braked separately, the two sides
+		// would slow differently and turn the robot.
 		bBrakeRamp = true;
-		BrakeRampForward = 0.5 * (SmoothLeftRate + SmoothRightRate);
-		BrakeRampTurn = 0.5 * (SmoothRightRate - SmoothLeftRate);
+		BrakeRampForward = Forward;
+		BrakeRampTurn = Turn;
 		BrakeRampElapsed = 0.0;
 		BrakeRampRestSeconds = 0.0;
 	}
@@ -1269,10 +1280,8 @@ void URammsDifferentialDriveController::StepBrakeRamp(double DeltaSeconds, doubl
 
 	const double RampIn = BrakeRampInSeconds > 0.0f ? FMath::Min(1.0, BrakeRampElapsed / BrakeRampInSeconds) : 1.0;
 	const double Step = BrakeDeceleration / FMath::Max(WheelRadius, 1.0f) * RampIn * DeltaSeconds;
-	// Towards rest by Step, and no more than CatchUpRadS further from rest than the wheels are
-	// (their smoothed rates: a target pulled down to one tick's low reading of a loaded wheel
-	// would brake harder than the ramp): a target left ahead of wheels that stopped short would
-	// drive them on again.
+	// Towards rest by Step, and no more than CatchUpRadS further from rest than the wheels are:
+	// a target left ahead of wheels that stopped short would no longer brake them.
 	constexpr double CatchUpRadS = 0.5;
 
 	auto Toward = [Step](double Target, double Actual) {
@@ -1280,8 +1289,6 @@ void URammsDifferentialDriveController::StepBrakeRamp(double DeltaSeconds, doubl
 		const double Magnitude = FMath::Max(0.0, FMath::Abs(Target) - Step);
 		return Sign * FMath::Min(Magnitude, FMath::Max(0.0, Sign * Actual) + CatchUpRadS);
 	};
-	const double Forward = 0.5 * (SmoothLeftRate + SmoothRightRate);
-	const double Turn = 0.5 * (SmoothRightRate - SmoothLeftRate);
 	BrakeRampForward = Toward(BrakeRampForward, Forward);
 	BrakeRampTurn = Toward(BrakeRampTurn, Turn);
 	BrakeRampRestSeconds = BrakeRampForward == 0.0 && BrakeRampTurn == 0.0 ? BrakeRampRestSeconds + DeltaSeconds : 0.0;
@@ -1306,6 +1313,14 @@ void URammsDifferentialDriveController::ApplyBrakes(float DeltaSeconds)
 		const double Stiffen = FMath::Min(1.0, BrakeRampRestSeconds / BrakeRestStiffenSeconds);
 		Damping = BrakeTorque * static_cast<float>(1.0 + (BrakeRestDampingScale - 1.0) * Stiffen);
 	}
+	// Each wheel's target between rest and the wheel's own spin, so the brakes only ever slow it:
+	// a wheel slowed below its share of the ramp (one side over a bump) is left alone, not
+	// driven forward with the stick centred.
+	auto Braking = [](double Target, float Spin) {
+		return Target * Spin > 0.0 ? FMath::Sign(Spin) * FMath::Min(FMath::Abs(Target), static_cast<double>(FMath::Abs(Spin))) : 0.0;
+	};
+	LeftTarget = Braking(LeftTarget, LeftWheelState.AngularVelocity);
+	RightTarget = Braking(RightTarget, RightWheelState.AngularVelocity);
 
 	// Base-component path: damping torque proportional to the spin velocity off
 	// the ramp, by motor Id -- BrakeTorque is the damping coefficient (per rad/s),
@@ -1351,7 +1366,7 @@ void URammsDifferentialDriveController::ApplyBrakes(float DeltaSeconds)
 		// Only apply braking above deadband to prevent oscillation
 		if (AngVel.Size() > BrakeDeadband && FMath::Abs(Error) > BrakeDeadband)
 		{
-			// The ramp only ever lies between rest and the wheel's spin, so this is 0..1.
+			// The target lies between rest and the wheel's spin (Braking), so this is 0..1.
 			const float	  OffRamp = FMath::Abs(Spin) > KINDA_SMALL_NUMBER ? FMath::Clamp(Error / Spin, 0.0f, 1.0f) : 1.0f;
 			const FVector DampingTorque = -AngVel * Damping * OffRamp * 100.0f; // Convert to UE units
 			BodyInst->AddTorqueInRadians(DampingTorque, false, true);

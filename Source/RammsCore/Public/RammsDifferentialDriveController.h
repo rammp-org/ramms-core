@@ -444,8 +444,8 @@ private:
 	/** Check if braking should be applied */
 	bool ShouldApplyBrakes() const;
 
-	/** Apply brake torque to both wheels, DeltaSeconds since the last tick (the brake ramp:
-	 *  BrakeDeceleration). */
+	/** Apply brake torque to both wheels; DeltaSeconds is the physics clock's step since the
+	 *  last tick (0 if it has not advanced), which the brake ramp (BrakeDeceleration) moves on by. */
 	void ApplyBrakes(float DeltaSeconds);
 
 	/** Debug log current state */
@@ -554,10 +554,10 @@ private:
 	static constexpr double BrakeRestDampingScale = 5.0;
 	static constexpr double BrakeRestStiffenSeconds = 0.25;
 	static constexpr double BrakeRestCloseSeconds = 0.75;
-	/** One tick of the brake ramp, begun from the wheels' smoothed rates if not under way: each
-	 *  target brought DeltaSeconds nearer rest, and never more than half a rad/s further from
-	 *  rest than the wheels' smoothed rates (slowed harder by a bump or a wall, they are not
-	 *  driven back up to it). The target rate (rad/s) of each wheel out. */
+	/** One tick of the brake ramp, begun from the wheels' rates if not under way (each the
+	 *  further from rest of the smoothed rate and this tick's): each target brought DeltaSeconds
+	 *  nearer rest, and never more than half a rad/s further from rest than those rates. The
+	 *  target rate (rad/s) of each wheel out. */
 	void StepBrakeRamp(double DeltaSeconds, double& OutLeft, double& OutRight);
 
 	/** A motion handed over by the selector, pulled towards (SeedMotion). */
