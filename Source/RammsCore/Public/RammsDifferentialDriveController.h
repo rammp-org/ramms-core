@@ -659,6 +659,9 @@ private:
 	double					SmoothLeftRate = 0.0;
 	double					SmoothRightRate = 0.0;
 	static constexpr double HoldRateSmoothSeconds = 0.15;
+
+	/** The smoothed rates have taken a reading since the first tick or the last reset. */
+	bool bSmoothRatesSet = false;
 	/** The most (cm, of tread travel) the two held wheels' errors may differ
 	 *  by: beyond it their targets are moved together (RammsDrive::BoundTurnError),
 	 *  so the hold never turns the robot back by more than this, whatever the

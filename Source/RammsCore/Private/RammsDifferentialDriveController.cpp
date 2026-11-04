@@ -178,9 +178,12 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 		RightAngle = RightAngleSource->Update(BaseComponent->GetMotorValue(RightMotorId), RightWheelState.AngularVelocity, Dt);
 	}
 	{
-		const double Share = Dt > 0.0 ? FMath::Min(1.0, Dt / HoldRateSmoothSeconds) : 1.0;
+		// A tick the physics clock has not advanced over adds nothing new: the filter keeps what it
+		// has, except to take its first reading (at the first tick, or after a reset).
+		const double Share = Dt > 0.0 ? FMath::Min(1.0, Dt / HoldRateSmoothSeconds) : (bSmoothRatesSet ? 0.0 : 1.0);
 		SmoothLeftRate += Share * (LeftWheelState.AngularVelocity - SmoothLeftRate);
 		SmoothRightRate += Share * (RightWheelState.AngularVelocity - SmoothRightRate);
+		bSmoothRatesSet = true;
 	}
 	if (ReleaseElapsed >= 0.0)
 	{
@@ -300,7 +303,9 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 		ParkSlowSeconds = bStopped ? ParkSlowSeconds + Dt : 0.0;
 		ParkSlowTicks = bStopped ? ParkSlowTicks + (Dt > 0.0 ? 1 : 0) : 0;
 		const bool bDebounced = ParkSlowSeconds >= ParkDebounceSeconds && ParkSlowTicks >= 2;
-		if ((bStopped && (!bBrakeRamp || bDebounced)) || bRampAtRest)
+		// Whether the ramp brakes, not whether it has started: on the first tick at centre it has
+		// not (ApplyBrakes starts it below), and a closing then would skip the debounce.
+		if ((bStopped && (BrakeDeceleration <= 0.0f || bDebounced)) || bRampAtRest)
 		{
 			SetParkingBrake(true);
 		}
@@ -910,6 +915,7 @@ void URammsDifferentialDriveController::ResetHoldState()
 	LeftAngleSource->Reset();
 	RightAngleSource->Reset();
 	SmoothLeftRate = SmoothRightRate = 0.0;
+	bSmoothRatesSet = false;
 	SeedExpires = -1.0;
 	bStoodDownHeld = false;
 	// Its wheels are back where a reset put them; brake them afresh once at rest.
@@ -1285,6 +1291,15 @@ void URammsDifferentialDriveController::StepBrakeRamp(double DeltaSeconds, doubl
 		BrakeRampTurn = Turn;
 		BrakeRampElapsed = 0.0;
 		BrakeRampRestSeconds = 0.0;
+	}
+	else if (DeltaSeconds <= 0.0)
+	{
+		// The physics clock has not moved: nor do the targets (no step, no catch-up to a reading
+		// taken without simulated motion); the damping goes on against them.
+		bBrakeRampStepped = true;
+		OutLeft = BrakeRampForward - BrakeRampTurn;
+		OutRight = BrakeRampForward + BrakeRampTurn;
+		return;
 	}
 	else
 	{
