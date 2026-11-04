@@ -269,6 +269,8 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			SetParkingBrake(false);
 		}
 		ParkFromSpeed = 0.0f;
+		ParkSlowSeconds = 0.0;
+		ParkSlowTicks = 0;
 	}
 	else if (!bParkingBrake)
 	{
@@ -286,7 +288,19 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 		// The brake ramp at rest a while: a slope's pull can hold the robot short of
 		// ParkingBrakeSpeed under the drive brakes alone.
 		const bool bRampAtRest = bBrakeRamp && BrakeRampRestSeconds >= BrakeRestCloseSeconds;
-		if (bSlow || bTurnedBack || bRampAtRest)
+		// Braked down the ramp, slow or turned back for ParkDebounceSeconds of the physics clock
+		// and at least two readings running (at 30 fps one tick is longer than that), and not
+		// while the ramp itself is above ParkingBrakeSpeed: braked hard, a wheel's reading can
+		// swing through rest for a tick (-1.7 rad/s with the chair still at 88 cm/s, its front
+		// casters raised), and the brakes closing on it stopped the chair outright and pitched it
+		// 6 deg. Without the ramp, at once, as before.
+		const double Radius = FMath::Max(WheelRadius, 1.0f);
+		const bool	 bRampMoving = bBrakeRamp && FMath::Max(FMath::Abs(BrakeRampForward), FMath::Abs(BrakeRampTurn)) * Radius > ParkingBrakeSpeed;
+		const bool	 bStopped = (bSlow || bTurnedBack) && !bRampMoving;
+		ParkSlowSeconds = bStopped ? ParkSlowSeconds + Dt : 0.0;
+		ParkSlowTicks = bStopped ? ParkSlowTicks + (Dt > 0.0 ? 1 : 0) : 0;
+		const bool bDebounced = ParkSlowSeconds >= ParkDebounceSeconds && ParkSlowTicks >= 2;
+		if ((bStopped && (!bBrakeRamp || bDebounced)) || bRampAtRest)
 		{
 			SetParkingBrake(true);
 		}

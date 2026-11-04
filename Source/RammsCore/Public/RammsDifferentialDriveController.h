@@ -556,6 +556,13 @@ private:
 	static constexpr double BrakeRestDampingScale = 5.0;
 	static constexpr double BrakeRestStiffenSeconds = 0.25;
 	static constexpr double BrakeRestCloseSeconds = 0.75;
+	/** Braked down the ramp, how long (s, the physics clock) the treads must have read slow or
+	 *  turned back, over at least two readings, before the parking brakes close, and how long and
+	 *  over how many readings they have: braked hard, one tick's reading of a wheel can swing
+	 *  through rest with the robot still well under way. */
+	static constexpr double ParkDebounceSeconds = 0.03;
+	double					ParkSlowSeconds = 0.0;
+	int32					ParkSlowTicks = 0;
 	/** One tick of the brake ramp, begun from the wheels' rates if not under way (each the
 	 *  further from rest of the smoothed rate and this tick's): each target brought DeltaSeconds
 	 *  nearer rest, and never more than half a rad/s further from rest than those rates. The
