@@ -318,6 +318,39 @@ struct RAMMSCORE_API FRammsCurbStick
 	float CancelHoldSeconds = 0.75f;
 };
 
+/**
+ * Curb assist, on a curb controller (URammsCurbNegotiationController::Assist, URammsRammpGen1CurbController::Assist):
+ * the switch curb.assist on the control surface, Off/On. On, a rider driving forward at a curb that controller can
+ * cross -- the stick past its Stick.EngageFraction, in whichever drive mode has the robot -- has the crossing started
+ * for them once the edge is within TriggerDistanceCm, on the move; from there the stick drives it as FRammsCurbStick
+ * says. It does not steer: a curb the controller would refuse (too high, too far off square) is not taken, and the
+ * robot drives on as the rider steers it. After a crossing it started that did not finish (stopped, cancelled), it
+ * waits for the stick to be let go before it starts another.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsCurbAssist
+{
+	GENERATED_BODY()
+
+	/** On: driving forward at a curb crosses it. What curb.assist shows and sets; set here, the robot starts with it on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Assist")
+	bool bEnabled = false;
+
+	/** The crossing is started once the curb's edge is this close ahead of the front wheels (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Assist", meta = (ClampMin = "10.0"))
+	float TriggerDistanceCm = 80.0f;
+
+	/** Nor once it is closer than this (cm): the rider has driven up to the curb (one the controller would not take
+	 *  further out, say, as they turned to face it), and a crossing begun there would lift the front wheels against
+	 *  its face. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Assist", meta = (ClampMin = "0.0"))
+	float MinDistanceCm = 20.0f;
+
+	/** How often (s) it looks ahead while the rider drives forward. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Assist", meta = (ClampMin = "0.0"))
+	float ScanIntervalSeconds = 0.1f;
+};
+
 /** The step the robot is to cross. */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbProfile
