@@ -162,7 +162,8 @@ public:
 	 * on ahead of the ramp, and BrakeTorque brakes them harder. 0 brakes as hard as BrakeTorque
 	 * can, as before. The torque hold (bHoldWhenIdle where the backend simulates the wheels'
 	 * joints: MuJoCo) brakes its target to rest at this deceleration too, eased in over
-	 * BrakeRampInSeconds; at 0 it brakes gently (30 cm/s^2), as before.
+	 * BrakeRampInSeconds, at most what the drive motors can brake VehicleMass at (four
+	 * fifths of their torque); at 0 it brakes gently (30 cm/s^2), as before.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
 	float BrakeDeceleration = 750.0f;

@@ -370,11 +370,16 @@ namespace RammsDrive
 		double TaperSeconds = 0.0;
 	};
 
+	/** The share of a motor's torque the target's braking may take at most
+	 *  (TorqueHoldGains): the rest is the loop's. */
+	constexpr double TorqueDecelShare = 0.8;
+
 	/** Gains for a wheel carrying InertiaKgM2 of the robot (its share of the
 	 *  mass times the radius squared) with a motor of MaxTorqueNm: a loop of
 	 *  about 6 rad/s, damped 0.8, its integral over half a second; the target
-	 *  braking at DecelCmS2 over a wheel of RadiusCm, reaching it over
-	 *  RampInSeconds, eased off (if eased) from TaperSeconds of rest. */
+	 *  braking at DecelCmS2 over a wheel of RadiusCm -- at most what
+	 *  TorqueDecelShare of the motor's torque gives the wheel's share -- reaching
+	 *  it over RampInSeconds, eased off (if eased) from TaperSeconds of rest. */
 	FTorqueHoldGains TorqueHoldGains(
 		double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2, double RampInSeconds = 0.0, double TaperSeconds = 0.0);
 

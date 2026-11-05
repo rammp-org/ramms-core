@@ -595,7 +595,8 @@ bool FRammsDriveHoldRampedIn::RunTest(const FString& Parameters)
 	// BrakeRampInSeconds): braking from 8 rad/s at 50 rad/s^2 eased in over
 	// 0.1 s, the target slows a quarter of the full step over the first of
 	// 25 ms ticks, the full step from the fourth on; without, the full step at
-	// once. The wheel is read on its target throughout.
+	// once. The wheel is read on its target throughout. And the braking is no
+	// harder than the motor can give the wheel's share of the robot.
 	const RammsDrive::FTorqueHoldGains Eased = RammsDrive::TorqueHoldGains(1.0, 100.0, 10.0, 500.0, 0.1);
 	const RammsDrive::FTorqueHoldGains AtOnce = RammsDrive::TorqueHoldGains(1.0, 100.0, 10.0, 500.0);
 	TestNearlyEqual(TEXT("gains: the ramp-in kept"), Eased.RampInSeconds, 0.1, 1e-12);
@@ -618,6 +619,12 @@ bool FRammsDriveHoldRampedIn::RunTest(const FString& Parameters)
 	Plain.Begin(0.0, 8.0);
 	Plain.Step(0.0, 8.0, Dt, AtOnce);
 	TestNearlyEqual(TEXT("not eased in: the full step at once"), 8.0 - Plain.TargetRate, FullStep, 1e-9);
+
+	// No harder than the motor can brake the wheel's share: 500 cm/s^2 over a 10 cm
+	// wheel is 50 rad/s^2, and 10 N*m over 1 kg m^2 gives 10, TorqueDecelShare of it 8.
+	const RammsDrive::FTorqueHoldGains Weak = RammsDrive::TorqueHoldGains(1.0, 10.0, 10.0, 500.0);
+	TestNearlyEqual(TEXT("braking within the motor's torque"), Weak.Decel, RammsDrive::TorqueDecelShare * 10.0, 1e-9);
+	TestNearlyEqual(TEXT("...and as asked where it can"), RammsDrive::TorqueHoldGains(1.0, 100.0, 10.0, 500.0).Decel, 50.0, 1e-9);
 	return true;
 }
 

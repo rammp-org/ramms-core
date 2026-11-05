@@ -425,6 +425,14 @@ namespace RammsDrive
 		G.Ki = G.Kp / IntegralSeconds;
 		G.MaxTorque = FMath::Max(MaxTorqueNm, 0.0);
 		G.Decel = RadiusCm > 0.0 ? FMath::Max(DecelCmS2, 0.0) / RadiusCm : 0.0;
+		// No harder than the motor can brake the wheel's share of the robot, a part of its
+		// torque kept for the loop: a target braking past that leaves the wheel running on
+		// behind it (taken for a slope pulling it on), and the loop then pulled the robot
+		// back once the target had stopped.
+		if (G.MaxTorque > 0.0)
+		{
+			G.Decel = FMath::Min(G.Decel, TorqueDecelShare * G.MaxTorque / J);
+		}
 		G.Inertia = J;
 		G.RampInSeconds = FMath::Max(RampInSeconds, 0.0);
 		G.TaperSeconds = FMath::Max(TaperSeconds, 0.0);
