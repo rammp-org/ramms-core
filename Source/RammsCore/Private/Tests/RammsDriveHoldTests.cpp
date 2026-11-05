@@ -680,6 +680,19 @@ bool FRammsDriveHoldSettlesWhereItStops::RunTest(const FString& Parameters)
 		Pulled.Step(Pulled.Target, Pulled.TargetRate + 1.0, Dt, G);
 	}
 	TestTrue(TEXT("pulled on: so marked"), Pulled.bPulledThisBraking);
+	// Ticks the clock has not moved over do not count towards it.
+	RammsDrive::FTorqueHold Still;
+	Still.Begin(0.0, 6.0, 0.0, true);
+	for (int32 k = 0; k < 5; ++k)
+	{
+		Still.Step(Still.Target, Still.TargetRate + 1.0, 0.0, G);
+	}
+	TestFalse(TEXT("zero-length ticks ahead of the target: not pulled on"), Still.bPulledThisBraking);
+	// A step over no time keeps the last torque, the braking fed forward with it.
+	RammsDrive::FTorqueHold Paused;
+	Paused.Begin(0.0, 6.0);
+	const double Braked = Paused.Step(0.0, 6.0, Dt, G);
+	TestNearlyEqual(TEXT("no time: the torque as it was"), Paused.Step(0.0, 6.0, 0.0, G), Braked, 1e-12);
 	const double PulledStop = Pulled.Target;
 	Pulled.Step(PulledStop + 0.1, 1.0, Dt, G);
 	TestNearlyEqual(TEXT("pulled on: the target stays at its stop"), Pulled.Target, PulledStop, 1e-9);

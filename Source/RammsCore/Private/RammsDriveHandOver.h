@@ -486,6 +486,8 @@ namespace RammsDrive
 		double SettledRad = 0.0;
 		/** The integral (N.m) Begin started the loop with. */
 		double BeganIntegral = 0.0;
+		/** Stepped since Begin: a step over no time keeps the torque it gave last. */
+		bool bStepped = false;
 
 		/** Hold from Angle (rad), braking from Rate (rad/s); Integral (N.m) is
 		 *  what the loop starts holding with -- a slope's pull already known

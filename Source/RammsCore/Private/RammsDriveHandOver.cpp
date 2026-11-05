@@ -508,6 +508,7 @@ namespace RammsDrive
 		SettleElapsed = -1.0;
 		SettledRad = 0.0;
 		BeganIntegral = InitialIntegral;
+		bStepped = false;
 	}
 
 	double FTorqueHold::Step(double Angle, double Rate, double DeltaSeconds, const FTorqueHoldGains& Gains)
@@ -517,6 +518,14 @@ namespace RammsDrive
 			LastTorque = 0.0;
 			return 0.0;
 		}
+		if (DeltaSeconds <= 0.0 && bStepped)
+		{
+			// The clock has not moved since the last step: nothing new is read, and the torque
+			// stays as it was. Stepped again, the braking fed forward (the target's change over
+			// the tick) would drop out, and the wheel run on under the rest until the next.
+			return LastTorque;
+		}
+		bStepped = true;
 		const double Dt = FMath::Max(DeltaSeconds, 0.0);
 		// Braking never asks a wheel for more than it has: one slowing faster
 		// than its target (a slope's pull uphill, its own drag) takes the target
@@ -547,8 +556,12 @@ namespace RammsDrive
 			const bool bPulledOn = !bDecided && !bFree && FMath::Sign(TargetRate) * (Rate - TargetRate) > CatchUpRadS;
 			// Pulled on PulledOnTicks ticks running, and not after the target was caught up to a
 			// wheel slowing faster than it: a hard braking's noisy reading ahead of the target for
-			// a tick is not a slope, nor is a wheel braked into a skid spinning up again.
-			PulledTicks = (bDecided ? Scale > 1.0 : bPulledOn) ? PulledTicks + 1 : 0;
+			// a tick is not a slope, nor is a wheel braked into a skid spinning up again. A tick the
+			// clock has not moved over (no new reading) does not count.
+			if (Dt > 0.0)
+			{
+				PulledTicks = (bDecided ? Scale > 1.0 : bPulledOn) ? PulledTicks + 1 : 0;
+			}
 			bPulledThisBraking = bPulledThisBraking || (PulledTicks >= PulledOnTicks && !bCaughtUpThisBraking);
 			// Eased in over the gains' RampInSeconds: braking from none, not all at once.
 			BrakingSeconds += Dt;
