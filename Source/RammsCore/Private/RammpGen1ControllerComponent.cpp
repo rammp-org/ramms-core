@@ -41,6 +41,15 @@ namespace
 	{
 		return !MotorId.IsNone() && RammpGen1MotorsClaimedByActiveMode(Self).Contains(MotorId);
 	}
+
+	/** Where the mode driving a motor has it: its last command, else its measured value. A loaded servo sits short of
+	 *  its command; taken back where it sags, it would hold there and sag further, and a crossing that put the lifts
+	 *  back where it found them would not quite have. */
+	float RammpGen1FollowValue(const URammsRobotBaseComponent& Base, FName MotorId)
+	{
+		float Value = 0.0f;
+		return Base.GetMotorCommand(MotorId, Value) ? Value : Base.GetMotorValue(MotorId);
+	}
 } // namespace
 
 URammpGen1ControllerComponent::URammpGen1ControllerComponent()
@@ -672,7 +681,7 @@ void URammpGen1ControllerComponent::UpdateAngularMotors(float DeltaTime, const T
 		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
 		{
 			// Another mode drives it: follow it, writing nothing.
-			const float Degrees = FMath::RadiansToDegrees(RobotBase->GetMotorValue(Motor.ResolvedMotorId));
+			const float Degrees = FMath::RadiansToDegrees(RammpGen1FollowValue(*RobotBase, Motor.ResolvedMotorId));
 			Motor.CurrentAngle = Motor.TargetAngle = Motor.bInvertDirection ? -Degrees : Degrees;
 			Motor.bPendingApply = false;
 			continue;
@@ -713,7 +722,7 @@ void URammpGen1ControllerComponent::UpdateLinearMotors(float DeltaTime, const TS
 		if (bViaBase && !Motor.ResolvedMotorId.IsNone() && Yielded.Contains(Motor.ResolvedMotorId))
 		{
 			// Another mode drives it: follow it, writing nothing.
-			Motor.CurrentPosition = Motor.TargetPosition = RobotBase->GetMotorValue(Motor.ResolvedMotorId);
+			Motor.CurrentPosition = Motor.TargetPosition = RammpGen1FollowValue(*RobotBase, Motor.ResolvedMotorId);
 			Motor.bPendingApply = false;
 			continue;
 		}

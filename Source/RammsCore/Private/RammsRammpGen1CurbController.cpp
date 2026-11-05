@@ -74,9 +74,9 @@ namespace
 			case EPhase::ClearEdge:
 				return TEXT("Clear the edge");
 			case EPhase::Recentre:
-				return TEXT("Translators to centre");
+				return TEXT("Translators back");
 			case EPhase::Restore:
-				return TEXT("Driving pose");
+				return TEXT("Back to the starting pose");
 			case EPhase::Done:
 				return TEXT("Done");
 			case EPhase::Aborted:
@@ -448,12 +448,7 @@ void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 	HoldWheels(bHoldUntilDown);
 	ArmAxes.Reset(); // the arm is the operator's again once the hold lapses
 	// The lifts stay where they are; the rear keeps its trim.
-	if (bLevel)
-	{
-		Lifts[RearLiftLift].Cmd += RearTrimRad;
-		RearTrimRad = 0.0f;
-		bLevel = false;
-	}
+	StopLevelling();
 	for (FLift& L : Lifts)
 	{
 		L.Goal = L.Cmd;
@@ -520,11 +515,19 @@ void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick Ti
 
 void URammsRammpGen1CurbController::Begin()
 {
-	for (FLift& L : Lifts)
+	for (int32 i = 0; i < NumLifts; ++i)
 	{
+		FLift& L = Lifts[i];
 		L.Cmd = L.Goal = Base->GetMotorValue(L.Motor); // where each stands (rad, cm)
 		L.Rate = L.MaxRate;
+		// Where a finished crossing puts it back: what it was last commanded to (a loaded servo sits short of that),
+		// else where it stands.
+		if (!Base->GetMotorCommand(L.Motor, StartCmd[i]))
+		{
+			StartCmd[i] = L.Cmd;
+		}
 	}
+	bFrontUp = FrontOffGround();
 	RearTrimRad = 0.0f;
 	bLevel = true;
 	bDriveWheelsUp = false;
@@ -538,6 +541,10 @@ void URammsRammpGen1CurbController::Begin()
 	}
 	HoldWheels();
 	PhaseLog.Reset();
+	if (bFrontUp)
+	{
+		PhaseLog.Add(TEXT("        the front omni wheels start up: they stay up until they go down over the edge"));
+	}
 	StowArm();
 	EnterPhase(ERammsRammpGen1CurbPhase::Level);
 }
@@ -604,8 +611,12 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 		case ERammsRammpGen1CurbPhase::Level:
 		{
 			// Climbing, every support on the road holds the chassis H up; descending, on the upper level, H - step.
+			// Front omni wheels that started up stay up, rather than being set down only to be lifted again at the
+			// curb: where they are, or higher if the crossing needs it -- climbing, clear of the curb's top; descending,
+			// of the upper level.
 			const float B = bClimb ? -H : Hs - H;
-			bOk = StartHeights({ { ESupport::Drive, B }, { ESupport::Front, B }, { ESupport::Rear, B } }, 0.5f);
+			const float Front = bFrontUp ? FMath::Max(HeightNow(ESupport::Front), bClimb ? Lift : B + Config.ClearanceCm) : B;
+			bOk = StartHeights({ { ESupport::Drive, B }, { ESupport::Front, Front }, { ESupport::Rear, B } }, 0.5f);
 			break;
 		}
 		case ERammsRammpGen1CurbPhase::Approach:
@@ -684,10 +695,7 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 				Check.PastEdgeCm[0], Check.PastEdgeCm[1], Check.TranslatorCm[0], Check.TranslatorCm[1], Check.ComAheadOfAxleCm));
 			UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
 			// The rear leaves the ground: its trim goes into its command.
-			Lifts[RearLiftLift].Cmd += RearTrimRad;
-			Lifts[RearLiftLift].Goal = Lifts[RearLiftLift].Cmd;
-			RearTrimRad = 0.0f;
-			bLevel = false;
+			StopLevelling();
 			bOk = StartHeights({ { ESupport::Rear, Lift } }, 0.5f);
 			break;
 		}
@@ -709,12 +717,18 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 			DriveAt(Config.CreepSpeedCmS, true, bPowered);
 			break;
 		case ERammsRammpGen1CurbPhase::Recentre:
-			// The translators back to centre while the drive wheels roll at the plates' speed: the chassis stays put.
-			StartMove({ { TranslatorL, 0.0f }, { TranslatorR, 0.0f } }, 0.0f);
+			// The translators back where they started while the drive wheels roll at the plates' speed: the chassis
+			// stays put.
+			StartMove({ { TranslatorL, StartCmd[TranslatorL] }, { TranslatorR, StartCmd[TranslatorR] } }, 0.0f);
 			break;
 		case ERammsRammpGen1CurbPhase::Restore:
+			// Every lift back where the crossing found it. The rear's levelling trim goes into its command and out with
+			// this move, so the rear ends at its own starting angle and the chassis at the pitch it started with.
 			HoldWheels();
-			StartMove({ { ElevatorL, 0.0f }, { ElevatorR, 0.0f }, { FrontArmLift, 0.0f }, { RearLiftLift, 0.0f } }, 1.5f);
+			StopLevelling();
+			StartMove({ { ElevatorL, StartCmd[ElevatorL] }, { ElevatorR, StartCmd[ElevatorR] }, { FrontArmLift, StartCmd[FrontArmLift] },
+						  { RearLiftLift, StartCmd[RearLiftLift] } },
+				1.5f);
 			break;
 		default:
 			break;
@@ -791,7 +805,15 @@ void URammsRammpGen1CurbController::Step(float Dt)
 			// Climbing: until the front omni wheels are 5 cm short of the face; descending: the drive wheels 7 cm short of the edge.
 			if (bClimb)
 			{
-				Arrive(SupportAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= -5.0f, ERammsRammpGen1CurbPhase::FrontUp);
+				const bool bAtFace = SupportAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= -5.0f;
+				if (!bFrontUp)
+				{
+					Arrive(bAtFace, ERammsRammpGen1CurbPhase::FrontUp);
+				}
+				else if (bAtFace)
+				{
+					EnterPhase(ERammsRammpGen1CurbPhase::ToEdge); // already up: on at the creep, without a stop
+				}
 			}
 			else
 			{
@@ -1337,6 +1359,32 @@ bool URammsRammpGen1CurbController::DriveWheelsLoaded()
 		bLoaded &= Height <= HoldContactCm[i] - 0.5f * Config.TouchPreloadCm;
 	}
 	return bLoaded;
+}
+
+bool URammsRammpGen1CurbController::FrontOffGround() const
+{
+	for (FName Name : { Config.FrontOmniLeftBody, Config.FrontOmniRightBody })
+	{
+		const FVector Hub = BodyPos(Name);
+		float		  Ground = 0.0f;
+		if (!SurfaceZ(Hub, Ground) || Hub.Z - Config.FrontOmniRadiusCm - Ground <= Config.TouchToleranceCm)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+void URammsRammpGen1CurbController::StopLevelling()
+{
+	if (!bLevel)
+	{
+		return;
+	}
+	Lifts[RearLiftLift].Cmd += RearTrimRad;
+	Lifts[RearLiftLift].Goal = Lifts[RearLiftLift].Cmd;
+	RearTrimRad = 0.0f;
+	bLevel = false;
 }
 
 float URammsRammpGen1CurbController::HeightNow(ESupport S) const
