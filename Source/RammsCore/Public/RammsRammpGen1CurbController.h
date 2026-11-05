@@ -322,7 +322,6 @@ private:
 	/** The curb ahead, as a crossing of it would run (PlanAhead), until one is started on it (Commit). */
 	struct FPlan
 	{
-		FVector Heading = FVector::ForwardVector;
 		FVector EdgePoint = FVector::ZeroVector;
 		FVector EdgeNormal = FVector::ForwardVector;
 		float	EdgeAheadCm = 0.0f;
@@ -334,7 +333,7 @@ private:
 
 	// Starting: what stops a start, the curb ahead, and the start on it.
 	bool CanStart(FString& OutReason) const;
-	bool PlanAhead(FPlan& OutPlan, FString& OutReason) const;
+	bool PlanAhead(FPlan& OutPlan, FString& OutReason, float NoFurtherCm = TNumericLimits<float>::Max()) const;
 	bool Commit(const FPlan& Plan, FString& OutReason);
 
 	// The sequence.
@@ -405,10 +404,7 @@ private:
 	float					 CrossingHeightCm = 0.0f; // above the lower level, from the reference pose
 	float					 NearZ = 0.0f, FarZ = 0.0f;
 	FVector					 EdgePoint = FVector::ZeroVector;
-	FVector					 Heading = FVector::ForwardVector;
 	FVector					 EdgeNormal = FVector::ForwardVector; // square to the edge, onto the far level (Along measures along it)
-	float					 EdgeAheadCm = 0.0f;				  // the edge's nearest point ahead of the front omni wheels
-	float					 ApproachDeg = 0.0f;				  // how far off square the edge is (deg)
 
 	// The stick and curb assist.
 	FVector							   StickInput = FVector::ZeroVector; // drive.forward, .turn, .strafe while the curb mode has the robot

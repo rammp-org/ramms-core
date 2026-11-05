@@ -3658,13 +3658,10 @@ void URammsCurbNegotiationController::StepAssist(float DeltaTime)
 	}
 	if (Profile.EdgeDistanceCm < Assist.MinDistanceCm)
 	{
-		Why = FString::Printf(TEXT("the step ahead is %.0f cm away, closer than %.0f: back off to cross it"), Profile.EdgeDistanceCm,
+		// The status says why (each look's distance differs as the robot drives on: the log has it at Verbose).
+		Status = FString::Printf(TEXT("the step ahead is %.0f cm away, closer than %.0f: back off to cross it"), Profile.EdgeDistanceCm,
 			Assist.MinDistanceCm);
-		if (Why != Status)
-		{
-			Status = Why;
-			UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': curb assist: %s"), *GetNameSafe(GetOwner()), *Why);
-		}
+		UE_LOG(LogRammsCurb, Verbose, TEXT("[Curb] '%s': curb assist: %s"), *GetNameSafe(GetOwner()), *Status);
 		return;
 	}
 	if (!BeginNegotiation(Profile, Why))

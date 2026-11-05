@@ -264,8 +264,11 @@ struct RAMMSCORE_API FRammsCurbSeat
 };
 
 /**
- * How the rider's stick drives a per-wheel crossing
- * (URammsCurbNegotiationController::Stick). With bRequired, the crossing
+ * How the rider's stick drives a crossing: a per-wheel one
+ * (URammsCurbNegotiationController::Stick), and a RAMMP Gen1 one
+ * (URammsRammpGen1CurbController::Stick, which goes at its planned speeds
+ * rather than the stick's share, and holds its lifts where they are when
+ * paused). With bRequired, the crossing
  * moves only while the stick is held forward: held part way, it goes at that
  * share of the plan's speed; let go, or pushed any other way, it pauses --
  * braked to rest at the crossing's Deceleration (the rate every planned pose

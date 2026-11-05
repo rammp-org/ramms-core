@@ -227,4 +227,21 @@ namespace RammsRammpGen1Curb
 		const float Total = FixedMassKg + 2.0f * DriveAssemblyKg;
 		return Total > 0.0f ? (FixedMassKg * FixedDistCm + DriveAssemblyKg * (LeftDistCm + RightDistCm)) / Total : 0.0f;
 	}
+
+	FEdgeFrame EdgeFrame(const FVector& Heading, float LeftDistCm, float RightDistCm, float HalfTrackCm)
+	{
+		FEdgeFrame Out;
+		FVector	   Fwd(Heading.X, Heading.Y, 0.0);
+		if (!Fwd.Normalize() || HalfTrackCm <= 0.0f)
+		{
+			return Out;
+		}
+		// The edge runs from the left line's point to the right line's; square to it, onto the far level, is the
+		// heading turned by atan((left - right) / track) toward the right.
+		Out.OffSquareDeg = FMath::RadiansToDegrees(FMath::Atan2(LeftDistCm - RightDistCm, 2.0f * HalfTrackCm));
+		Out.Normal = Fwd.RotateAngleAxis(Out.OffSquareDeg, FVector::UpVector);
+		Out.Normal.Z = 0.0;
+		Out.Normal.Normalize();
+		return Out;
+	}
 } // namespace RammsRammpGen1Curb

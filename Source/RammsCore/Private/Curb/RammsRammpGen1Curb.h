@@ -82,4 +82,16 @@ namespace RammsRammpGen1Curb
 	/** The centre of mass along the heading from the chassis-fixed mass and the two drive assemblies
 	 *  (which ride the translators), each at its distance along the heading. */
 	float CentreOfMass(float FixedMassKg, float FixedDistCm, float DriveAssemblyKg, float LeftDistCm, float RightDistCm);
+
+	/** An edge's frame, from where two lines parallel to the heading -- HalfTrackCm either side of the robot's centre
+	 *  line, left and right -- meet it, each that far along the heading. */
+	struct FEdgeFrame
+	{
+		/** How far off square the edge is (deg): positive when the right line meets it nearer. */
+		float OffSquareDeg = 0.0f;
+		/** Square to the edge, in the ground plane, onto the far level: the heading turned toward the side that meets
+		 *  it nearer (in Unreal's frame, a positive angle about Z turns toward +Y, the right). */
+		FVector Normal = FVector::ForwardVector;
+	};
+	FEdgeFrame EdgeFrame(const FVector& Heading, float LeftDistCm, float RightDistCm, float HalfTrackCm);
 } // namespace RammsRammpGen1Curb

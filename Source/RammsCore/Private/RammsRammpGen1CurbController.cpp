@@ -317,7 +317,7 @@ void URammsRammpGen1CurbController::GetClaimedMotorIds(TArray<FName>& OutIds) co
 		OutIds.Append({ Config.FrontOmniLeft, Config.FrontOmniRight });
 	}
 	// The lifts only while a crossing runs: stopped, they are the operator's (the RAMMP Gen1 controller takes them
-	// where they stand).
+	// back at their last commands).
 	if (bStartPending || IsCrossing())
 	{
 		for (const FLift& L : Lifts)
@@ -482,10 +482,11 @@ bool URammsRammpGen1CurbController::CanStart(FString& OutReason) const
 	return true;
 }
 
-bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason) const
+bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason, float NoFurtherCm) const
 {
 	// The curb ahead: the ground along the heading from under the front omni wheels, on the robot's centre line and on
-	// the lines its drive wheels run on, which give the edge's angle; each must find the same step.
+	// the lines its drive wheels run on, which give the edge's angle; each must find the same step. An edge that
+	// begins further than NoFurtherCm along the centre line is not looked for (curb assist's reach).
 	const USceneComponent* Chassis = Body(Config.ChassisBody);
 	FVector				   Fwd = Chassis->GetForwardVector();
 	Fwd.Z = 0.0;
@@ -497,30 +498,29 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 	const FVector Right(-Fwd.Y, Fwd.X, 0.0); // the heading turned 90 deg right (Unreal: Z up, left-handed)
 	const FVector From = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
 	const float	  HalfTrack = FMath::Max(10.0f, 0.5f * FMath::Abs(static_cast<float>((BodyPos(Config.DriveWheelRightBody) - BodyPos(Config.DriveWheelLeftBody)) | Right)));
-	const auto	  FindAt = [this, From, Fwd, Right](float Lateral, RammsRammpGen1Curb::FStep& OutStep, FString& OutWhy) {
+	const auto	  FindAt = [this, From, Fwd, Right](float Lateral, float ToCm, RammsRammpGen1Curb::FStep& OutStep, FString& OutWhy) {
 		   const FVector Line = From + Right * Lateral;
 		   const auto	 SurfaceAt = [this, Line, Fwd](float D, float& OutZ) { return SurfaceZ(Line + Fwd * D, OutZ); };
-		   return RammsRammpGen1Curb::FindStep(SurfaceAt, 0.0f, Config.ScanAheadCm, 2.0f, Config.MinStepCm, OutStep, OutWhy);
+		   return RammsRammpGen1Curb::FindStep(SurfaceAt, 0.0f, ToCm, 2.0f, Config.MinStepCm, OutStep, OutWhy);
 	};
 	RammsRammpGen1Curb::FStep Found, Left, RightStep;
-	if (!FindAt(0.0f, Found, OutReason))
+	if (!FindAt(0.0f, FMath::Min(Config.ScanAheadCm, NoFurtherCm), Found, OutReason))
 	{
 		OutReason = TEXT("no curb ahead: ") + OutReason;
 		return false;
 	}
 	FString SideWhy;
-	if (!FindAt(-HalfTrack, Left, SideWhy) || !FindAt(HalfTrack, RightStep, SideWhy) || FMath::Abs(Left.HeightCm - Found.HeightCm) > 2.0f
-		|| FMath::Abs(RightStep.HeightCm - Found.HeightCm) > 2.0f)
+	if (!FindAt(-HalfTrack, Config.ScanAheadCm, Left, SideWhy) || !FindAt(HalfTrack, Config.ScanAheadCm, RightStep, SideWhy)
+		|| FMath::Abs(Left.HeightCm - Found.HeightCm) > 2.0f || FMath::Abs(RightStep.HeightCm - Found.HeightCm) > 2.0f)
 	{
 		OutReason = FString::Printf(TEXT("the %.1f cm step %.0f cm ahead does not run straight across the robot's path"), Found.HeightCm,
 			Found.EdgeDistCm);
 		return false;
 	}
-	// Off square: positive when the edge is nearer on the right, so the right wheels reach it first.
-	const float OffSquareDeg = FMath::RadiansToDegrees(FMath::Atan2(Left.EdgeDistCm - RightStep.EdgeDistCm, 2.0f * HalfTrack));
-	if (FMath::Abs(OffSquareDeg) > Config.MaxApproachDeg)
+	const RammsRammpGen1Curb::FEdgeFrame Edge = RammsRammpGen1Curb::EdgeFrame(Fwd, Left.EdgeDistCm, RightStep.EdgeDistCm, HalfTrack);
+	if (FMath::Abs(Edge.OffSquareDeg) > Config.MaxApproachDeg)
 	{
-		OutReason = FString::Printf(TEXT("the curb ahead is %.0f deg off square (at most %.0f): turn to face it"), FMath::Abs(OffSquareDeg),
+		OutReason = FString::Printf(TEXT("the curb ahead is %.0f deg off square (at most %.0f): turn to face it"), FMath::Abs(Edge.OffSquareDeg),
 			Config.MaxApproachDeg);
 		return false;
 	}
@@ -539,15 +539,10 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 		return false;
 	}
 
-	OutPlan.Heading = Fwd;
 	OutPlan.EdgePoint = From + Fwd * Found.EdgeDistCm;
-	// Square to the edge, onto the far level: the heading turned by how far off square the edge is, toward the side
-	// that reaches it first (a positive angle about Z turns toward +Y, the right).
-	OutPlan.EdgeNormal = Fwd.RotateAngleAxis(OffSquareDeg, FVector::UpVector);
-	OutPlan.EdgeNormal.Z = 0.0;
-	OutPlan.EdgeNormal.Normalize();
+	OutPlan.EdgeNormal = Edge.Normal;
 	OutPlan.EdgeAheadCm = FMath::Min3(Found.EdgeDistCm, Left.EdgeDistCm, RightStep.EdgeDistCm);
-	OutPlan.ApproachDeg = OffSquareDeg;
+	OutPlan.ApproachDeg = Edge.OffSquareDeg;
 	OutPlan.StepCm = Found.HeightCm;
 	OutPlan.NearZ = Found.NearZ;
 	OutPlan.HeightCm = Height;
@@ -556,18 +551,15 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 
 bool URammsRammpGen1CurbController::Commit(const FPlan& Plan, FString& OutReason)
 {
-	Heading = Plan.Heading;
 	EdgePoint = Plan.EdgePoint;
 	EdgeNormal = Plan.EdgeNormal;
-	EdgeAheadCm = Plan.EdgeAheadCm;
-	ApproachDeg = Plan.ApproachDeg;
 	StepCm = Plan.StepCm;
 	bClimb = StepCm > 0.0f;
 	NearZ = Plan.NearZ;
 	FarZ = Plan.NearZ + Plan.StepCm;
 	CrossingHeightCm = Plan.HeightCm;
 	Status = FString::Printf(TEXT("%s %.1f cm, %.0f cm ahead, %.0f deg off square; crossing height %.1f cm"), bClimb ? TEXT("up") : TEXT("down"),
-		FMath::Abs(StepCm), EdgeAheadCm, FMath::Abs(ApproachDeg), CrossingHeightCm);
+		FMath::Abs(StepCm), Plan.EdgeAheadCm, FMath::Abs(Plan.ApproachDeg), CrossingHeightCm);
 	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb crossing: %s%s"), *GetNameSafe(GetOwner()), *Status,
 		bPowered ? TEXT(", the front omni wheels powered") : TEXT(""));
 
@@ -688,15 +680,15 @@ void URammsRammpGen1CurbController::Begin()
 {
 	for (int32 i = 0; i < NumLifts; ++i)
 	{
+		// Each lift taken over at its last command (a loaded servo sits short of it: re-commanded where it sags, it
+		// would sag further), else where it stands (rad, cm); and that is where a finished crossing puts it back.
 		FLift& L = Lifts[i];
-		L.Cmd = L.Goal = Base->GetMotorValue(L.Motor); // where each stands (rad, cm)
-		L.Rate = L.MaxRate;
-		// Where a finished crossing puts it back: what it was last commanded to (a loaded servo sits short of that),
-		// else where it stands.
 		if (!Base->GetMotorCommand(L.Motor, StartCmd[i]))
 		{
-			StartCmd[i] = L.Cmd;
+			StartCmd[i] = Base->GetMotorValue(L.Motor);
 		}
+		L.Cmd = L.Goal = StartCmd[i];
+		L.Rate = L.MaxRate;
 	}
 	bFrontUp = FrontOffGround();
 	RearTrimRad = 0.0f;
@@ -1298,14 +1290,17 @@ void URammsRammpGen1CurbController::StepAssist(float Dt)
 	}
 	// The rider drives forward with curb assist on: a curb this controller can cross, within reach, is crossed. One it
 	// cannot is left to the rider (the status says why); none in range, nothing.
+	// Only as far ahead as it would start one: the side lines and the crossing's plan are not worked out for a curb
+	// further off. A refusal is the status (the debug log has each look's: they change with every look as the robot
+	// drives on).
 	FString Why;
 	FPlan	Plan;
-	if (!CanStart(Why) || !PlanAhead(Plan, Why))
+	if (!CanStart(Why) || !PlanAhead(Plan, Why, Assist.TriggerDistanceCm))
 	{
-		if (!Why.StartsWith(TEXT("no curb ahead")) && Why != Status)
+		if (!Why.StartsWith(TEXT("no curb ahead")))
 		{
 			Status = Why;
-			UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Why);
+			UE_LOG(LogRammsRammpGen1Curb, Verbose, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Why);
 		}
 		return;
 	}
@@ -1315,12 +1310,9 @@ void URammsRammpGen1CurbController::StepAssist(float Dt)
 	}
 	if (Plan.EdgeAheadCm < Assist.MinDistanceCm)
 	{
-		Why = FString::Printf(TEXT("the curb ahead is %.0f cm away, closer than %.0f: back off to cross it"), Plan.EdgeAheadCm, Assist.MinDistanceCm);
-		if (Why != Status)
-		{
-			Status = Why;
-			UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Why);
-		}
+		Status = FString::Printf(TEXT("the curb ahead is %.0f cm away, closer than %.0f: back off to cross it"), Plan.EdgeAheadCm,
+			Assist.MinDistanceCm);
+		UE_LOG(LogRammsRammpGen1Curb, Verbose, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Status);
 		return;
 	}
 	if (!Commit(Plan, Why))
