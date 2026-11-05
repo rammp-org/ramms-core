@@ -2,9 +2,12 @@
 
 #include "RammsRammpGen1CurbController.h"
 
+#include "Curb/RammsCurbAssist.h"
+#include "Curb/RammsCurbStick.h"
 #include "Curb/RammsRammpGen1Curb.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "RammsControlIds.h"
 #include "RammsDriveHandOver.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsMotorSpec.h"
@@ -165,11 +168,93 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 	}
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
+
+	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 3));
+
+	// The rider's stick (Stick), while a crossing has the robot: the drive controls every drive mode offers, so that
+	// the stick a rider holds reaches whichever mode has the robot. Strafe too: pushed sideways is a pause.
+	if (bModeActive && Stick.bRequired)
+	{
+		FRammsControlAxis Forward;
+		Forward.Id = RammsControlIds::Drive::Forward();
+		Forward.Group = RammsControlIds::Groups::Drive();
+		Forward.DisplayName = NSLOCTEXT("Ramms", "RammpGen1CurbStickForward", "Forward");
+		Forward.Kind = ERammsControlKind::Continuous;
+		Forward.Units = ERammsControlUnits::Normalized;
+		Forward.Range = FVector2D(-1.0, 1.0);
+		Forward.Order = 0;
+		Forward.PairedAxis = RammsControlIds::Drive::Turn();
+		OutSurface.Add(Forward);
+
+		FRammsControlAxis Turn = Forward;
+		Turn.Id = RammsControlIds::Drive::Turn();
+		Turn.DisplayName = NSLOCTEXT("Ramms", "RammpGen1CurbStickTurn", "Turn");
+		Turn.Order = 1;
+		Turn.PairedAxis = RammsControlIds::Drive::Forward();
+		OutSurface.Add(Turn);
+
+		FRammsControlAxis Strafe = Forward;
+		Strafe.Id = RammsControlIds::Drive::Strafe();
+		Strafe.DisplayName = NSLOCTEXT("Ramms", "RammpGen1CurbStickStrafe", "Strafe");
+		Strafe.Order = 2;
+		Strafe.PairedAxis = FName();
+		OutSurface.Add(Strafe);
+	}
 }
+
+namespace
+{
+	/** The stick's component a drive control Id names (X forward, Y turn, Z strafe), else null. */
+	template <typename TVector>
+	auto RammpGen1StickAxis(TVector& Stick, FName Id) -> decltype(&Stick.X)
+	{
+		return Id == RammsControlIds::Drive::Forward() ? &Stick.X
+			: Id == RammsControlIds::Drive::Turn()	   ? &Stick.Y
+			: Id == RammsControlIds::Drive::Strafe()   ? &Stick.Z
+													   : nullptr;
+	}
+} // namespace
 
 bool URammsRammpGen1CurbController::ApplyControl(FName Id, float Value)
 {
-	return false; // actions and a read-only state only
+	if (bModeActive && Stick.bRequired)
+	{
+		if (double* Axis = RammpGen1StickAxis(StickInput, Id))
+		{
+			*Axis = FMath::Clamp(static_cast<double>(Value), -1.0, 1.0);
+			return true;
+		}
+	}
+	if (Id == RammsCurb::AssistControlId())
+	{
+		const bool bOn = FMath::RoundToInt(Value) != 0;
+		if (bOn != Assist.bEnabled)
+		{
+			Assist.bEnabled = bOn;
+			UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb assist %s"), *GetNameSafe(GetOwner()), bOn ? TEXT("on") : TEXT("off"));
+		}
+		return true;
+	}
+	return false;
+}
+
+bool URammsRammpGen1CurbController::ReleaseControl(FName Id)
+{
+	if (bModeActive && Stick.bRequired)
+	{
+		if (double* Axis = RammpGen1StickAxis(StickInput, Id))
+		{
+			*Axis = 0.0;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URammsRammpGen1CurbController::ReadTarget(FName Id, float& OutTarget) const
+{
+	// The switch's target is what it is set to, however it was set (the panel steps from it).
+	return Id == RammsCurb::AssistControlId() && ReadControl(Id, OutTarget);
 }
 
 bool URammsRammpGen1CurbController::TriggerControl(FName Id)
@@ -190,14 +275,31 @@ bool URammsRammpGen1CurbController::TriggerControl(FName Id)
 		Abort(TEXT("stopped"));
 		return true;
 	}
+	if (Id == RammsCurb::AssistControlId())
+	{
+		return ApplyControl(Id, Assist.bEnabled ? 0.0f : 1.0f); // a button on the switch flips it
+	}
 	return false;
 }
 
 bool URammsRammpGen1CurbController::ReadControl(FName Id, float& OutValue) const
 {
+	if (bModeActive && Stick.bRequired)
+	{
+		if (const double* Axis = RammpGen1StickAxis(StickInput, Id))
+		{
+			OutValue = static_cast<float>(*Axis);
+			return true;
+		}
+	}
 	if (Id == RammpGen1CurbPhaseId())
 	{
 		OutValue = static_cast<float>(Phase);
+		return true;
+	}
+	if (Id == RammsCurb::AssistControlId())
+	{
+		OutValue = Assist.bEnabled ? 1.0f : 0.0f;
 		return true;
 	}
 	return false;
@@ -215,7 +317,7 @@ void URammsRammpGen1CurbController::GetClaimedMotorIds(TArray<FName>& OutIds) co
 		OutIds.Append({ Config.FrontOmniLeft, Config.FrontOmniRight });
 	}
 	// The lifts only while a crossing runs: stopped, they are the operator's (the RAMMP Gen1 controller takes them
-	// where they stand).
+	// back at their last commands).
 	if (bStartPending || IsCrossing())
 	{
 		for (const FLift& L : Lifts)
@@ -257,9 +359,15 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 			Phase = ERammsRammpGen1CurbPhase::Aborted;
 			Status = TEXT("another drive mode was selected");
 			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: curb crossing aborted: %s"), *GetNameSafe(GetOwner()), *Status);
+			if (bAssistStarted && AssistWatch.IsValid())
+			{
+				AssistWatch->CrossingEnded(false);
+			}
+			bAssistStarted = false;
 		}
 		bStartPending = false;
 		bHoldUntilDown = false;
+		StickInput = FVector::ZeroVector;
 		ReleaseWheels();
 	}
 }
@@ -333,6 +441,12 @@ bool URammsRammpGen1CurbController::SelectMode(FName ModeId)
 
 bool URammsRammpGen1CurbController::StartCrossing(FString& OutReason)
 {
+	FPlan Plan;
+	return CanStart(OutReason) && PlanAhead(Plan, OutReason) && Commit(Plan, OutReason);
+}
+
+bool URammsRammpGen1CurbController::CanStart(FString& OutReason) const
+{
 	if (IsCrossing() || bStartPending)
 	{
 		OutReason = TEXT("a crossing is already under way");
@@ -365,8 +479,14 @@ bool URammsRammpGen1CurbController::StartCrossing(FString& OutReason)
 			return false;
 		}
 	}
+	return true;
+}
 
-	// The curb ahead: the ground along the heading from under the front omni wheels.
+bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason, float NoFurtherCm) const
+{
+	// The curb ahead: the ground along the heading from under the front omni wheels, on the robot's centre line and on
+	// the lines its drive wheels run on, which give the edge's angle; each must find the same step. An edge that
+	// begins further than NoFurtherCm along the centre line is not looked for (curb assist's reach).
 	const USceneComponent* Chassis = Body(Config.ChassisBody);
 	FVector				   Fwd = Chassis->GetForwardVector();
 	Fwd.Z = 0.0;
@@ -375,12 +495,33 @@ bool URammsRammpGen1CurbController::StartCrossing(FString& OutReason)
 		OutReason = TEXT("the chassis has no heading");
 		return false;
 	}
-	const FVector			  From = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
-	const auto				  SurfaceAt = [this, From, Fwd](float D, float& OutZ) { return SurfaceZ(From + Fwd * D, OutZ); };
-	RammsRammpGen1Curb::FStep Found;
-	if (!RammsRammpGen1Curb::FindStep(SurfaceAt, 0.0f, Config.ScanAheadCm, 2.0f, Config.MinStepCm, Found, OutReason))
+	const FVector Right(-Fwd.Y, Fwd.X, 0.0); // the heading turned 90 deg right (Unreal: Z up, left-handed)
+	const FVector From = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
+	const float	  HalfTrack = FMath::Max(10.0f, 0.5f * FMath::Abs(static_cast<float>((BodyPos(Config.DriveWheelRightBody) - BodyPos(Config.DriveWheelLeftBody)) | Right)));
+	const auto	  FindAt = [this, From, Fwd, Right](float Lateral, float ToCm, RammsRammpGen1Curb::FStep& OutStep, FString& OutWhy) {
+		   const FVector Line = From + Right * Lateral;
+		   const auto	 SurfaceAt = [this, Line, Fwd](float D, float& OutZ) { return SurfaceZ(Line + Fwd * D, OutZ); };
+		   return RammsRammpGen1Curb::FindStep(SurfaceAt, 0.0f, ToCm, 2.0f, Config.MinStepCm, OutStep, OutWhy);
+	};
+	RammsRammpGen1Curb::FStep Found, Left, RightStep;
+	if (!FindAt(0.0f, FMath::Min(Config.ScanAheadCm, NoFurtherCm), Found, OutReason))
 	{
 		OutReason = TEXT("no curb ahead: ") + OutReason;
+		return false;
+	}
+	FString SideWhy;
+	if (!FindAt(-HalfTrack, Config.ScanAheadCm, Left, SideWhy) || !FindAt(HalfTrack, Config.ScanAheadCm, RightStep, SideWhy)
+		|| FMath::Abs(Left.HeightCm - Found.HeightCm) > 2.0f || FMath::Abs(RightStep.HeightCm - Found.HeightCm) > 2.0f)
+	{
+		OutReason = FString::Printf(TEXT("the %.1f cm step %.0f cm ahead does not run straight across the robot's path"), Found.HeightCm,
+			Found.EdgeDistCm);
+		return false;
+	}
+	const RammsRammpGen1Curb::FEdgeFrame Edge = RammsRammpGen1Curb::EdgeFrame(Fwd, Left.EdgeDistCm, RightStep.EdgeDistCm, HalfTrack);
+	if (FMath::Abs(Edge.OffSquareDeg) > Config.MaxApproachDeg)
+	{
+		OutReason = FString::Printf(TEXT("the curb ahead is %.0f deg off square (at most %.0f): turn to face it"), FMath::Abs(Edge.OffSquareDeg),
+			Config.MaxApproachDeg);
 		return false;
 	}
 	if (FMath::Abs(Found.HeightCm) > Config.MaxStepCm)
@@ -398,15 +539,27 @@ bool URammsRammpGen1CurbController::StartCrossing(FString& OutReason)
 		return false;
 	}
 
-	Heading = Fwd;
-	EdgePoint = From + Fwd * Found.EdgeDistCm;
-	StepCm = Found.HeightCm;
+	OutPlan.EdgePoint = From + Fwd * Found.EdgeDistCm;
+	OutPlan.EdgeNormal = Edge.Normal;
+	OutPlan.EdgeAheadCm = FMath::Min3(Found.EdgeDistCm, Left.EdgeDistCm, RightStep.EdgeDistCm);
+	OutPlan.ApproachDeg = Edge.OffSquareDeg;
+	OutPlan.StepCm = Found.HeightCm;
+	OutPlan.NearZ = Found.NearZ;
+	OutPlan.HeightCm = Height;
+	return true;
+}
+
+bool URammsRammpGen1CurbController::Commit(const FPlan& Plan, FString& OutReason)
+{
+	EdgePoint = Plan.EdgePoint;
+	EdgeNormal = Plan.EdgeNormal;
+	StepCm = Plan.StepCm;
 	bClimb = StepCm > 0.0f;
-	NearZ = Found.NearZ;
-	FarZ = Found.NearZ + Found.HeightCm;
-	CrossingHeightCm = Height;
-	Status = FString::Printf(TEXT("%s %.1f cm, %.0f cm ahead; crossing height %.1f cm"), bClimb ? TEXT("up") : TEXT("down"),
-		FMath::Abs(StepCm), Found.EdgeDistCm, Height);
+	NearZ = Plan.NearZ;
+	FarZ = Plan.NearZ + Plan.StepCm;
+	CrossingHeightCm = Plan.HeightCm;
+	Status = FString::Printf(TEXT("%s %.1f cm, %.0f cm ahead, %.0f deg off square; crossing height %.1f cm"), bClimb ? TEXT("up") : TEXT("down"),
+		FMath::Abs(StepCm), Plan.EdgeAheadCm, FMath::Abs(Plan.ApproachDeg), CrossingHeightCm);
 	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb crossing: %s%s"), *GetNameSafe(GetOwner()), *Status,
 		bPowered ? TEXT(", the front omni wheels powered") : TEXT(""));
 
@@ -439,6 +592,11 @@ void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 {
 	Phase = bAborted ? ERammsRammpGen1CurbPhase::Aborted : ERammsRammpGen1CurbPhase::Done;
 	Status = Why;
+	if (bAssistStarted && AssistWatch.IsValid())
+	{
+		AssistWatch->CrossingEnded(!bAborted); // one that did not finish: no other until the stick is let go
+	}
+	bAssistStarted = bCancelling = bStickPaused = false;
 	// Braked where it stands, it hands back on the next tick: the other mode holds it from there. Stopped with
 	// the drive wheels up (lifted and not yet touched down: a wheel a few millimetres over the curb reads as on
 	// it), that mode would hold nothing that carries load: it holds on the front omni wheels' hubs until the
@@ -464,8 +622,13 @@ void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	if (!Base || !bModeActive)
+	if (!Base)
 	{
+		return;
+	}
+	if (!bModeActive)
+	{
+		StepAssist(DeltaTime); // another drive mode has the robot: curb assist watches for a curb to cross
 		return;
 	}
 	// The backend's clock when it keeps one (a simulator behind real time is slower than the game); the game's
@@ -517,20 +680,29 @@ void URammsRammpGen1CurbController::Begin()
 {
 	for (int32 i = 0; i < NumLifts; ++i)
 	{
+		// Each lift taken over at its last command (a loaded servo sits short of it: re-commanded where it sags, it
+		// would sag further), else where it stands (rad, cm); and that is where a finished crossing puts it back.
 		FLift& L = Lifts[i];
-		L.Cmd = L.Goal = Base->GetMotorValue(L.Motor); // where each stands (rad, cm)
-		L.Rate = L.MaxRate;
-		// Where a finished crossing puts it back: what it was last commanded to (a loaded servo sits short of that),
-		// else where it stands.
 		if (!Base->GetMotorCommand(L.Motor, StartCmd[i]))
 		{
-			StartCmd[i] = L.Cmd;
+			StartCmd[i] = Base->GetMotorValue(L.Motor);
 		}
+		L.Cmd = L.Goal = StartCmd[i];
+		L.Rate = L.MaxRate;
 	}
 	bFrontUp = FrontOffGround();
 	RearTrimRad = 0.0f;
 	bLevel = true;
 	bDriveWheelsUp = false;
+	if (!StickGate.IsValid())
+	{
+		StickGate = MakePimpl<RammsCurb::FStickGate>();
+	}
+	StickGate->Reset();
+	bStickPaused = bLegsMoved = bCancelling = false;
+	StickWhy.Reset();
+	CancelWhy.Reset();
+	CrossingStatus = Status;
 	SettleLeft = 0.0f;
 	// The wheel radii divide the drive speeds (cm/s to rad/s); the editor's ClampMin does not stop a script or a
 	// Blueprint setting 0.
@@ -741,8 +913,30 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 
 void URammsRammpGen1CurbController::Step(float Dt)
 {
-	PhaseSeconds += Dt;
 	HoldArm();
+	// The rider's stick (Stick): held forward, the crossing goes on; let go or pushed any other way, it pauses where it
+	// is, the clock stopped; before any wheel has lifted for the curb, held back it cancels. A cancelled crossing's
+	// lifts go back without it.
+	bool bPaused = false;
+	if (!bCancelling && !StepStick(Dt, bPaused))
+	{
+		return; // cancelled
+	}
+	if (bPaused)
+	{
+		if (!bStickPaused)
+		{
+			PauseCrossing();
+		}
+		StepLifts(0.0f); // every lift held where it is
+		return;
+	}
+	if (bStickPaused)
+	{
+		ResumeCrossing();
+	}
+	bLegsMoved = true;
+	PhaseSeconds += Dt;
 	StepLifts(Dt);
 
 	// Driving: the drive wheels (and the powered front omni wheels) at the speed asked; nothing else commanded.
@@ -778,7 +972,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 	};
 	const auto RearGuard = [this]() {
 		// While the chassis is pulled forward the rear omni wheels must stay clear of the curb.
-		const float Near = SupportAlong(ESupport::Rear) + (bClimb ? Config.RearOmniRadiusCm + 2.0f : 3.0f);
+		const float Near = LeadingAlong(ESupport::Rear) + (bClimb ? Config.RearOmniRadiusCm + 2.0f : 3.0f);
 		if (Near > 0.0f)
 		{
 			Finish(true, TEXT("the rear omni wheels reached the curb while the chassis was pulled forward"));
@@ -805,7 +999,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 			// Climbing: until the front omni wheels are 5 cm short of the face; descending: the drive wheels 7 cm short of the edge.
 			if (bClimb)
 			{
-				const bool bAtFace = SupportAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= -5.0f;
+				const bool bAtFace = LeadingAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= -5.0f;
 				if (!bFrontUp)
 				{
 					Arrive(bAtFace, ERammsRammpGen1CurbPhase::FrontUp);
@@ -817,7 +1011,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 			}
 			else
 			{
-				Arrive(SupportAlong(ESupport::Drive) >= -7.0f, ERammsRammpGen1CurbPhase::FrontDown);
+				Arrive(LeadingAlong(ESupport::Drive) >= -7.0f, ERammsRammpGen1CurbPhase::FrontDown);
 			}
 			break;
 		case ERammsRammpGen1CurbPhase::FrontUp:
@@ -827,7 +1021,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 			}
 			break;
 		case ERammsRammpGen1CurbPhase::ToEdge:
-			Arrive(SupportAlong(ESupport::Drive) + Config.DriveWheelRadiusCm >= -3.0f, ERammsRammpGen1CurbPhase::FrontDown);
+			Arrive(LeadingAlong(ESupport::Drive) + Config.DriveWheelRadiusCm >= -3.0f, ERammsRammpGen1CurbPhase::FrontDown);
 			break;
 		case ERammsRammpGen1CurbPhase::FrontDown:
 			if (StepTouchdown(Dt))
@@ -952,7 +1146,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 			}
 			break;
 		case ERammsRammpGen1CurbPhase::ClearEdge:
-			Arrive(SupportAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 15.0f, ERammsRammpGen1CurbPhase::Recentre);
+			Arrive(LaggingAlong(ESupport::Rear) - Config.RearOmniRadiusCm >= 15.0f, ERammsRammpGen1CurbPhase::Recentre);
 			break;
 		case ERammsRammpGen1CurbPhase::Recentre:
 		{
@@ -978,7 +1172,14 @@ void URammsRammpGen1CurbController::Step(float Dt)
 		case ERammsRammpGen1CurbPhase::Restore:
 			if (!Moving())
 			{
-				Finish(false, FString::Printf(TEXT("crossed %s %.1f cm"), bClimb ? TEXT("up") : TEXT("down"), Hs));
+				if (bCancelling)
+				{
+					Finish(true, TEXT("cancelled: ") + CancelWhy);
+				}
+				else
+				{
+					Finish(false, FString::Printf(TEXT("crossed %s %.1f cm"), bClimb ? TEXT("up") : TEXT("down"), Hs));
+				}
 			}
 			break;
 		default:
@@ -987,6 +1188,142 @@ void URammsRammpGen1CurbController::Step(float Dt)
 }
 
 // --- primitives ----------------------------------------------------------------------------------
+
+// --- the rider's stick and curb assist ------------------------------------------------------------
+
+bool URammsRammpGen1CurbController::StepStick(float Dt, bool& bOutPaused)
+{
+	bOutPaused = false;
+	if (!Stick.bRequired)
+	{
+		return true;
+	}
+	RammsCurb::FStickGate& Gate = *StickGate;
+	Gate.Step(Stick, StickInput.X, StickInput.Y, StickInput.Z, Dt);
+	// Where the crossing is: nothing moved yet; levelling to the crossing height; at it, driving up to the curb with no
+	// wheel lifted for it or over it (front omni wheels that started up are not lifted for it: until they reach the
+	// edge, going back to the stance lowers them onto the road they left); or crossing, to the end.
+	using EPhase = ERammsRammpGen1CurbPhase;
+	RammsCurb::FStickStage Stage;
+	Stage.bLegsMoved = bLegsMoved;
+	Stage.bLevelled = Phase != EPhase::Level;
+	Stage.bCrossing = Phase == EPhase::FrontUp
+		|| (Phase == EPhase::ToEdge && (!bFrontUp || LeadingAlong(ESupport::Front) + Config.FrontOmniRadiusCm > 0.0f))
+		|| static_cast<uint8>(Phase) >= static_cast<uint8>(EPhase::FrontDown);
+	const float Still = 2.0f / Config.DriveWheelRadiusCm; // rad/s: under 2 cm/s
+	Stage.bAtRest = FMath::IsNearlyZero(DriveCmS) && FMath::Abs(Base->GetMotorVelocity(Config.DriveLeft)) < Still
+		&& FMath::Abs(Base->GetMotorVelocity(Config.DriveRight)) < Still;
+	const RammsCurb::FStickDecision Decision = RammsCurb::DecideStick(Stick, Gate, Stage);
+	switch (Decision.Action)
+	{
+		case RammsCurb::EStickAction::Go:
+			StickWhy.Reset();
+			return true;
+		case RammsCurb::EStickAction::Cancel:
+			CancelByRider(Decision.Why);
+			return false;
+		default:
+			bOutPaused = true;
+			StickWhy = Decision.Why;
+			Status = StickWhy;
+			return true;
+	}
+}
+
+void URammsRammpGen1CurbController::PauseCrossing()
+{
+	// The drive it was making is kept for the resume; the wheels braked (with the drive wheels up, the powered front
+	// omni wheels' hubs hold the robot); the lifts are held where they are by Step.
+	bStickPaused = true;
+	SavedDriveCmS = DriveCmS;
+	bSavedDriveWheels = bDriveWheels;
+	bSavedDriveFront = bDriveFront;
+	bSavedFrontHubs = bFrontHubsHeld;
+	HoldWheels(bDriveWheelsUp || bFrontHubsHeld);
+	PhaseLog.Add(FString::Printf(TEXT("        paused by the stick in %s: %s"), *RammpGen1CurbPhaseName(Phase), *StickWhy));
+	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
+}
+
+void URammsRammpGen1CurbController::ResumeCrossing()
+{
+	bStickPaused = false;
+	if (!FMath::IsNearlyZero(SavedDriveCmS))
+	{
+		DriveAt(SavedDriveCmS, bSavedDriveWheels, bSavedDriveFront);
+	}
+	else
+	{
+		HoldWheels(bSavedFrontHubs);
+	}
+	Status = CrossingStatus;
+	PhaseLog.Add(FString::Printf(TEXT("        the stick goes on in %s"), *RammpGen1CurbPhaseName(Phase)));
+	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
+}
+
+void URammsRammpGen1CurbController::CancelByRider(const FString& Why)
+{
+	// No wheel has lifted for the curb: the lifts go back where the crossing found them (the translators have not
+	// moved), then it hands back.
+	bCancelling = true;
+	bStickPaused = false;
+	CancelWhy = TEXT("the stick held back before any wheel lifted for the curb: the lifts back where they were");
+	PhaseLog.Add(TEXT("        cancelled by the stick: ") + Why);
+	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
+	EnterPhase(ERammsRammpGen1CurbPhase::Restore);
+}
+
+float URammsRammpGen1CurbController::RiderForward() const
+{
+	const URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this);
+	return Surface ? Surface->GetControlValue(RammsControlIds::Drive::Forward()) : 0.0f;
+}
+
+void URammsRammpGen1CurbController::StepAssist(float Dt)
+{
+	if (!AssistWatch.IsValid())
+	{
+		AssistWatch = MakePimpl<RammsCurb::FAssistWatch>();
+	}
+	if (!AssistWatch->Step(Assist, Stick, RiderForward(), Dt))
+	{
+		return;
+	}
+	// The rider drives forward with curb assist on: a curb this controller can cross, within reach, is crossed. One it
+	// cannot is left to the rider (the status says why); none in range, nothing.
+	// Only as far ahead as it would start one: the side lines and the crossing's plan are not worked out for a curb
+	// further off. A refusal is the status (the debug log has each look's: they change with every look as the robot
+	// drives on).
+	FString Why;
+	FPlan	Plan;
+	if (!CanStart(Why) || !PlanAhead(Plan, Why, Assist.TriggerDistanceCm))
+	{
+		if (!Why.StartsWith(TEXT("no curb ahead")))
+		{
+			Status = Why;
+			UE_LOG(LogRammsRammpGen1Curb, Verbose, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Why);
+		}
+		return;
+	}
+	if (Plan.EdgeAheadCm > Assist.TriggerDistanceCm)
+	{
+		return;
+	}
+	if (Plan.EdgeAheadCm < Assist.MinDistanceCm)
+	{
+		Status = FString::Printf(TEXT("the curb ahead is %.0f cm away, closer than %.0f: back off to cross it"), Plan.EdgeAheadCm,
+			Assist.MinDistanceCm);
+		UE_LOG(LogRammsRammpGen1Curb, Verbose, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Status);
+		return;
+	}
+	if (!Commit(Plan, Why))
+	{
+		Status = Why;
+		AssistWatch->CrossingEnded(false);
+		return;
+	}
+	bAssistStarted = true;
+	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb assist started the crossing"), *GetNameSafe(GetOwner()));
+}
 
 void URammsRammpGen1CurbController::StartMove(const TMap<int32, float>& Goals, float SettleSeconds)
 {
@@ -1129,6 +1466,7 @@ void URammsRammpGen1CurbController::DriveAt(float SpeedCmS, bool bDrive, bool bF
 	DriveCmS = SpeedCmS;
 	bDriveWheels = bDrive;
 	bDriveFront = bFront && bPowered;
+	bFrontHubsHeld = false;
 	if (!bDrive)
 	{
 		Base->SetMotorVelocityCommand(Config.DriveLeft, 0.0f);
@@ -1152,6 +1490,7 @@ void URammsRammpGen1CurbController::HoldWheels(bool bFrontHubsToo)
 	}
 	DriveCmS = 0.0f;
 	bDriveWheels = bDriveFront = false;
+	bFrontHubsHeld = bPowered && bFrontHubsToo;
 	const FName Drive[] = { Config.DriveLeft, Config.DriveRight };
 	for (FName M : Drive)
 	{
@@ -1190,7 +1529,7 @@ void URammsRammpGen1CurbController::ReleaseWheels()
 	}
 	RammsDrive::ReleaseBrakes(*Base, Braked);
 	DriveCmS = 0.0f;
-	bDriveWheels = bDriveFront = false;
+	bDriveWheels = bDriveFront = bFrontHubsHeld = false;
 	TArray<FName> Wheels = { Config.DriveLeft, Config.DriveRight };
 	if (bPowered)
 	{
@@ -1256,20 +1595,7 @@ float URammsRammpGen1CurbController::Along(const FVector& P) const
 {
 	FVector D = P - EdgePoint;
 	D.Z = 0.0;
-	return static_cast<float>(D | Heading);
-}
-
-float URammsRammpGen1CurbController::SupportAlong(ESupport S) const
-{
-	switch (S)
-	{
-		case ESupport::Drive:
-			return 0.5f * (Along(BodyPos(Config.DriveWheelLeftBody)) + Along(BodyPos(Config.DriveWheelRightBody)));
-		case ESupport::Front:
-			return 0.5f * (Along(BodyPos(Config.FrontOmniLeftBody)) + Along(BodyPos(Config.FrontOmniRightBody)));
-		default:
-			return 0.5f * (Along(BodyPos(Config.RearOmniLeftBody)) + Along(BodyPos(Config.RearOmniRightBody)));
-	}
+	return static_cast<float>(D | EdgeNormal);
 }
 
 float URammsRammpGen1CurbController::LaggingAlong(ESupport S) const
@@ -1282,6 +1608,19 @@ float URammsRammpGen1CurbController::LaggingAlong(ESupport S) const
 			return FMath::Min(Along(BodyPos(Config.FrontOmniLeftBody)), Along(BodyPos(Config.FrontOmniRightBody)));
 		default:
 			return FMath::Min(Along(BodyPos(Config.RearOmniLeftBody)), Along(BodyPos(Config.RearOmniRightBody)));
+	}
+}
+
+float URammsRammpGen1CurbController::LeadingAlong(ESupport S) const
+{
+	switch (S)
+	{
+		case ESupport::Drive:
+			return FMath::Max(Along(BodyPos(Config.DriveWheelLeftBody)), Along(BodyPos(Config.DriveWheelRightBody)));
+		case ESupport::Front:
+			return FMath::Max(Along(BodyPos(Config.FrontOmniLeftBody)), Along(BodyPos(Config.FrontOmniRightBody)));
+		default:
+			return FMath::Max(Along(BodyPos(Config.RearOmniLeftBody)), Along(BodyPos(Config.RearOmniRightBody)));
 	}
 }
 

@@ -2,6 +2,7 @@
 
 #include "RammsCurbNegotiationController.h"
 
+#include "Curb/RammsCurbAssist.h"
 #include "Curb/RammsCurbDebugView.h"
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
@@ -3631,6 +3632,50 @@ bool URammsCurbNegotiationController::StepStick(float DeltaTime, double& OutScal
 	}
 }
 
+void URammsCurbNegotiationController::StepAssist(float DeltaTime)
+{
+	if (!AssistWatch.IsValid())
+	{
+		AssistWatch = MakePimpl<RammsCurb::FAssistWatch>();
+	}
+	const URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this);
+	const float								  Forward = Surface ? Surface->GetControlValue(RammsControlIds::Drive::Forward()) : 0.0f;
+	if (!AssistWatch->Step(Assist, Stick, Forward, DeltaTime))
+	{
+		return;
+	}
+	// The rider drives forward with curb assist on: a step this controller crosses, within reach, is begun. One it
+	// will not cross is left to the rider (the status says why); none in range, nothing.
+	FRammsCurbProfile Profile;
+	FString			  Why;
+	if (!DetectStepAhead(Profile, Why))
+	{
+		return;
+	}
+	if (Profile.EdgeDistanceCm > Assist.TriggerDistanceCm)
+	{
+		return;
+	}
+	if (Profile.EdgeDistanceCm < Assist.MinDistanceCm)
+	{
+		// The status says why (each look's distance differs as the robot drives on: the log has it at Verbose).
+		Status = FString::Printf(TEXT("the step ahead is %.0f cm away, closer than %.0f: back off to cross it"), Profile.EdgeDistanceCm,
+			Assist.MinDistanceCm);
+		UE_LOG(LogRammsCurb, Verbose, TEXT("[Curb] '%s': curb assist: %s"), *GetNameSafe(GetOwner()), *Status);
+		return;
+	}
+	if (!BeginNegotiation(Profile, Why))
+	{
+		Status = Why;
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': curb assist: not crossing the step ahead: %s"), *GetNameSafe(GetOwner()), *Why);
+		AssistWatch->CrossingEnded(false);
+		return;
+	}
+	bAssistStarted = true;
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': curb assist began the crossing (edge %.0f cm ahead)"), *GetNameSafe(GetOwner()),
+		Profile.EdgeDistanceCm);
+}
+
 void URammsCurbNegotiationController::CancelByRider(const FString& Why)
 {
 	// Nothing has crossed: the drive mode the crossing came from takes the robot
@@ -3668,6 +3713,11 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 {
 	Phase = EndPhase;
 	Status = Why;
+	if (bAssistStarted && AssistWatch.IsValid())
+	{
+		AssistWatch->CrossingEnded(EndPhase == ERammsCurbPhase::Done); // one that did not finish: no other until the stick is let go
+	}
+	bAssistStarted = false;
 	const FString Line = FString::Printf(TEXT("t=%5.2fs %s: %s"), Elapsed, PhaseName(EndPhase), *Why);
 	StepLog.Add(Line);
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -6174,6 +6224,10 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	const bool bCrossing = IsNegotiating() && bDriveModeActive && (bPerWheelCrossing || Steps.IsValidIndex(StepIndex));
 	if (!bCrossing && !(bStopping && bDriveModeActive))
 	{
+		if (!bDriveModeActive && !IsNegotiating() && !bStopping)
+		{
+			StepAssist(DeltaTime); // another drive mode has the robot: curb assist watches for a curb to cross
+		}
 		// Held in this mode after a crossing stopped (a fault, an abort, or no
 		// mode to hand back to that holds the robot): the wheels held where they
 		// stand.
@@ -7057,6 +7111,8 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
 
+	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 3));
+
 	// The rider's stick (Stick), while a crossing has the robot: the drive
 	// controls every drive mode offers, so that the stick a rider holds reaches
 	// whichever mode has the robot. Strafe too: pushed sideways is a pause.
@@ -7160,6 +7216,15 @@ bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 		}
 	}
 	const int32 Index = FMath::RoundToInt(Value);
+	if (Id == RammsCurb::AssistControlId())
+	{
+		if ((Index != 0) != Assist.bEnabled)
+		{
+			Assist.bEnabled = Index != 0;
+			UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': curb assist %s"), *GetNameSafe(GetOwner()), Assist.bEnabled ? TEXT("on") : TEXT("off"));
+		}
+		return true;
+	}
 	if (Id == ViewSensingControlId())
 	{
 		DebugView.Sensing = static_cast<ERammsCurbSensingView>(FMath::Clamp(Index, 0, 2));
@@ -7177,7 +7242,7 @@ bool URammsCurbNegotiationController::ReadTarget(FName Id, float& OutTarget) con
 {
 	// A switch's target is what it is set to, however it was set (the panel
 	// steps from it).
-	if (Id == ViewSensingControlId() || ViewFlag(DebugView, Id))
+	if (Id == ViewSensingControlId() || ViewFlag(DebugView, Id) || Id == RammsCurb::AssistControlId())
 	{
 		return ReadControl(Id, OutTarget);
 	}
@@ -7195,6 +7260,10 @@ bool URammsCurbNegotiationController::TriggerControl(FName Id)
 	{
 		Abort();
 		return true;
+	}
+	if (Id == RammsCurb::AssistControlId())
+	{
+		return ApplyControl(Id, Assist.bEnabled ? 0.0f : 1.0f); // a button on the switch flips it
 	}
 	return false;
 }
@@ -7225,6 +7294,11 @@ bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) con
 	if (Id == PhaseControlId())
 	{
 		OutValue = static_cast<float>(Phase);
+		return true;
+	}
+	if (Id == RammsCurb::AssistControlId())
+	{
+		OutValue = Assist.bEnabled ? 1.0f : 0.0f;
 		return true;
 	}
 	if (Id == ViewSensingControlId())

@@ -5,11 +5,18 @@
 #include "Components/ActorComponent.h"
 #include "CoreMinimal.h"
 #include "RammsControlContributor.h"
+#include "RammsCurbNegotiationTypes.h"
 #include "RammsDriveMode.h"
+#include "Templates/PimplPtr.h"
 #include "RammsRammpGen1CurbController.generated.h"
 
 class URammsRobotBaseComponent;
 class USceneComponent;
+namespace RammsCurb
+{
+	class FStickGate;
+	class FAssistWatch;
+} // namespace RammsCurb
 
 /** Where a RAMMP Gen1 curb crossing is (curb.phase). */
 UENUM(BlueprintType)
@@ -171,6 +178,10 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
 	/** How far ahead of the front omni wheels the curb is looked for. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Crossing", meta = (ClampMin = "10.0"))
 	float ScanAheadCm = 150.0f;
+	/** The most the curb's edge may be off square to the heading (deg). Each pair of wheels goes over it together, so
+	 *  the further off square, the further the leading wheel of a pair has gone before the other reaches it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Crossing", meta = (ClampMin = "0.0", ClampMax = "45.0"))
+	float MaxApproachDeg = 10.0f;
 	/** The sprung rear's lift is trimmed against the chassis's pitch while its wheels are down (rad/s per
 	 *  rad of pitch), no faster than RearLiftSpeedDegS. It has to level the chassis while the translators
 	 *  re-centre after a climb, or the rear sags as the drive wheels move forward and the frame meets the curb. */
@@ -192,7 +203,13 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
  * until they go down over the edge. A finished crossing puts every lift back where it found it (each lift's last
  * command), so the robot ends in the stance it started in.
  *
- * Controls: curb.negotiate (start, at a curb ahead within ScanAheadCm), curb.abort, curb.phase. It is the
+ * The rider's stick drives a crossing (Stick): it goes on only while drive.forward is held, pauses when it is let go,
+ * and before any wheel has lifted for the curb, held back, cancels it. Curb assist (Assist, curb.assist) starts one when
+ * the rider drives forward at a curb it can cross: within Config.MaxApproachDeg of square, the edge within
+ * Assist.TriggerDistanceCm.
+ *
+ * Controls: curb.negotiate (start, at a curb ahead within ScanAheadCm), curb.abort, curb.phase, curb.assist (Off/On;
+ * a button on it flips it), and while a crossing has the robot drive.forward / turn / strafe (the stick). It is the
  * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one), and a
  * finished or stopped crossing hands back to ReturnModeId once both drive wheels are on the ground. Stopped
  * with them up, nothing in that mode would hold the robot, so it holds the wheels (the powered front omni
@@ -216,6 +233,19 @@ public:
 	/** The drive mode a finished crossing hands back to. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FName ReturnModeId = "differential";
+
+	/** The rider's stick in a crossing. With Stick.bRequired (the default) a crossing goes on only while the stick is
+	 *  held forward (drive.forward, which the curb mode takes while it has the robot) and pauses -- the lifts held where
+	 *  they are, the wheels braked -- when it is let go or pushed any other way. Before any wheel has lifted for the
+	 *  curb, pulled back (or, before anything has moved, pushed sideways) it cancels: the lifts go back where the
+	 *  crossing found them and the robot is handed back. It goes at the planned speeds: the stick's share is not
+	 *  applied. Off, a crossing runs to its end once begun. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbStick Stick;
+
+	/** Curb assist (curb.assist, Off/On): on, driving forward at a curb this controller can cross starts the crossing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbAssist Assist;
 
 	/** Start a crossing of the curb ahead. False, with the reason, when it cannot. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
@@ -243,8 +273,10 @@ public:
 	// --- IRammsControlContributor
 	virtual void DescribeControls(FRammsControlSurface& OutSurface) const override;
 	virtual bool ApplyControl(FName Id, float Value) override;
+	virtual bool ReleaseControl(FName Id) override;
 	virtual bool TriggerControl(FName Id) override;
 	virtual bool ReadControl(FName Id, float& OutValue) const override;
+	virtual bool ReadTarget(FName Id, float& OutTarget) const override;
 	virtual void GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 
 	// --- IRammsDriveMode
@@ -287,12 +319,37 @@ private:
 		NumLifts
 	};
 
+	/** The curb ahead, as a crossing of it would run (PlanAhead), until one is started on it (Commit). */
+	struct FPlan
+	{
+		FVector EdgePoint = FVector::ZeroVector;
+		FVector EdgeNormal = FVector::ForwardVector;
+		float	EdgeAheadCm = 0.0f;
+		float	ApproachDeg = 0.0f;
+		float	StepCm = 0.0f;
+		float	NearZ = 0.0f;
+		float	HeightCm = 0.0f;
+	};
+
+	// Starting: what stops a start, the curb ahead, and the start on it.
+	bool CanStart(FString& OutReason) const;
+	bool PlanAhead(FPlan& OutPlan, FString& OutReason, float NoFurtherCm = TNumericLimits<float>::Max()) const;
+	bool Commit(const FPlan& Plan, FString& OutReason);
+
 	// The sequence.
 	void Begin();
 	void Step(float Dt);
 	void EnterPhase(ERammsRammpGen1CurbPhase Next);
 	void Finish(bool bAborted, const FString& Why);
 	bool SelectMode(FName ModeId);
+
+	// The rider's stick (Stick) and curb assist (Assist).
+	bool  StepStick(float Dt, bool& bOutPaused); // false: the rider cancelled the crossing
+	void  PauseCrossing();
+	void  ResumeCrossing();
+	void  CancelByRider(const FString& Why);
+	void  StepAssist(float Dt);
+	float RiderForward() const; // the drive.forward the rider holds, as the drive mode that has the robot reads it
 
 	// Primitives: lift moves (synchronised ramps), touchdowns, driving.
 	void StartMove(const TMap<int32, float>& Goals, float SettleSeconds);
@@ -312,9 +369,9 @@ private:
 	USceneComponent*				   Body(FName Name) const;
 	FVector							   BodyPos(FName Name) const;
 	bool							   SurfaceZ(const FVector& At, float& OutZ) const;
-	float							   Along(const FVector& P) const;  // past the edge along the heading (cm, negative before it)
-	float							   SupportAlong(ESupport S) const; // the pair's mean hub
+	float							   Along(const FVector& P) const;  // past the edge, square to it (cm, negative before it)
 	float							   LaggingAlong(ESupport S) const; // the pair's hub further back
+	float							   LeadingAlong(ESupport S) const; // the pair's hub further on
 	float							   Radius(ESupport S) const;
 	float							   Gap(ESupport S, float LevelZ) const; // the higher wheel's bottom above LevelZ
 	float							   HeightNow(ESupport S) const;			// its table height at the joint's angle
@@ -347,7 +404,20 @@ private:
 	float					 CrossingHeightCm = 0.0f; // above the lower level, from the reference pose
 	float					 NearZ = 0.0f, FarZ = 0.0f;
 	FVector					 EdgePoint = FVector::ZeroVector;
-	FVector					 Heading = FVector::ForwardVector;
+	FVector					 EdgeNormal = FVector::ForwardVector; // square to the edge, onto the far level (Along measures along it)
+
+	// The stick and curb assist.
+	FVector							   StickInput = FVector::ZeroVector; // drive.forward, .turn, .strafe while the curb mode has the robot
+	TPimplPtr<RammsCurb::FStickGate>   StickGate;
+	TPimplPtr<RammsCurb::FAssistWatch> AssistWatch;
+	bool							   bStickPaused = false;
+	bool							   bLegsMoved = false;	   // the stick has let the crossing go on at least once
+	bool							   bCancelling = false;	   // the rider cancelled: the lifts going back, then the hand-back
+	bool							   bAssistStarted = false; // curb assist started this crossing
+	bool							   bFrontHubsHeld = false; // HoldWheels has the powered front omni wheels' hubs at rest
+	FString							   StickWhy, CancelWhy, CrossingStatus;
+	float							   SavedDriveCmS = 0.0f; // the drive a pause stopped, for the resume
+	bool							   bSavedDriveWheels = false, bSavedDriveFront = false, bSavedFrontHubs = false;
 
 	FLift Lifts[NumLifts];
 	float StartCmd[NumLifts] = {}; // where the crossing found each lift (its last command): a finished crossing returns there

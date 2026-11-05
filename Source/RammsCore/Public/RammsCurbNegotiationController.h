@@ -40,6 +40,7 @@ namespace RammsCurb
 	struct FPlannerInput;
 	class FPlanTask;
 	class FExecutor;
+	class FAssistWatch;
 	struct FExecMeasure;
 	struct FDebugViewState;
 	struct FDebugPainter;
@@ -296,6 +297,12 @@ public:
 	 *  with Stick.bRequired, it moves only while the stick is held forward. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FRammsCurbStick Stick;
+
+	/** Curb assist (curb.assist, Off/On): on, driving forward at a curb this
+	 *  controller can cross (DetectStepAhead finds it, its edge within
+	 *  Assist.TriggerDistanceCm) begins the crossing, on the move. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbAssist Assist;
 
 	/** Drive mode to hand back to when done. None returns to whichever mode
 	 *  was active when the manoeuvre began. */
@@ -1315,6 +1322,14 @@ private:
 
 	/** The stall watch and each wheel's feed-forward (Private/Curb). */
 	TPimplPtr<RammsCurb::FDriveState> Drive;
+
+	/** Curb assist (Assist): when it looks ahead, and whether it began the
+	 *  crossing under way. */
+	TPimplPtr<RammsCurb::FAssistWatch> AssistWatch;
+	bool							   bAssistStarted = false;
+	/** Another drive mode has the robot: with curb assist on and the rider
+	 *  driving forward, look for a curb to cross and begin it. */
+	void StepAssist(float DeltaTime);
 
 	/** The level base: the attitude loop, the surfaces' biases and whether
 	 *  the level-in is done (Private/Curb). */

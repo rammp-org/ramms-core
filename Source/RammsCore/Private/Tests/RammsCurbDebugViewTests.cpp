@@ -188,7 +188,14 @@ bool FRammsCurbDebugViewControls::RunTest(const FString& Parameters)
 	Hidden.GetAxesInGroup(FName(TEXT("Curb view")), HiddenView);
 	Hidden.GetAxesInGroup(FName(TEXT("Curb")), Own);
 	TestEqual(TEXT("not offered when asked not to"), HiddenView.Num(), 0);
-	TestEqual(TEXT("...the curb's own controls still are"), Own.Num(), 3);
+	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, phase, assist)"), Own.Num(), 4);
+
+	// Curb assist's switch: off at first, set and read back, a button on it flips it.
+	const FName Assist(TEXT("curb.assist"));
+	TestTrue(TEXT("assist: off at first"), Curb->ReadControl(Assist, Value) && Value == 0.0f && !Curb->Assist.bEnabled);
+	TestTrue(TEXT("assist: on"), Curb->ApplyControl(Assist, 1.0f) && Curb->Assist.bEnabled);
+	TestTrue(TEXT("assist: the panel steps from it"), Curb->ReadTarget(Assist, Value) && Value == 1.0f);
+	TestTrue(TEXT("assist: a button flips it off"), Curb->TriggerControl(Assist) && !Curb->Assist.bEnabled);
 	return true;
 }
 

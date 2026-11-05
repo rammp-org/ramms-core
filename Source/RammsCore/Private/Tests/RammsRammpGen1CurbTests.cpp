@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "UObject/Package.h" // GetTransientPackage's UPackage, complete: NewObject's Outer
 
 #include "Curb/RammsRammpGen1Curb.h"
 #include "RammsRammpGen1CurbController.h"
@@ -204,6 +205,39 @@ bool FRammsRammpGen1CurbRuleTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbEdgeFrameTest, "Ramms.Curb.RammpGen1.EdgeFrame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsRammpGen1CurbEdgeFrameTest::RunTest(const FString& Parameters)
+{
+	const float EdgeHalfTrack = 30.0f;
+	const auto	Check = [this, EdgeHalfTrack](const TCHAR* What, const FVector& Heading, float LeftCm, float RightCm) {
+		 const RammsRammpGen1Curb::FEdgeFrame F = RammsRammpGen1Curb::EdgeFrame(Heading, LeftCm, RightCm, EdgeHalfTrack);
+		 const FVector						  Fwd = Heading.GetSafeNormal2D();
+		 const FVector						  Right(-Fwd.Y, Fwd.X, 0.0); // the heading turned 90 deg toward +Y
+		 // Where the two lines meet the edge: the normal is square to the line between them, flat, and onto the far
+		 // level (forward); it leans toward the side that meets it nearer; the angle is that lean.
+		 const FVector OnLeft = -Right * EdgeHalfTrack + Fwd * LeftCm, OnRight = Right * EdgeHalfTrack + Fwd * RightCm;
+		 TestTrue(FString::Printf(TEXT("%s: square to the edge"), What), FMath::Abs((OnRight - OnLeft).GetSafeNormal() | F.Normal) < 1.0e-4);
+		 TestTrue(FString::Printf(TEXT("%s: flat, unit"), What), FMath::IsNearlyZero(F.Normal.Z) && FMath::IsNearlyEqual(F.Normal.Size(), 1.0, 1.0e-4));
+		 TestTrue(FString::Printf(TEXT("%s: onto the far level"), What), (F.Normal | Fwd) > 0.0);
+		 if (!FMath::IsNearlyEqual(LeftCm, RightCm))
+		 {
+			 TestTrue(FString::Printf(TEXT("%s: leans toward the side meeting it nearer"), What), ((F.Normal | Right) > 0.0) == (RightCm < LeftCm));
+			 TestTrue(FString::Printf(TEXT("%s: positive when nearer on the right"), What), (F.OffSquareDeg > 0.0f) == (RightCm < LeftCm));
+		 }
+		 const double Lean = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(F.Normal | Fwd, -1.0, 1.0)));
+		 TestTrue(FString::Printf(TEXT("%s: the angle is the lean (%.3f / %.3f deg)"), What, F.OffSquareDeg, Lean), FMath::IsNearlyEqual(FMath::Abs(F.OffSquareDeg), Lean, 1.0e-2));
+	};
+	Check(TEXT("square"), FVector(1, 0, 0), 50.0f, 50.0f);
+	Check(TEXT("nearer on the right"), FVector(1, 0, 0), 60.0f, 40.0f);
+	Check(TEXT("nearer on the left"), FVector(1, 0, 0), 40.0f, 60.0f);
+	Check(TEXT("another heading"), FVector(0.6, -0.8, 0), 55.0f, 45.0f);
+	Check(TEXT("a heading with Z"), FVector(-1, 0.2, 0.3), 45.0f, 55.0f);
+	const RammsRammpGen1Curb::FEdgeFrame Square = RammsRammpGen1Curb::EdgeFrame(FVector(1, 0, 0), 50.0f, 50.0f, EdgeHalfTrack);
+	TestTrue(TEXT("square: 0 deg, the heading"), FMath::IsNearlyZero(Square.OffSquareDeg) && Square.Normal.Equals(FVector(1, 0, 0), 1.0e-4));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbControlsTest, "Ramms.Curb.RammpGen1.Controls",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)
@@ -229,6 +263,17 @@ bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)
 	TArray<FName> Claimed;
 	C->GetClaimedMotorIds(Claimed);
 	TestEqual(TEXT("claims nothing while inactive"), Claimed.Num(), 0);
+
+	// Curb assist's switch: on the surface, off at first; set, read back, flipped by a button.
+	TestTrue(TEXT("curb.assist"), Ids.Contains(FName("curb.assist")));
+	TestTrue(TEXT("assist: off at first"), C->ReadControl(FName("curb.assist"), Value) && Value == 0.0f);
+	TestTrue(TEXT("assist: on"), C->ApplyControl(FName("curb.assist"), 1.0f) && C->Assist.bEnabled);
+	TestTrue(TEXT("assist: the panel steps from it"), C->ReadTarget(FName("curb.assist"), Value) && Value == 1.0f);
+	TestTrue(TEXT("assist: a button flips it off"), C->TriggerControl(FName("curb.assist")) && !C->Assist.bEnabled);
+	// The stick: the drive controls are the curb mode's only while it has the robot.
+	TestFalse(TEXT("inactive: no drive.forward"), Ids.Contains(FName("drive.forward")));
+	TestFalse(TEXT("inactive: drive.forward not taken"), C->ApplyControl(FName("drive.forward"), 1.0f));
+	TestTrue(TEXT("the stick is required by default"), C->Stick.bRequired);
 	return true;
 }
 
