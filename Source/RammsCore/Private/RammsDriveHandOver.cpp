@@ -408,7 +408,7 @@ namespace RammsDrive
 		return bHeld ? FMath::Clamp(-Gain * (Angle - Anchor), -MaxRate, MaxRate) : 0.0;
 	}
 
-	FTorqueHoldGains TorqueHoldGains(double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2)
+	FTorqueHoldGains TorqueHoldGains(double InertiaKgM2, double MaxTorqueNm, double RadiusCm, double DecelCmS2, double RampInSeconds, double TaperSeconds)
 	{
 		// A second-order loop on the wheel's angle: about 6 rad/s, damped 0.8, its
 		// integral (what holds a slope's pull at no error) over half a second.
@@ -425,7 +425,17 @@ namespace RammsDrive
 		G.Ki = G.Kp / IntegralSeconds;
 		G.MaxTorque = FMath::Max(MaxTorqueNm, 0.0);
 		G.Decel = RadiusCm > 0.0 ? FMath::Max(DecelCmS2, 0.0) / RadiusCm : 0.0;
+		// No harder than the motor can brake the wheel's share of the robot, a part of its
+		// torque kept for the loop: a target braking past that leaves the wheel running on
+		// behind it (taken for a slope pulling it on), and the loop then pulled the robot
+		// back once the target had stopped.
+		if (G.MaxTorque > 0.0)
+		{
+			G.Decel = FMath::Min(G.Decel, TorqueDecelShare * G.MaxTorque / J);
+		}
 		G.Inertia = J;
+		G.RampInSeconds = FMath::Max(RampInSeconds, 0.0);
+		G.TaperSeconds = FMath::Max(TaperSeconds, 0.0);
 		return G;
 	}
 
@@ -491,6 +501,14 @@ namespace RammsDrive
 		LastTorque = 0.0;
 		bEaseToRest = bEase;
 		bPulledThisBraking = false;
+		PulledTicks = 0;
+		bCaughtUpThisBraking = false;
+		BrakingSeconds = 0.0;
+		SettleSign = bEase ? FMath::Sign(Rate) : 0.0;
+		SettleElapsed = -1.0;
+		SettledRad = 0.0;
+		BeganIntegral = InitialIntegral;
+		bStepped = false;
 	}
 
 	double FTorqueHold::Step(double Angle, double Rate, double DeltaSeconds, const FTorqueHoldGains& Gains)
@@ -500,6 +518,14 @@ namespace RammsDrive
 			LastTorque = 0.0;
 			return 0.0;
 		}
+		if (DeltaSeconds <= 0.0 && bStepped)
+		{
+			// The clock has not moved since the last step: nothing new is read, and the torque
+			// stays as it was. Stepped again, the braking fed forward (the target's change over
+			// the tick) would drop out, and the wheel run on under the rest until the next.
+			return LastTorque;
+		}
+		bStepped = true;
 		const double Dt = FMath::Max(DeltaSeconds, 0.0);
 		// Braking never asks a wheel for more than it has: one slowing faster
 		// than its target (a slope's pull uphill, its own drag) takes the target
@@ -517,6 +543,7 @@ namespace RammsDrive
 				const double Speed = Along * Rate;
 				TargetRate = Speed > 0.0 ? Along * (Speed + CatchUpRadS) : 0.0;
 				Target = Angle;
+				bCaughtUpThisBraking = true;
 			}
 		}
 		const double RateWas = TargetRate;
@@ -527,10 +554,21 @@ namespace RammsDrive
 		if (TargetRate != 0.0)
 		{
 			const bool bPulledOn = !bDecided && !bFree && FMath::Sign(TargetRate) * (Rate - TargetRate) > CatchUpRadS;
-			bPulledThisBraking = bPulledThisBraking || (bDecided ? Scale > 1.0 : bPulledOn);
-			const double Full = (bDecided ? Scale : (bPulledOn ? PulledOnDecelScale : 1.0)) * Gains.Decel;
+			// Pulled on PulledOnTicks ticks running, and not after the target was caught up to a
+			// wheel slowing faster than it: a hard braking's noisy reading ahead of the target for
+			// a tick is not a slope, nor is a wheel braked into a skid spinning up again. A tick the
+			// clock has not moved over (no new reading) does not count.
+			if (Dt > 0.0)
+			{
+				PulledTicks = (bDecided ? Scale > 1.0 : bPulledOn) ? PulledTicks + 1 : 0;
+			}
+			bPulledThisBraking = bPulledThisBraking || (PulledTicks >= PulledOnTicks && !bCaughtUpThisBraking);
+			// Eased in over the gains' RampInSeconds: braking from none, not all at once.
+			BrakingSeconds += Dt;
+			const double RampIn = Gains.RampInSeconds > 0.0 ? FMath::Min(1.0, BrakingSeconds / Gains.RampInSeconds) : 1.0;
+			const double Full = RampIn * (bDecided ? Scale : (bPulledOn ? PulledOnDecelScale : 1.0)) * Gains.Decel;
 			const double Decel = (bEaseToRest && !bPulledThisBraking && Full > 0.0)
-				? Full * FMath::Clamp(FMath::Abs(TargetRate) / (Full * BrakeTaperSeconds), BrakeTaperFloor, 1.0)
+				? Full * FMath::Clamp(FMath::Abs(TargetRate) / (Full * (Gains.TaperSeconds > 0.0 ? Gains.TaperSeconds : BrakeTaperSeconds)), BrakeTaperFloor, 1.0)
 				: Full;
 			const double Slow = Decel * Dt;
 			if (Decel <= 0.0 || FMath::Abs(TargetRate) <= Slow)
@@ -572,6 +610,34 @@ namespace RammsDrive
 			Integral = 0.0;
 			LastTorque = 0.0;
 			return 0.0;
+		}
+		// Settling: a wheel running on past where its target stopped is held where it
+		// comes to rest (SettleSeconds), not pulled back -- unless a slope pulled it
+		// on, which the braking is to stop, not follow.
+		if (SettleSign != 0.0 && TargetRate == 0.0)
+		{
+			SettleElapsed = SettleElapsed < 0.0 ? 0.0 : SettleElapsed + Dt;
+			if (bPulledThisBraking || SettleElapsed > SettleSeconds)
+			{
+				SettleSign = 0.0;
+			}
+			else
+			{
+				const double Follow = FMath::Min(SettleSign * (Angle - Target), SettleMaxRad - SettledRad);
+				if (Follow > 0.0)
+				{
+					Target += SettleSign * Follow;
+					SettledRad += Follow;
+				}
+				// Nor pushed back by what the integral wound up behind the braking (the
+				// wheel's lag, not a slope's pull: a slope pulling it on ends the settling).
+				// What it began with stays (a slope's pull handed over), as does what it
+				// wound up pushing on (uphill).
+				if (SettleSign * (Integral - BeganIntegral) < 0.0)
+				{
+					Integral = BeganIntegral;
+				}
+			}
 		}
 		const double Error = Target - Angle;
 		const double Trial = Integral + Gains.Ki * Error * Dt;
@@ -625,6 +691,7 @@ namespace RammsDrive
 					Left.TargetRate = Right.TargetRate = Rate;
 					Left.Target = LeftAngle;
 					Right.Target = RightAngle;
+					Left.bCaughtUpThisBraking = Right.bCaughtUpThisBraking = true;
 				}
 				else if (Along * (MeanRate - MeanTarget) > FTorqueHold::CatchUpRadS)
 				{
