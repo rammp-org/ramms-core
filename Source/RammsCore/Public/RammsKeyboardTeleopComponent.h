@@ -78,7 +78,9 @@ struct FRammsLinkageKeyBinding
  *
  * LEGACY: superseded by URammsControlInputComponent + a URammsControlInputMap
  * (Enhanced Input -> the robot's control surface). Not added to new pawns;
- * kept for one release for existing Blueprints.
+ * kept for one release for existing Blueprints. On a pawn that also carries a
+ * ControlInput with an input map it stands down at BeginPlay (no tick), so the
+ * keys mean what the map says rather than being written twice.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsKeyboardTeleopComponent : public UActorComponent
