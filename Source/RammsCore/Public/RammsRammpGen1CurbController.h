@@ -30,8 +30,8 @@ enum class ERammsRammpGen1CurbPhase : uint8
 	Lower	  UMETA(DisplayName = "Chassis down"),
 	RearDown  UMETA(DisplayName = "Rear omni wheels down"),
 	ClearEdge UMETA(DisplayName = "Clear the edge"),
-	Recentre  UMETA(DisplayName = "Translators to centre"),
-	Restore	  UMETA(DisplayName = "Driving pose"),
+	Recentre  UMETA(DisplayName = "Translators back"),
+	Restore	  UMETA(DisplayName = "Back to the starting pose"),
 	Done	  UMETA(DisplayName = "Done"),
 	Aborted	  UMETA(DisplayName = "Aborted"),
 };
@@ -188,6 +188,9 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
  * does not hold. With hub motors on the front omni wheels, they pull the robot forward while the drive wheels
  * are up (and the translators bring them aft); without, the translators carry the drive wheels over and then,
  * braked, pull the chassis over them. The sprung rear's lift is trimmed against the chassis's pitch.
+ * Front omni wheels that start off the ground (the outdoor stance) stay up, at least as high as the crossing needs,
+ * until they go down over the edge. A finished crossing puts every lift back where it found it (each lift's last
+ * command), so the robot ends in the stance it started in.
  *
  * Controls: curb.negotiate (start, at a curb ahead within ScanAheadCm), curb.abort, curb.phase. It is the
  * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one), and a
@@ -322,7 +325,9 @@ private:
 	TArray<int32>					   LiftsOf(ESupport S) const;
 	float							   TranslatorReachCm() const;
 	bool							   IsCrossing() const;
-	bool							   DriveWheelsLoaded(); // both down on the ground under them, taking load
+	bool							   DriveWheelsLoaded();	   // both down on the ground under them, taking load
+	bool							   FrontOffGround() const; // both front omni wheels clear of the ground under them
+	void							   StopLevelling();		   // the rear's levelling trim into its lift's command, and off
 
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
@@ -345,6 +350,8 @@ private:
 	FVector					 Heading = FVector::ForwardVector;
 
 	FLift Lifts[NumLifts];
+	float StartCmd[NumLifts] = {}; // where the crossing found each lift (its last command): a finished crossing returns there
+	bool  bFrontUp = false;		   // the front omni wheels started off the ground: they stay up until they go down over the edge
 	float SettleLeft = 0.0f;
 	float PhaseSeconds = 0.0f;
 	bool  bLevel = false; // trim the rear lift against the pitch
