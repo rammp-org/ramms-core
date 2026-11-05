@@ -150,6 +150,28 @@ public:
 	float BrakingVelocityThreshold = 5.0f;
 
 	/**
+	 * How hard (cm/s^2) the drive brakes slow the robot, with the input at centre: auto-braking
+	 * (bEnableAutoBraking), and on the way to the parking brakes (ParkingBrakeSpeed). The two
+	 * drive wheels are brought to rest down a ramp of rate at this deceleration, rather than as
+	 * hard as BrakeTorque can stop them, as a power chair's controller decelerates when its stick
+	 * is let go. BrakeTorque becomes the gain that keeps each wheel on the ramp. Without
+	 * the ramp, the Chaos chair stopped from 1.8 m/s in 0.2 s, at over 1 g, and pitched up to 8 deg
+	 * onto its front casters. At the default it stops from 1.8 m/s in about half a metre, peaking
+	 * at about 0.7 g (the wheels lag the ramp, then catch it up), pitching under a degree. A turn
+	 * under way slows at the same rate. Downhill, the ramp holds the robot to it: the wheels run
+	 * on ahead of the ramp, and BrakeTorque brakes them harder. 0 brakes as hard as BrakeTorque
+	 * can, as before. The torque hold (bHoldWhenIdle where the backend simulates the wheels'
+	 * joints: MuJoCo) brakes on its own profile instead.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
+	float BrakeDeceleration = 750.0f;
+
+	/** How long (s) braking takes to reach BrakeDeceleration from none, so that letting go of the
+	 *  stick does not jerk the robot (0: at once). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
+	float BrakeRampInSeconds = 0.1f;
+
+	/**
 	 * With the input at centre, bring the robot to rest -- both drive wheels
 	 * braked together from its forward speed, at no more than 30 cm/s^2
 	 * (twice that while a slope pulls them on; a turn under way stops) --
@@ -198,7 +220,10 @@ public:
 	 * the moment it is driven again. Without them a robot stopped on a ramp rolls back
 	 * down it. Until they close the drive brakes to rest (ApplyBrakes), auto-braking
 	 * or not; this is above BrakingVelocityThreshold, where that braking stops, so the
-	 * robot is caught rather than left creeping.
+	 * robot is caught rather than left creeping. With the brake ramp (BrakeDeceleration),
+	 * the drive brakes stiffen once it has come to rest, and the parking brakes close at the
+	 * latest three quarters of a second after it, however fast the robot still creeps: down a
+	 * slope, the drive brakes alone hold it short of rest.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drive|Braking", meta = (ClampMin = "0.0"))
 	float ParkingBrakeSpeed = 6.0f;
@@ -421,8 +446,9 @@ private:
 	/** Check if braking should be applied */
 	bool ShouldApplyBrakes() const;
 
-	/** Apply brake torque to both wheels */
-	void ApplyBrakes();
+	/** Apply brake torque to both wheels; DeltaSeconds is the physics clock's step since the
+	 *  last tick (0 if it has not advanced), which the brake ramp (BrakeDeceleration) moves on by. */
+	void ApplyBrakes(float DeltaSeconds);
 
 	/** Debug log current state */
 	void DebugLogState();
@@ -509,6 +535,39 @@ private:
 	/** Engage / release both drive wheels' parking brakes through the base;
 	 *  engaged only if both take it. */
 	void SetParkingBrake(bool bEngage);
+
+	/** The brake ramp (BrakeDeceleration): braking under way, its target rates (rad/s:
+	 *  forward, the wheels' mean, and turning, half their difference, right less left), and how
+	 *  long (s) it has braked. bBrakeRampStepped: ApplyBrakes stepped it this tick; a tick
+	 *  that does not ends it. */
+	bool   bBrakeRamp = false;
+	bool   bBrakeRampStepped = false;
+	double BrakeRampForward = 0.0;
+	double BrakeRampTurn = 0.0;
+	double BrakeRampElapsed = 0.0;
+	/** How long (s) the ramp's targets have been at rest. */
+	double BrakeRampRestSeconds = 0.0;
+	/** Down a slope, damping at BrakeTorque holds the wheels short of rest: the 1:8 ramp's pull
+	 *  kept the chair creeping at 10-17 cm/s, above ParkingBrakeSpeed, for up to two seconds. Once
+	 *  the ramp is at rest the damping rises, to BrakeRestDampingScale times BrakeTorque over
+	 *  BrakeRestStiffenSeconds, bringing the creep down to where the parking brakes close; failing
+	 *  that, they close BrakeRestCloseSeconds after it came to rest, however fast it creeps
+	 *  (closing them at once from a creep jolted the chair 1.6 deg). */
+	static constexpr double BrakeRestDampingScale = 5.0;
+	static constexpr double BrakeRestStiffenSeconds = 0.25;
+	static constexpr double BrakeRestCloseSeconds = 0.75;
+	/** Braked down the ramp, how long (s, the physics clock) the treads must have read slow or
+	 *  turned back, over at least two readings, before the parking brakes close, and how long and
+	 *  over how many readings they have: braked hard, one tick's reading of a wheel can swing
+	 *  through rest with the robot still well under way. */
+	static constexpr double ParkDebounceSeconds = 0.03;
+	double					ParkSlowSeconds = 0.0;
+	int32					ParkSlowTicks = 0;
+	/** One tick of the brake ramp, begun from the wheels' rates if not under way (each the
+	 *  further from rest of the smoothed rate and this tick's): each target brought DeltaSeconds
+	 *  nearer rest, and never more than half a rad/s further from rest than those rates. The
+	 *  target rate (rad/s) of each wheel out. */
+	void StepBrakeRamp(double DeltaSeconds, double& OutLeft, double& OutRight);
 
 	/** A motion handed over by the selector, pulled towards (SeedMotion). */
 	TPimplPtr<RammsDrive::FCarry> Carry;
@@ -600,6 +659,9 @@ private:
 	double					SmoothLeftRate = 0.0;
 	double					SmoothRightRate = 0.0;
 	static constexpr double HoldRateSmoothSeconds = 0.15;
+
+	/** The smoothed rates have taken a reading since the first tick or the last reset. */
+	bool bSmoothRatesSet = false;
 	/** The most (cm, of tread travel) the two held wheels' errors may differ
 	 *  by: beyond it their targets are moved together (RammsDrive::BoundTurnError),
 	 *  so the hold never turns the robot back by more than this, whatever the
