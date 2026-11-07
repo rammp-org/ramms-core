@@ -4,6 +4,7 @@
 #include "RammsRobotBaseComponent.h"
 #include "RammsControlIds.h"
 #include "RammsRobotControlSurfaceComponent.h"
+#include "RammsControlInputComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 
@@ -42,6 +43,19 @@ void URammsKeyboardTeleopComponent::BeginPlay()
 	AActor* Owner = GetOwner();
 	if (!Owner)
 	{
+		return;
+	}
+	// A pawn whose keys come through Enhanced Input (a ControlInput carrying an
+	// input map) is driven by that. Polling the same keys here as well wrote the
+	// same controls twice, with this component's fixed meanings over the map's:
+	// A / D a turn even where the map makes them a holonomic drive's strafe,
+	// E / Q the linkages wherever the map put them.
+	if (const URammsControlInputComponent* Input = Owner->FindComponentByClass<URammsControlInputComponent>();
+		Input && !Input->InputMaps.IsEmpty())
+	{
+		SetComponentTickEnabled(false);
+		UE_LOG(LogTemp, Log, TEXT("[KeyboardTeleop] '%s': standing down -- its ControlInput (%d input maps) carries the keys."),
+			*Owner->GetName(), Input->InputMaps.Num());
 		return;
 	}
 	Base = Owner->FindComponentByClass<URammsRobotBaseComponent>();
