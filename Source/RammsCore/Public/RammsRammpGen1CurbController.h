@@ -226,6 +226,17 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.0"))
 	float BlendLeadDownCm = 10.0f;
 
+	// --- faults: a crossing that has stopped getting anywhere says so within seconds, rather than waiting out its
+	// phase's minute
+	/** Driven at 3 cm/s or more while the chassis moves under 0.5 cm/s for this long (s): something holds the robot (a
+	 *  wheel against the curb's face, the frame on its edge, the wheels slipping). It faults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Faults", meta = (ClampMin = "0.5"))
+	float StallSeconds = 3.0f;
+	/** Rolling: held short of the edge for a pair that is not up off the level it is leaving, with no lift moving, for
+	 *  this long (s): it is not going to get there. It faults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Faults", meta = (ClampMin = "0.5"))
+	float WaitSeconds = 5.0f;
+
 	// --- the measurements (GetStats): where the rider is, and the frame's underside, in the chassis frame
 	/** The body the rider sits on (the owner's scene component by name); the chassis when it has none. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements")
@@ -399,6 +410,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	FString GetStatus() const { return Status; }
 
+	/** What curb.status shows: what the crossing is doing, or how the last one ended, and why -- "Crossing up 15.0
+	 *  cm: Drive to the edge", "Paused: ...", "Waiting: the front omni wheels to clear the curb", "Faulted: ... Cross
+	 *  the curb ahead to try again" -- and how much it needs the rider. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	FString GetStatusLine(ERammsControlTextSeverity& OutSeverity) const;
+
 	/** How the last crossing went (or the one under way, so far): its times, stops, attitude, the rider's
 	 *  acceleration and the least margins. Logged when it ends. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
@@ -419,6 +436,7 @@ public:
 	virtual bool TriggerControl(FName Id) override;
 	virtual bool ReadControl(FName Id, float& OutValue) const override;
 	virtual bool ReadTarget(FName Id, float& OutTarget) const override;
+	virtual bool ReadControlText(FName Id, FText& OutText) const override;
 	virtual void GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 
 	// --- IRammsDriveMode
@@ -639,4 +657,38 @@ private:
 	mutable TMap<FName, TWeakObjectPtr<USceneComponent>> BodyCache;
 
 	TArray<FString> PhaseLog;
+
+	// How the last crossing ended, and the watches that end one that has stopped getting anywhere.
+	enum class EEnd : uint8
+	{
+		None,
+		Done,
+		Stopped,   // Abort, or another drive mode selected
+		Cancelled, // by the rider's stick
+		Faulted
+	};
+	/** A wheel has gone up for the curb: a crossing stopped from here cannot simply begin again where it stands. */
+	bool CrossedAny() const;
+	/** The last crossing stopped with nothing across, and the robot is still where it stopped: a start looks for the
+	 *  curb from behind the drive wheels (the front omni wheels may already be over the edge). */
+	bool RetryHere() const;
+	/** The chassis's commanded speed along the heading (cm/s): the drive less the translators', or the front omni
+	 *  wheels' pull. */
+	float CommandedSpeedCmS() const;
+	/** Driven but not moving for Config.StallSeconds: a fault. False when it faulted. */
+	bool	WatchStall(float Dt);
+	FString RetryHint() const;
+
+	EEnd	LastEnd = EEnd::None;
+	EEnd	PendingEnd = EEnd::None; // set by an Abort before its Finish: a stop, not a fault
+	bool	bRetryable = false;
+	FVector RetryAt = FVector::ZeroVector; // the chassis where it stopped
+	FString StartRefusal;				   // why the last start was refused; cleared when one is made
+	FString WaitWhy;					   // rolling: what a stop short of the edge holds it for, while one does
+	float	HeldSeconds = 0.0f;			   // held for it with nothing moving
+	float	StalledSeconds = 0.0f;
+	float	FrontCreepCmS = 0.0f; // DriveOver, powered: the front omni wheels' pull while they pull
+	float	ChassisAlong = 0.0f;
+	float	ChassisSpeedCmS = 0.0f; // measured along EdgeNormal, filtered
+	bool	bChassisSpeedValid = false;
 };

@@ -301,6 +301,7 @@ namespace RammsCurb
 		bOperatorPaused = false;
 		// The runtime checks start afresh.
 		bFault = false;
+		bSafetyFault = false;
 		FaultWhy.Reset();
 		bHalted = false;
 		HaltDecel = 0.0;
@@ -414,13 +415,14 @@ namespace RammsCurb
 		Log(FString::Printf(TEXT("halted (%s): braking from %.1f cm/s at %.0f cm/s^2, every leg holding its target"), *Why, VCmd, HaltDecel));
 	}
 
-	void FExecutor::Fault(const FString& Why)
+	void FExecutor::Fault(const FString& Why, bool bSafety)
 	{
 		if (!bRunning || bHalted)
 		{
 			return;
 		}
 		bFault = true;
+		bSafetyFault = bSafety;
 		FaultWhy = Why;
 		Log(FString::Printf(TEXT("fault: %s"), *Why));
 		Halt(Why);
@@ -1708,7 +1710,8 @@ namespace RammsCurb
 			if (MarginWatch.Tick(LiveMarginCm, T.MinLiveStabilityMarginCm, Dt) == EMarginWatch::Fault)
 			{
 				Fault(FString::Printf(TEXT("the robot measured %.2f cm inside its wheels for %.2f s, under %.1f: near tipping"), LiveMarginCm,
-					MarginWatch.Low.Seconds, MarginFaultCm));
+						  MarginWatch.Low.Seconds, MarginFaultCm),
+					/*bSafety=*/true);
 				TickHalted(Measure, Level, Out, Dt, /*bWheelsMeasured=*/true);
 				return;
 			}

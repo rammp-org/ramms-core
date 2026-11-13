@@ -16,7 +16,7 @@ namespace RammsCurb
 		FRammsControlAxis Switch;
 		Switch.Id = AssistControlId();
 		Switch.Group = FName("Curb");
-		Switch.DisplayName = NSLOCTEXT("Ramms", "CurbAssist", "Curb assist (drive at a curb to cross it)");
+		Switch.DisplayName = NSLOCTEXT("Ramms", "CurbAssist", "Curb assist");
 		Switch.Kind = ERammsControlKind::Enum;
 		Switch.Units = ERammsControlUnits::None;
 		Switch.Order = Order;
@@ -24,6 +24,25 @@ namespace RammsCurb
 		Switch.Range = FVector2D(0.0, 1.0);
 		Switch.DefaultValue = bOn ? 1.0f : 0.0f;
 		return Switch;
+	}
+
+	FName StatusControlId()
+	{
+		return FName("curb.status");
+	}
+
+	FRammsControlAxis MakeStatusControl(int32 Order)
+	{
+		FRammsControlAxis Status;
+		Status.Id = StatusControlId();
+		Status.Group = FName("Curb");
+		Status.DisplayName = NSLOCTEXT("Ramms", "CurbStatus", "Curb status");
+		Status.Kind = ERammsControlKind::Text;
+		Status.Units = ERammsControlUnits::None;
+		Status.bReadOnly = true;
+		Status.Order = Order;
+		Status.Range = FVector2D(0.0, static_cast<double>(ERammsControlTextSeverity::Fault));
+		return Status;
 	}
 
 	void FAssistWatch::Reset()

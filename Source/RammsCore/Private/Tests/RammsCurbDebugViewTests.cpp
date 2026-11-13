@@ -188,7 +188,16 @@ bool FRammsCurbDebugViewControls::RunTest(const FString& Parameters)
 	Hidden.GetAxesInGroup(FName(TEXT("Curb view")), HiddenView);
 	Hidden.GetAxesInGroup(FName(TEXT("Curb")), Own);
 	TestEqual(TEXT("not offered when asked not to"), HiddenView.Num(), 0);
-	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, phase, assist)"), Own.Num(), 4);
+	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, status, phase, assist)"), Own.Num(), 5);
+
+	// The status: read-only words, and how much they need the rider.
+	const FRammsControlAxis* StatusAxis = Own.FindByPredicate([](const FRammsControlAxis& A) { return A.Id == FName(TEXT("curb.status")); });
+	TestTrue(TEXT("curb.status: a read-only Text control"), StatusAxis && StatusAxis->Kind == ERammsControlKind::Text && StatusAxis->bReadOnly);
+	FText Words;
+	TestTrue(TEXT("status: idle, ready"), Curb->ReadControlText(FName(TEXT("curb.status")), Words) && Words.ToString().StartsWith(TEXT("Ready")));
+	TestTrue(TEXT("status: information"), Curb->ReadControl(FName(TEXT("curb.status")), Value) && Value == static_cast<float>(ERammsControlTextSeverity::Info));
+	TestFalse(TEXT("status: nothing to set"), Curb->ApplyControl(FName(TEXT("curb.status")), 1.0f));
+	TestFalse(TEXT("status: no words for other controls"), Curb->ReadControlText(C::PhaseControlId(), Words));
 
 	// Curb assist's switch: off at first, set and read back, a button on it flips it.
 	const FName Assist(TEXT("curb.assist"));

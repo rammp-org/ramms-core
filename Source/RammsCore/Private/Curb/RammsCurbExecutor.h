@@ -646,7 +646,10 @@ namespace RammsCurb
 		 *  the check, the wheel, its state and the numbers. */
 		bool		   HasFault() const { return bFault; }
 		const FString& GetFaultWhy() const { return FaultWhy; }
-		bool		   IsHalted() const { return bHalted; }
+		/** The fault is about the robot itself -- near tipping, or the base off its planned attitude -- rather than
+		 *  the terrain, a leg or the time a step took: not one to try again on. */
+		bool IsSafetyFault() const { return bFault && bSafetyFault; }
+		bool IsHalted() const { return bHalted; }
 		/** Halted and at rest: the command at 0, the chassis stopped, and every
 		 *  leg on the target the halt left it (its command there, the leg where
 		 *  it was sent or stopped short of it on the ground) -- for
@@ -763,8 +766,8 @@ namespace RammsCurb
 		 *  double when no set differs from the plan's; OutAt is the travel (S)
 		 *  of the least. */
 		double PredictedMargin(int32 Leg, const FExecMeasure& Measure, double& OutAt) const;
-		/** A runtime check faults: Why logged, the executor halted. */
-		void Fault(const FString& Why);
+		/** A runtime check faults: Why logged, the executor halted. bSafety: IsSafetyFault. */
+		void Fault(const FString& Why, bool bSafety = false);
 		/** The halted executor's tick: the speed braked to rest, the legs to
 		 *  their targets. */
 		void TickHalted(const FExecMeasure& Measure, FLevelState& Level, FExecCommand& Out, double Dt, bool bWheelsMeasured);
@@ -958,6 +961,7 @@ namespace RammsCurb
 		 *  (a fault or Halt), how hard it brakes, at rest (and every leg on its
 		 *  target), and whether the halt's leg targets are set. */
 		bool	 bFault = false;
+		bool	 bSafetyFault = false;
 		FString	 FaultWhy;
 		bool	 bHalted = false;
 		double	 HaltDecel = 0.0;

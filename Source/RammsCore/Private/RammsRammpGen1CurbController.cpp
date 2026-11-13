@@ -165,7 +165,7 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 	State.Kind = ERammsControlKind::Enum;
 	State.Units = ERammsControlUnits::None;
 	State.bReadOnly = true;
-	State.Order = 2;
+	State.Order = 3;
 	const UEnum* PhaseEnum = StaticEnum<ERammsRammpGen1CurbPhase>();
 	for (int32 i = 0; i < PhaseEnum->NumEnums() - 1; ++i)
 	{
@@ -173,8 +173,9 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 	}
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
+	OutSurface.Add(RammsCurb::MakeStatusControl(2));
 
-	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 3));
+	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 4));
 
 	// How the next crossing moves: a switch the panel steps (a crossing under way keeps the style it started with).
 	FRammsControlAxis StyleAxis;
@@ -186,7 +187,7 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 	StyleAxis.EnumLabels = { NSLOCTEXT("Ramms", "RammpGen1CurbStyleStepped", "Stop and step"),
 		NSLOCTEXT("Ramms", "RammpGen1CurbStyleBlended", "Rolling") };
 	StyleAxis.Range = FVector2D(0.0, 1.0);
-	StyleAxis.Order = 4;
+	StyleAxis.Order = 5;
 	OutSurface.Add(StyleAxis);
 
 	// The rider's stick (Stick), while a crossing has the robot: the drive controls every drive mode offers, so that
@@ -294,7 +295,7 @@ bool URammsRammpGen1CurbController::TriggerControl(FName Id)
 		if (!StartCrossing(Why))
 		{
 			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: curb crossing refused: %s"), *GetNameSafe(GetOwner()), *Why);
-			Status = Why;
+			Status = StartRefusal = Why;
 			return false;
 		}
 		return true;
@@ -336,6 +337,164 @@ bool URammsRammpGen1CurbController::ReadControl(FName Id, float& OutValue) const
 		OutValue = Style == ERammsRammpGen1CurbStyle::Blended ? 1.0f : 0.0f;
 		return true;
 	}
+	if (Id == RammsCurb::StatusControlId())
+	{
+		ERammsControlTextSeverity Severity = ERammsControlTextSeverity::Info;
+		GetStatusLine(Severity);
+		OutValue = static_cast<float>(Severity);
+		return true;
+	}
+	return false;
+}
+
+bool URammsRammpGen1CurbController::ReadControlText(FName Id, FText& OutText) const
+{
+	if (Id != RammsCurb::StatusControlId())
+	{
+		return false;
+	}
+	ERammsControlTextSeverity Severity = ERammsControlTextSeverity::Info;
+	OutText = FText::FromString(GetStatusLine(Severity));
+	return true;
+}
+
+FString URammsRammpGen1CurbController::GetStatusLine(ERammsControlTextSeverity& OutSeverity) const
+{
+	using ESeverity = ERammsControlTextSeverity;
+	OutSeverity = ESeverity::Info;
+	if (bStartPending)
+	{
+		return TEXT("Starting: ") + Status;
+	}
+	if (IsCrossing())
+	{
+		const FString Crossing = FString::Printf(TEXT("%s %.1f cm"), bClimb ? TEXT("up") : TEXT("down"), FMath::Abs(StepCm));
+		if (bCancelling)
+		{
+			OutSeverity = ESeverity::Attention;
+			return TEXT("Cancelling: the lifts going back where they were");
+		}
+		if (bStickPaused)
+		{
+			OutSeverity = ESeverity::Attention;
+			return StickWhy.StartsWith(TEXT("Paused")) ? StickWhy : TEXT("Paused: ") + StickWhy; // the stick's reason may say so itself
+		}
+		if (!WaitWhy.IsEmpty())
+		{
+			OutSeverity = ESeverity::Attention;
+			return HeldSeconds >= 1.0f
+				? FString::Printf(TEXT("Waiting, nothing moving (%.0f of %.0f s): %s"), HeldSeconds, Config.WaitSeconds, *WaitWhy)
+				: TEXT("Waiting: ") + WaitWhy;
+		}
+		if (StalledSeconds >= 1.0f)
+		{
+			OutSeverity = ESeverity::Attention;
+			return FString::Printf(TEXT("Not moving (%.0f of %.0f s): driven at %.0f cm/s in %s"), StalledSeconds, Config.StallSeconds,
+				CommandedSpeedCmS(), RammpGen1CurbPhaseLabel(Phase));
+		}
+		return FString::Printf(TEXT("Crossing %s: %s"), *Crossing, RammpGen1CurbPhaseLabel(Phase));
+	}
+	if (!StartRefusal.IsEmpty())
+	{
+		OutSeverity = ESeverity::Attention;
+		return TEXT("Not crossing: ") + StartRefusal;
+	}
+	switch (LastEnd)
+	{
+		case EEnd::Done:
+			return TEXT("Done: ") + Status;
+		case EEnd::Cancelled:
+			return TEXT("Cancelled: ") + CancelWhy;
+		case EEnd::Stopped:
+			OutSeverity = ESeverity::Attention;
+			return (Status == TEXT("stopped") ? FString(TEXT("Stopped.")) : TEXT("Stopped: ") + Status + TEXT(".")) + RetryHint();
+		case EEnd::Faulted:
+			OutSeverity = ESeverity::Fault;
+			return TEXT("Faulted: ") + Status + TEXT(".") + RetryHint();
+		default:
+			return Assist.bEnabled ? TEXT("Ready: drive at a curb to cross it") : TEXT("Ready");
+	}
+}
+
+FString URammsRammpGen1CurbController::RetryHint() const
+{
+	if (bHoldUntilDown)
+	{
+		return FString(); // the status already says what it holds for
+	}
+	if (RetryHere())
+	{
+		return Assist.bEnabled ? TEXT(" Cross the curb ahead, or let go of the stick and push forward again, to try again.")
+							   : TEXT(" Cross the curb ahead to try again.");
+	}
+	return bRetryable ? FString() : FString(TEXT(" A wheel had gone up for the curb: the lifts are the operator's to finish by hand."));
+}
+
+bool URammsRammpGen1CurbController::CrossedAny() const
+{
+	if (bDriveWheelsUp)
+	{
+		return true;
+	}
+	if (bBlended)
+	{
+		return PairState[static_cast<int32>(ESupport::Drive)] != EPair::Near;
+	}
+	using EPhase = ERammsRammpGen1CurbPhase;
+	return static_cast<uint8>(Phase) >= static_cast<uint8>(EPhase::DriveUp) && Phase != EPhase::Done && Phase != EPhase::Aborted;
+}
+
+bool URammsRammpGen1CurbController::RetryHere() const
+{
+	return bRetryable && Body(Config.ChassisBody) && FVector::Dist2D(BodyPos(Config.ChassisBody), RetryAt) <= 50.0f;
+}
+
+float URammsRammpGen1CurbController::CommandedSpeedCmS() const
+{
+	if (bBlended)
+	{
+		return BlendV;
+	}
+	if (FrontCreepCmS > 0.0f)
+	{
+		return FrontCreepCmS;
+	}
+	if (bDriveFront)
+	{
+		return DriveCmS;
+	}
+	if (bDriveWheels)
+	{
+		// The drive wheels ride the translators' plates: the chassis goes at their speed less the plates'.
+		const FLift& T = Lifts[TranslatorL];
+		const float	 PlateCmS = FMath::IsNearlyEqual(T.Cmd, T.Goal, 1.0e-5f) ? 0.0f : FMath::Sign(T.Goal - T.Cmd) * T.Rate;
+		return DriveCmS - PlateCmS;
+	}
+	return 0.0f;
+}
+
+bool URammsRammpGen1CurbController::WatchStall(float Dt)
+{
+	if (Dt <= 0.0f)
+	{
+		return true;
+	}
+	const float AlongNow = Along(BodyPos(Config.ChassisBody));
+	if (bChassisSpeedValid)
+	{
+		ChassisSpeedCmS += FMath::Clamp(Dt / 0.25f, 0.0f, 1.0f) * ((AlongNow - ChassisAlong) / Dt - ChassisSpeedCmS);
+	}
+	ChassisAlong = AlongNow;
+	bChassisSpeedValid = true;
+	const float Commanded = CommandedSpeedCmS();
+	StalledSeconds = Commanded >= 3.0f && ChassisSpeedCmS < 0.5f ? StalledSeconds + Dt : 0.0f;
+	if (StalledSeconds < Config.StallSeconds)
+	{
+		return true;
+	}
+	Finish(true, FString::Printf(TEXT("stalled in %s: driven at %.0f cm/s, the chassis moved %.1f cm/s for %.1f s (a wheel against the curb, "
+									  "the frame on its edge, or the wheels slipping)"),
+					 RammpGen1CurbPhaseLabel(Phase), Commanded, ChassisSpeedCmS, StalledSeconds));
 	return false;
 }
 
@@ -383,7 +542,7 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 		if (!StartCrossing(Why))
 		{
 			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: curb crossing refused: %s"), *GetNameSafe(GetOwner()), *Why);
-			Status = Why;
+			Status = StartRefusal = Why;
 		}
 	}
 	if (!bActive)
@@ -394,6 +553,10 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 			{
 				Meter->End(SimNow());
 			}
+			LastEnd = EEnd::Stopped;
+			bRetryable = !CrossedAny();
+			RetryAt = BodyPos(Config.ChassisBody);
+			WaitWhy.Reset();
 			Phase = ERammsRammpGen1CurbPhase::Aborted;
 			Status = TEXT("another drive mode was selected");
 			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: curb crossing aborted: %s"), *GetNameSafe(GetOwner()), *Status);
@@ -534,7 +697,16 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 		return false;
 	}
 	const FVector Right(-Fwd.Y, Fwd.X, 0.0); // the heading turned 90 deg right (Unreal: Z up, left-handed)
-	const FVector From = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
+	const FVector FrontHubs = 0.5 * (BodyPos(Config.FrontOmniLeftBody) + BodyPos(Config.FrontOmniRightBody));
+	// Trying again where a crossing stopped, the front omni wheels may already be over the edge: look from behind the
+	// drive wheels instead, and say how far ahead of the front omni wheels it is as before (negative: behind them).
+	float Back = 0.0f;
+	if (RetryHere())
+	{
+		const FVector DriveHubs = 0.5 * (BodyPos(Config.DriveWheelLeftBody) + BodyPos(Config.DriveWheelRightBody));
+		Back = FMath::Max(0.0f, static_cast<float>((FrontHubs - DriveHubs) | Fwd) + Config.DriveWheelRadiusCm + 5.0f);
+	}
+	const FVector From = FrontHubs - Fwd * Back;
 	const float	  HalfTrack = FMath::Max(10.0f, 0.5f * FMath::Abs(static_cast<float>((BodyPos(Config.DriveWheelRightBody) - BodyPos(Config.DriveWheelLeftBody)) | Right)));
 	const auto	  FindAt = [this, From, Fwd, Right](float Lateral, float ToCm, RammsRammpGen1Curb::FStep& OutStep, FString& OutWhy) {
 		   const FVector Line = From + Right * Lateral;
@@ -542,17 +714,17 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 		   return RammsRammpGen1Curb::FindStep(SurfaceAt, 0.0f, ToCm, 2.0f, Config.MinStepCm, OutStep, OutWhy);
 	};
 	RammsRammpGen1Curb::FStep Found, Left, RightStep;
-	if (!FindAt(0.0f, FMath::Min(Config.ScanAheadCm, NoFurtherCm), Found, OutReason))
+	if (!FindAt(0.0f, FMath::Min(Config.ScanAheadCm, NoFurtherCm) + Back, Found, OutReason))
 	{
 		OutReason = TEXT("no curb ahead: ") + OutReason;
 		return false;
 	}
 	FString SideWhy;
-	if (!FindAt(-HalfTrack, Config.ScanAheadCm, Left, SideWhy) || !FindAt(HalfTrack, Config.ScanAheadCm, RightStep, SideWhy)
+	if (!FindAt(-HalfTrack, Config.ScanAheadCm + Back, Left, SideWhy) || !FindAt(HalfTrack, Config.ScanAheadCm + Back, RightStep, SideWhy)
 		|| FMath::Abs(Left.HeightCm - Found.HeightCm) > 2.0f || FMath::Abs(RightStep.HeightCm - Found.HeightCm) > 2.0f)
 	{
 		OutReason = FString::Printf(TEXT("the %.1f cm step %.0f cm ahead does not run straight across the robot's path"), Found.HeightCm,
-			Found.EdgeDistCm);
+			Found.EdgeDistCm - Back);
 		return false;
 	}
 	const RammsRammpGen1Curb::FEdgeFrame Edge = RammsRammpGen1Curb::EdgeFrame(Fwd, Left.EdgeDistCm, RightStep.EdgeDistCm, HalfTrack);
@@ -579,7 +751,7 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 
 	OutPlan.EdgePoint = From + Fwd * Found.EdgeDistCm;
 	OutPlan.EdgeNormal = Edge.Normal;
-	OutPlan.EdgeAheadCm = FMath::Min3(Found.EdgeDistCm, Left.EdgeDistCm, RightStep.EdgeDistCm);
+	OutPlan.EdgeAheadCm = FMath::Min3(Found.EdgeDistCm, Left.EdgeDistCm, RightStep.EdgeDistCm) - Back;
 	OutPlan.ApproachDeg = Edge.OffSquareDeg;
 	OutPlan.StepCm = Found.HeightCm;
 	OutPlan.NearZ = Found.NearZ;
@@ -589,6 +761,7 @@ bool URammsRammpGen1CurbController::PlanAhead(FPlan& OutPlan, FString& OutReason
 
 bool URammsRammpGen1CurbController::Commit(const FPlan& Plan, FString& OutReason)
 {
+	StartRefusal.Reset();
 	EdgePoint = Plan.EdgePoint;
 	EdgeNormal = Plan.EdgeNormal;
 	StepCm = Plan.StepCm;
@@ -615,6 +788,7 @@ void URammsRammpGen1CurbController::Abort(const FString& Reason)
 {
 	if (IsCrossing())
 	{
+		PendingEnd = EEnd::Stopped;
 		Finish(true, Reason);
 	}
 	else if (bStartPending)
@@ -623,6 +797,8 @@ void URammsRammpGen1CurbController::Abort(const FString& Reason)
 		bStartPending = false;
 		Phase = ERammsRammpGen1CurbPhase::Aborted;
 		Status = Reason;
+		LastEnd = EEnd::Stopped;
+		bRetryable = false;
 	}
 }
 
@@ -639,6 +815,16 @@ double URammsRammpGen1CurbController::SimNow() const
 
 void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 {
+	// How it ended, and whether a start where it stands begins it again: nothing gone up for the curb yet.
+	LastEnd = !bAborted ? EEnd::Done : PendingEnd != EEnd::None ? PendingEnd
+		: bCancelling											? EEnd::Cancelled
+																: EEnd::Faulted;
+	PendingEnd = EEnd::None;
+	bRetryable = (LastEnd == EEnd::Faulted || LastEnd == EEnd::Stopped) && !CrossedAny();
+	RetryAt = BodyPos(Config.ChassisBody);
+	WaitWhy.Reset();
+	StartRefusal.Reset(); // a start refused while this one ran says nothing about how it ended
+	HeldSeconds = StalledSeconds = 0.0f;
 	if (Meter.IsValid() && Meter->IsOn())
 	{
 		Meter->End(SimNow());
@@ -739,6 +925,10 @@ void URammsRammpGen1CurbController::Begin()
 		Meter = MakePimpl<RammsRammpGen1Curb::FCrossingMeter>();
 	}
 	Meter->Begin(SimNow());
+	bRetryable = false;
+	WaitWhy.Reset();
+	HeldSeconds = StalledSeconds = FrontCreepCmS = 0.0f;
+	bChassisSpeedValid = false;
 	for (int32 i = 0; i < NumLifts; ++i)
 	{
 		// Each lift taken over at its last command (a loaded servo sits short of it: re-commanded where it sags, it
@@ -849,6 +1039,7 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 	PhaseSeconds = 0.0f;
 	PhaseValue = 0.0f;
 	TouchStage = 0;
+	FrontCreepCmS = 0.0f;
 	bool bOk = true;
 	switch (Next)
 	{
@@ -980,6 +1171,9 @@ void URammsRammpGen1CurbController::Step(float Dt)
 			PauseCrossing();
 		}
 		StepLifts(0.0f); // every lift held where it is
+		// Stopped by the rider, not held by anything: no stall, no wait.
+		bChassisSpeedValid = false;
+		StalledSeconds = HeldSeconds = 0.0f;
 		return;
 	}
 	if (bStickPaused)
@@ -989,6 +1183,10 @@ void URammsRammpGen1CurbController::Step(float Dt)
 	bLegsMoved = true;
 	PhaseSeconds += Dt;
 	StepLifts(Dt);
+	if (!WatchStall(Dt))
+	{
+		return;
+	}
 	if (bBlended && !bCancelling) // a cancelled crossing's lifts go back as a stepped one's do (Restore)
 	{
 		StepBlended(Dt);
@@ -1103,6 +1301,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 				// drive wheels up). Stopped there with the translators aft, it settles, then the drive wheels go down.
 				const bool	bThere = LaggingAlong(ESupport::Drive) >= PhaseValue;
 				const float W = bThere ? 0.0f : Config.CreepSpeedCmS / Config.FrontOmniRadiusCm;
+				FrontCreepCmS = bThere ? 0.0f : Config.CreepSpeedCmS;
 				Base->SetMotorVelocityCommand(Config.FrontOmniLeft, W);
 				Base->SetMotorVelocityCommand(Config.FrontOmniRight, W);
 				if (TouchStage == 0 && bThere && !Moving())
@@ -1487,25 +1686,46 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 	// the level it is leaving, and short of the curb until the chassis is at its crossing height.
 	const float FrontNear = -FrontLead;
 	float		Want = FrontNear > Config.BlendNearCm ? Config.ApproachSpeedCmS : Config.CrawlSpeedCmS;
-	const auto	StopAt = [this, &Want](float Lead, float At) { Want = FMath::Min(Want, FMath::Max(0.0f, Config.BlendStopGain * (At - Lead))); };
-	const auto	NotUp = [](EPair P) { return P == EPair::Near || P == EPair::Lifting; };
+	FString		HoldFor; // what a stop short of the edge holds it for, while one does
+	const auto	StopAt = [this, &Want, &HoldFor](float Lead, float At, const TFunctionRef<FString()>& For) {
+		 const float Cap = FMath::Max(0.0f, Config.BlendStopGain * (At - Lead));
+		 if (Cap < Want)
+		 {
+			 Want = Cap;
+			 if (Cap < 0.5f)
+			 {
+				 HoldFor = For();
+			 }
+		 }
+	};
+	const auto NotUp = [](EPair P) { return P == EPair::Near || P == EPair::Lifting; };
+	const auto ToGo = [this](const TCHAR* Who, ESupport S, float LevelZ, const TCHAR* Level) {
+		return FString::Printf(TEXT("the %s to clear %s (%.1f cm to go)"), Who, Level, FMath::Max(0.0f, Config.BlendClearCm - LowGap(S, LevelZ)));
+	};
+	const TCHAR* Upper = bClimb ? TEXT("the curb") : TEXT("the upper level");
 	if (!bRaised)
 	{
-		StopAt(FrontLead, -5.0f);
+		StopAt(FrontLead, -5.0f, [] { return FString(TEXT("the chassis to reach its crossing height")); });
 	}
 	if (bClimb)
 	{
 		if (PF == EPair::Near)
 		{
-			StopAt(FrontLead, -2.0f);
+			StopAt(FrontLead, -2.0f, [&] { return ToGo(TEXT("front omni wheels"), ESupport::Front, FarZ, Upper); });
 		}
 		if (NotUp(PD))
 		{
-			StopAt(LeadingAlong(ESupport::Drive) + RD, -1.0f);
+			StopAt(LeadingAlong(ESupport::Drive) + RD, -1.0f, [&] {
+				return PD == EPair::Lifting ? ToGo(TEXT("drive wheels"), ESupport::Drive, UpperZ, Upper)
+											: FString(TEXT("the front omni wheels to be down on the curb, before the drive wheels go up"));
+			});
 		}
 		if (NotUp(PR))
 		{
-			StopAt(LeadingAlong(ESupport::Rear) + RR, -3.0f);
+			StopAt(LeadingAlong(ESupport::Rear) + RR, -3.0f, [&] {
+				return PR == EPair::Lifting ? ToGo(TEXT("rear omni wheels"), ESupport::Rear, UpperZ, Upper)
+											: FString(TEXT("the drive wheels down on the curb and the translators aft, before the rear omni wheels go up"));
+			});
 		}
 	}
 	else
@@ -1513,16 +1733,41 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		// On the upper level a pair touches it under its hubs.
 		if (NotUp(PD))
 		{
-			StopAt(LeadingAlong(ESupport::Drive), -2.0f);
+			StopAt(LeadingAlong(ESupport::Drive), -2.0f, [&] {
+				return PD == EPair::Lifting ? ToGo(TEXT("drive wheels"), ESupport::Drive, UpperZ, Upper)
+											: FString(TEXT("the front omni wheels to be down on the road, before the drive wheels go up"));
+			});
 		}
 		if (NotUp(PR))
 		{
-			StopAt(LeadingAlong(ESupport::Rear), -2.0f);
+			StopAt(LeadingAlong(ESupport::Rear), -2.0f, [&] {
+				return PR == EPair::Lifting ? ToGo(TEXT("rear omni wheels"), ESupport::Rear, UpperZ, Upper)
+											: FString(TEXT("the drive wheels down on the road and the translators aft, before the rear omni wheels go up"));
+			});
 		}
 	}
 	if (BlendEnd == 3)
 	{
 		Want = 0.0f;
+		HoldFor.Reset();
+	}
+	// Held there, the status says what for; held with nothing moving -- no lift going anywhere, so nothing that could
+	// bring what it waits for -- for Config.WaitSeconds, it is not coming, and the crossing faults rather than wait out
+	// the phase's minute.
+	if (!HoldFor.IsEmpty() && BlendV <= 0.5f)
+	{
+		WaitWhy = HoldFor;
+		HeldSeconds = Moving() ? 0.0f : HeldSeconds + Dt;
+		if (HeldSeconds >= Config.WaitSeconds)
+		{
+			Finish(true, FString::Printf(TEXT("held short of the edge %.0f s for %s, with nothing moving"), HeldSeconds, *HoldFor));
+			return;
+		}
+	}
+	else
+	{
+		WaitWhy.Reset();
+		HeldSeconds = 0.0f;
 	}
 	const float MaxDv = Config.BlendAccelCmS2 * Dt;
 	BlendV += FMath::Clamp(Want - BlendV, -MaxDv, MaxDv);
@@ -1814,31 +2059,38 @@ void URammsRammpGen1CurbController::StepAssist(float Dt)
 	// Only as far ahead as it would start one: the side lines and the crossing's plan are not worked out for a curb
 	// further off. A refusal is the status (the debug log has each look's: they change with every look as the robot
 	// drives on).
-	FString Why;
-	FPlan	Plan;
-	if (!CanStart(Why) || !PlanAhead(Plan, Why, Assist.TriggerDistanceCm))
+	// Where a crossing stopped with nothing across, pushing forward again tries it again, from where it stands: the
+	// curb may be under the robot by now, so neither the reach nor the least distance applies.
+	const bool bRetry = RetryHere();
+	FString	   Why;
+	FPlan	   Plan;
+	if (!CanStart(Why) || !PlanAhead(Plan, Why, bRetry ? TNumericLimits<float>::Max() : Assist.TriggerDistanceCm))
 	{
 		if (!Why.StartsWith(TEXT("no curb ahead")))
 		{
-			Status = Why;
+			Status = StartRefusal = Why;
 			UE_LOG(LogRammsRammpGen1Curb, Verbose, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Why);
+		}
+		else
+		{
+			StartRefusal.Reset(); // no curb in reach: what stopped the last look no longer stands
 		}
 		return;
 	}
-	if (Plan.EdgeAheadCm > Assist.TriggerDistanceCm)
+	if (!bRetry && Plan.EdgeAheadCm > Assist.TriggerDistanceCm)
 	{
 		return;
 	}
-	if (Plan.EdgeAheadCm < Assist.MinDistanceCm)
+	if (!bRetry && Plan.EdgeAheadCm < Assist.MinDistanceCm)
 	{
-		Status = FString::Printf(TEXT("the curb ahead is %.0f cm away, closer than %.0f: back off to cross it"), Plan.EdgeAheadCm,
+		Status = StartRefusal = FString::Printf(TEXT("the curb ahead is %.0f cm away, closer than %.0f: back off to cross it"), Plan.EdgeAheadCm,
 			Assist.MinDistanceCm);
 		UE_LOG(LogRammsRammpGen1Curb, Verbose, TEXT("%s: curb assist: not crossing the curb ahead: %s"), *GetNameSafe(GetOwner()), *Status);
 		return;
 	}
 	if (!Commit(Plan, Why))
 	{
-		Status = Why;
+		Status = StartRefusal = Why;
 		AssistWatch->CrossingEnded(false);
 		return;
 	}
@@ -2103,7 +2355,12 @@ bool URammsRammpGen1CurbController::SurfaceZ(const FVector& At, float& OutZ) con
 		return false;
 	}
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(RammsRammpGen1Curb), false, GetOwner());
-	FHitResult			  Hit;
+	// Nor what it carries on actors of its own (the rider): a look from behind the drive wheels passes under the
+	// rider's feet, which are not the ground.
+	TArray<AActor*> Carried;
+	GetOwner()->GetAttachedActors(Carried, true, true);
+	Params.AddIgnoredActors(Carried);
+	FHitResult Hit;
 	if (!World->LineTraceSingleByChannel(Hit, At + FVector(0, 0, 60), At - FVector(0, 0, 120), ECC_Visibility, Params))
 	{
 		return false;

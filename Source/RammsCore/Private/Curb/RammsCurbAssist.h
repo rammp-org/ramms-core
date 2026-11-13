@@ -21,6 +21,13 @@ namespace RammsCurb
 	/** The switch as a control (group Curb, an Enum Off/On) showing bOn. */
 	FRammsControlAxis MakeAssistControl(bool bOn, int32 Order);
 
+	/** curb.status: what a crossing is doing and why, in words -- Paused, Waiting or Faulted and the reason. */
+	FName StatusControlId();
+
+	/** The status as a control (group Curb, a read-only Text control). Its value is how much the words need the
+	 *  rider (ERammsControlTextSeverity). */
+	FRammsControlAxis MakeStatusControl(int32 Order);
+
 	/**
 	 * When curb assist looks ahead, read once a tick while another drive mode has the robot: with the switch on and
 	 * the rider's stick forward past Stick.EngageFraction, every Assist.ScanIntervalSeconds. A crossing it started

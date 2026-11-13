@@ -427,6 +427,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	FString GetStatusText() const { return Status; }
 
+	/** What curb.status shows: what the crossing is doing, or how the last one ended, and why -- "Crossing up 12.0
+	 *  cm: ...", "Paused: ...", "Waiting: ...", "Faulted: ... Cross curb ahead to try again" -- and how much it needs
+	 *  the rider. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	FString GetStatusLine(ERammsControlTextSeverity& OutSeverity) const;
+
+	/** A fault before any wheel has begun to cross -- the far side not yet confirmed, a plan refused, a hold that
+	 *  lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to rest, half
+	 *  a second after. Not one about the robot itself (a tilt, near tipping, a runaway, a robot it cannot measure),
+	 *  and not on a terrain given rather than detected (BeginNegotiationOnTerrain). A second fault stays a fault;
+	 *  Cross curb ahead, or curb assist and the stick pushed forward again, tries again by hand. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	bool bRetryOnceAfterFault = true;
+
 	/** Seconds since BeginNegotiation (frozen once it ends). */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	float GetElapsedSeconds() const { return static_cast<float>(Elapsed); }
@@ -556,6 +570,7 @@ public:
 	virtual bool  ReleaseControl(FName Id) override;
 	virtual bool  ReadControl(FName Id, float& OutValue) const override;
 	virtual bool  ReadTarget(FName Id, float& OutTarget) const override;
+	virtual bool  ReadControlText(FName Id, FText& OutText) const override;
 	virtual void  GetClaimedMotorIds(TArray<FName>& OutIds) const override;
 	virtual int32 GetControlOrder() const override { return 5; }
 
@@ -1327,6 +1342,25 @@ private:
 	 *  crossing under way. */
 	TPimplPtr<RammsCurb::FAssistWatch> AssistWatch;
 	bool							   bAssistStarted = false;
+
+	/** A wheel has begun to cross (the per-wheel executor's, or the per-axle gait past its last Prepare). */
+	bool CrossingBegun() const;
+	/** The last crossing stopped (a fault, an abort) with no wheel across, and the robot stands within 50 cm of where
+	 *  it did: pushing forward again with curb assist on tries again, at whatever distance the edge is. */
+	bool RetryHere() const;
+	/** The pending retry (bRetryOnceAfterFault), once the robot has stood half a second. */
+	void StepRetry(float DeltaTime);
+	/** Finish as a fault about the robot itself (a tilt, a runaway, unmeasured, a reset): never tried again. */
+	void	  FaultHard(const FString& Why, bool bRampDown = true);
+	bool	  bFaultSafety = false;
+	bool	  bRetryable = false;
+	bool	  bRetryPending = false;
+	bool	  bRetriedOnce = false;	 // the retry was made: a second fault stays one
+	bool	  bTerrainGiven = false; // BeginNegotiationOnTerrain: development fault injection, never retried
+	double	  RetryWaitSeconds = 0.0;
+	FVector2D RetryAtXY = FVector2D::ZeroVector;
+	FString	  FirstFaultWhy;
+	FString	  EndStatus = TEXT("Idle"); // Status as the last crossing ended (Status's own start): a refusal since then replaces it
 	/** Another drive mode has the robot: with curb assist on and the rider
 	 *  driving forward, look for a curb to cross and begin it. */
 	void StepAssist(float DeltaTime);
