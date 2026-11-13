@@ -3580,7 +3580,10 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': beginning on a terrain given rather than detected (development: fault injection)"),
 		*GetNameSafe(GetOwner()));
 	const bool bBegun = BeginNegotiation(Profile, OutReason);
-	bTerrainGiven = bBegun;
+	if (bBegun)
+	{
+		bTerrainGiven = true; // a refusal (one already running) leaves the running crossing's as it is
+	}
 	return bBegun;
 #endif
 }
@@ -3673,7 +3676,6 @@ void URammsCurbNegotiationController::StepAssist(float DeltaTime)
 		UE_LOG(LogRammsCurb, Verbose, TEXT("[Curb] '%s': curb assist: %s"), *GetNameSafe(GetOwner()), *Status);
 		return;
 	}
-	bRetriedOnce = false; // the rider's own start: a fault in it is tried again once, as any
 	if (!BeginNegotiation(Profile, Why))
 	{
 		Status = Why;
@@ -3682,6 +3684,7 @@ void URammsCurbNegotiationController::StepAssist(float DeltaTime)
 		return;
 	}
 	bAssistStarted = true;
+	bRetriedOnce = false; // the rider's own start, made: a fault in it is tried again once, as any
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': curb assist began the crossing (edge %.0f cm ahead)"), *GetNameSafe(GetOwner()),
 		Profile.EdgeDistanceCm);
 }
@@ -3724,7 +3727,7 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	// Whether a start from here begins it again (no wheel has begun to cross), and whether it does so by itself: a
 	// fault, the first, not about the robot itself, on terrain it detected.
 	const bool bBegun = CrossingBegun();
-	bRetryable = EndPhase != ERammsCurbPhase::Done && !bBegun;
+	bRetryable = EndPhase != ERammsCurbPhase::Done && !bBegun && !bFaultSafety;
 	bRetryPending = EndPhase == ERammsCurbPhase::Faulted && bRetryable && bRetryOnceAfterFault && !bFaultSafety && !bRetriedOnce && !bTerrainGiven;
 	if (EndPhase == ERammsCurbPhase::Done)
 	{
@@ -3743,9 +3746,16 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	}
 	Phase = EndPhase;
 	Status = EndStatus = Why;
-	if (bAssistStarted && AssistWatch.IsValid())
+	// One that did not finish, however it was begun (curb assist, Cross curb ahead, a script): curb assist starts no
+	// other until the stick is let go. Only for a crossing curb assist began, a held stick would otherwise restart one
+	// begun by hand at once, past the safety faults and the one retry.
+	if (!AssistWatch.IsValid())
 	{
-		AssistWatch->CrossingEnded(EndPhase == ERammsCurbPhase::Done); // one that did not finish: no other until the stick is let go
+		AssistWatch = MakePimpl<RammsCurb::FAssistWatch>();
+	}
+	if (EndPhase != ERammsCurbPhase::Done || bAssistStarted)
+	{
+		AssistWatch->CrossingEnded(EndPhase == ERammsCurbPhase::Done);
 	}
 	bAssistStarted = false;
 	const FString Line = FString::Printf(TEXT("t=%5.2fs %s: %s"), Elapsed, PhaseName(EndPhase), *Why);
@@ -7483,10 +7493,13 @@ bool URammsCurbNegotiationController::TriggerControl(FName Id)
 {
 	if (Id == NegotiateControlId())
 	{
-		FString Reason;
-		bRetriedOnce = false; // the rider's own start: a fault in it is tried again once, as any
-		bRetryPending = false;
-		return NegotiateStepAhead(Reason);
+		FString	   Reason;
+		const bool bStarted = NegotiateStepAhead(Reason);
+		if (bStarted)
+		{
+			bRetriedOnce = false; // the rider's own start, made: a fault in it is tried again once, as any (a refusal leaves the count)
+		}
+		return bStarted;
 	}
 	if (Id == AbortControlId())
 	{

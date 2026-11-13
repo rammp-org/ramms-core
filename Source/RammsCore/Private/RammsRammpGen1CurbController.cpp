@@ -560,10 +560,11 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 			Phase = ERammsRammpGen1CurbPhase::Aborted;
 			Status = TEXT("another drive mode was selected");
 			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: curb crossing aborted: %s"), *GetNameSafe(GetOwner()), *Status);
-			if (bAssistStarted && AssistWatch.IsValid())
+			if (!AssistWatch.IsValid())
 			{
-				AssistWatch->CrossingEnded(false);
+				AssistWatch = MakePimpl<RammsCurb::FAssistWatch>();
 			}
+			AssistWatch->CrossingEnded(false); // however it was begun: no other until the stick is let go
 			bAssistStarted = false;
 		}
 		bStartPending = false;
@@ -833,9 +834,15 @@ void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 	}
 	Phase = bAborted ? ERammsRammpGen1CurbPhase::Aborted : ERammsRammpGen1CurbPhase::Done;
 	Status = Why;
-	if (bAssistStarted && AssistWatch.IsValid())
+	// One that did not finish, however it was begun: curb assist starts no other until the stick is let go (only for one
+	// it began, a held stick would restart one begun by hand at once).
+	if (!AssistWatch.IsValid())
 	{
-		AssistWatch->CrossingEnded(!bAborted); // one that did not finish: no other until the stick is let go
+		AssistWatch = MakePimpl<RammsCurb::FAssistWatch>();
+	}
+	if (bAborted || bAssistStarted)
+	{
+		AssistWatch->CrossingEnded(!bAborted);
 	}
 	bAssistStarted = bCancelling = bStickPaused = false;
 	// Braked where it stands, it hands back on the next tick: the other mode holds it from there. Stopped with
