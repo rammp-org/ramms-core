@@ -57,6 +57,10 @@ public:
 	 *  default. */
 	virtual bool ReadTarget(FName Id, float& OutTarget) const { return false; }
 
+	/** The words a Text control reports now (ERammsControlKind::Text). False =
+	 *  unknown, or nothing to say. */
+	virtual bool ReadControlText(FName Id, FText& OutText) const { return false; }
+
 	/** RobotBase motor Ids this contributor drives (not exposed as raw motors). */
 	virtual void GetClaimedMotorIds(TArray<FName>& OutIds) const {}
 
