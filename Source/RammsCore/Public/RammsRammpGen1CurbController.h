@@ -17,6 +17,10 @@ namespace RammsCurb
 	class FStickGate;
 	class FAssistWatch;
 } // namespace RammsCurb
+namespace RammsRammpGen1Curb
+{
+	class FCrossingMeter;
+} // namespace RammsRammpGen1Curb
 
 /** Where a RAMMP Gen1 curb crossing is (curb.phase). */
 UENUM(BlueprintType)
@@ -221,6 +225,91 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
 	/** Descents: the drive wheels start up off the upper level when their hubs are this far from the edge. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.0"))
 	float BlendLeadDownCm = 10.0f;
+
+	// --- the measurements (GetStats): where the rider is, and the frame's underside, in the chassis frame
+	/** The body the rider sits on (the owner's scene component by name); the chassis when it has none. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements")
+	FName SeatBody = "seat";
+	/** The rider's centre of mass from that body's origin, in its frame (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements")
+	FVector RiderOffsetCm = FVector(0.0, 0.0, 25.0);
+	/** The frame's underside, a flat box under the chassis: from FrameBackCm to FrameFrontCm along it, FrameBottomCm
+	 *  from its origin, FrameHalfWidthCm either side (the MJCF's chassis_frame and caster-arm mount boxes). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements")
+	float FrameBackCm = -5.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements")
+	float FrameFrontCm = 59.6f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements")
+	float FrameBottomCm = -3.5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Measurements", meta = (ClampMin = "0.0"))
+	float FrameHalfWidthCm = 16.5f;
+};
+
+/**
+ * How the last RAMMP Gen1 crossing went (URammsRammpGen1CurbController::GetStats), measured on every tick
+ * (simulated time) from its start to its end -- done, stopped or cancelled -- and kept until the next one starts.
+ * Lengths cm, attitudes deg, accelerations m/s^2. ramms-sim's curb_sequence.py prints the same measures for the
+ * MuJoCo reference.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsRammpGen1CurbStats
+{
+	GENERATED_BODY()
+
+	/** Seconds from the start to the end. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Time")
+	float CrossingSeconds = 0.0f;
+	/** Seconds from the front omni wheels reaching the edge to the rear omni wheels down on the far level (0 when it
+	 *  did not get there). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Time")
+	float EdgeToRearDownSeconds = 0.0f;
+	/** Seconds from the front omni wheels reaching the edge to the end. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Time")
+	float EdgeToEndSeconds = 0.0f;
+	/** Times the chassis's measured speed stayed under 2 cm/s for 0.2 s or more, once it had first moved (5 cm/s). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Time")
+	int32 Stops = 0;
+	/** Seconds under 2 cm/s, once it had first moved. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Time")
+	float SecondsStopped = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Chassis")
+	float MaxAbsPitchDeg = 0.0f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Chassis")
+	float MaxAbsRollDeg = 0.0f;
+	/** Largest inclination from level, whichever way it leans: atan(sqrt(tan^2 pitch + tan^2 roll)). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Chassis")
+	float MaxInclinationDeg = 0.0f;
+	/** Largest pitch rate (deg/s), low-passed at about 50 ms. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Chassis")
+	float MaxPitchRateDegS = 0.0f;
+
+	/** The rider's acceleration (at Config.RiderOffsetCm on Config.SeatBody; gravity left out, low-passed at about
+	 *  50 ms, since the wheels' and rollers' contacts shake the chassis at the physics step's scale): its peak, fore/aft
+	 *  along the heading and vertical, and their RMS over the crossing. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Rider")
+	float PeakRiderAccelMS2 = 0.0f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Rider")
+	float PeakRiderForeAftAccelMS2 = 0.0f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Rider")
+	float PeakRiderVerticalAccelMS2 = 0.0f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Rider")
+	float RmsRiderAccelMS2 = 0.0f;
+
+	/** Least stability margin: how far inside the wheels on the ground (each within Config.TouchToleranceCm of the
+	 *  surface under it) the centre of mass of the config's mass model stands, straight down; and in which phase. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
+	float MinStabilityMarginCm = 0.0f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
+	ERammsRammpGen1CurbPhase MinMarginPhase = ERammsRammpGen1CurbPhase::Idle;
+	/** Least height of the frame's underside (Config.Frame*) over the curb's edge while it is over it (negative: into
+	 *  it), and in which phase; bFrameMeasured false when the frame never got over the edge. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
+	float MinFrameClearanceCm = 0.0f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
+	ERammsRammpGen1CurbPhase MinClearancePhase = ERammsRammpGen1CurbPhase::Idle;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb|Margins")
+	bool bFrameMeasured = false;
 };
 
 /**
@@ -309,6 +398,11 @@ public:
 	/** The last crossing's outcome, or why it stopped. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	FString GetStatus() const { return Status; }
+
+	/** How the last crossing went (or the one under way, so far): its times, stops, attitude, the rider's
+	 *  acceleration and the least margins. Logged when it ends. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
+	FRammsRammpGen1CurbStats GetStats() const;
 
 	/** The curb ahead's step (cm, positive up) and the crossing height the last start chose. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
@@ -436,6 +530,11 @@ private:
 
 	/** The rear-lift rule, as measured (logged when it holds); bOutDriveAbove: a drive wheel is above the far level. */
 	bool CheckRearLift(FString& OutWhy, bool& bOutDriveAbove);
+	/** This tick's measurements (GetStats), while a crossing runs. */
+	void   MeasureTick();
+	double SimNow() const; // the backend's clock, or the world's when it keeps none
+
+	TPimplPtr<RammsRammpGen1Curb::FCrossingMeter> Meter;
 
 	// The rolling crossing (Style Blended). Each pair's state, by ESupport.
 	enum class EPair : uint8

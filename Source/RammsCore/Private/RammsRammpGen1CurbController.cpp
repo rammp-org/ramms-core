@@ -5,6 +5,7 @@
 #include "Curb/RammsCurbAssist.h"
 #include "Curb/RammsCurbStick.h"
 #include "Curb/RammsRammpGen1Curb.h"
+#include "Curb/RammsRammpGen1CurbMeter.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "RammsControlIds.h"
@@ -389,6 +390,10 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 	{
 		if (IsCrossing())
 		{
+			if (Meter.IsValid())
+			{
+				Meter->End(SimNow());
+			}
 			Phase = ERammsRammpGen1CurbPhase::Aborted;
 			Status = TEXT("another drive mode was selected");
 			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: curb crossing aborted: %s"), *GetNameSafe(GetOwner()), *Status);
@@ -621,8 +626,25 @@ void URammsRammpGen1CurbController::Abort(const FString& Reason)
 	}
 }
 
+FRammsRammpGen1CurbStats URammsRammpGen1CurbController::GetStats() const
+{
+	return Meter.IsValid() ? Meter->GetStats() : FRammsRammpGen1CurbStats();
+}
+
+double URammsRammpGen1CurbController::SimNow() const
+{
+	const double Now = Base ? Base->GetSimulationTime() : -1.0;
+	return Now >= 0.0 ? Now : (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
+}
+
 void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 {
+	if (Meter.IsValid() && Meter->IsOn())
+	{
+		Meter->End(SimNow());
+		PhaseLog.Add(TEXT("        ") + Meter->Summary());
+		UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
+	}
 	Phase = bAborted ? ERammsRammpGen1CurbPhase::Aborted : ERammsRammpGen1CurbPhase::Done;
 	Status = Why;
 	if (bAssistStarted && AssistWatch.IsValid())
@@ -691,6 +713,7 @@ void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick Ti
 	if (IsCrossing())
 	{
 		Step(Dt);
+		MeasureTick();
 		return;
 	}
 	// Nothing to run (finished, stopped, or the mode selected by hand): hand back, unless a crossing stopped with
@@ -711,6 +734,11 @@ void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick Ti
 
 void URammsRammpGen1CurbController::Begin()
 {
+	if (!Meter.IsValid())
+	{
+		Meter = MakePimpl<RammsRammpGen1Curb::FCrossingMeter>();
+	}
+	Meter->Begin(SimNow());
 	for (int32 i = 0; i < NumLifts; ++i)
 	{
 		// Each lift taken over at its last command (a loaded servo sits short of it: re-commanded where it sags, it
@@ -1169,6 +1197,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 		case ERammsRammpGen1CurbPhase::RearDown:
 			if (StepTouchdown(Dt))
 			{
+				Meter->MarkRearDown(SimNow());
 				bLevel = true;
 				EnterPhase(bClimb ? ERammsRammpGen1CurbPhase::Recentre : ERammsRammpGen1CurbPhase::ClearEdge);
 			}
@@ -1432,6 +1461,7 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		PR = EPair::Far;
 		bLevel = true;
 		BlendRearOn = Base->GetSimulationTime();
+		Meter->MarkRearDown(SimNow());
 		BlendEnd = 1;
 		StartMove({ { TranslatorL, StartCmd[TranslatorL] }, { TranslatorR, StartCmd[TranslatorR] } }, 0.0f);
 		NoteBlended(EPhase::Recentre, TEXT("rear omni wheels down: translators back (rolling)"));
@@ -2236,6 +2266,74 @@ bool URammsRammpGen1CurbController::CheckRearLift(FString& OutWhy, bool& bOutDri
 		Check.PastEdgeCm[0], Check.PastEdgeCm[1], Check.TranslatorCm[0], Check.TranslatorCm[1], Check.ComAheadOfAxleCm));
 	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
 	return true;
+}
+
+void URammsRammpGen1CurbController::MeasureTick()
+{
+	const USceneComponent* Chassis = Body(Config.ChassisBody);
+	if (!Meter.IsValid() || !Meter->IsOn() || !Chassis)
+	{
+		return;
+	}
+	const FTransform				 T = Chassis->GetComponentTransform();
+	RammsRammpGen1Curb::FMeterSample S;
+	S.TimeS = SimNow();
+	S.ChassisPos = T.GetLocation();
+	const FVector F = Chassis->GetForwardVector();
+	S.Heading = FVector2D(F.X, F.Y).GetSafeNormal();
+	S.PitchDeg = FMath::RadiansToDegrees(PitchRad());
+	S.RollDeg = static_cast<float>(T.Rotator().Roll);
+	const USceneComponent* Seat = Body(Config.SeatBody);
+	S.RiderPos = (Seat ? Seat->GetComponentTransform() : T).TransformPosition(Config.RiderOffsetCm);
+	S.Phase = Phase;
+
+	// The wheels on the ground: each hub within the touch tolerance of the surface under it, touching it there.
+	const TPair<FName, float> Wheels[] = { { Config.DriveWheelLeftBody, Config.DriveWheelRadiusCm }, { Config.DriveWheelRightBody, Config.DriveWheelRadiusCm },
+		{ Config.FrontOmniLeftBody, Config.FrontOmniRadiusCm }, { Config.FrontOmniRightBody, Config.FrontOmniRadiusCm },
+		{ Config.RearOmniLeftBody, Config.RearOmniRadiusCm }, { Config.RearOmniRightBody, Config.RearOmniRadiusCm } };
+	for (const TPair<FName, float>& W : Wheels)
+	{
+		const FVector Hub = BodyPos(W.Key);
+		float		  Ground = 0.0f;
+		if (SurfaceZ(Hub, Ground) && Hub.Z - W.Value - Ground <= Config.TouchToleranceCm)
+		{
+			S.Contacts.Add(FVector2D(Hub.X, Hub.Y));
+		}
+	}
+	// The centre of mass, from the config's mass model: the chassis-fixed mass and each drive assembly at its hub.
+	const FVector Fixed = T.TransformPosition(FVector(Config.FixedComAheadCm, 0.0, 0.0));
+	const FVector Off = F * Config.DriveAssemblyComFromHubCm;
+	const FVector L = BodyPos(Config.DriveWheelLeftBody) + Off, R = BodyPos(Config.DriveWheelRightBody) + Off;
+	const float	  Mass = Config.FixedMassKg + 2.0f * Config.DriveAssemblyMassKg;
+	if (Mass > 0.0f)
+	{
+		const FVector Com = (Config.FixedMassKg * Fixed + Config.DriveAssemblyMassKg * (L + R)) / Mass;
+		S.ComXY = FVector2D(Com.X, Com.Y);
+	}
+	// The frame's underside over the edge: on each side, where its bottom edge crosses the edge line, its height over
+	// the upper level.
+	const float UpperZ = FMath::Max(NearZ, FarZ);
+	for (const float Side : { -Config.FrameHalfWidthCm, Config.FrameHalfWidthCm })
+	{
+		const FVector Back = T.TransformPosition(FVector(Config.FrameBackCm, Side, Config.FrameBottomCm));
+		const FVector Front = T.TransformPosition(FVector(Config.FrameFrontCm, Side, Config.FrameBottomCm));
+		const float	  A0 = Along(Back), A1 = Along(Front);
+		if ((A0 <= 0.0f) == (A1 <= 0.0f) || FMath::IsNearlyEqual(A0, A1))
+		{
+			continue;
+		}
+		const float Clear = static_cast<float>(FMath::Lerp(Back.Z, Front.Z, A0 / (A0 - A1))) - UpperZ;
+		if (!S.bFrameOverEdge || Clear < S.FrameClearanceCm)
+		{
+			S.bFrameOverEdge = true;
+			S.FrameClearanceCm = Clear;
+		}
+	}
+	Meter->Add(S);
+	if (LeadingAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= 0.0f)
+	{
+		Meter->MarkFrontAtEdge(S.TimeS);
+	}
 }
 
 void URammsRammpGen1CurbController::StopLevelling()
