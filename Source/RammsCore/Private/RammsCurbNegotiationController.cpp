@@ -3587,11 +3587,7 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 
 void URammsCurbNegotiationController::Abort()
 {
-	if (bRetryPending)
-	{
-		bRetryPending = false;
-		Status = EndStatus = FirstFaultWhy + TEXT(" (not tried again: stopped)");
-	}
+	CancelRetry(TEXT("stopped"));
 	if (IsNegotiating())
 	{
 		Finish(ERammsCurbPhase::Aborted, TEXT("aborted"));
@@ -3737,7 +3733,8 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	if (bRetryPending)
 	{
 		FirstFaultWhy = Why;
-		RetryWaitSeconds = 0.0;
+		RetryWaitSeconds = RetryElapsedSeconds = 0.0;
+		RetryLastTime = -1.0;
 	}
 	bFaultSafety = false;
 	{
@@ -3864,7 +3861,10 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			StepLog.Add(HandLine);
 			UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *HandLine);
 			StopWheels(/*bRelease=*/true);
-			SetActiveModeThroughSelector(Next);
+			{
+				TGuardValue<bool> Own(bOwnHandBack, true); // a refusal at rest hands back and may still be tried again
+				SetActiveModeThroughSelector(Next);
+			}
 			// The slope's pull handed over with the robot: a mode that holds it
 			// still takes it up at once instead of finding it as the robot sags
 			// back (IRammsDriveMode::SeedGroundSlope).
@@ -3989,18 +3989,25 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 	CommandWheels(DriveSpeed, Tuning.HeadingGain * HeadingErrorRad);
 	if (bAtRest)
 	{
-		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving));
+		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving), /*bAtRest=*/true);
 	}
 	else if (StopElapsed > StopTimeoutSeconds)
 	{
 		const bool bLegsLate = FMath::Abs(Moving) < RammsCurb::StopSpeedCmS && Executor && Executor->IsHalted() && !Executor->AreLegsHome();
+		// The chassis measured at rest with a leg short of where the halt sent it is at rest: a retry plans from the
+		// legs as measured. Not at rest after the time allowed is not.
 		EndStopping(bLegsLate ? FString::Printf(TEXT("at rest, but a leg not on its target after %.0f s: the wheels braked"), StopTimeoutSeconds)
-							  : FString::Printf(TEXT("not at rest after %.0f s (%.1f cm/s measured): the wheels braked"), StopTimeoutSeconds, Moving));
+							  : FString::Printf(TEXT("not at rest after %.0f s (%.1f cm/s measured): the wheels braked"), StopTimeoutSeconds, Moving),
+			/*bAtRest=*/bLegsLate);
 	}
 }
 
-void URammsCurbNegotiationController::EndStopping(const FString& Why)
+void URammsCurbNegotiationController::EndStopping(const FString& Why, bool bAtRest)
 {
+	if (!bAtRest)
+	{
+		CancelRetry(Why); // braked to rest is the only way out of a stop that a retry may follow
+	}
 	bStopping = false;
 	DriveSpeed = 0.0f;
 	StopWheels(/*bRelease=*/false);
@@ -4039,6 +4046,10 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 	if (!bActive)
 	{
 		bHandBackPending = false;
+		if (!bOwnHandBack)
+		{
+			CancelRetry(TEXT("another drive mode was selected")); // the rider's choice of mode stands
+		}
 		if (IsNegotiating())
 		{
 			// The other mode takes the robot over at once: nothing to brake for.
@@ -6283,6 +6294,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				// handed back as after a reset mid-crossing.
 				HoldWheels();
 				bHandBackPending = true;
+				CancelRetry(TEXT("the simulation was reset"));
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while the wheels were held: held again where they are"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -6326,6 +6338,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				{
 					Executor->End();
 				}
+				CancelRetry(TEXT("the simulation was reset"));
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while braking to rest"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -7359,7 +7372,16 @@ bool URammsCurbNegotiationController::CrossingBegun() const
 	{
 		return Executor && Executor->IsRunning() && Executor->HasCrossingBegun();
 	}
-	return Steps.IsValidIndex(StepIndex) && Steps[StepIndex].Phase != ERammsCurbPhase::Approach && Steps[StepIndex].Phase != ERammsCurbPhase::Prepare;
+	// Per axle: any step reached so far past an approach or a prepare. Each axle has its own Prepare, so the current
+	// step alone does not say whether an earlier axle has already gone over.
+	for (int32 i = 0; i <= StepIndex && i < Steps.Num(); ++i)
+	{
+		if (Steps[i].Phase != ERammsCurbPhase::Approach && Steps[i].Phase != ERammsCurbPhase::Prepare)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 bool URammsCurbNegotiationController::RetryHere() const
@@ -7374,11 +7396,60 @@ void URammsCurbNegotiationController::FaultHard(const FString& Why, bool bRampDo
 	Finish(ERammsCurbPhase::Faulted, Why, bRampDown);
 }
 
+void URammsCurbNegotiationController::CancelRetry(const FString& Why)
+{
+	if (!bRetryPending)
+	{
+		return;
+	}
+	bRetryPending = false;
+	Status = EndStatus = FString::Printf(TEXT("%s (not tried again: %s)"), *FirstFaultWhy, *Why);
+	const FString Line = FString::Printf(TEXT("t=%5.2fs not trying again: %s"), Elapsed, *Why);
+	StepLog.Add(Line);
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': %s"), *GetNameSafe(GetOwner()), *Line);
+}
+
 void URammsCurbNegotiationController::StepRetry(float DeltaTime)
 {
-	RetryWaitSeconds += DeltaTime;
-	if (RetryWaitSeconds < 0.5)
+	// Only from measured rest: the chassis, looked at on the simulation's clock where it keeps one, under
+	// StopSpeedCmS for half a second. One not at rest within RetryRestTimeoutSeconds is not made.
+	constexpr double RetryRestSeconds = 0.5;
+	constexpr double RetryRestTimeoutSeconds = 10.0;
+	FVector2D		 Centre, Forward;
+	if (!LocateChassis(Centre, Forward))
 	{
+		CancelRetry(TEXT("the robot cannot be located"));
+		return;
+	}
+	if (FVector2D::Distance(Centre, RetryAtXY) > 50.0)
+	{
+		// Handed back (a plan refused at rest) and driven on by the rider: not here, where it stopped.
+		CancelRetry(TEXT("the robot was driven away from where it stopped"));
+		return;
+	}
+	const URammsRobotBaseComponent* Base = EnsureBase();
+	const double					SimNow = Base ? Base->GetSimulationTime() : -1.0;
+	const double					Now = SimNow >= 0.0 ? SimNow : (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
+	if (RetryLastTime >= 0.0 && Now > RetryLastTime)
+	{
+		const double Dt = Now - RetryLastTime;
+		const double Speed = FVector2D::Distance(Centre, RetryLastXY) / Dt;
+		RetryWaitSeconds = Speed < RammsCurb::StopSpeedCmS ? RetryWaitSeconds + Dt : 0.0;
+		RetryElapsedSeconds += Dt;
+	}
+	else if (RetryLastTime >= 0.0 && Now < RetryLastTime)
+	{
+		CancelRetry(TEXT("the simulation was reset"));
+		return;
+	}
+	RetryLastTime = Now;
+	RetryLastXY = Centre;
+	if (RetryWaitSeconds < RetryRestSeconds)
+	{
+		if (RetryElapsedSeconds > RetryRestTimeoutSeconds)
+		{
+			CancelRetry(FString::Printf(TEXT("not at rest within %.0f s"), RetryRestTimeoutSeconds));
+		}
 		return;
 	}
 	bRetryPending = false;

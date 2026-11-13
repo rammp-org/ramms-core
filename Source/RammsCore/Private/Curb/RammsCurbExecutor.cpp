@@ -1681,7 +1681,8 @@ namespace RammsCurb
 			{
 				Fault(FString::Printf(TEXT("the base %.1f deg off its planned attitude for %.2f s (pitch %+.1f, roll %+.1f deg; planned %+.1f / %+.1f), "
 										   "more than AttitudeFaultDeg %.1f"),
-					Err, AttitudeOff.Seconds, Measure.AttitudeDeg.X, Measure.AttitudeDeg.Y, PlannedAttitude.X, PlannedAttitude.Y, T.AttitudeFaultDeg));
+						  Err, AttitudeOff.Seconds, Measure.AttitudeDeg.X, Measure.AttitudeDeg.Y, PlannedAttitude.X, PlannedAttitude.Y, T.AttitudeFaultDeg),
+					/*bSafety=*/true);
 				TickHalted(Measure, Level, Out, Dt, /*bWheelsMeasured=*/true);
 				return;
 			}

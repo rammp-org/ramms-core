@@ -434,10 +434,12 @@ public:
 	FString GetStatusLine(ERammsControlTextSeverity& OutSeverity) const;
 
 	/** A fault before any wheel has begun to cross -- the far side not yet confirmed, a plan refused, a hold that
-	 *  lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to rest, half
-	 *  a second after. Not one about the robot itself (a tilt, near tipping, a runaway, a robot it cannot measure),
-	 *  and not on a terrain given rather than detected (BeginNegotiationOnTerrain). A second fault stays a fault;
-	 *  Cross curb ahead, or curb assist and the stick pushed forward again, tries again by hand. */
+	 *  lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to rest, once
+	 *  it has stood measured at rest for half a second. Not one about the robot itself (a tilt, near tipping, the
+	 *  base off its planned attitude, a runaway, a robot it cannot measure), and not on a terrain given rather than
+	 *  detected (BeginNegotiationOnTerrain). A stop that does not end at rest, another drive mode selected, Stop, or
+	 *  a reset cancels it. A second fault stays a fault; Cross curb ahead, or curb assist and the stick pushed
+	 *  forward again, tries again by hand. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	bool bRetryOnceAfterFault = true;
 
@@ -1080,7 +1082,7 @@ private:
 	/** After a fault or an abort: one tick of braking the robot to rest, the
 	 *  legs holding their targets; the wheels braked once it is at rest. */
 	void  StepStopping(float DeltaTime);
-	void  EndStopping(const FString& Why);
+	void  EndStopping(const FString& Why, bool bAtRest = false); // anything but bAtRest cancels a pending retry
 	void  SetActiveModeThroughSelector(FName ModeId);
 	float AxleProgress(ERammsCurbAxle Axle) const;
 
@@ -1348,16 +1350,22 @@ private:
 	/** The last crossing stopped (a fault, an abort) with no wheel across, and the robot stands within 50 cm of where
 	 *  it did: pushing forward again with curb assist on tries again, at whatever distance the edge is. */
 	bool RetryHere() const;
-	/** The pending retry (bRetryOnceAfterFault), once the robot has stood half a second. */
+	/** The pending retry (bRetryOnceAfterFault), once the robot has stood measured at rest half a second. */
 	void StepRetry(float DeltaTime);
+	/** Drop a pending retry, saying why it was not made. */
+	void CancelRetry(const FString& Why);
 	/** Finish as a fault about the robot itself (a tilt, a runaway, unmeasured, a reset): never tried again. */
 	void	  FaultHard(const FString& Why, bool bRampDown = true);
 	bool	  bFaultSafety = false;
 	bool	  bRetryable = false;
 	bool	  bRetryPending = false;
-	bool	  bRetriedOnce = false;	 // the retry was made: a second fault stays one
-	bool	  bTerrainGiven = false; // BeginNegotiationOnTerrain: development fault injection, never retried
-	double	  RetryWaitSeconds = 0.0;
+	bool	  bRetriedOnce = false;		 // the retry was made: a second fault stays one
+	bool	  bTerrainGiven = false;	 // BeginNegotiationOnTerrain: development fault injection, never retried
+	double	  RetryWaitSeconds = 0.0;	 // measured at rest for so long
+	double	  RetryElapsedSeconds = 0.0; // since it became pending: one not at rest in time is not made
+	double	  RetryLastTime = -1.0;		 // the last look at the chassis (s, the simulation's clock where it keeps one)
+	FVector2D RetryLastXY = FVector2D::ZeroVector;
+	bool	  bOwnHandBack = false; // Finish handing the robot back itself: not a rider's mode change
 	FVector2D RetryAtXY = FVector2D::ZeroVector;
 	FString	  FirstFaultWhy;
 	FString	  EndStatus = TEXT("Idle"); // Status as the last crossing ended (Status's own start): a refusal since then replaces it
