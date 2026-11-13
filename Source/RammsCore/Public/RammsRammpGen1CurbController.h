@@ -43,6 +43,17 @@ enum class ERammsRammpGen1CurbPhase : uint8
 	Aborted	  UMETA(DisplayName = "Aborted"),
 };
 
+/** How a RAMMP Gen1 crossing moves (curb.style). */
+UENUM(BlueprintType)
+enum class ERammsRammpGen1CurbStyle : uint8
+{
+	/** It stops for each step: each pair is lifted, carried over and set down in turn, every touchdown found in small steps. */
+	Stepped UMETA(DisplayName = "Stop and step"),
+	/** It rolls through the crossing, moving each pair as it reaches the edge, as the real robot's own sequence does.
+	 *  Needs the powered front omni wheels (they keep it rolling while the drive wheels are up); without them it steps. */
+	Blended UMETA(DisplayName = "Rolling"),
+};
+
 /** One support's height table (see RammsRammpGen1Curb::FSupportTable): its wheels' bottom height (cm, chassis
  *  level) from the reference pose as its joint turns (rad), unloaded. Written from the MJCF. */
 USTRUCT(BlueprintType)
@@ -187,6 +198,29 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
 	 *  re-centre after a climb, or the rear sags as the drive wheels move forward and the frame meets the curb. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Crossing", meta = (ClampMin = "0.0"))
 	float LevelGain = 8.0f;
+
+	// --- the rolling crossing (Style Blended): the real robot's own sequence, from videos of it crossing a 15 cm curb,
+	// keeps moving at about the translators' speed and takes each pair over in 2-2.5 s
+	/** Its speed through the crossing (cm/s); ApproachSpeedCmS until the front omni wheels are BlendNearCm from the edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "1.0"))
+	float CrawlSpeedCmS = 12.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.0"))
+	float BlendNearCm = 30.0f;
+	/** How fast its speed changes (cm/s^2). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "1.0"))
+	float BlendAccelCmS2 = 50.0f;
+	/** Held short of the edge for a pair not up yet: cm/s per cm left to where it must stop. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.1"))
+	float BlendStopGain = 2.0f;
+	/** A lifted pair is ready for the edge once its lower wheel is this far above the upper level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.0"))
+	float BlendClearCm = 1.0f;
+	/** Climbs: the drive wheels start up when they are this far from the curb's face. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.0"))
+	float BlendLeadUpCm = 5.0f;
+	/** Descents: the drive wheels start up off the upper level when their hubs are this far from the edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Blended", meta = (ClampMin = "0.0"))
+	float BlendLeadDownCm = 10.0f;
 };
 
 /**
@@ -203,13 +237,22 @@ struct RAMMSCORE_API FRammsRammpGen1CurbConfig
  * until they go down over the edge. A finished crossing puts every lift back where it found it (each lift's last
  * command), so the robot ends in the stance it started in.
  *
+ * Style Blended (the default; curb.style) is how the real robot's own sequence crosses, and the reference's
+ * --sequence blended: the same order and rule, but it keeps rolling at Config.CrawlSpeedCmS and moves each pair as it
+ * reaches the edge -- held short of it, slowing to a stop, only while a pair reaching it is not up yet. Each
+ * touchdown is one move, to contact and the preload. The drive wheels go over with the translators where they are and
+ * are drawn aft once down, as it rolls on to the rear's step; the translators re-centre as it rolls on after it. The
+ * phase (curb.phase) is the step begun last: pairs overlap. It needs the powered front omni wheels, which keep it
+ * rolling while the drive wheels are up; without them a crossing steps.
+ *
  * The rider's stick drives a crossing (Stick): it goes on only while drive.forward is held, pauses when it is let go,
  * and before any wheel has lifted for the curb, held back, cancels it. Curb assist (Assist, curb.assist) starts one when
  * the rider drives forward at a curb it can cross: within Config.MaxApproachDeg of square, the edge within
  * Assist.TriggerDistanceCm.
  *
  * Controls: curb.negotiate (start, at a curb ahead within ScanAheadCm), curb.abort, curb.phase, curb.assist (Off/On;
- * a button on it flips it), and while a crossing has the robot drive.forward / turn / strafe (the stick). It is the
+ * a button on it flips it), curb.style (Stop and step / Rolling: the next crossing's), and while a crossing has the
+ * robot drive.forward / turn / strafe (the stick). It is the
  * "curb" drive mode: starting selects it (through the owner's URammsDriveModeSelector when it has one), and a
  * finished or stopped crossing hands back to ReturnModeId once both drive wheels are on the ground. Stopped
  * with them up, nothing in that mode would hold the robot, so it holds the wheels (the powered front omni
@@ -246,6 +289,11 @@ public:
 	/** Curb assist (curb.assist, Off/On): on, driving forward at a curb this controller can cross starts the crossing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FRammsCurbAssist Assist;
+
+	/** How a crossing moves (curb.style): rolling through it as the real robot does, or stopping for each step. A
+	 *  crossing under way keeps the style it started with. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	ERammsRammpGen1CurbStyle Style = ERammsRammpGen1CurbStyle::Blended;
 
 	/** Start a crossing of the curb ahead. False, with the reason, when it cannot. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
@@ -386,6 +434,40 @@ private:
 	bool							   FrontOffGround() const; // both front omni wheels clear of the ground under them
 	void							   StopLevelling();		   // the rear's levelling trim into its lift's command, and off
 
+	/** The rear-lift rule, as measured (logged when it holds); bOutDriveAbove: a drive wheel is above the far level. */
+	bool CheckRearLift(FString& OutWhy, bool& bOutDriveAbove);
+
+	// The rolling crossing (Style Blended). Each pair's state, by ESupport.
+	enum class EPair : uint8
+	{
+		Near,	  // on the level it is leaving
+		Lifting,  // going up off it
+		Up,		  // its lower wheel clear of the upper level
+		Lowering, // touching down on the far level
+		Pressing, // the drive wheels set down again (drawn aft, they carried less)
+		Far		  // down on the far level
+	};
+	struct FBlendTouch
+	{
+		bool  bActive = false;
+		bool  bPreload = false; // contact made: on past it by the preload
+		float LevelZ = 0.0f;
+		float PlanCm = 0.0f; // the support's height for contact, as measured when it began
+	};
+	/** Rolling at SpeedCmS: the drive wheels (unless free) at it plus the translators' speed, the front omni wheels' hubs at it. */
+	void RollAt(float SpeedCmS);
+	/** The log; Display becomes the phase. */
+	void NoteBlended(ERammsRammpGen1CurbPhase Display, const FString& What);
+
+	void  BeginBlended();
+	void  StepBlended(float Dt);
+	void  StartBlendTouch(ESupport S, float LevelZ);
+	bool  StepBlendTouch(ESupport S);				   // true the tick it finishes
+	float LowGap(ESupport S, float LevelZ) const;	   // the lower wheel's bottom above LevelZ
+	float CmdHeight(ESupport S) const;				   // its table height at the lift's command
+	float TimeToTouch(ESupport S, float LevelZ) const; // its lift's time to lower it onto LevelZ at full speed (s)
+	void  RearGateBlended(float LiftCm);
+
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
 
@@ -426,6 +508,18 @@ private:
 	float PhaseSeconds = 0.0f;
 	bool  bLevel = false; // trim the rear lift against the pitch
 	float RearTrimRad = 0.0f;
+
+	// The rolling crossing.
+	bool		bBlended = false; // this crossing rolls (Style Blended, the front omni wheels powered)
+	EPair		PairState[3] = { EPair::Near, EPair::Near, EPair::Near };
+	FBlendTouch BlendTouch[3];
+	bool		bRaised = false;	 // the chassis at its crossing height
+	bool		bDriveFree = false;	 // the drive wheels freewheel: their arms are lifting them off the ground
+	bool		bPressed = false;	 // the drive wheels have been set down again once
+	int32		BlendEnd = 0;		 // after the rear is down: 1 translators back, 2 to the stance, 3 stopping
+	float		BlendV = 0.0f;		 // the speed it rolls at (cm/s)
+	double		BlendFrontAt = -1.0; // when the front omni wheels reached the edge, and the rear's touchdown (s)
+	double		BlendRearOn = -1.0;
 
 	// Touchdown.
 	ESupport TouchSupport = ESupport::Drive;

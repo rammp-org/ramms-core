@@ -270,6 +270,13 @@ bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("assist: on"), C->ApplyControl(FName("curb.assist"), 1.0f) && C->Assist.bEnabled);
 	TestTrue(TEXT("assist: the panel steps from it"), C->ReadTarget(FName("curb.assist"), Value) && Value == 1.0f);
 	TestTrue(TEXT("assist: a button flips it off"), C->TriggerControl(FName("curb.assist")) && !C->Assist.bEnabled);
+	// The crossing's style: on the surface, a two-way switch; rolling at first; set, read back.
+	const FRammsControlAxis* StyleAxis = Surface.Axes.FindByPredicate([](const FRammsControlAxis& A) { return A.Id == FName("curb.style"); });
+	TestTrue(TEXT("curb.style"), StyleAxis && StyleAxis->Kind == ERammsControlKind::Enum && !StyleAxis->bReadOnly && StyleAxis->EnumLabels.Num() == 2);
+	TestTrue(TEXT("style: rolling at first"), C->Style == ERammsRammpGen1CurbStyle::Blended && C->ReadControl(FName("curb.style"), Value) && Value == 1.0f);
+	TestTrue(TEXT("style: stop and step"), C->ApplyControl(FName("curb.style"), 0.0f) && C->Style == ERammsRammpGen1CurbStyle::Stepped);
+	TestTrue(TEXT("style: the panel steps from it"), C->ReadTarget(FName("curb.style"), Value) && Value == 0.0f);
+	TestTrue(TEXT("style: rolling again"), C->ApplyControl(FName("curb.style"), 1.0f) && C->Style == ERammsRammpGen1CurbStyle::Blended);
 	// The stick: the drive controls are the curb mode's only while it has the robot.
 	TestFalse(TEXT("inactive: no drive.forward"), Ids.Contains(FName("drive.forward")));
 	TestFalse(TEXT("inactive: drive.forward not taken"), C->ApplyControl(FName("drive.forward"), 1.0f));
