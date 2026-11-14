@@ -4405,7 +4405,7 @@ bool FRammsCurbExecutorFinishInPlace::RunTest(const FString& Parameters)
 				TestTrue(FString::Printf(TEXT("%s: finished in place (from %.1f cm)"), *How, R.InPlaceAtCm), R.InPlaceAtCm >= 0.0);
 				TestTrue(FString::Printf(TEXT("%s: stopped within its braking distance of there (%.1f cm, %.1f allowed)"), *How, R.InPlaceTravelCm, Braking),
 					R.InPlaceTravelCm <= Braking);
-				TestTrue(FString::Printf(TEXT("%s: at rest (%.2f cm/s)"), *How, R.FinalSpeedCmS), R.FinalSpeedCmS < 0.5);
+				TestTrue(FString::Printf(TEXT("%s: at rest (%.2f cm/s)"), *How, R.FinalSpeedCmS), R.FinalSpeedCmS < RammsCurb::StopSpeedCmS);
 				TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *How), R.KeepOffViolations, 0);
 				TestEqual(FString::Printf(TEXT("%s: lifted wheels into the terrain"), *How), R.IntoTerrain, 0);
 				TestEqual(FString::Printf(TEXT("%s: ticks with a forbidden set off the ground"), *How), R.Counts.ForbiddenTicks, 0);

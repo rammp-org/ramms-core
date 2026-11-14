@@ -3102,14 +3102,17 @@ namespace RammsCurb
 		}
 
 		// Finishing in place, the plan's end is reached where the robot stands once
-		// every command has reached the pose it ends in: the chassis' height, the
-		// base's attitude, the centre wheels home, every support leg on its
-		// target. (The seat and the legs following their commands are Done's own
-		// checks, below, as at the plan's end.)
+		// it has braked to rest (the rider let go: the drive mode is handed a robot
+		// that has stopped, not one still rolling out its braking) and every
+		// command has reached the pose it ends in: the chassis' height, the base's
+		// attitude, the centre wheels home, every support leg on its target. (The
+		// seat and the legs following their commands are Done's own checks, below,
+		// as at the plan's end.)
 		bool bFinishPoseReached = false;
 		if (bFinishInPlace)
 		{
-			bFinishPoseReached = bCaughtUp && FMath::Abs(BCmd - BaseTo) <= ExecCaughtUpCm && (FinishAttitude - FinishEndAttitude).IsNearlyZero(1e-6);
+			const bool bBrakedToRest = VCmd <= 1e-6 && (!Measure.bSpeedValid || FMath::Abs(Measure.SpeedCmS) < StopSpeedCmS);
+			bFinishPoseReached = bBrakedToRest && bCaughtUp && FMath::Abs(BCmd - BaseTo) <= ExecCaughtUpCm && (FinishAttitude - FinishEndAttitude).IsNearlyZero(1e-6);
 			for (int32 Side = 0; Side < 2 && bFinishPoseReached; ++Side)
 			{
 				const int32 C = Centre[Side];
