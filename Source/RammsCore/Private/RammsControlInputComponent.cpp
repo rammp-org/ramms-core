@@ -2,6 +2,7 @@
 
 #include "RammsControlInputComponent.h"
 #include "RammsControlInputResolve.h"
+#include "RammsRobotControlSurfaceComponent.h"
 #include "RammsControlSink.h"
 #include "RammsControlSurfaceProvider.h"
 #include "EnhancedInputComponent.h"
@@ -39,6 +40,21 @@ float RammsControlInput::StepCentre(bool& bAwait, float Value)
 	}
 	bAwait = FMath::Abs(Value) > CentreBand;
 	return 0.0f;
+}
+
+bool RammsControlInput::TakeCentreRequest(int32 Requests, int32& InOutSeen, bool bHeld, bool& bAwait)
+{
+	if (Requests == InOutSeen)
+	{
+		return false;
+	}
+	InOutSeen = Requests;
+	if (!bHeld)
+	{
+		return false;
+	}
+	bAwait = true;
+	return true;
 }
 
 URammsControlInputComponent::URammsControlInputComponent()
@@ -180,6 +196,44 @@ void URammsControlInputComponent::ResolveSlots()
 		for (const FName& Id : Dropped)
 		{
 			LetGo(Slot, Id);
+		}
+	}
+}
+
+void URammsControlInputComponent::TakeCentreRequests(FSlot& Slot)
+{
+	// A stick or axis binding held while a centre is asked of a control it
+	// drives (URammsRobotControlSurfaceComponent::RequireCentre: a curb
+	// crossing handing back with the stick held back of centre) sends that
+	// control nothing more until it has been back to centre -- as when what it
+	// drives changes -- and what it held there is let go.
+	const URammsRobotControlSurfaceComponent* Surface = Cast<URammsRobotControlSurfaceComponent>(Sink);
+	const URammsControlInputMap*			  Map = Slot.Map.Get();
+	if (!Surface || !Map || !Map->Bindings.IsValidIndex(Slot.Index))
+	{
+		return;
+	}
+	const ERammsControlInputMode Mode = Map->Bindings[Slot.Index].Mode;
+	if (Mode != ERammsControlInputMode::Stick && Mode != ERammsControlInputMode::Axis)
+	{
+		return;
+	}
+	for (int32 a = 0; a < 3; ++a)
+	{
+		for (const FName& Id : Slot.Ids[a])
+		{
+			const int32 Requests = Surface->GetCentreRequests(Id);
+			int32*		Seen = Slot.CentreSeen.Find(Id);
+			if (!Seen)
+			{
+				// First seen: what was asked before is nothing to this binding.
+				Slot.CentreSeen.Add(Id, Requests);
+				continue;
+			}
+			if (RammsControlInput::TakeCentreRequest(Requests, *Seen, Slot.bHeld, Slot.bAwaitCentre[a]) && Slot.Commanded.Contains(Id))
+			{
+				LetGo(Slot, Id);
+			}
 		}
 	}
 }
@@ -393,6 +447,10 @@ void URammsControlInputComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		return;
 	}
 	ResolveSlots(); // picks up surface rebuilds (new contributors, registry loads)
+	for (FSlot& Slot : Slots)
+	{
+		TakeCentreRequests(Slot);
+	}
 
 	// Held injections: re-feed each action every tick until it expires.
 	if (Injections.Num() > 0)
@@ -539,6 +597,10 @@ void URammsControlInputComponent::OnTriggered(int32 SlotIndex, const FInputActio
 	}
 	const FVector Value = Instance.GetValue().Get<FVector>();
 	const float	  Dt = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f;
+	// A centre asked of what it drives since it last looked (before it is
+	// taken to be held now: a press that begins after the ask has nothing to
+	// wait out).
+	TakeCentreRequests(Slot);
 	// Held until Completed, which IncrementRate is not bound to.
 	Slot.bHeld = B.Mode != ERammsControlInputMode::IncrementRate;
 

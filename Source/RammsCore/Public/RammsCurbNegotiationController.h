@@ -214,10 +214,42 @@ namespace RammsCurb
  * Stick.CancelHoldSeconds, the robot at rest, does -- either way handing
  * the robot back to the drive mode it came from (phase Aborted), which
  * takes the legs back to its stance. Once a wheel has begun to cross,
- * nothing but forward moves the robot: the plan is laid along one heading
- * and cannot be backed out of. At Done the stick carries on into the drive
- * mode handed back to. The per-axle gait does not read the stick, so it is
- * not begun while the stick is required.
+ * nothing but forward moves the robot along the plan: it is laid along one
+ * heading and cannot be backed out of.
+ *
+ * Finishing in place: once the crossing (up or down) is far enough on that
+ * the rear wheels can touch down on the far surface -- nothing left of it
+ * needs the robot to travel (RammsCurb::FExecutor::CanFinishInPlace) -- the
+ * stick out of forward (let go, sideways or back) for
+ * Stick.FinishInPlaceConfirmSeconds no longer pauses the crossing but
+ * finishes it where the robot stands: braked to rest as a pause brakes it,
+ * the wheels still up set down where they are, the centre wheels walked home,
+ * the chassis, the base and the seat taken to the plan's end pose, each at
+ * its own rate; then handed back to the drive mode as any finish is ("...,
+ * finished in place"). A pause until the confirm, from which forward goes on
+ * along the plan; once begun, it holds to the end whatever the stick (forward
+ * again would pull the legs, off the plan's schedule, back to it). Held
+ * forward throughout, nothing changes: the pose is finished along the moving
+ * path.
+ *
+ * At Done the stick carries on into the drive mode handed back to: held
+ * forward, it drives on; held to the side, the mode turns (differential) or
+ * strafes (holonomic) as its own stick mapping has it -- the crossing pairs
+ * the stick's X as that mode does (StickSideAxis), so a stick held through
+ * the hand-back is not made to come back to centre first. Never pulled back:
+ * with the stick reading back the crossing is not handed back at all (the
+ * mode would reverse the robot over the curb just crossed) but held, at rest,
+ * "Finished -- release the stick to drive", until it leaves back
+ * (RammsCurb::HandBackWaits); and handed back with the stick held at all
+ * backward of centre (back and to the side), drive.forward is not passed on
+ * -- not carried across by the selector, and a gamepad stick or key the
+ * player's input bindings drive (URammsControlInputComponent) must come back
+ * to centre before it drives the robot forward or back again
+ * (RammsCurb::HandBackNeedsCentre,
+ * URammsRobotControlSurfaceComponent::RequireCentre); its sideways part
+ * drives on. (A source that sets drive.forward itself -- a touch panel, a
+ * script -- is not held to that: only the wait on back.) The per-axle gait
+ * does not read the stick, so it is not begun while the stick is required.
  *
  * It is a drive mode ("curb"): while it runs, the other modes stand down and
  * it owns the wheels and cranks. Starting a manoeuvre selects it through the
@@ -1461,6 +1493,9 @@ private:
 	double	StickPausedSeconds = 0.0;
 	double	PausedStillSeconds = 0.0;
 	FString StickWhy;
+	/** Done, but the hand-back held while the stick reads back
+	 *  (RammsCurb::HandBackWaits; logged once). */
+	bool bHandBackWaiting = false;
 	/** What a stick's X drives while this mode has the robot (the control it
 	 *  pairs drive.forward with): as in the mode the crossing took the robot
 	 *  from -- drive.turn on a differential drive, drive.strafe on a holonomic
