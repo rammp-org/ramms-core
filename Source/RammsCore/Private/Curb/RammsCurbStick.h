@@ -59,6 +59,11 @@ namespace RammsCurb
 		/** How long (s) the stick has read back without a break; 0 when it does
 		 *  not. */
 		double GetBackSeconds() const { return Intent == EStickIntent::Back ? Seconds : 0.0; }
+		/** How long (s) the stick has read anything but forward -- let go,
+		 *  sideways or back, whichever, changing among them -- without a break;
+		 *  0 while it reads forward (through a waver shorter than ReleaseSeconds
+		 *  too). From Reset, the time since. */
+		double GetOutOfForwardSeconds() const { return OffSeconds; }
 
 	private:
 		EStickIntent Intent = EStickIntent::LetGo;
@@ -66,6 +71,7 @@ namespace RammsCurb
 		/** Held forward, how long (s) it has been out of forward. */
 		double OutSeconds = 0.0;
 		double Seconds = 0.0;
+		double OffSeconds = 0.0;
 	};
 
 	/** Where a crossing is, for what the stick does to it. */
@@ -79,6 +85,15 @@ namespace RammsCurb
 		bool bLevelled = false;
 		/** The robot is at rest: its command at 0 and its chassis measured still. */
 		bool bAtRest = false;
+		/** Nothing left of the crossing needs the robot to travel: every wheel is
+		 *  across, or off the ground past its window, over the far surface where it
+		 *  may be set down -- the rear wheels, the last to cross, can touch down
+		 *  there (RammsCurb::FExecutor::CanFinishInPlace; a RAMMP Gen2 per-wheel
+		 *  crossing only). */
+		bool bRearCanLand = false;
+		/** The crossing is finishing in place already (EStickAction::FinishInPlace
+		 *  taken on an earlier tick). */
+		bool bFinishingInPlace = false;
 	};
 
 	/** What the stick does to a crossing on a tick. */
@@ -90,6 +105,13 @@ namespace RammsCurb
 		Pause,
 		/** End the crossing and hand the robot back to its drive mode. */
 		Cancel,
+		/** Brake to rest and finish the crossing where the robot stands: the
+		 *  landings left, the legs and the seat to the plan's end pose at their
+		 *  own rates; then end it and hand back as a finish does -- the drive mode
+		 *  takes the stick from there (HandBackWaits, HandBackNeedsCentre). Once
+		 *  taken it holds to the end, whatever the stick: going on along the plan
+		 *  from a pose the legs have left would pull them back to it. */
+		FinishInPlace,
 	};
 
 	struct FStickDecision
@@ -97,20 +119,71 @@ namespace RammsCurb
 		EStickAction Action = EStickAction::Pause;
 		/** Go: the share of the plan's speed the stick asks. */
 		double Scale = 0.0;
-		/** Pause: the status line, saying why and what the stick does next;
-		 *  Cancel: why, for the log. */
+		/** Pause and FinishInPlace: the status line, saying why and what the
+		 *  stick does next; Cancel: why, for the log. */
 		FString Why;
 	};
 
+	/** The status line while a crossing finishes in place (EStickAction::
+	 *  FinishInPlace). */
+	const TCHAR* FinishingInPlaceWhy();
+
 	/**
-	 * What the stick, as Gate reads it now, does to a crossing at Stage. Held
-	 * forward, go at its share. Before any leg has moved for the curb, back or
-	 * sideways read for ReleaseSeconds cancels. Levelled in with no wheel yet
-	 * lifted, back read for CancelHoldSeconds with the robot at rest cancels.
-	 * Anything else -- let go, or any direction once a wheel has begun to
-	 * cross -- pauses.
+	 * What the stick, as Gate reads it now, does to a crossing at Stage. Once
+	 * finishing in place, that, whatever the stick. Held forward, go at its
+	 * share. With the rear wheels able to touch down on the far surface (nothing
+	 * left needs the robot to travel), anything else -- let go, sideways or back
+	 * -- read for FinishInPlaceConfirmSeconds without a break finishes in place
+	 * (a robot paused short of there that rolled on into it, the stick long let
+	 * go, at once); until then it pauses, and forward again goes on along the
+	 * plan. Before any leg has moved for the curb, back or sideways read for
+	 * ReleaseSeconds cancels. Levelled in with no wheel yet lifted, back read
+	 * for CancelHoldSeconds with the robot at rest cancels. Anything else -- let
+	 * go, or any direction once a wheel has begun to cross -- pauses.
 	 */
 	FStickDecision DecideStick(const FRammsCurbStick& Settings, const FStickGate& Gate, const FStickStage& Stage);
+
+	/**
+	 * At the end of a crossing (Done), whether its hand-back to the drive mode
+	 * waits on the stick: while it reads back. The robot is never handed to a
+	 * drive mode with the stick pulled back -- that mode would reverse it at
+	 * once, back over the curb it has just crossed (or into its face): the
+	 * crossing holds it where it is ("Finished -- release the stick to drive")
+	 * until the stick leaves back.
+	 */
+	bool HandBackWaits(const FStickGate& Gate);
+	/** The status line meanwhile. */
+	const TCHAR* HandBackWaitWhy();
+
+	/**
+	 * Handed back with the stick's forward at Forward (-1..1, as drive.forward
+	 * carries it): whether drive.forward must come back to centre before it
+	 * drives the mode handed back to -- held at all backward, beyond the
+	 * controls' centre band (RammsControlInput::CentreBand), it must: what a
+	 * stick held back-and-sideways commands is not handed on; its sideways part
+	 * is. Centred or forward, nothing waits: a stick held forward drives on.
+	 */
+	bool HandBackNeedsCentre(double Forward);
+
+	/** What a crossing's drive controls are paired with (FRammsControlAxis::
+	 *  PairedAxis), so that a stick's X drives what it drives in the mode the
+	 *  crossing took the robot from. */
+	struct FStickPairs
+	{
+		FName Forward;
+		FName Turn;
+		FName Strafe;
+	};
+	/**
+	 * The pairs for SideAxis, the control that mode pairs drive.forward with:
+	 * drive.strafe (a holonomic drive) pairs drive.forward with drive.strafe and
+	 * the other way round, drive.turn with none; anything else -- drive.turn (a
+	 * differential drive), none -- pairs drive.forward with drive.turn and back,
+	 * drive.strafe with none. A stick held to one side through the take-over
+	 * and the hand-back then drives the same control throughout, and never
+	 * waits for centre on a change of what its X drives.
+	 */
+	FStickPairs StickPairs(FName SideAxis);
 
 	/** A crossing's hold time (s) one tick of Dt on: counted while it holds,
 	 *  kept as it is while the rider's stick pauses it (letting go and pushing

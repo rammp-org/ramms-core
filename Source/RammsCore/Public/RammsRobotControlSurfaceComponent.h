@@ -176,6 +176,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Control Surface", meta = (WorldContext = "WorldContextObject"))
 	static TArray<UObject*> FindControlSurfaces(const UObject* WorldContextObject);
 
+	/** Have every input binding (URammsControlInputComponent: a stick, or an
+	 *  axis key) that is held while it drives Id send it nothing more until it
+	 *  has been back to centre -- the wait a held stick makes when what it
+	 *  drives changes, asked for where what it drives has not changed but a
+	 *  command held for one owner must not reach the next: a curb crossing
+	 *  handing the robot back with the stick held back of centre. A binding not
+	 *  held then is not affected. Sources that set Id themselves (panels,
+	 *  scripts) are not held to it. */
+	void RequireCentre(FName Id);
+	/** How many times RequireCentre has been asked for Id (0 never): a binding
+	 *  that saw fewer while held waits for centre. */
+	int32 GetCentreRequests(FName Id) const;
+
 	// --- IRammsControlSurfaceProvider ---------------------------------------
 	virtual FRammsControlSurface GetControlSurface_Implementation() const override;
 	virtual int32				 GetControlSurfaceVersion_Implementation() const override;
@@ -226,6 +239,8 @@ private:
 	mutable TMap<FName, FHold>	 Holds;
 	/** Last value commanded per control (any source); cleared when a Position / Velocity axis is released. */
 	TMap<FName, float> Targets;
+	/** RequireCentre's asks, per control. */
+	TMap<FName, int32> CentreRequests;
 	/** Append Actor's contributor-bearing components, then those of its child
 	 *  actors, depth-first and bounded. */
 	void GatherContributorComponents(AActor* Actor, int32 Depth, TSet<AActor*>& Visited,

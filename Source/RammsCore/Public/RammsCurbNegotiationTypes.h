@@ -279,6 +279,18 @@ struct RAMMSCORE_API FRammsCurbSeat
  * drive mode; levelled in with no wheel yet lifted, held back for
  * CancelHoldSeconds at rest does the same, the legs taken back to the drive
  * stance; once a wheel has begun to cross, nothing but forward moves it.
+ *
+ * A RAMMP Gen2 per-wheel crossing only (not Gen1): once it is far enough on
+ * that the rear wheels can touch down on the far surface (nothing left of it
+ * needs the robot to travel), the stick out of forward -- let go, sideways or
+ * back -- for FinishInPlaceConfirmSeconds finishes the crossing in place
+ * instead of pausing it: braked to rest, the rest of the crossing made where
+ * the robot stands, then handed back to the drive mode, which takes the stick
+ * as it is held. Until then it is a pause, and forward again goes on along the
+ * plan; once begun, it holds to the end whatever the stick. The robot is never
+ * handed back with the stick pulled back (it waits, "Finished -- release the
+ * stick to drive"), and a stick held at all backward at the hand-back must
+ * come back to centre before it drives the robot forward or back again.
  */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbStick
@@ -319,6 +331,15 @@ struct RAMMSCORE_API FRammsCurbStick
 	 *  with the robot at rest cancels the crossing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0"))
 	float CancelHoldSeconds = 0.75f;
+
+	/** A RAMMP Gen2 per-wheel crossing, past where the rear wheels can touch
+	 *  down: the stick out of forward (let go, sideways or back, once it has
+	 *  been let go after ReleaseSeconds) this long (s) without a break finishes
+	 *  the crossing in place -- a pause until then, from which forward goes on.
+	 *  Not on a tremor or a bump, which once finishing in place could not be
+	 *  taken back. Not read by a RAMMP Gen1 crossing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stick", meta = (ClampMin = "0.0"))
+	float FinishInPlaceConfirmSeconds = 0.5f;
 };
 
 /**

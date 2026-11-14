@@ -108,6 +108,30 @@
  * rear tyres are FinishClearance past the edge and the legs are where the
  * plan ends them), Done; Halted (a fault or Halt: stopping).
  *
+ * Finishing in place (FinishInPlace: the rider let go once nothing left needs
+ * the robot to travel -- every wheel across, or off the ground past its window
+ * over the far surface): the robot is braked to rest as a pause brakes it, and
+ * the rest of the crossing is made where it stands rather than along the plan.
+ * The wheels still up are set down where they are (their landing no longer
+ * waits on the plan's position). From the first tick -- not only once they
+ * are down -- the chassis goes to the plan's end height over the far surface
+ * and the base to its end attitude (no faster than TiltRateDegPerSec), and
+ * the seat to its end, each at its own rate: the chassis must come down for
+ * a landing leg at its reach (along the plan, the travel would bring it
+ * down), and the end pose is the drive stance's, every wheel on one plane, so
+ * the base turns towards level over the wheels that carry it. That pose,
+ * with a wheel still up, is not one the plan verified: the live margin and
+ * attitude checks guard it, as everywhere (a margin under its floor, or the
+ * base off its attitude, faults). Only the centre wheels' walk home waits for
+ * every wheel to be down (the plan's end has them all down). Done there, as
+ * at the plan's end, once the robot is at rest with every wheel loaded on the
+ * far side, the commands have reached that pose (the chassis and the support
+ * legs within SettleTolerance of theirs) and the legs, the seat and the base
+ * have followed -- or, whatever is not there, FinishInPlaceWaitSeconds after
+ * the commands could have got there (logged). The runtime checks run on
+ * throughout; no lift, hold or planned stop is made, and the stick no longer
+ * moves the robot (SetOperator).
+ *
  * The runtime checks (RammsCurbSafety.h), every tick once the crossing runs:
  *
  *  - the terrain monitor: traces ahead of and under each wheel
@@ -246,6 +270,16 @@ namespace RammsCurb
 	 *  Settle, at most DoneAttitudeWaitSeconds. */
 	constexpr double DoneAttitudeToleranceDeg = 0.75;
 	constexpr double DoneAttitudeWaitSeconds = 1.5;
+	/** Finishing in place, how long (s) Done waits -- once the robot is at rest
+	 *  with every wheel down, the base's attitude command at the end, and the
+	 *  rest of the finish's commands have had the time their own rates need --
+	 *  for the commands, the legs, the seat and the base to be where the
+	 *  crossing ends, before it ends it as it stands (logged). */
+	constexpr double FinishInPlaceWaitSeconds = 2.0;
+	/** Finishing in place with no speed measured (FExecMeasure::bSpeedValid
+	 *  false), the robot is taken to be at rest once its command has been at 0
+	 *  this long (s): the drive's lag (DriveLagSeconds) and room. */
+	constexpr double UnmeasuredRestSeconds = 0.5;
 
 	/** The time it takes a loaded wheel to come off the ground once its lift
 	 *  begins (s): a descent's deadline. A lift still on the ground after
@@ -577,6 +611,10 @@ namespace RammsCurb
 		int32 MarginHolds = 0;
 		int32 AttitudeSlowTicks = 0;
 		int32 ReplanAsks = 0;
+		/** Finishing in place, wheels set down short of the plan's landing
+		 *  (FWheelPlan::SLand): where they were, the robot no longer travelling
+		 *  on to it. */
+		int32 InPlaceLandings = 0;
 		/** The furthest the terrain monitor's probes found a surface off its
 		 *  plane (cm, signed), on which plane (0 near, 1 far; INDEX_NONE for
 		 *  none) and how far ahead of its wheel (cm); the furthest the base
@@ -631,9 +669,25 @@ namespace RammsCurb
 		 *  with no lift and no level-in begun (fewer wheels are never up than the
 		 *  plan has), those under way finished, and no hold made or timed: the
 		 *  robot is not waiting on the crossing. Scale 1, not paused (as Begin
-		 *  leaves it): the plan's own. */
+		 *  leaves it): the plan's own. Finishing in place, the stick no longer
+		 *  matters: ignored. */
 		void SetOperator(double Scale, bool bPaused);
 		bool IsOperatorPaused() const { return bOperatorPaused; }
+
+		/** Nothing left of the crossing needs the robot to travel: every wheel is
+		 *  on the far side (planted, loading or being set down there) or off the
+		 *  ground past its window (Lifting or Clear, LandedPastCm at DDown or on),
+		 *  over the far surface where it may be set down -- the rear wheels, the
+		 *  last to cross, can touch down there. False halted, done, or not
+		 *  running. */
+		bool CanFinishInPlace() const;
+		/** From the next tick, finish the crossing where the robot stands (see
+		 *  above): braked to rest, the landings left made, the legs and the seat
+		 *  taken to the plan's end pose; Done there. Why is logged. Latched until
+		 *  the next Begin. False, nothing changed, where CanFinishInPlace is not
+		 *  (true at once when already finishing in place). */
+		bool FinishInPlace(const FString& Why);
+		bool IsFinishingInPlace() const { return bFinishInPlace; }
 
 		/** Stop the crossing (an abort, or a fault outside the executor): from
 		 *  the next tick the robot is braked to rest at Deceleration (twice that
@@ -717,6 +771,14 @@ namespace RammsCurb
 			double SeatX = 0.0;
 		};
 		FPlanAt Between(double SAt) const;
+		/** Finishing in place, the pose the legs and the seat are taken to this
+		 *  tick, Dt (s) on from the last: the plan's at its end (SEnd) -- the
+		 *  chassis as high over the far surface where the robot stands as the plan
+		 *  has it there, the seat where the plan ends it -- its attitude reached
+		 *  from where the plan had it when the finish began (FinishAttitude) no
+		 *  faster than TiltRateDegPerSec. OutEndAttitude: that end attitude (deg;
+		 *  pitch, roll). */
+		FPlanAt StepFinishPose(const FExecMeasure& Measure, double Dt, FVector2D& OutEndAttitude);
 		/** The plan's speed at travel SAt (cm/s), read no nearer its origin (or
 		 *  the planned stop the robot last rested at, SResume) than its first
 		 *  sample past it: a robot at or behind the origin of a plan made at rest
@@ -949,6 +1011,19 @@ namespace RammsCurb
 		/** The rider's stick (SetOperator). */
 		double OperatorScale = 1.0;
 		bool   bOperatorPaused = false;
+		/** Finishing in place (FinishInPlace), and the base's attitude the legs
+		 *  are taking it to meanwhile (deg; pitch, roll), on its way from the
+		 *  plan's where the finish began to the plan's end. */
+		bool	  bFinishInPlace = false;
+		FVector2D FinishAttitude = FVector2D::ZeroVector;
+		/** Finishing in place: when (s since Begin) the robot was at rest with
+		 *  every wheel down and the base's attitude command at the end (-1 not
+		 *  yet), and how long (s) from then Done waits for the rest
+		 *  (FinishInPlaceWaitSeconds). */
+		double FinishSentAt = -1.0;
+		double FinishWaitFor = 0.0;
+		/** How long (s) the drive command has been at 0. */
+		double CmdStillSeconds = 0.0;
 		/** What last held the robot under the plan's speed (logged when it
 		 *  changes), and when. */
 		FString		   SlowBy;
@@ -1026,6 +1101,17 @@ namespace RammsCurb
 		int32  BegunWhilePaused = 0;
 		double PausedTravelCm = 0.0;
 		double PausedRestSeconds = 0.0;
+		/** Let go for good (FExecDryRunOptions::FinishInPlaceAtTravelCm): where
+		 *  along the plan (cm) the stick was let go (-1 never), where the executor
+		 *  took up finishing in place (-1 never), and how far (cm) the robot went
+		 *  on from there. And where the robot ended along the plan (cm of
+		 *  travel); and where along it the executor first could have finished in
+		 *  place (FExecutor::CanFinishInPlace; -1 never). */
+		double LetGoAtCm = -1.0;
+		double InPlaceAtCm = -1.0;
+		double InPlaceTravelCm = 0.0;
+		double FinalTravelCm = 0.0;
+		double CanFinishFromCm = -1.0;
 		/** The least measured dynamic margin over the run (cm). */
 		double MinMarginCm = TNumericLimits<double>::Max();
 		/** The largest base tilt (deg) the support legs' errors give. */
@@ -1167,6 +1253,14 @@ namespace RammsCurb
 		double PauseAtTravelCm = TNumericLimits<double>::Max();
 		double PauseSeconds = 0.0;
 		double StickScale = 1.0;
+		/** The stick let go for good once the robot has gone this far along the
+		 *  plan (cm; the largest double never), as the controller's stick then
+		 *  has it (RammsCurb::DecideStick): paused until the executor may finish
+		 *  in place (CanFinishInPlace) with the stick let go for
+		 *  FinishInPlaceConfirmSeconds (FRammsCurbStick's), then finishing in
+		 *  place -- and from there held forward again, which changes nothing. */
+		double FinishInPlaceAtTravelCm = TNumericLimits<double>::Max();
+		double FinishInPlaceConfirmSeconds = 0.0;
 		/** A re-plan the executor asks for (TakeReplanAsk) is made, from the
 		 *  robot as it stands then on the plan's terrain re-fitted, and adopted,
 		 *  as the controller does -- ReplanDelaySeconds later (the controller
