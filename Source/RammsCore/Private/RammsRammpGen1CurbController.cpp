@@ -190,6 +190,19 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 	StyleAxis.Order = 5;
 	OutSurface.Add(StyleAxis);
 
+	// How the next crossing moves: a switch the panel steps (a crossing under way keeps the style it started with).
+	FRammsControlAxis StyleAxis;
+	StyleAxis.Id = RammpGen1CurbStyleId();
+	StyleAxis.Group = Group;
+	StyleAxis.DisplayName = NSLOCTEXT("Ramms", "RammpGen1CurbStyle", "Curb crossing style");
+	StyleAxis.Kind = ERammsControlKind::Enum;
+	StyleAxis.Units = ERammsControlUnits::None;
+	StyleAxis.EnumLabels = { NSLOCTEXT("Ramms", "RammpGen1CurbStyleStepped", "Stop and step"),
+		NSLOCTEXT("Ramms", "RammpGen1CurbStyleBlended", "Rolling") };
+	StyleAxis.Range = FVector2D(0.0, 1.0);
+	StyleAxis.Order = 4;
+	OutSurface.Add(StyleAxis);
+
 	// The rider's stick (Stick), while a crossing has the robot: the drive controls every drive mode offers, so that
 	// the stick a rider holds reaches whichever mode has the robot. Strafe too: pushed sideways is a pause.
 	if (bModeActive && Stick.bRequired)
