@@ -589,6 +589,11 @@ float URammsRammpGen1CurbController::PaintDebugPanel(const RammsCurb::FDebugPain
 			Rows.Add({ TEXT("support"), { { FColor::White, TEXT("wheels down, commanded height") }, { Colours::Good, TEXT("centre of mass 5 cm in") }, { Colours::Warn, TEXT("inside") }, { Colours::Bad, TEXT("outside") } } });
 			Rows.Add({ TEXT("up"), { { Colours::Measured, TEXT("measured") }, { RammpGen1VerticalColour, TEXT("vertical") } } });
 		}
+		if (DebugView.bGraphs)
+		{
+			// The charts' conventions, kept out of their titles so that each title and its legend fit on one line.
+			Rows.Add({ TEXT("charts"), { { FColor(150, 155, 160), TEXT("thin: commanded") }, { FColor(150, 155, 160), TEXT("dashed: the speed law, the rear-lift rule, aft") }, { FColor(150, 155, 160), TEXT("rider: at the seat") } } });
+		}
 		Y += RammsCurb::DrawKey(P, X, Y, Width, Rows, bDraw) + 4.0f;
 	}
 	if (DebugView.bGraphs)
@@ -616,12 +621,12 @@ float URammsRammpGen1CurbController::PaintDebugPanel(const RammsCurb::FDebugPain
 			// The chassis's speed, the rider's, the command and what the speed law wants (rolling).
 			const FGraphLine SpeedLines[] = { { EGraphSeries::Speed, Meas, TEXT("chassis") }, { EGraphSeries::RiderSpeed, FLinearColor(Colours::Rider), TEXT("rider") },
 				{ EGraphSeries::SpeedCommand, Cmd, TEXT("commanded") }, { EGraphSeries::SpeedTarget, Wants, TEXT("wants"), true } };
-			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("ground speed (rider: at the seat)"), Samples, TFrom, Span, SpeedLines, ZeroMark, 10.0f, TEXT("cm/s")) + Gap;
+			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("ground speed"), Samples, TFrom, Span, SpeedLines, ZeroMark, 10.0f, TEXT("cm/s")) + Gap;
 
 			// The wheels at the tread: against the chassis's speed, they show slip (the drive wheels' less the translators').
 			const FGraphLine WheelLines[] = { { EGraphSeries::DriveWheelSpeed, Drive, TEXT("drive") }, { EGraphSeries::DriveWheelCommand, Drive, nullptr, true },
 				{ EGraphSeries::FrontHubSpeed, Front, TEXT("front omni") }, { EGraphSeries::FrontHubCommand, Front, nullptr, true } };
-			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("wheels at the tread (thin: commanded)"), Samples, TFrom, Span, WheelLines, ZeroMark, 10.0f, TEXT("cm/s")) + Gap;
+			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("wheels at the tread"), Samples, TFrom, Span, WheelLines, ZeroMark, 10.0f, TEXT("cm/s")) + Gap;
 
 			const FGraphLine TiltLines[] = { { EGraphSeries::Tilt, Meas, TEXT("tilt") }, { EGraphSeries::Pitch, FLinearColor(RammpGen1PitchColour), TEXT("pitch") },
 				{ EGraphSeries::Roll, FLinearColor(RammpGen1RollColour), TEXT("roll") } };
@@ -631,18 +636,18 @@ float URammsRammpGen1CurbController::PaintDebugPanel(const RammsCurb::FDebugPain
 			const FGraphLine MarginLines[] = { { EGraphSeries::Margin, Meas, TEXT("stability") }, { EGraphSeries::ComAheadOfAxle, FLinearColor(RammpGen1ComColour), TEXT("CoM past axle") },
 				{ EGraphSeries::FrameClearance, FLinearColor(RammpGen1FrameColour), TEXT("frame over edge") } };
 			const FGraphMark MarginMarks[] = { { 0.0f, Lim }, { Config.RuleComMarginCm, FLinearColor(RammpGen1ComColour) } };
-			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("margins (cm; dashed: the rear-lift rule)"), Samples, TFrom, Span, MarginLines, MarginMarks, 10.0f, TEXT("cm")) + Gap;
+			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("margins (cm)"), Samples, TFrom, Span, MarginLines, MarginMarks, 10.0f, TEXT("cm")) + Gap;
 
 			const FGraphLine LiftLines[] = { { EGraphSeries::FrontLift, Front, TEXT("front") }, { EGraphSeries::FrontLiftCommand, Front, nullptr, true },
 				{ EGraphSeries::DriveLift, Drive, TEXT("drive") }, { EGraphSeries::DriveLiftCommand, Drive, nullptr, true },
 				{ EGraphSeries::RearLift, Rear, TEXT("rear") }, { EGraphSeries::RearLiftCommand, Rear, nullptr, true } };
-			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("lifts (wheel height, + up; thin: commanded)"), Samples, TFrom, Span, LiftLines, ZeroMark, 4.0f, TEXT("cm")) + Gap;
+			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("lifts (wheel height, + up)"), Samples, TFrom, Span, LiftLines, ZeroMark, 4.0f, TEXT("cm")) + Gap;
 
 			// Aft (dashed) for the rear's lift.
 			const FGraphLine TranslatorLines[] = { { EGraphSeries::Translator, FLinearColor(RammpGen1TranslatorColour), TEXT("measured") },
 				{ EGraphSeries::TranslatorCommand, Cmd, TEXT("commanded"), true } };
 			const FGraphMark TranslatorMarks[] = { { 0.0f, Zero }, { Config.AftCm, Wants } };
-			RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("translators (+ forward; dashed: aft)"), Samples, TFrom, Span, TranslatorLines, TranslatorMarks, 5.0f, TEXT("cm"));
+			RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("translators (+ forward)"), Samples, TFrom, Span, TranslatorLines, TranslatorMarks, 5.0f, TEXT("cm"));
 		}
 		Y += Charts * (Row + H + Gap);
 	}
