@@ -4400,8 +4400,14 @@ bool FRammsCurbExecutorFinishInPlace::RunTest(const FString& Parameters)
 			const double SEnd = Free.DoneAtCm;
 			int32		 Runs = 0, ShortOfEnd = 0;
 
+			// The travel while a let-go is confirmed (the release, then the confirm,
+			// at the drive speed): let go closer than this to the plan's end, the
+			// crossing may reach its end, moving, before finishing in place locks in.
+			const double ConfirmTravel = T.DriveSpeed * (FRammsCurbStick().ReleaseSeconds + Confirm) + 2.0;
+
 			// One let-go: done in place, within its braking distance of where the
-			// stick was let go, every wheel down on the far side, nothing unsafe.
+			// stick was let go, every wheel down on the far side, nothing unsafe. Let
+			// go within ConfirmTravel of the end, it may instead finish along the plan.
 			auto LetGo = [&](const RammsCurb::FCurbSchedule& Plan, double At, const FString& How) {
 				RammsCurb::FExecDryRunOptions O;
 				O.FinishInPlaceAtTravelCm = At;
@@ -4410,12 +4416,16 @@ bool FRammsCurbExecutorFinishInPlace::RunTest(const FString& Parameters)
 				TestTrue(FString::Printf(TEXT("%s: done (%.1f s, ended %s%s%s)"), *How, R.Seconds, RammsCurb::ExecPhaseName(R.EndPhase),
 							 R.bFaulted ? TEXT(": ") : TEXT(""), *R.FaultWhy),
 					R.bDone && !R.bFaulted);
-				TestTrue(FString::Printf(TEXT("%s: finished in place (let go at %.1f cm, from %.1f)"), *How, R.LetGoAtCm, R.InPlaceAtCm),
-					R.LetGoAtCm >= 0.0 && R.InPlaceAtCm >= R.LetGoAtCm);
-				TestTrue(FString::Printf(TEXT("%s: stopped within its braking distance of where the stick was let go (%.1f cm, %.1f allowed)"), *How,
-							 R.FinalTravelCm - R.LetGoAtCm, Braking),
-					R.FinalTravelCm - R.LetGoAtCm <= Braking);
-				TestTrue(FString::Printf(TEXT("%s: at rest (%.2f cm/s)"), *How, R.FinalSpeedCmS), R.FinalSpeedCmS < RammsCurb::StopSpeedCmS);
+				const bool bMayFinishMoving = At + ConfirmTravel >= SEnd;
+				if (!bMayFinishMoving || R.InPlaceAtCm >= 0.0)
+				{
+					TestTrue(FString::Printf(TEXT("%s: finished in place (let go at %.1f cm, from %.1f)"), *How, R.LetGoAtCm, R.InPlaceAtCm),
+						R.LetGoAtCm >= 0.0 && R.InPlaceAtCm >= R.LetGoAtCm);
+					TestTrue(FString::Printf(TEXT("%s: stopped within its braking distance of where the stick was let go (%.1f cm, %.1f allowed)"), *How,
+								 R.FinalTravelCm - R.LetGoAtCm, Braking),
+						R.FinalTravelCm - R.LetGoAtCm <= Braking);
+					TestTrue(FString::Printf(TEXT("%s: at rest (%.2f cm/s)"), *How, R.FinalSpeedCmS), R.FinalSpeedCmS < RammsCurb::StopSpeedCmS);
+				}
 				TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *How), R.KeepOffViolations, 0);
 				TestEqual(FString::Printf(TEXT("%s: lifted wheels into the terrain"), *How), R.IntoTerrain, 0);
 				TestEqual(FString::Printf(TEXT("%s: ticks with a forbidden set off the ground"), *How), R.Counts.ForbiddenTicks, 0);
