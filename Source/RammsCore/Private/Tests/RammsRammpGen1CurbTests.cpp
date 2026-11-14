@@ -8,6 +8,7 @@
 #include "UObject/Package.h" // GetTransientPackage's UPackage, complete: NewObject's Outer
 
 #include "Curb/RammsRammpGen1Curb.h"
+#include "Curb/RammsRammpGen1CurbMeter.h"
 #include "RammsRammpGen1CurbController.h"
 #include "RammsControlTypes.h"
 
@@ -270,10 +271,76 @@ bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("assist: on"), C->ApplyControl(FName("curb.assist"), 1.0f) && C->Assist.bEnabled);
 	TestTrue(TEXT("assist: the panel steps from it"), C->ReadTarget(FName("curb.assist"), Value) && Value == 1.0f);
 	TestTrue(TEXT("assist: a button flips it off"), C->TriggerControl(FName("curb.assist")) && !C->Assist.bEnabled);
+	// The crossing's style: on the surface, a two-way switch; rolling at first; set, read back.
+	const FRammsControlAxis* StyleAxis = Surface.Axes.FindByPredicate([](const FRammsControlAxis& A) { return A.Id == FName("curb.style"); });
+	TestTrue(TEXT("curb.style"), StyleAxis && StyleAxis->Kind == ERammsControlKind::Enum && !StyleAxis->bReadOnly && StyleAxis->EnumLabels.Num() == 2);
+	TestTrue(TEXT("style: rolling at first"), C->Style == ERammsRammpGen1CurbStyle::Blended && C->ReadControl(FName("curb.style"), Value) && Value == 1.0f);
+	TestTrue(TEXT("style: stop and step"), C->ApplyControl(FName("curb.style"), 0.0f) && C->Style == ERammsRammpGen1CurbStyle::Stepped);
+	TestTrue(TEXT("style: the panel steps from it"), C->ReadTarget(FName("curb.style"), Value) && Value == 0.0f);
+	TestTrue(TEXT("style: rolling again"), C->ApplyControl(FName("curb.style"), 1.0f) && C->Style == ERammsRammpGen1CurbStyle::Blended);
 	// The stick: the drive controls are the curb mode's only while it has the robot.
 	TestFalse(TEXT("inactive: no drive.forward"), Ids.Contains(FName("drive.forward")));
 	TestFalse(TEXT("inactive: drive.forward not taken"), C->ApplyControl(FName("drive.forward"), 1.0f));
 	TestTrue(TEXT("the stick is required by default"), C->Stick.bRequired);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbMeterTest, "Ramms.Curb.RammpGen1.Meter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsRammpGen1CurbMeterTest::RunTest(const FString& Parameters)
+{
+	// Made-up motion, sampled at 100 Hz: at rest 1 s, speeding up at 50 cm/s^2 for 0.5 s (to 25 cm/s), rolling 1 s,
+	// braking at 50 cm/s^2 for 0.5 s, at rest 1 s, then speeding up again the same way. The rider rides the chassis. The
+	// wheels stand at the corners of a 100 cm square around the origin and the centre of mass 10 cm ahead of its
+	// centre; the frame passes over the edge from 2 s to 3 s at 5, then 3, then 4 cm.
+	RammsRammpGen1Curb::FCrossingMeter Meter;
+	Meter.Begin(0.0);
+	double		 X = 0.0, V = 0.0;
+	const double Dt = 0.01;
+	for (int32 i = 0; i <= 500; ++i)
+	{
+		const double					 T = i * Dt;
+		const double					 A = ((T >= 1.0 && T < 1.5) || (T >= 4.0 && T < 4.5)) ? 50.0 : (T >= 2.5 && T < 3.0) ? -50.0
+																															 : 0.0;
+		RammsRammpGen1Curb::FMeterSample S;
+		S.TimeS = T;
+		S.ChassisPos = FVector(X, 0.0, 30.0);
+		S.RiderPos = FVector(X, 0.0, 80.0);
+		S.PitchDeg = (T >= 2.0 && T < 2.5) ? 2.0f : 0.0f;
+		S.Contacts = { FVector2D(50, 50), FVector2D(50, -50), FVector2D(-50, 50), FVector2D(-50, -50) };
+		S.ComXY = FVector2D(10.0, 0.0);
+		S.bFrameOverEdge = T >= 2.0 && T < 3.0;
+		S.FrameClearanceCm = T < 2.3 ? 5.0f : T < 2.6 ? 3.0f
+													  : 4.0f;
+		S.Phase = T < 2.3 ? ERammsRammpGen1CurbPhase::DriveUp : ERammsRammpGen1CurbPhase::DriveOver;
+		Meter.Add(S);
+		if (FMath::IsNearlyEqual(T, 1.2))
+		{
+			Meter.MarkFrontAtEdge(T);
+		}
+		if (FMath::IsNearlyEqual(T, 3.7))
+		{
+			Meter.MarkRearDown(T);
+		}
+		V += A * Dt;
+		X += V * Dt;
+	}
+	Meter.End(5.0);
+	const FRammsRammpGen1CurbStats& St = Meter.GetStats();
+	TestEqual(TEXT("crossing seconds"), St.CrossingSeconds, 5.0f, 1.0e-3f);
+	TestEqual(TEXT("front at the edge -> rear down"), St.EdgeToRearDownSeconds, 2.5f, 1.0e-3f);
+	TestEqual(TEXT("front at the edge -> end"), St.EdgeToEndSeconds, 3.8f, 1.0e-3f);
+	TestEqual(TEXT("one stop (the start's rest is before it first moved)"), St.Stops, 1);
+	TestTrue(TEXT("stopped about 1 s"), St.SecondsStopped > 0.9f && St.SecondsStopped < 1.25f);
+	TestTrue(FString::Printf(TEXT("peak fore/aft acceleration about 0.5 m/s^2 (%.2f)"), St.PeakRiderForeAftAccelMS2),
+		St.PeakRiderForeAftAccelMS2 > 0.4f && St.PeakRiderForeAftAccelMS2 < 0.6f);
+	TestTrue(TEXT("no vertical acceleration"), St.PeakRiderVerticalAccelMS2 < 0.01f);
+	TestEqual(TEXT("pitch"), St.MaxAbsPitchDeg, 2.0f, 1.0e-4f);
+	TestEqual(TEXT("margin: 40 cm to the square's front edge"), St.MinStabilityMarginCm, 40.0f, 1.0e-3f);
+	TestTrue(TEXT("the frame measured"), St.bFrameMeasured);
+	TestEqual(TEXT("the frame's least clearance"), St.MinFrameClearanceCm, 3.0f, 1.0e-4f);
+	TestEqual(TEXT("...and when"), St.MinClearancePhase, ERammsRammpGen1CurbPhase::DriveOver);
+	TestFalse(TEXT("off once ended"), Meter.IsOn());
 	return true;
 }
 
