@@ -36,9 +36,19 @@ namespace RammsCurb
 {
 	void AddGraphSample(TArray<FDebugGraphSample>& Graph, const FDebugGraphSample& Sample, double SpanSeconds)
 	{
-		if (Graph.Num() > 0 && Sample.T < Graph.Last().T)
+		if (Graph.Num() > 0)
 		{
-			Graph.Reset(); // the simulation was reset
+			if (Sample.T < Graph.Last().T)
+			{
+				Graph.Reset(); // the simulation was reset
+			}
+			else if (Sample.T == Graph.Last().T)
+			{
+				// No time has passed (the simulation paused, or not stepped this frame): the latest stands for it, and
+				// a paused simulation does not pile up samples the span never lets go of.
+				Graph.Last() = Sample;
+				return;
+			}
 		}
 		Graph.Add(Sample);
 		const double From = Sample.T - SpanSeconds;
@@ -171,12 +181,12 @@ namespace RammsCurb
 		TConstArrayView<FDebugGraphSample> Samples, double TFrom, double Span, TConstArrayView<FGraphLine> Lines,
 		TConstArrayView<FGraphMark> Marks, float MinSpan, const TCHAR* Units)
 	{
-		TArray<EGraphSeries> Series;
+		TArray<EGraphSeries, TInlineAllocator<8>> Series;
 		for (const FGraphLine& L : Lines)
 		{
 			Series.Add(L.Series);
 		}
-		TArray<float> Always;
+		TArray<float, TInlineAllocator<4>> Always;
 		for (const FGraphMark& M : Marks)
 		{
 			Always.Add(M.Value);
@@ -209,29 +219,32 @@ namespace RammsCurb
 		{
 			P.Dashed(X, X + Width, ToY(M.Value), M.Colour);
 		}
-		// At most a sample a pixel.
-		const int32 Stride = FMath::Max(1, Samples.Num() / FMath::Max(1, FMath::RoundToInt(Width)));
+		// At most a sample a pixel across: every Stride-th, no more of them than the chart is pixels wide.
+		const int32 Pixels = FMath::Max(1, FMath::FloorToInt(Width));
+		const int32 Stride = FMath::Max(1, (Samples.Num() + Pixels - 1) / Pixels);
+		// Each series a polyline a run at a time, broken where it has no value.
+		TArray<FVector2f> Run;
 		for (const FGraphLine& L : Lines)
 		{
-			bool  bHave = false;
-			float Px = 0.0f, Py = 0.0f;
+			const float Thickness = L.bThin ? 1.0f : 2.0f;
+			const auto	Flush = [&P, &Run, &L, Thickness]() {
+				 if (Run.Num() >= 2)
+				 {
+					 P.Polyline(Run, L.Colour, Thickness);
+				 }
+				 Run.Reset();
+			};
 			for (int32 k = 0; k < Samples.Num(); k += Stride)
 			{
 				const FDebugGraphSample& S = Samples[k];
 				if (!S.Has(L.Series))
 				{
-					bHave = false;
+					Flush();
 					continue;
 				}
-				const float Nx = ToX(S.T), Ny = ToY(FMath::Clamp(S.Get(L.Series), static_cast<float>(Range.X), static_cast<float>(Range.Y)));
-				if (bHave)
-				{
-					P.Line(Px, Py, Nx, Ny, L.Colour, L.bDashed ? 1.0f : 2.0f);
-				}
-				Px = Nx;
-				Py = Ny;
-				bHave = true;
+				Run.Emplace(ToX(S.T), ToY(FMath::Clamp(S.Get(L.Series), static_cast<float>(Range.X), static_cast<float>(Range.Y))));
 			}
+			Flush();
 		}
 		return Top + Height;
 	}
@@ -324,6 +337,16 @@ namespace
 			TArray<FVector2f> Points{ FVector2f(X0, Y0), FVector2f(X1, Y1) };
 			FSlateDrawElement::MakeLines(*Elements, ++Layer, Geometry->ToPaintGeometry(), MoveTemp(Points), ESlateDrawEffect::None, Colour,
 				/*bAntialias=*/true, Thickness);
+		}
+		/** One element for the whole line: a graph's series is hundreds of points a frame. */
+		virtual void Polyline(TConstArrayView<FVector2f> Points, const FLinearColor& Colour, float Thickness) const override
+		{
+			if (Points.Num() < 2)
+			{
+				return;
+			}
+			FSlateDrawElement::MakeLines(*Elements, ++Layer, Geometry->ToPaintGeometry(), TArray<FVector2f>(Points.GetData(), Points.Num()),
+				ESlateDrawEffect::None, Colour, /*bAntialias=*/true, Thickness);
 		}
 		virtual float Text(float X, float Y, const FString& S, const FLinearColor& Colour) const override
 		{

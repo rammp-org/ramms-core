@@ -76,6 +76,16 @@ namespace RammsCurb
 		virtual float Text(float X, float Y, const FString& S, const FLinearColor& Colour) const = 0;
 		virtual float Width(const FString& S) const = 0;
 
+		/** A line through Points in turn (two or more): a segment at a time
+		 *  unless the painter draws a polyline as one (the Slate panel's). */
+		virtual void Polyline(TConstArrayView<FVector2f> Points, const FLinearColor& Colour, float Thickness = 1.0f) const
+		{
+			for (int32 k = 1; k < Points.Num(); ++k)
+			{
+				Line(Points[k - 1].X, Points[k - 1].Y, Points[k].X, Points[k].Y, Colour, Thickness);
+			}
+		}
+
 		void Dashed(float X0, float X1, float Y, const FLinearColor& Colour) const
 		{
 			for (float X = X0; X < X1; X += 8.0f)
@@ -157,7 +167,8 @@ namespace RammsCurb
 
 	/** Sample added to the graphs' samples (oldest first), keeping those of
 	 *  its last SpanSeconds; one from before the last starts them again (the
-	 *  simulation was reset). */
+	 *  simulation was reset), one at the last's time replaces it (no time has
+	 *  passed: the simulation is paused, or has not stepped this frame). */
 	void AddGraphSample(TArray<FDebugGraphSample>& Graph, const FDebugGraphSample& Sample, double SpanSeconds);
 
 	/** A graph's vertical range: the valid samples of Series in Samples, and
@@ -195,20 +206,23 @@ namespace RammsCurb
 		FLinearColor Colour;
 	};
 
-	/** A series a graph draws. Its latest value is written after the graph's
-	 *  title under its Name; a line with no Name is drawn without (one a named
-	 *  line's words already cover, as a command beside what it commands). */
+	/** A series a graph draws: a line 2 px wide, or 1 px when bThin. Its
+	 *  latest value is written after the graph's title under its Name; a line
+	 *  with no Name is drawn without (one a named line's words already cover,
+	 *  as a command beside what it commands). Only a graph's level lines
+	 *  (FGraphMark) are dashed. */
 	struct FGraphLine
 	{
 		EGraphSeries Series;
 		FLinearColor Colour;
 		const TCHAR* Name;
-		bool		 bDashed = false;
+		bool		 bThin = false;
 	};
 
 	/** One strip chart: its title and latest values on a line at Y, the chart
 	 *  Height tall under it, the samples from TFrom over Span seconds across
-	 *  Width; its bottom. */
+	 *  Width; its bottom. Each series is a polyline through at most a sample a
+	 *  pixel across, broken where it has no value. */
 	float DrawGraph(const FDebugPainter& P, float X, float Y, float Width, float Height, const TCHAR* Title,
 		TConstArrayView<FDebugGraphSample> Samples, double TFrom, double Span, TConstArrayView<FGraphLine> Lines,
 		TConstArrayView<FGraphMark> Marks, float MinSpan, const TCHAR* Units);
@@ -276,16 +290,20 @@ namespace RammsCurb
 		inline constexpr uint8 Robot = 1 << 3;
 		inline constexpr uint8 Graphs = 1 << 4;
 		inline constexpr uint8 Labels = 1 << 5;
+		/** Every layer: RAMMP Gen2's (URammsCurbNegotiationController). */
+		inline constexpr uint8 All = Sensing | Terrain | Plan | Robot | Graphs | Labels;
 	} // namespace ViewLayer
 
 	/** A layer's switch (one ViewLayer bit): curb.view.sensing (0 Off, 1
 	 *  Live, 2 Live + trail), .terrain, .plan, .robot, .graphs, .labels (0
 	 *  off, 1 on) -- the Ids URammsCurbNegotiationController::View*ControlId
-	 *  name. None for anything else. */
+	 *  name (RammsCurbDebugViewTests holds them to it). None for anything
+	 *  else. */
 	FName ViewControlId(uint8 Layer);
 
 	/** The switches of Layers, in the "Curb view" group, each showing how
-	 *  View has it; none when View.bExposeControls is off. */
+	 *  View has it; none when View.bExposeControls is off. Both controllers
+	 *  describe theirs with this, so a switch reads the same on either. */
 	void DescribeViewControls(FRammsControlSurface& OutSurface, const FRammsCurbDebugView& View, uint8 Layers);
 
 	/** A switch of Layers set (an index past the end is the last); false for

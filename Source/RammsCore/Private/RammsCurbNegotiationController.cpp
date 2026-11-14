@@ -12,6 +12,7 @@
 #include "Curb/RammsCurbSeat.h"
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbSafety.h"
+#include "Curb/RammsCurbScope.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "Curb/RammsCurbTerrainFit.h"
 #include "Debug/DebugDrawService.h"
@@ -7261,52 +7262,10 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 		OutSurface.Add(Strafe);
 	}
 
-	// The debug view's switches (DebugView), a group of their own.
-	if (!DebugView.bExposeControls)
-	{
-		return;
-	}
-	const FName View(TEXT("Curb view"));
-	auto		AddSwitch = [&](FName Id, const FText& Name, int32 Order, TArray<FText> Labels) {
-		   FRammsControlAxis Switch;
-		   Switch.Id = Id;
-		   Switch.Group = View;
-		   Switch.DisplayName = Name;
-		   Switch.Kind = ERammsControlKind::Enum;
-		   Switch.Units = ERammsControlUnits::None;
-		   Switch.Order = Order;
-		   Switch.Range = FVector2D(0.0, FMath::Max(0, Labels.Num() - 1));
-		   float Now = 0.0f;
-		   ReadControl(Id, Now);
-		   Switch.DefaultValue = Now;
-		   Switch.EnumLabels = MoveTemp(Labels);
-		   OutSurface.Add(Switch);
-	};
-	const FText Off = NSLOCTEXT("Ramms", "CurbViewOff", "Off");
-	const FText On = NSLOCTEXT("Ramms", "CurbViewOn", "On");
-	AddSwitch(ViewSensingControlId(), NSLOCTEXT("Ramms", "CurbViewSensing", "Sensing"), 0,
-		{ Off, NSLOCTEXT("Ramms", "CurbViewLive", "Live"), NSLOCTEXT("Ramms", "CurbViewTrail", "Live + trail") });
-	AddSwitch(ViewTerrainControlId(), NSLOCTEXT("Ramms", "CurbViewTerrain", "Terrain model"), 1, { Off, On });
-	AddSwitch(ViewPlanControlId(), NSLOCTEXT("Ramms", "CurbViewPlan", "Plan"), 2, { Off, On });
-	AddSwitch(ViewRobotControlId(), NSLOCTEXT("Ramms", "CurbViewRobot", "Robot state"), 3, { Off, On });
-	AddSwitch(ViewGraphsControlId(), NSLOCTEXT("Ramms", "CurbViewGraphs", "Graphs"), 4, { Off, On });
-	AddSwitch(ViewLabelsControlId(), NSLOCTEXT("Ramms", "CurbViewLabels", "Labels"), 5, { Off, On });
+	// The debug view's switches (DebugView), a group of their own: every layer's, described as RAMMP Gen1's are
+	// (RammsCurbScope), so a switch reads the same on either robot.
+	RammsCurb::DescribeViewControls(OutSurface, DebugView, RammsCurb::ViewLayer::All);
 }
-
-namespace
-{
-	/** The debug view's on/off switch an Id names, else null. */
-	template <typename TView>
-	auto ViewFlag(TView& View, FName Id) -> decltype(&View.bTerrain)
-	{
-		return Id == URammsCurbNegotiationController::ViewTerrainControlId() ? &View.bTerrain
-			: Id == URammsCurbNegotiationController::ViewPlanControlId()	 ? &View.bPlan
-			: Id == URammsCurbNegotiationController::ViewRobotControlId()	 ? &View.bRobot
-			: Id == URammsCurbNegotiationController::ViewGraphsControlId()	 ? &View.bGraphs
-			: Id == URammsCurbNegotiationController::ViewLabelsControlId()	 ? &View.bLabels
-																			 : nullptr;
-	}
-} // namespace
 
 namespace
 {
@@ -7342,17 +7301,8 @@ bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 		}
 		return true;
 	}
-	if (Id == ViewSensingControlId())
-	{
-		DebugView.Sensing = static_cast<ERammsCurbSensingView>(FMath::Clamp(Index, 0, 2));
-		return true;
-	}
-	if (bool* Flag = ViewFlag(DebugView, Id))
-	{
-		*Flag = Index != 0;
-		return true;
-	}
-	return false;
+	// The debug view's switches.
+	return RammsCurb::ApplyViewControl(DebugView, RammsCurb::ViewLayer::All, Id, Value);
 }
 
 bool URammsCurbNegotiationController::ReadControlText(FName Id, FText& OutText) const
@@ -7550,11 +7500,11 @@ bool URammsCurbNegotiationController::ReadTarget(FName Id, float& OutTarget) con
 {
 	// A switch's target is what it is set to, however it was set (the panel
 	// steps from it).
-	if (Id == ViewSensingControlId() || ViewFlag(DebugView, Id) || Id == RammsCurb::AssistControlId())
+	if (Id == RammsCurb::AssistControlId())
 	{
 		return ReadControl(Id, OutTarget);
 	}
-	return false;
+	return RammsCurb::ReadViewControl(DebugView, RammsCurb::ViewLayer::All, Id, OutTarget);
 }
 
 bool URammsCurbNegotiationController::TriggerControl(FName Id)
@@ -7621,17 +7571,8 @@ bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) con
 		OutValue = Assist.bEnabled ? 1.0f : 0.0f;
 		return true;
 	}
-	if (Id == ViewSensingControlId())
-	{
-		OutValue = static_cast<float>(DebugView.Sensing);
-		return true;
-	}
-	if (const bool* Flag = ViewFlag(DebugView, Id))
-	{
-		OutValue = *Flag ? 1.0f : 0.0f;
-		return true;
-	}
-	return false;
+	// The debug view's switches.
+	return RammsCurb::ReadViewControl(DebugView, RammsCurb::ViewLayer::All, Id, OutValue);
 }
 
 void URammsCurbNegotiationController::GetClaimedMotorIds(TArray<FName>& OutIds) const
