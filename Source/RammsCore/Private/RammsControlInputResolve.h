@@ -31,4 +31,14 @@ namespace RammsControlInput
 	 * axis reads within CentreBand.
 	 */
 	float StepCentre(bool& bAwait, float Value);
+
+	/**
+	 * A binding's axis seeing the centre requests made of a control it drives
+	 * (URammsRobotControlSurfaceComponent::RequireCentre): Requests, how many
+	 * there have been, against InOutSeen, how many it had seen (brought up to
+	 * date). A new one while the binding is held (bHeld) sets bAwait -- nothing
+	 * more to that control until the axis has been back to centre
+	 * (StepCentre); not held, it is only noted. True when it set bAwait.
+	 */
+	bool TakeCentreRequest(int32 Requests, int32& InOutSeen, bool bHeld, bool& bAwait);
 } // namespace RammsControlInput

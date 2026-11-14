@@ -2,10 +2,24 @@
 
 #include "Curb/RammsCurbStick.h"
 
+#include "RammsControlIds.h"
+#include "RammsControlInputResolve.h"
 #include "RammsCurbNegotiationTypes.h"
 
 namespace RammsCurb
 {
+	const TCHAR* FinishingInPlaceWhy()
+	{
+		// What it is doing, and that the stick drives again once it is done (the
+		// drive mode takes it, as after any finish).
+		return TEXT("Finishing in place: settling into the driving pose -- the stick takes over when it is done");
+	}
+
+	const TCHAR* HandBackWaitWhy()
+	{
+		return TEXT("Finished -- release the stick to drive");
+	}
+
 	const TCHAR* StickIntentName(EStickIntent Intent)
 	{
 		switch (Intent)
@@ -27,6 +41,7 @@ namespace RammsCurb
 		Scale = 0.0;
 		OutSeconds = 0.0;
 		Seconds = 0.0;
+		OffSeconds = 0.0;
 	}
 
 	EStickIntent FStickGate::Step(const FRammsCurbStick& Settings, double Forward, double Turn, double Strafe, double Dt)
@@ -54,6 +69,7 @@ namespace RammsCurb
 			{
 				// Held forward still -- or wavering, on at the share it had.
 				Seconds += Dt;
+				OffSeconds = 0.0;
 				return Intent;
 			}
 		}
@@ -69,6 +85,8 @@ namespace RammsCurb
 		}
 		OutSeconds = 0.0;
 		Seconds = Now == Intent ? Seconds + Dt : Dt;
+		// Out of forward: counted on through let go, sideways and back alike.
+		OffSeconds = Now == EStickIntent::Forward ? 0.0 : OffSeconds + Dt;
 		Intent = Now;
 		return Intent;
 	}
@@ -77,17 +95,13 @@ namespace RammsCurb
 	{
 		FStickDecision	   Out;
 		const EStickIntent Intent = Gate.GetIntent();
-		// The line while the crossing finishes where the robot stands: what it is
-		// doing, and that the stick drives again once it is done (the drive mode
-		// takes it, as after any finish).
-		const TCHAR* const SettlingWhy = TEXT("Finishing in place: settling into the driving pose -- the stick takes over when it is done");
 		// Finishing in place already: on so to the end, whatever the stick. Held
 		// forward again, going on along the plan would pull the legs, which have
 		// left its schedule, back to it.
 		if (Stage.bFinishingInPlace)
 		{
 			Out.Action = EStickAction::FinishInPlace;
-			Out.Why = SettlingWhy;
+			Out.Why = FinishingInPlaceWhy();
 			return Out;
 		}
 		if (Intent == EStickIntent::Forward)
@@ -99,12 +113,20 @@ namespace RammsCurb
 		// Nothing left of the crossing needs the robot to travel -- the rear wheels
 		// can touch down on the far surface: let go, sideways or back, the robot
 		// is braked to rest and the rest of the crossing made where it stands,
-		// rather than held paused on the rider. A robot paused short of there that
-		// rolled on into it (or a pause that began past it) finishes so too.
+		// rather than held paused on the rider. Not on a waver, though: out of
+		// forward for FinishInPlaceConfirmSeconds first, a pause meanwhile (braked
+		// as any pause), from which forward again goes on along the plan. A robot
+		// paused short of there that rolled on into it (or a pause that began past
+		// it), the stick long out of forward, finishes so at once.
 		if (Stage.bRearCanLand)
 		{
-			Out.Action = EStickAction::FinishInPlace;
-			Out.Why = SettlingWhy;
+			if (Gate.GetOutOfForwardSeconds() >= Settings.FinishInPlaceConfirmSeconds)
+			{
+				Out.Action = EStickAction::FinishInPlace;
+				Out.Why = FinishingInPlaceWhy();
+				return Out;
+			}
+			Out.Why = TEXT("Paused: let go, the crossing finishes where the robot stands -- push forward to go on");
 			return Out;
 		}
 		const bool bBack = Intent == EStickIntent::Back;
@@ -152,6 +174,32 @@ namespace RammsCurb
 		else
 		{
 			Out.Why = TEXT("Paused: push the stick forward to go on");
+		}
+		return Out;
+	}
+
+	bool HandBackWaits(const FStickGate& Gate)
+	{
+		return Gate.GetIntent() == EStickIntent::Back;
+	}
+
+	bool HandBackNeedsCentre(double Forward)
+	{
+		return Forward < -static_cast<double>(RammsControlInput::CentreBand);
+	}
+
+	FStickPairs StickPairs(FName SideAxis)
+	{
+		FStickPairs Out;
+		if (SideAxis == RammsControlIds::Drive::Strafe())
+		{
+			Out.Forward = RammsControlIds::Drive::Strafe();
+			Out.Strafe = RammsControlIds::Drive::Forward();
+		}
+		else
+		{
+			Out.Forward = RammsControlIds::Drive::Turn();
+			Out.Turn = RammsControlIds::Drive::Forward();
 		}
 		return Out;
 	}

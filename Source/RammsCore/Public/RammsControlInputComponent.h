@@ -38,7 +38,11 @@ struct FInputActionInstance;
  * on the surface only counts, so a mode where the stick drives nothing and
  * back is such a change too. What a binding commanded and no longer drives is
  * released then (unless another binding holds it), and letting go of a
- * binding releases only what it commanded. Bindings on the same control
+ * binding releases only what it commanded. A stick or axis binding held when
+ * the surface asks a control it drives to come back to centre
+ * (URammsRobotControlSurfaceComponent::RequireCentre -- a curb crossing
+ * handing the robot back with the stick held back of centre) waits so too,
+ * on that control, and lets go of what it held there. Bindings on the same control
  * combine: it gets the largest value any of them sends, so a held key and a
  * stick do not overwrite each other with zeros.
  *
@@ -106,6 +110,7 @@ private:
 		bool										bHeld = false;
 		bool										bFired = false;
 		bool										bAwaitCentre[3] = { false, false, false };
+		TMap<FName, int32>							CentreSeen;									 // the surface's centre requests per control, as last seen
 		TMap<FName, FCommand>						Commanded;									 // what it drives and holds, at its last value
 		ERammsControlSource							PressSource = ERammsControlSource::Keyboard; // the device that pressed it
 	};
@@ -142,6 +147,11 @@ private:
 	/** Slot no longer drives Id: the others holding it drive it on, else it is
 	 *  released. */
 	void LetGo(FSlot& Slot, FName Id);
+
+	/** The centre requests (URammsRobotControlSurfaceComponent::RequireCentre)
+	 *  made of what Slot drives since it last looked: held, the axis waits for
+	 *  centre (RammsControlInput::TakeCentreRequest) and lets go of it. */
+	void TakeCentreRequests(FSlot& Slot);
 
 	UPROPERTY(Transient)
 	TObjectPtr<UObject> Sink; // implements IRammsControlSink (+ IRammsControlSurfaceProvider)

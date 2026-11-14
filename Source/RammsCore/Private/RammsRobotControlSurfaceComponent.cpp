@@ -50,6 +50,20 @@ TArray<UObject*> URammsRobotControlSurfaceComponent::FindControlSurfaces(const U
 	return {};
 }
 
+void URammsRobotControlSurfaceComponent::RequireCentre(FName Id)
+{
+	if (!Id.IsNone())
+	{
+		++CentreRequests.FindOrAdd(Id, 0);
+	}
+}
+
+int32 URammsRobotControlSurfaceComponent::GetCentreRequests(FName Id) const
+{
+	const int32* Count = CentreRequests.Find(Id);
+	return Count ? *Count : 0;
+}
+
 void URammsRobotControlSurfaceComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (UWorld* World = GetWorld())
