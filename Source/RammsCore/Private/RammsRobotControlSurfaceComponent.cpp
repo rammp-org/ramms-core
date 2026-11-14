@@ -229,6 +229,11 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 				// Actions have no value to read back, whatever the contributor left set.
 				Normalized.bReadback = false;
 			}
+			else if (Normalized.IsText())
+			{
+				// Words to read, never a command, whatever the contributor left set.
+				Normalized.bReadOnly = true;
+			}
 			Surface.Add(Normalized);
 			FRoute Route;
 			Route.Contributor = Pair.Value;
@@ -626,4 +631,23 @@ bool URammsRobotControlSurfaceComponent::GetAxisTarget_Implementation(FName Id, 
 bool URammsRobotControlSurfaceComponent::GetControlTarget(FName Id, float& OutTarget) const
 {
 	return GetAxisTarget_Implementation(Id, OutTarget);
+}
+
+bool URammsRobotControlSurfaceComponent::GetAxisText_Implementation(FName Id, FText& OutText) const
+{
+	EnsureBuilt();
+	const FRammsControlAxis*		Axis = Surface.Find(Id);
+	const IRammsControlContributor* C = Axis && Axis->IsText() ? ContributorFor(Id) : nullptr;
+	if (C && C->ReadControlText(Id, OutText))
+	{
+		return true;
+	}
+	OutText = FText::GetEmpty();
+	return false;
+}
+
+FString URammsRobotControlSurfaceComponent::GetControlText(FName Id) const
+{
+	FText Text;
+	return GetAxisText_Implementation(Id, Text) ? Text.ToString() : FString();
 }

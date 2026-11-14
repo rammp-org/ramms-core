@@ -3447,6 +3447,9 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	StickPausedSeconds = 0.0;
 	PausedStillSeconds = 0.0;
 	StickWhy.Reset();
+	bRetryPending = false;
+	bRetryable = false;
+	bTerrainGiven = false;
 
 	// The per-wheel gait's speed trim starts at 0. (A seed from the drive mode's
 	// wheel speed commands found none on drive modes that command wheel torque,
@@ -3576,12 +3579,18 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 	}
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': beginning on a terrain given rather than detected (development: fault injection)"),
 		*GetNameSafe(GetOwner()));
-	return BeginNegotiation(Profile, OutReason);
+	const bool bBegun = BeginNegotiation(Profile, OutReason);
+	if (bBegun)
+	{
+		bTerrainGiven = true; // a refusal (one already running) leaves the running crossing's as it is
+	}
+	return bBegun;
 #endif
 }
 
 void URammsCurbNegotiationController::Abort()
 {
+	CancelRetry(TEXT("stopped"));
 	if (IsNegotiating())
 	{
 		Finish(ERammsCurbPhase::Aborted, TEXT("aborted"));
@@ -3591,7 +3600,7 @@ void URammsCurbNegotiationController::Abort()
 		// Asked again while a per-wheel crossing is being braked to rest (after a
 		// fault or an abort): every wheel braked at once, as the per-axle gait
 		// does.
-		EndStopping(TEXT("Abort called while braking to rest: every wheel braked at once"));
+		EndStopping(TEXT("Abort called while braking to rest: every wheel braked at once"), EStopEnd::Asked);
 	}
 }
 
@@ -3652,11 +3661,14 @@ void URammsCurbNegotiationController::StepAssist(float DeltaTime)
 	{
 		return;
 	}
-	if (Profile.EdgeDistanceCm > Assist.TriggerDistanceCm)
+	// Where a crossing stopped with nothing across, pushing forward again tries again: the robot may have rolled on
+	// closer to the edge than a crossing would begin from, which it can still do.
+	const bool bRetry = RetryHere();
+	if (!bRetry && Profile.EdgeDistanceCm > Assist.TriggerDistanceCm)
 	{
 		return;
 	}
-	if (Profile.EdgeDistanceCm < Assist.MinDistanceCm)
+	if (!bRetry && Profile.EdgeDistanceCm < Assist.MinDistanceCm)
 	{
 		// The status says why (each look's distance differs as the robot drives on: the log has it at Verbose).
 		Status = FString::Printf(TEXT("the step ahead is %.0f cm away, closer than %.0f: back off to cross it"), Profile.EdgeDistanceCm,
@@ -3672,6 +3684,7 @@ void URammsCurbNegotiationController::StepAssist(float DeltaTime)
 		return;
 	}
 	bAssistStarted = true;
+	bRetriedOnce = false; // the rider's own start, made: a fault in it is tried again once, as any
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': curb assist began the crossing (edge %.0f cm ahead)"), *GetNameSafe(GetOwner()),
 		Profile.EdgeDistanceCm);
 }
@@ -3711,11 +3724,38 @@ void URammsCurbNegotiationController::EnterStep(int32 Index)
 
 void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FString& Why, bool bRampDown)
 {
-	Phase = EndPhase;
-	Status = Why;
-	if (bAssistStarted && AssistWatch.IsValid())
+	// Whether a start from here begins it again (no wheel has begun to cross), and whether it does so by itself: a
+	// fault, the first, not about the robot itself, on terrain it detected.
+	const bool bBegun = CrossingBegun();
+	bRetryable = EndPhase != ERammsCurbPhase::Done && !bBegun && !bFaultSafety;
+	bRetryPending = EndPhase == ERammsCurbPhase::Faulted && bRetryable && bRetryOnceAfterFault && !bFaultSafety && !bRetriedOnce && !bTerrainGiven;
+	if (EndPhase == ERammsCurbPhase::Done)
 	{
-		AssistWatch->CrossingEnded(EndPhase == ERammsCurbPhase::Done); // one that did not finish: no other until the stick is let go
+		bRetriedOnce = false;
+	}
+	if (bRetryPending)
+	{
+		FirstFaultWhy = Why;
+		RetryWaitSeconds = RetryElapsedSeconds = 0.0;
+		RetryLastTime = -1.0;
+	}
+	bFaultSafety = false;
+	{
+		FVector2D Centre, Forward;
+		RetryAtXY = LocateChassis(Centre, Forward) ? Centre : ChassisOriginXY;
+	}
+	Phase = EndPhase;
+	Status = EndStatus = Why;
+	// One that did not finish, however it was begun (curb assist, Cross curb ahead, a script): curb assist starts no
+	// other until the stick is let go. Only for a crossing curb assist began, a held stick would otherwise restart one
+	// begun by hand at once, past the safety faults and the one retry.
+	if (!AssistWatch.IsValid())
+	{
+		AssistWatch = MakePimpl<RammsCurb::FAssistWatch>();
+	}
+	if (EndPhase != ERammsCurbPhase::Done || bAssistStarted)
+	{
+		AssistWatch->CrossingEnded(EndPhase == ERammsCurbPhase::Done);
 	}
 	bAssistStarted = false;
 	const FString Line = FString::Printf(TEXT("t=%5.2fs %s: %s"), Elapsed, PhaseName(EndPhase), *Why);
@@ -3831,7 +3871,10 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			StepLog.Add(HandLine);
 			UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *HandLine);
 			StopWheels(/*bRelease=*/true);
-			SetActiveModeThroughSelector(Next);
+			{
+				TGuardValue<bool> Own(bOwnHandBack, true); // a refusal at rest hands back and may still be tried again
+				SetActiveModeThroughSelector(Next);
+			}
 			// The slope's pull handed over with the robot: a mode that holds it
 			// still takes it up at once instead of finding it as the robot sags
 			// back (IRammsDriveMode::SeedGroundSlope).
@@ -3956,18 +3999,27 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 	CommandWheels(DriveSpeed, Tuning.HeadingGain * HeadingErrorRad);
 	if (bAtRest)
 	{
-		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving));
+		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving), EStopEnd::AtRest);
 	}
 	else if (StopElapsed > StopTimeoutSeconds)
 	{
 		const bool bLegsLate = FMath::Abs(Moving) < RammsCurb::StopSpeedCmS && Executor && Executor->IsHalted() && !Executor->AreLegsHome();
+		// The chassis measured at rest with a leg short of where the halt sent it is at rest: a retry plans from the
+		// legs as measured. Not at rest after the time allowed is not.
 		EndStopping(bLegsLate ? FString::Printf(TEXT("at rest, but a leg not on its target after %.0f s: the wheels braked"), StopTimeoutSeconds)
-							  : FString::Printf(TEXT("not at rest after %.0f s (%.1f cm/s measured): the wheels braked"), StopTimeoutSeconds, Moving));
+							  : FString::Printf(TEXT("not at rest after %.0f s (%.1f cm/s measured): the wheels braked"), StopTimeoutSeconds, Moving),
+			bLegsLate ? EStopEnd::AtRest : EStopEnd::Abnormal);
 	}
 }
 
-void URammsCurbNegotiationController::EndStopping(const FString& Why)
+void URammsCurbNegotiationController::EndStopping(const FString& Why, EStopEnd How)
 {
+	if (How != EStopEnd::AtRest)
+	{
+		// Braked to rest is the only way out of a stop that a retry may follow. One that ended neither at rest nor at
+		// the rider's asking is not tried again from where it stands at all, by itself or by hand.
+		CancelRetry(Why, /*bForgetHere=*/How == EStopEnd::Abnormal);
+	}
 	bStopping = false;
 	DriveSpeed = 0.0f;
 	StopWheels(/*bRelease=*/false);
@@ -3982,6 +4034,13 @@ void URammsCurbNegotiationController::EndStopping(const FString& Why)
 
 void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 {
+	if (!bActive && !bOwnHandBack)
+	{
+		// The rider's choice of mode stands, whether this mode had the robot or not: the selector stands down every
+		// mode but the one chosen, so choosing another after a refusal at rest handed the robot back comes here too,
+		// with this mode already inactive.
+		CancelRetry(TEXT("another drive mode was selected"));
+	}
 	if (bDriveModeActive == bActive)
 	{
 		return;
@@ -4950,7 +5009,7 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 		// where each leg is -- and skipping them would leave the wheels rolling
 		// on at their last speed with nothing watching. Stop and hold, as a
 		// tilt does.
-		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("cannot measure the robot during %s: %s"), *Status, *Unmeasured));
+		FaultHard(FString::Printf(TEXT("cannot measure the robot during %s: %s"), *Status, *Unmeasured));
 		return;
 	}
 	// Against the commands that stood over the time just simulated, before
@@ -4965,7 +5024,7 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 
 	if (RammsCurb::OverMaxTilt(MeasuredPitchDeg, MeasuredRollDeg, Tuning.MaxTiltDeg))
 	{
-		Finish(ERammsCurbPhase::Faulted,
+		FaultHard(
 			FString::Printf(TEXT("inclined %.1f deg (%.1f deg pitch / %.1f deg roll) during %s, over MaxTiltDeg %.1f"),
 				RammsCurb::InclinationDeg(MeasuredPitchDeg, MeasuredRollDeg), MeasuredPitchDeg, MeasuredRollDeg, *Status, Tuning.MaxTiltDeg));
 		return;
@@ -5477,7 +5536,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	FString Unmeasured;
 	if (!Measure(Unmeasured))
 	{
-		Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("cannot measure the robot during %s: %s"), *Status, *Unmeasured));
+		FaultHard(FString::Printf(TEXT("cannot measure the robot during %s: %s"), *Status, *Unmeasured));
 		return;
 	}
 	// Each wheel's progress is its distance past the edge, along the edge's
@@ -5498,7 +5557,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	FilteredRollRad += (RollRad - FilteredRollRad) * FMath::Clamp(DeltaTime / 0.15f, 0.0f, 1.0f);
 	if (RammsCurb::OverMaxTilt(MeasuredPitchDeg, MeasuredRollDeg, Tuning.MaxTiltDeg))
 	{
-		Finish(ERammsCurbPhase::Faulted,
+		FaultHard(
 			FString::Printf(TEXT("inclined %.1f deg (%.1f deg pitch / %.1f deg roll) during %s, over MaxTiltDeg %.1f"),
 				RammsCurb::InclinationDeg(MeasuredPitchDeg, MeasuredRollDeg), MeasuredPitchDeg, MeasuredRollDeg, *Status, Tuning.MaxTiltDeg));
 		return;
@@ -5553,7 +5612,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 		// The wheels this crossing drives do not hold the robot: braking it to
 		// rest through them, the rest rolling free, would let it go on. Every
 		// wheel is braked at once.
-		Finish(ERammsCurbPhase::Faulted,
+		FaultHard(
 			Runaway == RammsCurb::ERunaway::Back
 				? FString::Printf(TEXT("rolled back during %s at %.1f cm/s for %.1f s with a wheel off the ground (nothing on the ground holds "
 									   "it); every wheel braked at once"),
@@ -5901,6 +5960,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	{
 		// A runtime check: the executor has halted itself; it brakes the robot
 		// to rest from here (StepStopping), naming the check.
+		bFaultSafety = Executor->IsSafetyFault();
 		Finish(ERammsCurbPhase::Faulted, Executor->GetFaultWhy());
 		return;
 	}
@@ -6224,9 +6284,15 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	const bool bCrossing = IsNegotiating() && bDriveModeActive && (bPerWheelCrossing || Steps.IsValidIndex(StepIndex));
 	if (!bCrossing && !(bStopping && bDriveModeActive))
 	{
-		if (!bDriveModeActive && !IsNegotiating() && !bStopping)
+		if (bRetryPending && !IsNegotiating() && !bStopping)
 		{
-			StepAssist(DeltaTime); // another drive mode has the robot: curb assist watches for a curb to cross
+			StepRetry(DeltaTime);
+		}
+		else if (!IsNegotiating() && !bStopping && (!bDriveModeActive || RetryHere()))
+		{
+			// Another drive mode has the robot -- or this one holds it where a crossing stopped with nothing across:
+			// curb assist watches for a curb to cross (pushing forward again there tries again).
+			StepAssist(DeltaTime);
 		}
 		// Held in this mode after a crossing stopped (a fault, an abort, or no
 		// mode to hand back to that holds the robot): the wheels held where they
@@ -6243,6 +6309,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				// handed back as after a reset mid-crossing.
 				HoldWheels();
 				bHandBackPending = true;
+				CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while the wheels were held: held again where they are"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -6275,7 +6342,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 			// the mode from before takes the robot back too.
 			if (IsNegotiating())
 			{
-				Finish(ERammsCurbPhase::Faulted, TEXT("the simulation was reset"), /*bRampDown=*/false);
+				FaultHard(TEXT("the simulation was reset"), /*bRampDown=*/false);
 			}
 			else
 			{
@@ -6286,6 +6353,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				{
 					Executor->End();
 				}
+				CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while braking to rest"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -7102,7 +7170,7 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	State.Kind = ERammsControlKind::Enum;
 	State.Units = ERammsControlUnits::None;
 	State.bReadOnly = true;
-	State.Order = 2;
+	State.Order = 3;
 	const UEnum* PhaseEnum = StaticEnum<ERammsCurbPhase>();
 	for (int32 i = 0; i < PhaseEnum->NumEnums() - 1; ++i)
 	{
@@ -7110,8 +7178,9 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	}
 	State.Range = FVector2D(0.0, FMath::Max(0, State.EnumLabels.Num() - 1));
 	OutSurface.Add(State);
+	OutSurface.Add(RammsCurb::MakeStatusControl(2));
 
-	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 3));
+	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 4));
 
 	// The rider's stick (Stick), while a crossing has the robot: the drive
 	// controls every drive mode offers, so that the stick a rider holds reaches
@@ -7238,6 +7307,197 @@ bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 	return false;
 }
 
+bool URammsCurbNegotiationController::ReadControlText(FName Id, FText& OutText) const
+{
+	if (Id != RammsCurb::StatusControlId())
+	{
+		return false;
+	}
+	ERammsControlTextSeverity Severity = ERammsControlTextSeverity::Info;
+	OutText = FText::FromString(GetStatusLine(Severity));
+	return true;
+}
+
+FString URammsCurbNegotiationController::GetStatusLine(ERammsControlTextSeverity& OutSeverity) const
+{
+	using ESeverity = ERammsControlTextSeverity;
+	OutSeverity = ESeverity::Info;
+	if (IsNegotiating())
+	{
+		const float	  Step = ActiveTerrain.bValid ? ActiveTerrain.StepHeightCm : ActiveProfile.StepHeightCm;
+		const FString Crossing = FString::Printf(TEXT("%s %.1f cm"), Step >= 0.0f ? TEXT("up") : TEXT("down"), FMath::Abs(Step));
+		if (Phase == ERammsCurbPhase::Paused)
+		{
+			OutSeverity = ESeverity::Attention;
+			const FString& Why = StickWhy.IsEmpty() ? Status : StickWhy;
+			return Why.StartsWith(TEXT("Paused")) ? Why : TEXT("Paused: ") + Why; // the stick's reason may say so itself
+		}
+		if (Phase == ERammsCurbPhase::Hold)
+		{
+			// The executor's "Hold: <what for>".
+			FString For = Status;
+			For.RemoveFromStart(TEXT("Hold"));
+			For.RemoveFromStart(TEXT(": "));
+			if (For.IsEmpty())
+			{
+				For = TEXT("a wheel's turn to go on");
+			}
+			OutSeverity = ESeverity::Attention;
+			return HoldSeconds >= 1.0 ? FString::Printf(TEXT("Waiting (%.0f of %.0f s): %s"), HoldSeconds, RammsCurb::HoldTimeoutSeconds, *For)
+									  : TEXT("Waiting: ") + For;
+		}
+		return FString::Printf(TEXT("Crossing %s: %s"), *Crossing, *Status);
+	}
+	if (bRetryPending)
+	{
+		OutSeverity = ESeverity::Attention;
+		return TEXT("Faulted, trying again: ") + FirstFaultWhy;
+	}
+	// A start refused since the last crossing ended says why; else how that one ended.
+	if (!Status.IsEmpty() && Status != EndStatus)
+	{
+		OutSeverity = ESeverity::Attention;
+		return TEXT("Not crossing: ") + Status;
+	}
+	const FString Again = RetryHere() ? (Assist.bEnabled ? FString(TEXT(" Cross curb ahead, or let go of the stick and push forward again, to try again."))
+														 : FString(TEXT(" Cross curb ahead to try again.")))
+									  : FString();
+	switch (Phase)
+	{
+		case ERammsCurbPhase::Done:
+			return TEXT("Done: ") + Status;
+		case ERammsCurbPhase::Aborted:
+			OutSeverity = ESeverity::Attention;
+			return (bStopping ? TEXT("Stopping: ") : TEXT("Stopped: ")) + Status + TEXT(".") + Again;
+		case ERammsCurbPhase::Faulted:
+			OutSeverity = ESeverity::Fault;
+			return (bRetriedOnce ? FString(TEXT("Faulted again: ")) : FString(TEXT("Faulted: "))) + Status + (bStopping ? TEXT(" (braking to rest)") : TEXT(".")) + Again;
+		default:
+			return Assist.bEnabled ? TEXT("Ready: drive at a curb to cross it") : TEXT("Ready");
+	}
+}
+
+bool URammsCurbNegotiationController::CrossingBegun() const
+{
+	if (!IsNegotiating())
+	{
+		return false;
+	}
+	if (bPerWheelCrossing)
+	{
+		return Executor && Executor->IsRunning() && Executor->HasCrossingBegun();
+	}
+	// Per axle: any step reached so far past an approach or a prepare. Each axle has its own Prepare, so the current
+	// step alone does not say whether an earlier axle has already gone over.
+	for (int32 i = 0; i <= StepIndex && i < Steps.Num(); ++i)
+	{
+		if (Steps[i].Phase != ERammsCurbPhase::Approach && Steps[i].Phase != ERammsCurbPhase::Prepare)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URammsCurbNegotiationController::RetryHere() const
+{
+	FVector2D Centre, Forward;
+	return bRetryable && !IsNegotiating() && LocateChassis(Centre, Forward) && FVector2D::Distance(Centre, RetryAtXY) <= 50.0;
+}
+
+void URammsCurbNegotiationController::FaultHard(const FString& Why, bool bRampDown)
+{
+	bFaultSafety = true;
+	Finish(ERammsCurbPhase::Faulted, Why, bRampDown);
+}
+
+void URammsCurbNegotiationController::CancelRetry(const FString& Why, bool bForgetHere)
+{
+	if (bForgetHere && bRetryable && !bRetryPending)
+	{
+		// Nothing pending (the retry made, or never one), but a start from here still counted as one: the status says
+		// why it no longer does.
+		bRetryable = false;
+		Status = EndStatus = FString::Printf(TEXT("%s; then %s, so not tried again from here"), *EndStatus, *Why);
+		const FString Line = FString::Printf(TEXT("t=%5.2fs not tried again from here: %s"), Elapsed, *Why);
+		StepLog.Add(Line);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': %s"), *GetNameSafe(GetOwner()), *Line);
+		return;
+	}
+	if (bForgetHere)
+	{
+		bRetryable = false;
+	}
+	if (!bRetryPending)
+	{
+		return;
+	}
+	bRetryPending = false;
+	Status = EndStatus = FString::Printf(TEXT("%s (not tried again: %s)"), *FirstFaultWhy, *Why);
+	const FString Line = FString::Printf(TEXT("t=%5.2fs not trying again: %s"), Elapsed, *Why);
+	StepLog.Add(Line);
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': %s"), *GetNameSafe(GetOwner()), *Line);
+}
+
+void URammsCurbNegotiationController::StepRetry(float DeltaTime)
+{
+	// Only from measured rest: the chassis, looked at on the simulation's clock where it keeps one, under
+	// StopSpeedCmS for half a second. One not at rest within RetryRestTimeoutSeconds is not made.
+	constexpr double RetryRestSeconds = 0.5;
+	constexpr double RetryRestTimeoutSeconds = 10.0;
+	FVector2D		 Centre, Forward;
+	if (!LocateChassis(Centre, Forward))
+	{
+		CancelRetry(TEXT("the robot cannot be located"));
+		return;
+	}
+	if (FVector2D::Distance(Centre, RetryAtXY) > 50.0)
+	{
+		// Handed back (a plan refused at rest) and driven on by the rider: not here, where it stopped.
+		CancelRetry(TEXT("the robot was driven away from where it stopped"));
+		return;
+	}
+	const URammsRobotBaseComponent* Base = EnsureBase();
+	const double					SimNow = Base ? Base->GetSimulationTime() : -1.0;
+	const double					Now = SimNow >= 0.0 ? SimNow : (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
+	if (RetryLastTime >= 0.0 && Now > RetryLastTime)
+	{
+		const double Dt = Now - RetryLastTime;
+		const double Speed = FVector2D::Distance(Centre, RetryLastXY) / Dt;
+		RetryWaitSeconds = Speed < RammsCurb::StopSpeedCmS ? RetryWaitSeconds + Dt : 0.0;
+		RetryElapsedSeconds += Dt;
+	}
+	else if (RetryLastTime >= 0.0 && Now < RetryLastTime)
+	{
+		CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
+		return;
+	}
+	RetryLastTime = Now;
+	RetryLastXY = Centre;
+	if (RetryWaitSeconds < RetryRestSeconds)
+	{
+		if (RetryElapsedSeconds > RetryRestTimeoutSeconds)
+		{
+			CancelRetry(FString::Printf(TEXT("not at rest within %.0f s"), RetryRestTimeoutSeconds));
+		}
+		return;
+	}
+	bRetryPending = false;
+	bRetriedOnce = true;
+	const FString First = FirstFaultWhy;
+	const FString Line = FString::Printf(TEXT("t=%5.2fs trying again once, from where it came to rest (the fault: %s)"), Elapsed, *First);
+	StepLog.Add(Line);
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': %s"), *GetNameSafe(GetOwner()), *Line);
+	FString Why;
+	if (!NegotiateStepAhead(Why))
+	{
+		// Still a fault: the first one, and why the second try did not begin.
+		Phase = ERammsCurbPhase::Faulted;
+		Status = EndStatus = FString::Printf(TEXT("%s; tried again, not begun: %s"), *First, *Why);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': %s"), *GetNameSafe(GetOwner()), *Status);
+	}
+}
+
 bool URammsCurbNegotiationController::ReadTarget(FName Id, float& OutTarget) const
 {
 	// A switch's target is what it is set to, however it was set (the panel
@@ -7253,8 +7513,13 @@ bool URammsCurbNegotiationController::TriggerControl(FName Id)
 {
 	if (Id == NegotiateControlId())
 	{
-		FString Reason;
-		return NegotiateStepAhead(Reason);
+		FString	   Reason;
+		const bool bStarted = NegotiateStepAhead(Reason);
+		if (bStarted)
+		{
+			bRetriedOnce = false; // the rider's own start, made: a fault in it is tried again once, as any (a refusal leaves the count)
+		}
+		return bStarted;
 	}
 	if (Id == AbortControlId())
 	{
@@ -7294,6 +7559,13 @@ bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) con
 	if (Id == PhaseControlId())
 	{
 		OutValue = static_cast<float>(Phase);
+		return true;
+	}
+	if (Id == RammsCurb::StatusControlId())
+	{
+		ERammsControlTextSeverity Severity = ERammsControlTextSeverity::Info;
+		GetStatusLine(Severity);
+		OutValue = static_cast<float>(Severity);
 		return true;
 	}
 	if (Id == RammsCurb::AssistControlId())

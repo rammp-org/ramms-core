@@ -77,6 +77,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
 	float MaxPitch = 15.0f;
 
+	/** A first-person camera -- one on a spring arm authored at no length, at someone's eyes -- looks around rather
+	 *  than orbits: these pitch limits instead of MinPitch / MaxPitch (an orbit's 15 deg up would barely let it look
+	 *  up), and it does not zoom (out from the eyes is no longer their view). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
+	float FirstPersonMinPitch = -70.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Orbit")
+	float FirstPersonMaxPitch = 50.0f;
+
+	/** The active camera is a first-person one (see FirstPersonMinPitch). */
+	UFUNCTION(BlueprintPure, Category = "Camera")
+	bool IsFirstPerson() const;
+
 	// --- Zoom ------------------------------------------------------------------
 	// A wheel notch changes the *desired* arm length; the arm then eases toward
 	// it (ZoomInterpSpeed), so one notch is a short glide rather than a jump.

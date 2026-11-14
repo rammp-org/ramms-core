@@ -152,6 +152,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Control Surface")
 	bool GetControlTarget(FName Id, float& OutTarget) const;
 
+	/** What a Text control reports now (a status line); empty when it reports
+	 *  nothing or is not a Text control. */
+	UFUNCTION(BlueprintPure, Category = "Control Surface")
+	FString GetControlText(FName Id) const;
+
 	/** The surface as JSON (FJsonObjectConverter), for Remote Control clients. */
 	UFUNCTION(BlueprintCallable, Category = "Control Surface")
 	FString GetControlSurfaceJson() const;
@@ -183,6 +188,7 @@ public:
 	virtual ERammsControlSource GetAxisOwner_Implementation(FName Id) const override;
 	/** See GetControlTarget for the precedence rules this implements. */
 	virtual bool GetAxisTarget_Implementation(FName Id, float& OutTarget) const override;
+	virtual bool GetAxisText_Implementation(FName Id, FText& OutText) const override;
 
 protected:
 	virtual void BeginPlay() override;

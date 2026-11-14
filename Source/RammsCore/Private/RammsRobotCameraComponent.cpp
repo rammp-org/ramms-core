@@ -118,6 +118,18 @@ USpringArmComponent* URammsRobotCameraComponent::ActiveArm() const
 	return ActiveCamera ? Cast<USpringArmComponent>(ActiveCamera->GetAttachParent()) : nullptr;
 }
 
+bool URammsRobotCameraComponent::IsFirstPerson() const
+{
+	const USpringArmComponent* Arm = ActiveArm();
+	if (!Arm)
+	{
+		return false;
+	}
+	// As authored, not as zoomed: a first-person arm is never zoomed, and an orbit arm zoomed all the way in is not one.
+	const TPair<FRotator, float>* Def = ArmDefaults.Find(Arm);
+	return (Def ? Def->Value : Arm->TargetArmLength) < 1.0f;
+}
+
 void URammsRobotCameraComponent::NextCamera()
 {
 	// Re-gather every time: URLab adds its possess camera after BeginPlay.
@@ -153,15 +165,20 @@ void URammsRobotCameraComponent::Orbit(float DeltaYawDegrees, float DeltaPitchDe
 	{
 		return;
 	}
-	FRotator Rot = Arm->GetRelativeRotation();
+	FRotator   Rot = Arm->GetRelativeRotation();
+	const bool bFirstPerson = IsFirstPerson();
 	Rot.Yaw += DeltaYawDegrees;
-	Rot.Pitch = FMath::Clamp(Rot.Pitch + DeltaPitchDegrees, MinPitch, MaxPitch);
+	Rot.Pitch = FMath::Clamp(Rot.Pitch + DeltaPitchDegrees, bFirstPerson ? FirstPersonMinPitch : MinPitch, bFirstPerson ? FirstPersonMaxPitch : MaxPitch);
 	Rot.Roll = 0.0f;
 	Arm->SetRelativeRotation(Rot);
 }
 
 void URammsRobotCameraComponent::Zoom(float DeltaLength)
 {
+	if (IsFirstPerson())
+	{
+		return; // out from the eyes would no longer be their view
+	}
 	if (USpringArmComponent* Arm = ActiveArm())
 	{
 		DesiredArmLength = FMath::Clamp(DesiredArmLength + DeltaLength, MinArmLength, MaxArmLength);
@@ -174,7 +191,7 @@ void URammsRobotCameraComponent::Zoom(float DeltaLength)
 
 void URammsRobotCameraComponent::ZoomNotches(float Notches)
 {
-	if (Notches == 0.0f || !ActiveArm())
+	if (Notches == 0.0f || !ActiveArm() || IsFirstPerson())
 	{
 		return;
 	}
@@ -251,8 +268,8 @@ void URammsRobotCameraComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	float	   ViewportX = 0.0f, ViewportY = 0.0f;
 	const bool bCursorOverViewport = PC->GetMousePosition(ViewportX, ViewportY);
 	auto	   Held = [PC, bSlate, bCursorOverViewport](const FKey& Key) {
-		return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustReleased(Key)
-			|| (bSlate && bCursorOverViewport && FSlateApplication::Get().GetPressedMouseButtons().Contains(Key));
+		  return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustReleased(Key)
+			  || (bSlate && bCursorOverViewport && FSlateApplication::Get().GetPressedMouseButtons().Contains(Key));
 	};
 	const bool bAnyHeld = (OrbitButton.IsValid() && Held(OrbitButton)) || (bAlsoOrbitWithLeftDrag && Held(EKeys::LeftMouseButton));
 	// A press that lands on a UI widget (the HUD's joystick, a slider, a

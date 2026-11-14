@@ -261,6 +261,19 @@ bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)
 	FString Why;
 	TestFalse(TEXT("no robot: no crossing"), C->StartCrossing(Why));
 	TestEqual(TEXT("drive mode"), C->GetDriveModeId(), FName("curb"));
+
+	// The status: read-only words, and how much they need the rider; a refused start says why.
+	const FRammsControlAxis* StatusAxis = Surface.Axes.FindByPredicate([](const FRammsControlAxis& A) { return A.Id == FName("curb.status"); });
+	TestTrue(TEXT("curb.status: a read-only Text control"), StatusAxis && StatusAxis->Kind == ERammsControlKind::Text && StatusAxis->bReadOnly);
+	FText Words;
+	TestTrue(TEXT("status: idle, ready"), C->ReadControlText(FName("curb.status"), Words) && Words.ToString().StartsWith(TEXT("Ready")));
+	TestTrue(TEXT("status: information"), C->ReadControl(FName("curb.status"), Value) && Value == static_cast<float>(ERammsControlTextSeverity::Info));
+	TestFalse(TEXT("status: nothing to set"), C->ApplyControl(FName("curb.status"), 1.0f));
+	TestFalse(TEXT("a start with no robot is refused"), C->TriggerControl(FName("curb.negotiate")));
+	TestTrue(TEXT("status: why it was refused"), C->ReadControlText(FName("curb.status"), Words) && Words.ToString().StartsWith(TEXT("Not crossing: ")));
+	TestTrue(TEXT("status: for the rider's attention"),
+		C->ReadControl(FName("curb.status"), Value) && Value == static_cast<float>(ERammsControlTextSeverity::Attention));
+	TestFalse(TEXT("status: no words for other controls"), C->ReadControlText(FName("curb.phase"), Words));
 	TArray<FName> Claimed;
 	C->GetClaimedMotorIds(Claimed);
 	TestEqual(TEXT("claims nothing while inactive"), Claimed.Num(), 0);
