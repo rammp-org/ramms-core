@@ -3,13 +3,12 @@
 // The curb controller's debug view (URammsCurbNegotiationController::DebugView):
 // what it senses of the terrain, what it makes of it, its plan and its state,
 // drawn in the world each tick, and graphs and a colour key over the viewport.
-// Read-only: nothing here changes what the controller does.
+// Read-only: nothing here changes what the controller does. The graphs, the key,
+// the labels and the panel they are drawn in are drawn as RAMMP Gen1's are
+// (Curb/RammsCurbScope).
 
 #include "RammsCurbNegotiationController.h"
 
-#include "CanvasItem.h"
-#include "Fonts/FontMeasure.h"
-#include "Framework/Application/SlateApplication.h"
 #include "Curb/RammsCurbDebugView.h"
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
@@ -18,23 +17,11 @@
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbSafety.h"
 #include "Curb/RammsCurbSchedule.h"
+#include "Curb/RammsCurbScope.h"
 #include "DrawDebugHelpers.h"
-#include "Engine/Canvas.h"
-#include "Engine/Engine.h"
-#include "Engine/GameViewportClient.h"
-#include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
-#include "GameFramework/PlayerController.h"
-#include "GlobalRenderResources.h"
 #include "RammsRobotBaseComponent.h"
-#include "Rendering/DrawElements.h"
-#include "Rendering/SlateRenderer.h"
-#include "RenderUtils.h"
-#include "SceneInterface.h"
-#include "SceneView.h"
-#include "Styling/CoreStyle.h"
-#include "Widgets/SLeafWidget.h"
 
 // --- the sums the view draws from (tested in RammsCurbDebugViewTests) -----------
 
@@ -70,91 +57,6 @@ namespace RammsCurb
 		const double Expected = (bFar ? Terrain.Far : Terrain.Near).HeightAt(XY) + (bFar ? BiasCm.Y : BiasCm.X);
 		return (bHit ? Z : BottomZ) - Expected;
 	}
-
-	FVector2D GraphRange(TConstArrayView<FDebugGraphSample> Samples, TConstArrayView<EGraphSeries> Series,
-		TConstArrayView<float> Always, float MinSpan)
-	{
-		float Lo = TNumericLimits<float>::Max(), Hi = -TNumericLimits<float>::Max();
-		for (const FDebugGraphSample& S : Samples)
-		{
-			for (const EGraphSeries Which : Series)
-			{
-				if (S.Has(Which))
-				{
-					Lo = FMath::Min(Lo, S.Get(Which));
-					Hi = FMath::Max(Hi, S.Get(Which));
-				}
-			}
-		}
-		for (const float A : Always)
-		{
-			Lo = FMath::Min(Lo, A);
-			Hi = FMath::Max(Hi, A);
-		}
-		if (Lo > Hi)
-		{
-			return FVector2D(0.0, MinSpan);
-		}
-		const float Pad = 0.08f * (Hi - Lo);
-		Lo -= Pad;
-		Hi += Pad;
-		if (Hi - Lo < MinSpan)
-		{
-			const float Mid = 0.5f * (Lo + Hi);
-			Lo = Mid - 0.5f * MinSpan;
-			Hi = Mid + 0.5f * MinSpan;
-		}
-		return FVector2D(Lo, Hi);
-	}
-
-	TArray<int32> ConvexHull2D(TConstArrayView<FVector2D> Points)
-	{
-		TArray<int32> Order;
-		for (int32 i = 0; i < Points.Num(); ++i)
-		{
-			Order.Add(i);
-		}
-		Order.Sort([&Points](int32 A, int32 B) {
-			return Points[A].X < Points[B].X || (Points[A].X == Points[B].X && Points[A].Y < Points[B].Y);
-		});
-		// Distinct points only.
-		TArray<int32> P;
-		for (const int32 i : Order)
-		{
-			if (P.Num() == 0 || !Points[P.Last()].Equals(Points[i], 1e-6))
-			{
-				P.Add(i);
-			}
-		}
-		if (P.Num() < 3)
-		{
-			return P;
-		}
-		auto Cross = [&Points](int32 O, int32 A, int32 B) {
-			return FVector2D::CrossProduct(Points[A] - Points[O], Points[B] - Points[O]);
-		};
-		TArray<int32> Hull;
-		Hull.SetNum(2 * P.Num());
-		int32 K = 0;
-		for (int32 i = 0; i < P.Num(); ++i)
-		{
-			while (K >= 2 && Cross(Hull[K - 2], Hull[K - 1], P[i]) <= 0.0)
-			{
-				--K;
-			}
-			Hull[K++] = P[i];
-		}
-		for (int32 i = P.Num() - 2, Lower = K + 1; i >= 0; --i)
-		{
-			while (K >= Lower && Cross(Hull[K - 2], Hull[K - 1], P[i]) <= 0.0)
-			{
-				--K;
-			}
-			Hull[K++] = P[i];
-		}
-		Hull.SetNum(K - 1);
-		return Hull;
-	}
 } // namespace RammsCurb
 
 // --- drawing helpers ----------------------------------------------------------------
@@ -163,23 +65,24 @@ namespace
 {
 	using namespace RammsCurb;
 
-	// Colours, shared by the world layers and the colour key.
-	const FColor NearColour(70, 210, 110);
-	const FColor FarColour(70, 150, 255);
+	// Colours, shared by the world layers and the colour key (those RAMMP Gen1's
+	// view draws with too from RammsCurb::ViewColours).
+	const FColor NearColour = ViewColours::Near;
+	const FColor FarColour = ViewColours::Far;
 	const FColor OffColour(255, 160, 40);
 	const FColor MissColour(235, 70, 60);
 	const FColor UnfittedColour(170, 170, 170);
-	const FColor EdgeColour(255, 225, 60);
+	const FColor EdgeColour = ViewColours::Edge;
 	const FColor RayColour(150, 150, 165);
-	const FColor NearGridColour(40, 140, 70);
-	const FColor FarGridColour(40, 95, 175);
-	const FColor TextColour(235, 238, 242);
-	const FColor WarnColour(255, 160, 40);
-	const FColor BadColour(235, 70, 60);
-	const FColor GoodColour(90, 210, 120);
-	const FColor MeasuredColour(0, 220, 255);
-	const FColor PlannedColour(230, 90, 255);
-	const FColor RiderColour(150, 240, 110);
+	const FColor NearGridColour = ViewColours::NearGrid;
+	const FColor FarGridColour = ViewColours::FarGrid;
+	const FColor TextColour = ViewColours::Text;
+	const FColor WarnColour = ViewColours::Warn;
+	const FColor BadColour = ViewColours::Bad;
+	const FColor GoodColour = ViewColours::Good;
+	const FColor MeasuredColour = ViewColours::Measured;
+	const FColor PlannedColour = ViewColours::Planned;
+	const FColor RiderColour = ViewColours::Rider;
 
 	const FColor WheelPalette[] = {
 		FColor(255, 110, 110),
@@ -201,18 +104,18 @@ namespace
 		switch (State)
 		{
 			case ERammsCurbWheelState::Planted:
-				return FColor(90, 210, 120);
+				return ViewColours::Planted;
 			case ERammsCurbWheelState::Lifting:
-				return FColor(255, 225, 60);
+				return ViewColours::Lifting;
 			case ERammsCurbWheelState::Clear:
-				return FColor(0, 220, 255);
+				return ViewColours::Clear;
 			case ERammsCurbWheelState::Planting:
-				return FColor(255, 160, 40);
+				return ViewColours::Planting;
 			case ERammsCurbWheelState::Loading:
-				return FColor(220, 90, 255);
+				return ViewColours::Loading;
 			case ERammsCurbWheelState::Held:
 			default:
-				return FColor(160, 160, 160);
+				return ViewColours::Held;
 		}
 	}
 
@@ -366,10 +269,6 @@ void URammsCurbNegotiationController::TickDebugView(float DeltaTime)
 		{
 			T = Now;
 		}
-		if (S.Graph.Num() > 0 && T < S.Graph.Last().T)
-		{
-			S.Graph.Reset(); // the simulation was reset
-		}
 		using RammsCurb::EGraphSeries;
 		RammsCurb::FDebugGraphSample G;
 		G.T = T;
@@ -400,14 +299,7 @@ void URammsCurbNegotiationController::TickDebugView(float DeltaTime)
 			G.Set(EGraphSeries::Margin, LiveMarginCm);
 			G.Set(EGraphSeries::MarginPlanned, static_cast<float>(Executor->GetDiag().PlanMarginCm));
 		}
-		S.Graph.Add(G);
-		const double From = T - DebugView.GraphSeconds;
-		int32		 Old = 0;
-		while (Old < S.Graph.Num() && S.Graph[Old].T < From)
-		{
-			++Old;
-		}
-		S.Graph.RemoveAt(0, Old, EAllowShrinking::No);
+		RammsCurb::AddGraphSample(S.Graph, G, DebugView.GraphSeconds);
 	}
 	else
 	{
@@ -957,392 +849,15 @@ void URammsCurbNegotiationController::DrawDebugRobot(const UWorld* World) const
 
 // --- the colour key and the graphs: a HUD panel, or over the viewport ------------------
 //
-// One painter draws them both ways: into the panel the HUD hosts
-// (IRammsHUDPanelProvider: SRammsCurbScope, Slate), or, with no HUD to host it,
-// straight over the game viewport (UDebugDrawService's canvas).
-
-namespace
-{
-	/** Over the game viewport. */
-	struct FCanvasPainter : RammsCurb::FDebugPainter
-	{
-		UCanvas*	 Canvas = nullptr;
-		const UFont* Font = nullptr;
-		FVector2D	 Origin = FVector2D::ZeroVector;
-
-		virtual void Box(float X, float Y, float W, float H, const FLinearColor& Colour) const override
-		{
-			FCanvasTileItem Tile(Origin + FVector2D(X, Y), GWhiteTexture, FVector2D(W, H), Colour);
-			Tile.BlendMode = SE_BLEND_Translucent;
-			Canvas->DrawItem(Tile);
-		}
-		virtual void Line(float X0, float Y0, float X1, float Y1, const FLinearColor& Colour, float Thickness) const override
-		{
-			FCanvasLineItem L(Origin + FVector2D(X0, Y0), Origin + FVector2D(X1, Y1));
-			L.SetColor(Colour);
-			L.LineThickness = Thickness;
-			Canvas->DrawItem(L);
-		}
-		virtual float Text(float X, float Y, const FString& S, const FLinearColor& Colour) const override
-		{
-			FCanvasTextItem Item(Origin + FVector2D(X, Y), FText::FromString(S), Font, Colour);
-			Item.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Item);
-			return Width(S);
-		}
-		virtual float Width(const FString& S) const override
-		{
-			float W = 0.0f, H = 0.0f;
-			Canvas->TextSize(Font, S, W, H);
-			return W;
-		}
-	};
-
-	/** Into a Slate widget's paint. Each primitive goes on a layer of its own,
-	 *  so they stack in the order drawn. */
-	struct FSlatePainter : RammsCurb::FDebugPainter
-	{
-		const FGeometry*		 Geometry = nullptr;
-		FSlateWindowElementList* Elements = nullptr;
-		FSlateFontInfo			 Font;
-		mutable int32			 Layer = 0;
-
-		virtual void Box(float X, float Y, float W, float H, const FLinearColor& Colour) const override
-		{
-			FSlateDrawElement::MakeBox(*Elements, ++Layer,
-				Geometry->ToPaintGeometry(FVector2f(W, H), FSlateLayoutTransform(FVector2f(X, Y))),
-				FCoreStyle::Get().GetBrush(TEXT("WhiteBrush")), ESlateDrawEffect::None, Colour);
-		}
-		virtual void Line(float X0, float Y0, float X1, float Y1, const FLinearColor& Colour, float Thickness) const override
-		{
-			TArray<FVector2f> Points{ FVector2f(X0, Y0), FVector2f(X1, Y1) };
-			FSlateDrawElement::MakeLines(*Elements, ++Layer, Geometry->ToPaintGeometry(), MoveTemp(Points), ESlateDrawEffect::None, Colour,
-				/*bAntialias=*/true, Thickness);
-		}
-		virtual float Text(float X, float Y, const FString& S, const FLinearColor& Colour) const override
-		{
-			const float W = Width(S);
-			FSlateDrawElement::MakeText(*Elements, ++Layer,
-				Geometry->ToPaintGeometry(FVector2f(W + 2.0f, LineHeight), FSlateLayoutTransform(FVector2f(X, Y))), S, Font,
-				ESlateDrawEffect::None, Colour);
-			return W;
-		}
-		virtual float Width(const FString& S) const override
-		{
-			return static_cast<float>(FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(S, Font).X);
-		}
-	};
-
-	struct FKeyChip
-	{
-		FColor	Colour;
-		FString Words;
-	};
-
-	struct FKeyRow
-	{
-		FString			 Title;
-		TArray<FKeyChip> Chips;
-	};
-
-	/** A colour key -- chips (a square and its words) in rows Width wide,
-	 *  wrapping -- from Top down; its height. Drawn unless bDraw is false. */
-	float DrawKey(const RammsCurb::FDebugPainter& P, float X, float Top, float Width, TConstArrayView<FKeyRow> Rows, bool bDraw)
-	{
-		float Y = Top;
-		for (const FKeyRow& Row : Rows)
-		{
-			if (bDraw)
-			{
-				P.Text(X, Y, Row.Title, FLinearColor(0.6f, 0.65f, 0.7f));
-			}
-			float Cx = P.Width(Row.Title) + 10.0f;
-			for (const FKeyChip& Chip : Row.Chips)
-			{
-				const float W = 14.0f + P.Width(Chip.Words) + 12.0f;
-				if (Cx + W > Width && Cx > 18.0f)
-				{
-					Y += P.LineHeight + 2.0f;
-					Cx = 18.0f;
-				}
-				if (bDraw)
-				{
-					P.Box(X + Cx, Y + 3.0f, 10.0f, 10.0f, FLinearColor(Chip.Colour));
-					P.Text(X + Cx + 14.0f, Y, Chip.Words, FLinearColor::White);
-				}
-				Cx += W;
-			}
-			Y += P.LineHeight + 4.0f;
-		}
-		return Y - Top;
-	}
-
-	/** A level line across a graph: a limit, a floor, zero. */
-	struct FGraphMark
-	{
-		float		 Value;
-		FLinearColor Colour;
-	};
-
-	struct FGraphLine
-	{
-		EGraphSeries Series;
-		FLinearColor Colour;
-		const TCHAR* Name;
-		bool		 bDashed = false;
-	};
-
-	/** One strip chart: its title and latest values on a line at Y, the chart
-	 *  Height tall under it; its bottom. */
-	float DrawGraph(const RammsCurb::FDebugPainter& P, float X, float Y, float Width, float Height, const TCHAR* Title,
-		TConstArrayView<FDebugGraphSample> Samples, double TFrom, double Span, TConstArrayView<FGraphLine> Lines,
-		TConstArrayView<FGraphMark> Marks, float MinSpan, const TCHAR* Units)
-	{
-		TArray<EGraphSeries> Series;
-		for (const FGraphLine& L : Lines)
-		{
-			Series.Add(L.Series);
-		}
-		TArray<float> Always;
-		for (const FGraphMark& M : Marks)
-		{
-			Always.Add(M.Value);
-		}
-		const FVector2D Range = GraphRange(Samples, Series, Always, MinSpan);
-
-		float Tx = X + P.Text(X, Y, Title, FLinearColor(0.75f, 0.8f, 0.85f)) + 16.0f;
-		for (const FGraphLine& L : Lines)
-		{
-			for (int32 k = Samples.Num() - 1; k >= 0; --k)
-			{
-				if (Samples[k].Has(L.Series))
-				{
-					Tx += P.Text(Tx, Y, FString::Printf(TEXT("%s %.1f"), L.Name, Samples[k].Get(L.Series)), L.Colour) + 12.0f;
-					break;
-				}
-			}
-		}
-		const float Top = Y + P.LineHeight + 2.0f;
-		auto		ToX = [&](double T) { return X + static_cast<float>((T - TFrom) / Span) * Width; };
-		auto		ToY = [&](float V) { return Top + Height - static_cast<float>((V - Range.X) / (Range.Y - Range.X)) * Height; };
-		P.Box(X, Top, Width, Height, FLinearColor(0.02f, 0.03f, 0.04f, 0.72f));
-		P.Text(X + 3.0f, Top + 1.0f, FString::Printf(TEXT("%.0f %s"), Range.Y, Units), FLinearColor(0.5f, 0.55f, 0.6f));
-		P.Text(X + 3.0f, Top + Height - P.LineHeight - 1.0f, FString::Printf(TEXT("%.0f"), Range.X), FLinearColor(0.5f, 0.55f, 0.6f));
-		for (const FGraphMark& M : Marks)
-		{
-			P.Dashed(X, X + Width, ToY(M.Value), M.Colour);
-		}
-		// At most a sample a pixel.
-		const int32 Stride = FMath::Max(1, Samples.Num() / FMath::Max(1, FMath::RoundToInt(Width)));
-		for (const FGraphLine& L : Lines)
-		{
-			bool  bHave = false;
-			float Px = 0.0f, Py = 0.0f;
-			for (int32 k = 0; k < Samples.Num(); k += Stride)
-			{
-				const FDebugGraphSample& S = Samples[k];
-				if (!S.Has(L.Series))
-				{
-					bHave = false;
-					continue;
-				}
-				const float Nx = ToX(S.T), Ny = ToY(FMath::Clamp(S.Get(L.Series), static_cast<float>(Range.X), static_cast<float>(Range.Y)));
-				if (bHave)
-				{
-					P.Line(Px, Py, Nx, Ny, L.Colour, L.bDashed ? 1.0f : 2.0f);
-				}
-				Px = Nx;
-				Py = Ny;
-				bHave = true;
-			}
-		}
-		return Top + Height;
-	}
-} // namespace
-
-/** The curb controller's colour key and graphs, as a HUD panel. */
-class SRammsCurbScope : public SLeafWidget
-{
-public:
-	SLATE_BEGIN_ARGS(SRammsCurbScope) {}
-	SLATE_END_ARGS()
-
-	void Construct(const FArguments& InArgs, URammsCurbNegotiationController* InController)
-	{
-		Controller = InController;
-		Font = FCoreStyle::GetDefaultFontStyle("Regular", 10);
-		SetCanTick(false);
-	}
-
-	virtual FVector2D ComputeDesiredSize(float) const override
-	{
-		const URammsCurbNegotiationController* C = Controller.Get();
-		if (!C || !FSlateApplication::IsInitialized())
-		{
-			return FVector2D(DefaultWidth, 40.0);
-		}
-		FSlatePainter P;
-		P.Font = Font;
-		P.LineHeight = LineHeight;
-		// As tall as it needs at the width it was last given (the key wraps).
-		const float Width = LastWidth > 1.0f ? LastWidth : DefaultWidth;
-		return FVector2D(DefaultWidth, C->PaintDebugPanel(P, Width, /*Height=*/0.0f, /*bDraw=*/false));
-	}
-
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect,
-		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
-	{
-		const URammsCurbNegotiationController* C = Controller.Get();
-		FSlatePainter						   P;
-		P.Geometry = &AllottedGeometry;
-		P.Elements = &OutDrawElements;
-		P.Font = Font;
-		P.LineHeight = LineHeight;
-		P.Layer = LayerId;
-		const FVector2f Size = AllottedGeometry.GetLocalSize();
-		LastWidth = Size.X;
-		if (C)
-		{
-			C->PaintDebugPanel(P, Size.X, Size.Y, /*bDraw=*/true);
-		}
-		else
-		{
-			P.Text(4.0f, 4.0f, TEXT("no curb controller"), FLinearColor(0.6f, 0.6f, 0.6f));
-		}
-		return P.Layer;
-	}
-
-private:
-	static constexpr float DefaultWidth = 480.0f;
-	static constexpr float LineHeight = 17.0f;
-
-	TWeakObjectPtr<const URammsCurbNegotiationController> Controller;
-	FSlateFontInfo										  Font;
-	mutable float										  LastWidth = 0.0f;
-
-	// Repainted every frame: the graphs move with the simulation.
-	virtual bool ComputeVolatility() const override { return true; }
-};
-
-/** The world layers' labels, on the player's screen under the HUD. */
-class SRammsCurbLabels : public SLeafWidget
-{
-public:
-	SLATE_BEGIN_ARGS(SRammsCurbLabels) {}
-	SLATE_END_ARGS()
-
-	void Construct(const FArguments& InArgs, const URammsCurbNegotiationController* InController)
-	{
-		Controller = InController;
-		Font = FCoreStyle::GetDefaultFontStyle("Regular", 9);
-		SetCanTick(false);
-		SetVisibility(EVisibility::HitTestInvisible);
-	}
-
-	virtual FVector2D ComputeDesiredSize(float) const override { return FVector2D::ZeroVector; }
-
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect,
-		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
-	{
-		const URammsCurbNegotiationController* C = Controller.Get();
-		const UWorld*						   World = C ? C->GetWorld() : nullptr;
-		APlayerController*					   Player = World ? World->GetFirstPlayerController() : nullptr;
-		if (!Player)
-		{
-			return LayerId;
-		}
-		int32 PixelsX = 0, PixelsY = 0;
-		Player->GetViewportSize(PixelsX, PixelsY);
-		const FVector2f Local = AllottedGeometry.GetLocalSize();
-		if (PixelsX <= 0 || PixelsY <= 0)
-		{
-			return LayerId;
-		}
-		const FVector2D ToLocal(Local.X / PixelsX, Local.Y / PixelsY);
-		FSlatePainter	P;
-		P.Geometry = &AllottedGeometry;
-		P.Elements = &OutDrawElements;
-		P.Font = Font;
-		P.Layer = LayerId;
-		C->PaintDebugLabels(P, [Player, ToLocal, Local](const FVector& At, FVector2D& Out) {
-			FVector2D Screen;
-			if (!Player->ProjectWorldLocationToScreen(At, Screen, /*bPlayerViewportRelative=*/true))
-			{
-				return false;
-			}
-			Out = Screen * ToLocal;
-			return Out.X >= 0.0 && Out.Y >= 0.0 && Out.X <= Local.X && Out.Y <= Local.Y;
-		});
-		return P.Layer;
-	}
-
-private:
-	TWeakObjectPtr<const URammsCurbNegotiationController> Controller;
-	FSlateFontInfo										  Font;
-
-	virtual bool ComputeVolatility() const override { return true; }
-};
-
-void URammsCurbNegotiationController::PaintDebugLabels(const RammsCurb::FDebugPainter& P,
-	TFunctionRef<bool(const FVector&, FVector2D&)>									   Project) const
-{
-	if (!DebugState)
-	{
-		return;
-	}
-	// Each label's lines centred over its point, on a dark band.
-	for (const RammsCurb::FDebugLabel& L : DebugState->Labels)
-	{
-		FVector2D Screen;
-		if (!Project(L.At, Screen))
-		{
-			continue;
-		}
-		TArray<FString> Lines;
-		L.Text.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
-		float Widest = 0.0f;
-		for (const FString& Line : Lines)
-		{
-			Widest = FMath::Max(Widest, P.Width(Line));
-		}
-		const float Height = Lines.Num() * P.LineHeight;
-		const float Left = static_cast<float>(Screen.X) - 0.5f * Widest;
-		const float Top = static_cast<float>(Screen.Y) - Height;
-		P.Box(Left - 3.0f, Top - 1.0f, Widest + 6.0f, Height + 2.0f, FLinearColor(0.0f, 0.0f, 0.0f, 0.45f));
-		for (int32 k = 0; k < Lines.Num(); ++k)
-		{
-			P.Text(Left, Top + k * P.LineHeight, Lines[k], FLinearColor(L.Colour));
-		}
-	}
-}
+// Drawn as RAMMP Gen1's are (RammsCurbScope): into the panel the HUD hosts
+// (IRammsHUDPanelProvider), or, with no HUD to host it, straight over the game
+// viewport (UDebugDrawService's canvas).
 
 void URammsCurbNegotiationController::UpdateDebugLabelOverlay(bool bWanted)
 {
-	if (bWanted && !DebugLabelOverlay.IsValid())
+	if (DebugState)
 	{
-		UWorld*				 World = GetWorld();
-		UGameViewportClient* Viewport = World ? World->GetGameViewport() : nullptr;
-		ULocalPlayer*		 Player = World ? World->GetFirstLocalPlayerFromController() : nullptr;
-		if (Viewport && Player)
-		{
-			// Under the HUD, which takes the player's screen at 10.
-			DebugLabelOverlay = SNew(SRammsCurbLabels, this);
-			Viewport->AddViewportWidgetForPlayer(Player, DebugLabelOverlay.ToSharedRef(), 5);
-			DebugLabelViewport = Viewport;
-			DebugLabelPlayer = Player;
-		}
-	}
-	else if (!bWanted && DebugLabelOverlay.IsValid())
-	{
-		UGameViewportClient* Viewport = DebugLabelViewport.Get();
-		ULocalPlayer*		 Player = DebugLabelPlayer.Get();
-		if (Viewport && Player)
-		{
-			Viewport->RemoveViewportWidgetForPlayer(Player, DebugLabelOverlay.ToSharedRef());
-		}
-		DebugLabelOverlay.Reset();
-		DebugLabelViewport.Reset();
-		DebugLabelPlayer.Reset();
+		RammsCurb::UpdateLabelOverlay(*DebugState, *this, bWanted);
 	}
 }
 
@@ -1352,33 +867,25 @@ bool URammsCurbNegotiationController::WantsDebugKey() const
 		&& (DebugView.Sensing != ERammsCurbSensingView::Off || DebugView.bTerrain || DebugView.bPlan || DebugView.bRobot);
 }
 
-bool URammsCurbNegotiationController::IsDebugPanelHosted() const
-{
-	return DebugPanelWidget.IsValid();
-}
-
 void URammsCurbNegotiationController::GetHUDPanels(TArray<FRammsHUDPanelDesc>& OutPanels) const
 {
-	FRammsHUDPanelDesc& Panel = OutPanels.AddDefaulted_GetRef();
-	Panel.Id = FName(TEXT("CurbView"));
-	Panel.Title = NSLOCTEXT("Ramms", "CurbViewPanel", "Curb view");
-	const TWeakObjectPtr<URammsCurbNegotiationController> Self(const_cast<URammsCurbNegotiationController*>(this));
-	Panel.MakeContent = [Self]() -> TSharedRef<SWidget> {
-		TSharedRef<SRammsCurbScope> Scope = SNew(SRammsCurbScope, Self.Get());
-		if (URammsCurbNegotiationController* C = Self.Get())
-		{
-			C->DebugPanelWidget = Scope;
-		}
-		return Scope;
-	};
-	// Shown while it has something to show: the graphs, or the colour key of
-	// a layer drawn in the world.
-	Panel.IsWanted = [Self]() {
-		const URammsCurbNegotiationController* C = Self.Get();
-		return C && (C->DebugView.bGraphs || C->WantsDebugKey());
-	};
-	Panel.DefaultPlacement = FVector2D(0.28, 1.0);
-	Panel.bResizable = true;
+	if (!DebugState)
+	{
+		return;
+	}
+	const TWeakObjectPtr<const URammsCurbNegotiationController> Self(this);
+	RammsCurb::AddScopePanel(
+		OutPanels, *this, *DebugState,
+		[Self](const RammsCurb::FDebugPainter& P, float Width, float Height, bool bDraw) {
+			const URammsCurbNegotiationController* C = Self.Get();
+			return C ? C->PaintDebugPanel(P, Width, Height, bDraw) : 0.0f;
+		},
+		// Shown while it has something to show: the graphs, or the colour key of
+		// a layer drawn in the world.
+		[Self]() {
+			const URammsCurbNegotiationController* C = Self.Get();
+			return C && (C->DebugView.bGraphs || C->WantsDebugKey());
+		});
 }
 
 float URammsCurbNegotiationController::PaintDebugPanel(const RammsCurb::FDebugPainter& P, float Width, float Height, bool bDraw) const
@@ -1387,6 +894,9 @@ float URammsCurbNegotiationController::PaintDebugPanel(const RammsCurb::FDebugPa
 	{
 		return 0.0f;
 	}
+	using RammsCurb::FGraphLine;
+	using RammsCurb::FGraphMark;
+	using RammsCurb::FKeyRow;
 	float		Y = 0.0f;
 	const float X = 0.0f;
 	if (WantsDebugKey())
@@ -1409,7 +919,7 @@ float URammsCurbNegotiationController::PaintDebugPanel(const RammsCurb::FDebugPa
 			Rows.Add({ TEXT("wheels"), { { StateColour(ERammsCurbWheelState::Planted), TEXT("planted") }, { StateColour(ERammsCurbWheelState::Lifting), TEXT("lifting") }, { StateColour(ERammsCurbWheelState::Clear), TEXT("clear") }, { StateColour(ERammsCurbWheelState::Planting), TEXT("planting") }, { StateColour(ERammsCurbWheelState::Loading), TEXT("loading") }, { StateColour(ERammsCurbWheelState::Held), TEXT("held/idle") } } });
 			Rows.Add({ TEXT("up"), { { MeasuredColour, TEXT("measured") }, { PlannedColour, TEXT("planned") }, { FColor::White, TEXT("commanded wheel, support") } } });
 		}
-		Y += DrawKey(P, X, Y, Width, Rows, bDraw) + 4.0f;
+		Y += RammsCurb::DrawKey(P, X, Y, Width, Rows, bDraw) + 4.0f;
 	}
 	if (DebugView.bGraphs)
 	{
@@ -1431,13 +941,13 @@ float URammsCurbNegotiationController::PaintDebugPanel(const RammsCurb::FDebugPa
 			const FGraphLine SpeedLines[] = { { EGraphSeries::Speed, Meas, TEXT("chassis") }, { EGraphSeries::RiderSpeed, FLinearColor(RiderColour), TEXT("rider") },
 				{ EGraphSeries::SpeedCommand, Cmd, TEXT("commanded") }, { EGraphSeries::SpeedFloor, Flo, TEXT("floor"), true } };
 			const FGraphMark Zero[] = { { 0.0f, FLinearColor(0.4f, 0.4f, 0.45f) } };
-			G = DrawGraph(P, X, G, Width, H, TEXT("ground speed (rider: at the seat)"), Samples, TFrom, Span, SpeedLines, Zero, 10.0f, TEXT("cm/s")) + Gap;
+			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("ground speed (rider: at the seat)"), Samples, TFrom, Span, SpeedLines, Zero, 10.0f, TEXT("cm/s")) + Gap;
 			const FGraphLine TiltLines[] = { { EGraphSeries::Tilt, Meas, TEXT("measured") }, { EGraphSeries::TiltPlanned, Planned, TEXT("planned") } };
 			const FGraphMark TiltMarks[] = { { 0.0f, FLinearColor(0.4f, 0.4f, 0.45f) }, { Tuning.MaxPlannedTiltDeg, Lim } };
-			G = DrawGraph(P, X, G, Width, H, TEXT("base tilt (deg, limit dashed)"), Samples, TFrom, Span, TiltLines, TiltMarks, 2.0f, TEXT("deg")) + Gap;
+			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("base tilt (deg, limit dashed)"), Samples, TFrom, Span, TiltLines, TiltMarks, 2.0f, TEXT("deg")) + Gap;
 			const FGraphLine MarginLines[] = { { EGraphSeries::Margin, Meas, TEXT("measured") }, { EGraphSeries::MarginPlanned, Planned, TEXT("planned") } };
 			const FGraphMark MarginMarks[] = { { 0.0f, Lim } };
-			DrawGraph(P, X, G, Width, H, TEXT("stability margin (cm, crossing)"), Samples, TFrom, Span, MarginLines, MarginMarks, 10.0f, TEXT("cm"));
+			RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("stability margin (cm, crossing)"), Samples, TFrom, Span, MarginLines, MarginMarks, 10.0f, TEXT("cm"));
 		}
 		Y += 3.0f * (Row + H + Gap);
 	}
@@ -1446,42 +956,12 @@ float URammsCurbNegotiationController::PaintDebugPanel(const RammsCurb::FDebugPa
 
 void URammsCurbNegotiationController::DrawDebugOverlay(UCanvas* Canvas, APlayerController* Player)
 {
-	if (!Canvas || !DebugState || !GEngine)
+	if (!DebugState)
 	{
 		return;
 	}
-	// Only the viewport of this controller's world.
-	const UWorld* World = GetWorld();
-	if (Player ? Player->GetWorld() != World
-			   : !(Canvas->SceneView && Canvas->SceneView->Family && Canvas->SceneView->Family->Scene
-					 && Canvas->SceneView->Family->Scene->GetWorld() == World))
-	{
-		return;
-	}
-	FCanvasPainter P;
-	P.Canvas = Canvas;
-	P.Font = GEngine->GetSmallFont();
-	P.LineHeight = 15.0f;
-
-	// The world layers' labels, here only without the overlay under the HUD.
-	if (DebugView.bLabels && !DebugLabelOverlay.IsValid())
-	{
-		PaintDebugLabels(P, [Canvas](const FVector& At, FVector2D& Out) {
-			const FVector Screen = Canvas->Project(At);
-			Out = FVector2D(Screen.X, Screen.Y);
-			return Screen.Z > 0.0 && Screen.X >= 0.0 && Screen.Y >= 0.0 && Screen.X <= Canvas->ClipX && Screen.Y <= Canvas->ClipY;
+	RammsCurb::DrawScopeOverlay(*DebugState, *this, Canvas, Player, DebugView.bLabels, DebugView.bGraphs || WantsDebugKey(),
+		DebugView.OverlayAnchor, [this](const RammsCurb::FDebugPainter& P, float Width, float Height, bool bDraw) {
+			return PaintDebugPanel(P, Width, Height, bDraw);
 		});
-	}
-
-	// The key and the graphs, here only while no HUD hosts them as a panel.
-	if (IsDebugPanelHosted() || !(DebugView.bGraphs || WantsDebugKey()))
-	{
-		return;
-	}
-	const float Width = FMath::Clamp(Canvas->ClipX * 0.36f, 300.0f, 560.0f);
-	const float Height = PaintDebugPanel(P, Width, 0.0f, /*bDraw=*/false);
-	P.Origin = FVector2D(FMath::Clamp(static_cast<float>(DebugView.OverlayAnchor.X), 0.0f, 0.9f) * Canvas->ClipX,
-		FMath::Clamp(static_cast<float>(DebugView.OverlayAnchor.Y), 0.1f, 1.0f) * Canvas->ClipY - 6.0f - Height);
-	P.Box(-6.0f, -6.0f, Width + 12.0f, Height + 10.0f, FLinearColor(0.02f, 0.03f, 0.04f, 0.6f));
-	PaintDebugPanel(P, Width, 0.0f, /*bDraw=*/true);
 }

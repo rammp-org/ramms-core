@@ -3,11 +3,15 @@
 #include "RammsRammpGen1CurbController.h"
 
 #include "Curb/RammsCurbAssist.h"
+#include "Curb/RammsCurbScope.h"
 #include "Curb/RammsCurbStick.h"
 #include "Curb/RammsRammpGen1Curb.h"
 #include "Curb/RammsRammpGen1CurbMeter.h"
+#include "Curb/RammsRammpGen1CurbView.h"
+#include "Debug/DebugDrawService.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Misc/ScopeExit.h"
 #include "RammsControlIds.h"
 #include "RammsDriveHandOver.h"
 #include "RammsDriveModeSelector.h"
@@ -100,6 +104,7 @@ namespace
 } // namespace
 
 URammsRammpGen1CurbController::URammsRammpGen1CurbController()
+	: DebugState(MakePimpl<RammsRammpGen1Curb::FViewState>())
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
@@ -126,10 +131,23 @@ void URammsRammpGen1CurbController::BeginPlay()
 		Lifts[i].MaxRate = Rates[i];
 	}
 	bPowered = Base && !Config.FrontOmniLeft.IsNone() && Base->HasMotor(Config.FrontOmniLeft) && Base->HasMotor(Config.FrontOmniRight);
+	// The debug view's labels, colour key and graphs, over the game viewport; drawn only while DebugView asks for them
+	// (and the key and graphs only while no HUD hosts them as a panel).
+	DebugDrawHandle = UDebugDrawService::Register(TEXT("Game"),
+		FDebugDrawDelegate::CreateUObject(this, &URammsRammpGen1CurbController::DrawDebugOverlay));
 }
 
 void URammsRammpGen1CurbController::EndPlay(const EEndPlayReason::Type Reason)
 {
+	if (DebugDrawHandle.IsValid())
+	{
+		UDebugDrawService::Unregister(DebugDrawHandle);
+		DebugDrawHandle.Reset();
+	}
+	if (DebugState)
+	{
+		RammsCurb::UpdateLabelOverlay(*DebugState, *this, false);
+	}
 	if (bModeActive)
 	{
 		ReleaseWheels();
@@ -219,6 +237,9 @@ void URammsRammpGen1CurbController::DescribeControls(FRammsControlSurface& OutSu
 		Strafe.PairedAxis = FName();
 		OutSurface.Add(Strafe);
 	}
+
+	// The debug view's switches (DebugView), a group of their own: those of the layers it has.
+	RammsCurb::DescribeViewControls(OutSurface, DebugView, RammsRammpGen1Curb::ViewLayers);
 }
 
 namespace
@@ -265,7 +286,7 @@ bool URammsRammpGen1CurbController::ApplyControl(FName Id, float Value)
 		}
 		return true;
 	}
-	return false;
+	return RammsCurb::ApplyViewControl(DebugView, RammsRammpGen1Curb::ViewLayers, Id, Value);
 }
 
 bool URammsRammpGen1CurbController::ReleaseControl(FName Id)
@@ -284,7 +305,8 @@ bool URammsRammpGen1CurbController::ReleaseControl(FName Id)
 bool URammsRammpGen1CurbController::ReadTarget(FName Id, float& OutTarget) const
 {
 	// The switches' targets are what they are set to, however they were set (the panel steps from them).
-	return (Id == RammsCurb::AssistControlId() || Id == RammpGen1CurbStyleId()) && ReadControl(Id, OutTarget);
+	return (Id == RammsCurb::AssistControlId() || Id == RammpGen1CurbStyleId()) ? ReadControl(Id, OutTarget)
+																				: RammsCurb::ReadViewControl(DebugView, RammsRammpGen1Curb::ViewLayers, Id, OutTarget);
 }
 
 bool URammsRammpGen1CurbController::TriggerControl(FName Id)
@@ -344,7 +366,7 @@ bool URammsRammpGen1CurbController::ReadControl(FName Id, float& OutValue) const
 		OutValue = static_cast<float>(Severity);
 		return true;
 	}
-	return false;
+	return RammsCurb::ReadViewControl(DebugView, RammsRammpGen1Curb::ViewLayers, Id, OutValue);
 }
 
 bool URammsRammpGen1CurbController::ReadControlText(FName Id, FText& OutText) const
@@ -870,6 +892,11 @@ void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	// The debug view, after whatever this tick does (it returns from several places).
+	ON_SCOPE_EXIT
+	{
+		TickDebugView(DeltaTime);
+	};
 	if (!Base)
 	{
 		return;
@@ -1062,7 +1089,7 @@ void URammsRammpGen1CurbController::EnterPhase(ERammsRammpGen1CurbPhase Next)
 			break;
 		}
 		case ERammsRammpGen1CurbPhase::Approach:
-			DriveAt(Config.ApproachSpeedCmS, true, false);
+			DriveAt(Config.ApproachSpeedCmS, true, false, /*bApproach=*/true);
 			break;
 		case ERammsRammpGen1CurbPhase::FrontUp:
 			bOk = StartHeights({ { ESupport::Front, Lift } }, 0.5f);
@@ -1471,7 +1498,9 @@ void URammsRammpGen1CurbController::BeginBlended()
 	}
 	bRaised = bDriveFree = bPressed = false;
 	BlendEnd = 0;
-	BlendV = 0.0f;
+	BlendV = BlendWantCmS = BlendFrontNearCm = 0.0f;
+	BlendSpeed = EBlendSpeed::Starting;
+	BlendStop = FBlendStop();
 	BlendFrontAt = BlendRearOn = -1.0;
 	NoteBlended(ERammsRammpGen1CurbPhase::Level, TEXT("rolling: to the crossing height on the way"));
 	if (!StartHeights({ { ESupport::Drive, B }, { ESupport::Front, Front }, { ESupport::Rear, B } }, 0.0f))
@@ -1692,47 +1721,42 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 	// Its speed: the crawl (faster on the approach), held short of the edge for a pair reaching it that is not up off
 	// the level it is leaving, and short of the curb until the chassis is at its crossing height.
 	const float FrontNear = -FrontLead;
-	float		Want = FrontNear > Config.BlendNearCm ? Config.ApproachSpeedCmS : Config.CrawlSpeedCmS;
-	FString		HoldFor; // what a stop short of the edge holds it for, while one does
-	const auto	StopAt = [this, &Want, &HoldFor](float Lead, float At, const TFunctionRef<FString()>& For) {
-		 const float Cap = FMath::Max(0.0f, Config.BlendStopGain * (At - Lead));
-		 if (Cap < Want)
-		 {
-			 Want = Cap;
-			 if (Cap < 0.5f)
-			 {
-				 HoldFor = For();
-			 }
-		 }
+	const bool	bApproach = FrontNear > Config.BlendNearCm;
+	const float Cruise = bApproach ? Config.ApproachSpeedCmS : Config.CrawlSpeedCmS;
+	float		Want = Cruise;
+	// The stop that slows it most, if one does (nothing put in words here: BlendStopWords, when asked), and whether it
+	// holds it there.
+	FBlendStop Lowest;
+	bool	   bHeld = false;
+	const auto StopAt = [this, &Want, &Lowest, &bHeld](float Lead, float At, const FBlendStop& Stop) {
+		const float Cap = FMath::Max(0.0f, Config.BlendStopGain * (At - Lead));
+		if (Cap < Want)
+		{
+			Want = Cap;
+			Lowest = Stop;
+			bHeld = Cap < 0.5f;
+		}
 	};
 	const auto NotUp = [](EPair P) { return P == EPair::Near || P == EPair::Lifting; };
-	const auto ToGo = [this](const TCHAR* Who, ESupport S, float LevelZ, const TCHAR* Level) {
-		return FString::Printf(TEXT("the %s to clear %s (%.1f cm to go)"), Who, Level, FMath::Max(0.0f, Config.BlendClearCm - LowGap(S, LevelZ)));
-	};
-	const TCHAR* Upper = bClimb ? TEXT("the curb") : TEXT("the upper level");
 	if (!bRaised)
 	{
-		StopAt(FrontLead, -5.0f, [] { return FString(TEXT("the chassis to reach its crossing height")); });
+		StopAt(FrontLead, -5.0f, { EBlendStopFor::Height });
 	}
 	if (bClimb)
 	{
 		if (PF == EPair::Near)
 		{
-			StopAt(FrontLead, -2.0f, [&] { return ToGo(TEXT("front omni wheels"), ESupport::Front, FarZ, Upper); });
+			StopAt(FrontLead, -2.0f, { EBlendStopFor::Clear, ESupport::Front, FarZ });
 		}
 		if (NotUp(PD))
 		{
-			StopAt(LeadingAlong(ESupport::Drive) + RD, -1.0f, [&] {
-				return PD == EPair::Lifting ? ToGo(TEXT("drive wheels"), ESupport::Drive, UpperZ, Upper)
-											: FString(TEXT("the front omni wheels to be down on the curb, before the drive wheels go up"));
-			});
+			StopAt(LeadingAlong(ESupport::Drive) + RD, -1.0f,
+				PD == EPair::Lifting ? FBlendStop{ EBlendStopFor::Clear, ESupport::Drive, UpperZ } : FBlendStop{ EBlendStopFor::FrontDownFirst });
 		}
 		if (NotUp(PR))
 		{
-			StopAt(LeadingAlong(ESupport::Rear) + RR, -3.0f, [&] {
-				return PR == EPair::Lifting ? ToGo(TEXT("rear omni wheels"), ESupport::Rear, UpperZ, Upper)
-											: FString(TEXT("the drive wheels down on the curb and the translators aft, before the rear omni wheels go up"));
-			});
+			StopAt(LeadingAlong(ESupport::Rear) + RR, -3.0f,
+				PR == EPair::Lifting ? FBlendStop{ EBlendStopFor::Clear, ESupport::Rear, UpperZ } : FBlendStop{ EBlendStopFor::DriveDownFirst });
 		}
 	}
 	else
@@ -1740,29 +1764,35 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		// On the upper level a pair touches it under its hubs.
 		if (NotUp(PD))
 		{
-			StopAt(LeadingAlong(ESupport::Drive), -2.0f, [&] {
-				return PD == EPair::Lifting ? ToGo(TEXT("drive wheels"), ESupport::Drive, UpperZ, Upper)
-											: FString(TEXT("the front omni wheels to be down on the road, before the drive wheels go up"));
-			});
+			StopAt(LeadingAlong(ESupport::Drive), -2.0f,
+				PD == EPair::Lifting ? FBlendStop{ EBlendStopFor::Clear, ESupport::Drive, UpperZ } : FBlendStop{ EBlendStopFor::FrontDownFirst });
 		}
 		if (NotUp(PR))
 		{
-			StopAt(LeadingAlong(ESupport::Rear), -2.0f, [&] {
-				return PR == EPair::Lifting ? ToGo(TEXT("rear omni wheels"), ESupport::Rear, UpperZ, Upper)
-											: FString(TEXT("the drive wheels down on the road and the translators aft, before the rear omni wheels go up"));
-			});
+			StopAt(LeadingAlong(ESupport::Rear), -2.0f,
+				PR == EPair::Lifting ? FBlendStop{ EBlendStopFor::Clear, ESupport::Rear, UpperZ } : FBlendStop{ EBlendStopFor::DriveDownFirst });
 		}
 	}
 	if (BlendEnd == 3)
 	{
 		Want = 0.0f;
-		HoldFor.Reset();
+		bHeld = false;
 	}
+	// What set the speed, for SpeedSetBy to put in words when the debug view asks.
+	BlendWantCmS = Want;
+	BlendStop = Lowest;
+	BlendFrontNearCm = FrontNear;
+	BlendSpeed = BlendEnd == 3	? EBlendSpeed::Stopping
+		: bHeld					? EBlendSpeed::Held
+		: Want < Cruise - 0.01f ? EBlendSpeed::Slowing
+		: bApproach				? EBlendSpeed::Approach
+								: EBlendSpeed::Crawl;
 	// Held there, the status says what for; held with nothing moving -- no lift going anywhere, so nothing that could
 	// bring what it waits for -- for Config.WaitSeconds, it is not coming, and the crossing faults rather than wait out
 	// the phase's minute.
-	if (!HoldFor.IsEmpty() && BlendV <= 0.5f)
+	if (bHeld && BlendV <= 0.5f)
 	{
+		const FString HoldFor = BlendStopWords(Lowest);
 		WaitWhy = HoldFor;
 		HeldSeconds = Moving() ? 0.0f : HeldSeconds + Dt;
 		if (HeldSeconds >= Config.WaitSeconds)
@@ -1829,7 +1859,7 @@ void URammsRammpGen1CurbController::RollAt(float SpeedCmS)
 		RammsDrive::ReleaseBrakes(*Base, Braked);
 	}
 	DriveCmS = 0.0f; // the stepped drive's: rolling, the wheels are commanded here, every tick
-	bDriveWheels = bDriveFront = bFrontHubsHeld = false;
+	bDriveWheels = bDriveFront = bFrontHubsHeld = bDriveApproach = false;
 	const FLift& T = Lifts[TranslatorL];
 	const float	 PlateCmS = FMath::IsNearlyEqual(T.Cmd, T.Goal, 1.0e-5f) ? 0.0f : FMath::Sign(T.Goal - T.Cmd) * T.Rate;
 	for (FName M : { Config.DriveLeft, Config.DriveRight })
@@ -2012,6 +2042,7 @@ void URammsRammpGen1CurbController::PauseCrossing()
 	bSavedDriveWheels = bDriveWheels;
 	bSavedDriveFront = bDriveFront;
 	bSavedFrontHubs = bFrontHubsHeld;
+	bSavedDriveApproach = bDriveApproach;
 	HoldWheels(bDriveWheelsUp || bFrontHubsHeld);
 	PhaseLog.Add(FString::Printf(TEXT("        paused by the stick in %s: %s"), *RammpGen1CurbPhaseName(Phase), *StickWhy));
 	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
@@ -2022,7 +2053,7 @@ void URammsRammpGen1CurbController::ResumeCrossing()
 	bStickPaused = false;
 	if (!FMath::IsNearlyZero(SavedDriveCmS))
 	{
-		DriveAt(SavedDriveCmS, bSavedDriveWheels, bSavedDriveFront);
+		DriveAt(SavedDriveCmS, bSavedDriveWheels, bSavedDriveFront, bSavedDriveApproach);
 	}
 	else
 	{
@@ -2240,10 +2271,11 @@ bool URammsRammpGen1CurbController::StepTouchdown(float Dt)
 	return true;
 }
 
-void URammsRammpGen1CurbController::DriveAt(float SpeedCmS, bool bDrive, bool bFront)
+void URammsRammpGen1CurbController::DriveAt(float SpeedCmS, bool bDrive, bool bFront, bool bApproach)
 {
 	RammsDrive::ReleaseBrakes(*Base, Braked);
 	DriveCmS = SpeedCmS;
+	bDriveApproach = bApproach;
 	bDriveWheels = bDrive;
 	bDriveFront = bFront && bPowered;
 	bFrontHubsHeld = false;
@@ -2269,7 +2301,7 @@ void URammsRammpGen1CurbController::HoldWheels(bool bFrontHubsToo)
 		return;
 	}
 	DriveCmS = 0.0f;
-	bDriveWheels = bDriveFront = false;
+	bDriveWheels = bDriveFront = bDriveApproach = false;
 	bFrontHubsHeld = bPowered && bFrontHubsToo;
 	const FName Drive[] = { Config.DriveLeft, Config.DriveRight };
 	for (FName M : Drive)
@@ -2309,7 +2341,7 @@ void URammsRammpGen1CurbController::ReleaseWheels()
 	}
 	RammsDrive::ReleaseBrakes(*Base, Braked);
 	DriveCmS = 0.0f;
-	bDriveWheels = bDriveFront = bFrontHubsHeld = false;
+	bDriveWheels = bDriveFront = bFrontHubsHeld = bDriveApproach = false;
 	TArray<FName> Wheels = { Config.DriveLeft, Config.DriveRight };
 	if (bPowered)
 	{
@@ -2551,32 +2583,88 @@ void URammsRammpGen1CurbController::MeasureTick()
 	S.RiderPos = (Seat ? Seat->GetComponentTransform() : T).TransformPosition(Config.RiderOffsetCm);
 	S.Phase = Phase;
 
-	// The wheels on the ground: each hub within the touch tolerance of the surface under it, touching it there.
+	// The wheels on the ground: each hub within the touch tolerance of the surface under it, touching it there (this
+	// tick's sample, which the debug view draws from too).
+	TArray<RammsRammpGen1Curb::FWheelSample> Own;
+	if (!DebugState)
+	{
+		SampleWheels(Own);
+	}
+	const TArray<RammsRammpGen1Curb::FWheelSample>& Wheels = DebugState ? WheelsThisTick() : Own;
+	for (const FVector& Contact : RammsRammpGen1Curb::GroundContacts(Wheels, Config.TouchToleranceCm))
+	{
+		S.Contacts.Add(FVector2D(Contact.X, Contact.Y));
+	}
+	// The centre of mass, from the config's mass model.
+	const FVector Com = ComNow();
+	S.ComXY = FVector2D(Com.X, Com.Y);
+	// The frame's underside over the edge.
+	S.bFrameOverEdge = FrameOverEdge(S.FrameClearanceCm);
+	Meter->Add(S);
+	if (LeadingAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= 0.0f)
+	{
+		Meter->MarkFrontAtEdge(S.TimeS);
+	}
+}
+
+void URammsRammpGen1CurbController::SampleWheels(TArray<RammsRammpGen1Curb::FWheelSample>& Out) const
+{
 	const TPair<FName, float> Wheels[] = { { Config.DriveWheelLeftBody, Config.DriveWheelRadiusCm }, { Config.DriveWheelRightBody, Config.DriveWheelRadiusCm },
 		{ Config.FrontOmniLeftBody, Config.FrontOmniRadiusCm }, { Config.FrontOmniRightBody, Config.FrontOmniRadiusCm },
 		{ Config.RearOmniLeftBody, Config.RearOmniRadiusCm }, { Config.RearOmniRightBody, Config.RearOmniRadiusCm } };
+	Out.Reset();
 	for (const TPair<FName, float>& W : Wheels)
 	{
-		const FVector Hub = BodyPos(W.Key);
-		float		  Ground = 0.0f;
-		if (SurfaceZ(Hub, Ground) && Hub.Z - W.Value - Ground <= Config.TouchToleranceCm)
-		{
-			S.Contacts.Add(FVector2D(Hub.X, Hub.Y));
-		}
+		RammsRammpGen1Curb::FWheelSample& Sample = Out.AddDefaulted_GetRef();
+		Sample.Hub = BodyPos(W.Key);
+		Sample.RadiusCm = W.Value;
+		Sample.bGroundFound = SurfaceZ(Sample.Hub, Sample.GroundZ);
 	}
-	// The centre of mass, from the config's mass model: the chassis-fixed mass and each drive assembly at its hub.
-	const FVector Fixed = T.TransformPosition(FVector(Config.FixedComAheadCm, 0.0, 0.0));
-	const FVector Off = F * Config.DriveAssemblyComFromHubCm;
-	const FVector L = BodyPos(Config.DriveWheelLeftBody) + Off, R = BodyPos(Config.DriveWheelRightBody) + Off;
-	const float	  Mass = Config.FixedMassKg + 2.0f * Config.DriveAssemblyMassKg;
-	if (Mass > 0.0f)
+}
+
+const TArray<RammsRammpGen1Curb::FWheelSample>& URammsRammpGen1CurbController::WheelsThisTick() const
+{
+	// The bodies do not move within this component's tick (the backend steps after it, this its tick prerequisite): a
+	// sample is good for the frame it was made in, at the backend's time it was made at. DebugState is made with the
+	// component; its callers make sure of it.
+	RammsRammpGen1Curb::FViewState& S = *DebugState;
+	const double					Sim = SimNow();
+	if (S.Wheels.Num() == 0 || S.WheelsFrame != GFrameCounter || S.WheelsSimTime != Sim)
 	{
-		const FVector Com = (Config.FixedMassKg * Fixed + Config.DriveAssemblyMassKg * (L + R)) / Mass;
-		S.ComXY = FVector2D(Com.X, Com.Y);
+		SampleWheels(S.Wheels);
+		S.WheelsFrame = GFrameCounter;
+		S.WheelsSimTime = Sim;
 	}
-	// The frame's underside over the edge: on each side, where its bottom edge crosses the edge line, its height over
-	// the upper level.
-	const float UpperZ = FMath::Max(NearZ, FarZ);
+	return S.Wheels;
+}
+
+FVector URammsRammpGen1CurbController::ComNow() const
+{
+	// The chassis-fixed mass (rider included) at its place ahead of the chassis origin, and each drive assembly at its
+	// hub, or as far ahead of it as its own centre of mass sits.
+	const USceneComponent* Chassis = Body(Config.ChassisBody);
+	if (!Chassis)
+	{
+		return FVector::ZeroVector;
+	}
+	const FVector Fixed = Chassis->GetComponentTransform().TransformPosition(FVector(Config.FixedComAheadCm, 0.0, 0.0));
+	const FVector Off = Chassis->GetForwardVector() * Config.DriveAssemblyComFromHubCm;
+	return RammsRammpGen1Curb::CentreOfMassAt(Config.FixedMassKg, Fixed, Config.DriveAssemblyMassKg, BodyPos(Config.DriveWheelLeftBody) + Off,
+		BodyPos(Config.DriveWheelRightBody) + Off);
+}
+
+bool URammsRammpGen1CurbController::FrameOverEdge(float& OutClearanceCm) const
+{
+	// On each side, where the frame's bottom edge crosses the edge line, its height over the upper level.
+	const USceneComponent* Chassis = Body(Config.ChassisBody);
+	if (!Chassis)
+	{
+		return false;
+	}
+	const FTransform T = Chassis->GetComponentTransform();
+	const float		 UpperZ = FMath::Max(NearZ, FarZ);
+	bool			 bOver = false;
+	float			 Least = 0.0f;
 	for (const float Side : { -Config.FrameHalfWidthCm, Config.FrameHalfWidthCm })
 	{
 		const FVector Back = T.TransformPosition(FVector(Config.FrameBackCm, Side, Config.FrameBottomCm));
@@ -2587,16 +2675,118 @@ void URammsRammpGen1CurbController::MeasureTick()
 			continue;
 		}
 		const float Clear = static_cast<float>(FMath::Lerp(Back.Z, Front.Z, A0 / (A0 - A1))) - UpperZ;
-		if (!S.bFrameOverEdge || Clear < S.FrameClearanceCm)
+		if (!bOver || Clear < Least)
 		{
-			S.bFrameOverEdge = true;
-			S.FrameClearanceCm = Clear;
+			bOver = true;
+			Least = Clear;
 		}
 	}
-	Meter->Add(S);
-	if (LeadingAlong(ESupport::Front) + Config.FrontOmniRadiusCm >= 0.0f)
+	if (bOver)
 	{
-		Meter->MarkFrontAtEdge(S.TimeS);
+		OutClearanceCm = Least;
+	}
+	return bOver;
+}
+
+bool URammsRammpGen1CurbController::LiftHeightCm(ESupport S, bool bCommanded, float& OutCm) const
+{
+	if (!Base)
+	{
+		return false;
+	}
+	const TArray<int32> Ids = LiftsOf(S);
+	float				Angle = 0.0f;
+	for (int32 Index : Ids)
+	{
+		float A = 0.0f;
+		if (!bCommanded)
+		{
+			A = Base->GetMotorValue(Lifts[Index].Motor);
+		}
+		else if (!Base->GetMotorCommand(Lifts[Index].Motor, A))
+		{
+			return false;
+		}
+		Angle += A;
+	}
+	OutCm = RammpGen1CurbTable(TableOf(S)).HeightAt(Angle / Ids.Num());
+	return true;
+}
+
+FString URammsRammpGen1CurbController::SpeedSetBy() const
+{
+	using EPhase = ERammsRammpGen1CurbPhase;
+	if (bStickPaused)
+	{
+		return TEXT("the stick: paused");
+	}
+	if (bCancelling)
+	{
+		return TEXT("cancelling: the lifts going back where they were, the wheels held");
+	}
+	if (bBlended)
+	{
+		// What the rolling speed law noted on its last tick, put in words now.
+		switch (BlendSpeed)
+		{
+			case EBlendSpeed::Stopping:
+				return TEXT("stopping: in the starting pose");
+			case EBlendSpeed::Held:
+				return TEXT("held short of the edge for ") + BlendStopWords(BlendStop);
+			case EBlendSpeed::Slowing:
+				return TEXT("slowing short of the edge for ") + BlendStopWords(BlendStop);
+			case EBlendSpeed::Approach:
+				return FString::Printf(TEXT("the approach speed (the front omni wheels %.0f cm from the edge)"), BlendFrontNearCm);
+			case EBlendSpeed::Crawl:
+				return TEXT("the crawl speed");
+			case EBlendSpeed::Starting:
+			default:
+				return TEXT("starting");
+		}
+	}
+	// Stepping: the drive a phase asked for, or held while the lifts move.
+	if (FrontCreepCmS > 0.0f)
+	{
+		return TEXT("the front omni wheels' pull at the creep speed, the translators bringing the drive wheels aft");
+	}
+	if (Phase == EPhase::DriveOver && bPowered)
+	{
+		return TEXT("held by the front omni wheels' hubs: the drive wheels at their mark");
+	}
+	if (bDriveWheels || bDriveFront)
+	{
+		if (Phase == EPhase::Recentre)
+		{
+			return TEXT("the translators' plates: the drive wheels roll with them, the chassis stays");
+		}
+		return bDriveApproach ? TEXT("the approach speed") : TEXT("the creep speed");
+	}
+	return FString::Printf(TEXT("held for %s%s"), RammpGen1CurbPhaseLabel(Phase), Moving() ? TEXT(": the lifts moving") : TEXT(""));
+}
+
+FString URammsRammpGen1CurbController::BlendStopWords(const FBlendStop& Stop) const
+{
+	switch (Stop.For)
+	{
+		case EBlendStopFor::Height:
+			return TEXT("the chassis to reach its crossing height");
+		case EBlendStopFor::Clear:
+		{
+			const TCHAR* Who = Stop.Support == ESupport::Front ? TEXT("front omni wheels")
+				: Stop.Support == ESupport::Drive			   ? TEXT("drive wheels")
+															   : TEXT("rear omni wheels");
+			return FString::Printf(TEXT("the %s to clear %s (%.1f cm to go)"), Who, bClimb ? TEXT("the curb") : TEXT("the upper level"),
+				FMath::Max(0.0f, Config.BlendClearCm - LowGap(Stop.Support, Stop.LevelZ)));
+		}
+		case EBlendStopFor::FrontDownFirst:
+			return bClimb ? TEXT("the front omni wheels to be down on the curb, before the drive wheels go up")
+						  : TEXT("the front omni wheels to be down on the road, before the drive wheels go up");
+		case EBlendStopFor::DriveDownFirst:
+			return bClimb ? TEXT("the drive wheels down on the curb and the translators aft, before the rear omni wheels go up")
+						  : TEXT("the drive wheels down on the road and the translators aft, before the rear omni wheels go up");
+		case EBlendStopFor::None:
+		default:
+			return FString();
 	}
 }
 

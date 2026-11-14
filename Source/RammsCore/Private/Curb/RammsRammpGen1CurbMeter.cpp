@@ -2,8 +2,8 @@
 
 #include "Curb/RammsRammpGen1CurbMeter.h"
 
-#include "Curb/RammsCurbRobotModel.h"
 #include "Curb/RammsCurbRunStats.h"
+#include "Curb/RammsRammpGen1Curb.h"
 
 namespace RammsRammpGen1Curb
 {
@@ -31,7 +31,7 @@ namespace RammsRammpGen1Curb
 		Stats.MaxInclinationDeg = FMath::Max(Stats.MaxInclinationDeg, static_cast<float>(RammsCurb::InclinationDeg(S.PitchDeg, S.RollDeg)));
 
 		// The stability margin, against the wheels on the ground (none: the robot is off it, the lowest margin).
-		const float Margin = S.Contacts.Num() > 0 ? static_cast<float>(RammsCurb::HullMargin(S.Contacts, S.ComXY)) : -1.0e4f;
+		const float Margin = SupportMarginCm(S.Contacts, S.ComXY);
 		if (!bMarginSet || Margin < Stats.MinStabilityMarginCm)
 		{
 			bMarginSet = true;

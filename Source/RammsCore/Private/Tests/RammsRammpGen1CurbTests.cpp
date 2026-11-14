@@ -1,7 +1,8 @@
 // Tests for the RAMMP Gen1 curb crossing's arithmetic (Private/Curb/RammsRammpGen1Curb): the support height tables, the
 // crossing height's band, finding a step along a line of ground samples, the rear-lift rule and the centre of
-// mass the rule uses. Every number is made up, no robot's own: a support whose wheels rise 15 cm and fall 15 cm
-// over +-45 deg, and one that rises only 5 cm (a sprung rear's short reach).
+// mass the rule uses, the wheels on the ground and the stability margin over them; and the debug view's switches and
+// HUD panel. Every number is made up, no robot's own: a support whose wheels rise 15 cm and fall 15 cm over +-45 deg,
+// and one that rises only 5 cm (a sprung rear's short reach).
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -354,6 +355,113 @@ bool FRammsRammpGen1CurbMeterTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the frame's least clearance"), St.MinFrameClearanceCm, 3.0f, 1.0e-4f);
 	TestEqual(TEXT("...and when"), St.MinClearancePhase, ERammsRammpGen1CurbPhase::DriveOver);
 	TestFalse(TEXT("off once ended"), Meter.IsOn());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbSupportTest, "Ramms.Curb.RammpGen1.Support",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsRammpGen1CurbSupportTest::RunTest(const FString& Parameters)
+{
+	using RammsRammpGen1Curb::FWheelSample;
+	// Four 10 cm wheels at the corners of a 100 x 60 cm rectangle on level ground at z 0 -- one just touching, one 0.5 cm
+	// over it, one pressed 0.5 cm in, one touching -- a fifth 3 cm up, and a sixth over no ground at all.
+	const auto Wheel = [](double X, double Y, double HubZ, bool bGround) {
+		FWheelSample W;
+		W.Hub = FVector(X, Y, HubZ);
+		W.RadiusCm = 10.0f;
+		W.bGroundFound = bGround;
+		W.GroundZ = 0.0f;
+		return W;
+	};
+	const FWheelSample Wheels[] = { Wheel(50.0, 30.0, 10.0, true), Wheel(50.0, -30.0, 10.5, true), Wheel(-50.0, 30.0, 9.5, true),
+		Wheel(-50.0, -30.0, 10.0, true), Wheel(0.0, 0.0, 13.0, true), Wheel(80.0, 0.0, 10.0, false) };
+	TestNearlyEqual(TEXT("a gap over the ground"), Wheels[1].GapCm(), 0.5f, 1e-4f);
+	TestNearlyEqual(TEXT("pressed in: negative"), Wheels[2].GapCm(), -0.5f, 1e-4f);
+	TestNearlyEqual(TEXT("the lifted wheel's"), Wheels[4].GapCm(), 3.0f, 1e-4f);
+	TestFalse(TEXT("over no ground: not down"), Wheels[5].IsDown(0.8f));
+
+	const TArray<FVector> Contacts = RammsRammpGen1Curb::GroundContacts(Wheels, 0.8f);
+	TestEqual(TEXT("the four corners are down, within the tolerance"), Contacts.Num(), 4);
+	TestTrue(TEXT("...each under its hub, on the ground"), Contacts.Num() == 4 && Contacts[1].Equals(FVector(50.0, -30.0, 0.0)));
+	TestEqual(TEXT("a tighter tolerance leaves out the one 0.5 cm over"), RammsRammpGen1Curb::GroundContacts(Wheels, 0.3f).Num(), 3);
+
+	TArray<FVector2D> Flat;
+	for (const FVector& C : Contacts)
+	{
+		Flat.Add(FVector2D(C.X, C.Y));
+	}
+	TestNearlyEqual(TEXT("inside: to the nearest side, 30 cm"), RammsRammpGen1Curb::SupportMarginCm(Flat, FVector2D(10.0, 0.0)), 30.0f, 1e-3f);
+	TestNearlyEqual(TEXT("outside, ahead: negative"), RammsRammpGen1Curb::SupportMarginCm(Flat, FVector2D(60.0, 0.0)), -10.0f, 1e-3f);
+	const FVector2D Pair[] = { FVector2D(50.0, 30.0), FVector2D(50.0, -30.0) };
+	TestNearlyEqual(TEXT("two wheels down: a line, no better than on it"), RammsRammpGen1Curb::SupportMarginCm(Pair, FVector2D(40.0, 0.0)), -10.0f, 1e-3f);
+	TestEqual(TEXT("none down: the lowest margin"), RammsRammpGen1Curb::SupportMarginCm({}, FVector2D::ZeroVector), RammsRammpGen1Curb::NoSupportMarginCm);
+
+	// The mass model in space: 100 kg 30 cm ahead and 50 up, 15 kg at each hub.
+	const FVector Com = RammsRammpGen1Curb::CentreOfMassAt(100.0f, FVector(30.0, 0.0, 50.0), 15.0f, FVector(0.0, 25.0, 20.0), FVector(0.0, -25.0, 20.0));
+	TestTrue(TEXT("the weighted mean"), Com.Equals(FVector(3000.0 / 130.0, 0.0, (5000.0 + 600.0) / 130.0), 1e-3));
+	TestNearlyEqual(TEXT("along the heading, as the rule's"), static_cast<float>(Com.X), RammsRammpGen1Curb::CentreOfMass(100.0f, 30.0f, 15.0f, 0.0f, 0.0f), 1e-3f);
+	TestTrue(TEXT("no mass: zero"), RammsRammpGen1Curb::CentreOfMassAt(0.0f, FVector(1.0), 0.0f, FVector(2.0), FVector(3.0)).IsZero());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbViewTest, "Ramms.Curb.RammpGen1.View",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsRammpGen1CurbViewTest::RunTest(const FString& Parameters)
+{
+	URammsRammpGen1CurbController* C = NewObject<URammsRammpGen1CurbController>(GetTransientPackage());
+	const FName					   Terrain("curb.view.terrain"), Robot("curb.view.robot"), Graphs("curb.view.graphs"), Labels("curb.view.labels");
+	FRammsControlSurface		   Surface;
+	C->DescribeControls(Surface);
+	TArray<FRammsControlAxis> View;
+	Surface.GetAxesInGroup(FName("Curb view"), View);
+	TArray<FName> Ids;
+	for (const FRammsControlAxis& A : View)
+	{
+		Ids.Add(A.Id);
+		TestTrue(*FString::Printf(TEXT("%s: an on/off choice"), *A.Id.ToString()), A.Kind == ERammsControlKind::Enum && !A.bReadOnly && A.EnumLabels.Num() == 2);
+		TestEqual(*FString::Printf(TEXT("%s: shown as it is set"), *A.Id.ToString()), A.DefaultValue, A.Id == Labels ? 1.0f : 0.0f);
+	}
+	TestEqual(TEXT("the layers Gen1 has: four switches in Gen2's group"), View.Num(), 4);
+	TestTrue(TEXT("terrain, robot, graphs, labels"), Ids.Contains(Terrain) && Ids.Contains(Robot) && Ids.Contains(Graphs) && Ids.Contains(Labels));
+	TestFalse(TEXT("no sensing switch"), Ids.Contains(FName("curb.view.sensing")));
+	TestFalse(TEXT("no plan switch"), Ids.Contains(FName("curb.view.plan")));
+
+	float Value = -1.0f;
+	TestTrue(TEXT("graphs on"), C->ApplyControl(Graphs, 1.0f) && C->DebugView.bGraphs);
+	TestTrue(TEXT("...read back"), C->ReadControl(Graphs, Value) && Value == 1.0f);
+	TestTrue(TEXT("...the panel steps from it"), C->ReadTarget(Graphs, Value) && Value == 1.0f);
+	TestFalse(TEXT("sensing is not Gen1's"), C->ApplyControl(FName("curb.view.sensing"), 2.0f));
+	TestTrue(TEXT("...left off"), C->DebugView.Sensing == ERammsCurbSensingView::Off);
+	TestFalse(TEXT("the plan is not Gen1's"), C->ApplyControl(FName("curb.view.plan"), 1.0f) || C->DebugView.bPlan);
+	TestTrue(TEXT("the style is still its own switch"), C->ReadTarget(FName("curb.style"), Value) && Value == 1.0f);
+
+	// The HUD panel: Gen2's, shown while it has something to show.
+	TArray<FRammsHUDPanelDesc> Panels;
+	C->GetHUDPanels(Panels);
+	TestEqual(TEXT("one panel"), Panels.Num(), 1);
+	if (Panels.Num() == 1)
+	{
+		const FRammsHUDPanelDesc& Panel = Panels[0];
+		TestEqual(TEXT("the curb view, as Gen2's"), Panel.Id, FName("CurbView"));
+		TestTrue(TEXT("with content and a test of when it is wanted"), static_cast<bool>(Panel.MakeContent) && static_cast<bool>(Panel.IsWanted));
+		if (Panel.IsWanted)
+		{
+			TestTrue(TEXT("wanted with the graphs on"), Panel.IsWanted());
+			C->ApplyControl(Graphs, 0.0f);
+			TestFalse(TEXT("nothing to show: labels on, but no layer drawn to key"), Panel.IsWanted());
+			C->ApplyControl(Robot, 1.0f);
+			TestTrue(TEXT("the robot layer's colour key"), Panel.IsWanted());
+			C->ApplyControl(Labels, 0.0f);
+			TestFalse(TEXT("no labels, no key"), Panel.IsWanted());
+		}
+	}
+
+	C->DebugView.bExposeControls = false;
+	FRammsControlSurface Hidden;
+	C->DescribeControls(Hidden);
+	TArray<FRammsControlAxis> HiddenView;
+	Hidden.GetAxesInGroup(FName("Curb view"), HiddenView);
+	TestEqual(TEXT("not offered when asked not to"), HiddenView.Num(), 0);
 	return true;
 }
 
