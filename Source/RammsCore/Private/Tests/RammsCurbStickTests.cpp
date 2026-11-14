@@ -3,7 +3,9 @@
 // The stick read each tick on made-up input: forward only once pushed far
 // enough within the forward sector, then forward through a brief waver,
 // let go, sideways and back read at once out of forward, and how long it has
-// been held back.
+// been held back. And what that does to a crossing at each stage: go, pause or
+// cancel -- and, once the rear wheels can touch down on the far surface,
+// finishing in place, held to the end.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -175,8 +177,17 @@ namespace
 
 	const TCHAR* StickActionName(EStickAction Action)
 	{
-		return Action == EStickAction::Go ? TEXT("go") : Action == EStickAction::Cancel ? TEXT("cancel")
-																						: TEXT("pause");
+		switch (Action)
+		{
+			case EStickAction::Go:
+				return TEXT("go");
+			case EStickAction::Cancel:
+				return TEXT("cancel");
+			case EStickAction::FinishInPlace:
+				return TEXT("finish in place");
+			default:
+				return TEXT("pause");
+		}
 	}
 
 	/** The gate held at (Forward, Turn, Strafe) for Seconds, then what the stick does at
@@ -282,6 +293,91 @@ bool FRammsCurbStickDecide::RunTest(const FString& Parameters)
 	StickDecides(*this, TEXT("crossing, held back 5 s"), Gate, S, -0.8, 0.0, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("cannot back out"));
 	Gate.Reset();
 	StickDecides(*this, TEXT("crossing, pushed to the side 5 s"), Gate, S, 0.0, 0.8, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("steering is locked"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbStickFinishInPlace,
+	"Ramms.Curb.Stick.FinishInPlace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbStickFinishInPlace::RunTest(const FString& Parameters)
+{
+	// Once nothing left of a crossing needs the robot to travel -- the rear
+	// wheels can touch down on the far surface -- the stick let go, pushed to
+	// the side or pulled back no longer pauses it: the crossing finishes where
+	// the robot stands, and once it does, it holds to that whatever the stick
+	// does. Short of there, nothing changes.
+	const FRammsCurbStick S;
+	const FStickStage	  Crossing = StickStageOf(true, true, true, true);
+	FStickStage			  PastAtRest = Crossing;
+	PastAtRest.bRearCanLand = true;
+	FStickStage PastMoving = PastAtRest;
+	PastMoving.bAtRest = false;
+	FStickStage Finishing = PastAtRest;
+	Finishing.bFinishingInPlace = true;
+	// Finishing in place, whether or not the stage still says the rear wheels
+	// can land: the decision is held, not taken afresh.
+	FStickStage Latched = Crossing;
+	Latched.bFinishingInPlace = true;
+	const TCHAR* const Settling = TEXT("settling into the driving pose");
+	FStickGate		   Gate;
+
+	// Short of the point: as before -- let go, sideways or back pause, forward
+	// goes.
+	Gate.Reset();
+	StickDecides(*this, TEXT("short of it, let go 5 s"), Gate, S, 0.0, 0.0, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("push the stick forward"));
+	Gate.Reset();
+	StickDecides(*this, TEXT("short of it, to the side 5 s"), Gate, S, 0.0, 0.8, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("steering is locked"));
+	Gate.Reset();
+	StickDecides(*this, TEXT("short of it, back 5 s"), Gate, S, -0.8, 0.0, 0.0, 5.0, Crossing, EStickAction::Pause, TEXT("cannot back out"));
+	Gate.Reset();
+	StickDecides(*this, TEXT("short of it, forward"), Gate, S, 0.6, 0.0, 0.0, 0.2, Crossing, EStickAction::Go);
+
+	// Past it, held forward: on along the plan at the share pushed, and through
+	// a waver shorter than ReleaseSeconds.
+	Gate.Reset();
+	const FStickDecision Pushed = StickDecides(*this, TEXT("past it, forward"), Gate, S, 0.6, 0.0, 0.0, 0.2, PastMoving, EStickAction::Go);
+	TestEqual(TEXT("past it, forward: at the share pushed"), Pushed.Scale, 0.6);
+	StickDecides(*this, TEXT("past it, a 0.1 s waver"), Gate, S, 0.0, 0.0, 0.0, 0.1, PastMoving, EStickAction::Go);
+	// Let go for longer: read so once ReleaseSeconds have passed, and finishing
+	// in place from there.
+	StickDecides(*this, TEXT("past it, let go from forward 0.2 s"), Gate, S, 0.0, 0.0, 0.0, 0.1, PastMoving, EStickAction::FinishInPlace, Settling);
+
+	// Past it, let go, to the side (turning or strafing) or back, on the move or
+	// at rest: finishing in place at once -- no wait to cancel, and never a
+	// pause.
+	for (const FStickStage& Stage : { PastMoving, PastAtRest })
+	{
+		Gate.Reset();
+		StickDecides(*this, TEXT("past it, let go"), Gate, S, 0.0, 0.0, 0.0, StickDt, Stage, EStickAction::FinishInPlace, Settling);
+		Gate.Reset();
+		StickDecides(*this, TEXT("past it, turned to the side"), Gate, S, 0.0, 0.8, 0.0, StickDt, Stage, EStickAction::FinishInPlace, Settling);
+		Gate.Reset();
+		StickDecides(*this, TEXT("past it, strafed to the side"), Gate, S, 0.0, 0.0, -0.8, StickDt, Stage, EStickAction::FinishInPlace, Settling);
+		Gate.Reset();
+		StickDecides(*this, TEXT("past it, back"), Gate, S, -0.8, 0.0, 0.0, StickDt, Stage, EStickAction::FinishInPlace, Settling);
+		Gate.Reset();
+		StickDecides(*this, TEXT("past it, back 5 s"), Gate, S, -0.8, 0.0, 0.0, 5.0, Stage, EStickAction::FinishInPlace, Settling);
+	}
+
+	// Paused short of it, the stick still let go, then past it (rolled on into
+	// it while braking): no longer paused -- finishing in place.
+	Gate.Reset();
+	StickDecides(*this, TEXT("paused short of it"), Gate, S, 0.0, 0.0, 0.0, 1.0, Crossing, EStickAction::Pause);
+	StickDecides(*this, TEXT("still let go, now past it"), Gate, S, 0.0, 0.0, 0.0, StickDt, PastAtRest, EStickAction::FinishInPlace, Settling);
+
+	// Finishing in place: held to the end, whatever the stick -- forward again
+	// included, the drive mode takes the stick once it is done.
+	for (const FStickStage& Stage : { Finishing, Latched })
+	{
+		Gate.Reset();
+		StickDecides(*this, TEXT("finishing, let go"), Gate, S, 0.0, 0.0, 0.0, 1.0, Stage, EStickAction::FinishInPlace, Settling);
+		const FStickDecision Again = StickDecides(*this, TEXT("finishing, forward again"), Gate, S, 0.8, 0.0, 0.0, 1.0, Stage, EStickAction::FinishInPlace,
+			TEXT("the stick takes over"));
+		TestEqual(TEXT("finishing, forward again: no share of the plan's speed"), Again.Scale, 0.0);
+		StickDecides(*this, TEXT("finishing, to the side"), Gate, S, 0.0, 0.8, 0.0, 1.0, Stage, EStickAction::FinishInPlace, Settling);
+		StickDecides(*this, TEXT("finishing, back 5 s"), Gate, S, -0.8, 0.0, 0.0, 5.0, Stage, EStickAction::FinishInPlace, Settling);
+	}
 	return true;
 }
 

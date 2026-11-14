@@ -79,6 +79,14 @@ namespace RammsCurb
 		bool bLevelled = false;
 		/** The robot is at rest: its command at 0 and its chassis measured still. */
 		bool bAtRest = false;
+		/** Nothing left of the crossing needs the robot to travel: every wheel is
+		 *  across, or off the ground past its window, over the far surface where it
+		 *  may be set down -- the rear wheels, the last to cross, can touch down
+		 *  there (RammsCurb::FExecutor::CanFinishInPlace). */
+		bool bRearCanLand = false;
+		/** The crossing is finishing in place already (EStickAction::FinishInPlace
+		 *  taken on an earlier tick). */
+		bool bFinishingInPlace = false;
 	};
 
 	/** What the stick does to a crossing on a tick. */
@@ -90,6 +98,13 @@ namespace RammsCurb
 		Pause,
 		/** End the crossing and hand the robot back to its drive mode. */
 		Cancel,
+		/** Brake to rest and finish the crossing where the robot stands: the
+		 *  landings left, the legs and the seat to the plan's end pose at their
+		 *  own rates; then end it and hand back as a finish does -- the drive mode
+		 *  takes the stick from there. Once taken it holds to the end, whatever
+		 *  the stick: going on along the plan from a pose the legs have left would
+		 *  pull them back to it. */
+		FinishInPlace,
 	};
 
 	struct FStickDecision
@@ -97,18 +112,21 @@ namespace RammsCurb
 		EStickAction Action = EStickAction::Pause;
 		/** Go: the share of the plan's speed the stick asks. */
 		double Scale = 0.0;
-		/** Pause: the status line, saying why and what the stick does next;
-		 *  Cancel: why, for the log. */
+		/** Pause and FinishInPlace: the status line, saying why and what the
+		 *  stick does next; Cancel: why, for the log. */
 		FString Why;
 	};
 
 	/**
-	 * What the stick, as Gate reads it now, does to a crossing at Stage. Held
-	 * forward, go at its share. Before any leg has moved for the curb, back or
-	 * sideways read for ReleaseSeconds cancels. Levelled in with no wheel yet
-	 * lifted, back read for CancelHoldSeconds with the robot at rest cancels.
-	 * Anything else -- let go, or any direction once a wheel has begun to
-	 * cross -- pauses.
+	 * What the stick, as Gate reads it now, does to a crossing at Stage. Once
+	 * finishing in place, that, whatever the stick. Held forward, go at its
+	 * share. With the rear wheels able to touch down on the far surface (nothing
+	 * left needs the robot to travel), anything else -- let go, sideways or back
+	 * -- finishes in place, a robot paused short of there included. Before any
+	 * leg has moved for the curb, back or sideways read for ReleaseSeconds
+	 * cancels. Levelled in with no wheel yet lifted, back read for
+	 * CancelHoldSeconds with the robot at rest cancels. Anything else -- let go,
+	 * or any direction once a wheel has begun to cross -- pauses.
 	 */
 	FStickDecision DecideStick(const FRammsCurbStick& Settings, const FStickGate& Gate, const FStickStage& Stage);
 

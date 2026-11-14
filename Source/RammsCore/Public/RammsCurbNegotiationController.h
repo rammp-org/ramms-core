@@ -1074,7 +1074,9 @@ private:
 	void Finish(ERammsCurbPhase EndPhase, const FString& Why, bool bRampDown = true);
 	/** The rider's stick, one tick of a per-wheel crossing (Stick): the share
 	 *  of the plan's speed it asks (OutScale) and whether it pauses the
-	 *  crossing. False when it has cancelled the crossing (handed back). */
+	 *  crossing -- or has it finish in place, the executor told so
+	 *  (RammsCurb::FExecutor::FinishInPlace; OutScale 0, not paused). False
+	 *  when it has cancelled the crossing (handed back). */
 	bool StepStick(float DeltaTime, double& OutScale, bool& bOutPaused);
 	/** The rider has cancelled the crossing with the stick: handed back to
 	 *  the drive mode it came from. */
@@ -1475,6 +1477,15 @@ private:
 	double	StickPausedSeconds = 0.0;
 	double	PausedStillSeconds = 0.0;
 	FString StickWhy;
+	/** What a stick's X drives while this mode has the robot (the control it
+	 *  pairs drive.forward with): as in the mode the crossing took the robot
+	 *  from -- drive.turn on a differential drive, drive.strafe on a holonomic
+	 *  one -- so that a stick held through the take-over and the hand-back
+	 *  drives the same control throughout. A stick held while what it drives
+	 *  changes waits for centre (URammsControlInputComponent): held to the side
+	 *  as a crossing finishes in place, it would otherwise do nothing in the
+	 *  mode handed back to. None: drive.turn. */
+	FName StickSideAxis;
 	/** Seconds the chassis has run away: RunawayCmS faster than its command as
 	 *  the chassis can follow it (RunawayCommand: the command through
 	 *  RunawayLagSeconds), or rolling back faster than RollBackCmS. */
