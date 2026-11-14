@@ -2,6 +2,8 @@
 
 #include "Curb/RammsRammpGen1Curb.h"
 
+#include "Curb/RammsCurbRobotModel.h"
+
 namespace RammsRammpGen1Curb
 {
 	bool FSupportTable::IsValid() const
@@ -226,6 +228,30 @@ namespace RammsRammpGen1Curb
 	{
 		const float Total = FixedMassKg + 2.0f * DriveAssemblyKg;
 		return Total > 0.0f ? (FixedMassKg * FixedDistCm + DriveAssemblyKg * (LeftDistCm + RightDistCm)) / Total : 0.0f;
+	}
+
+	FVector CentreOfMassAt(float FixedMassKg, const FVector& FixedAt, float DriveAssemblyKg, const FVector& LeftAt, const FVector& RightAt)
+	{
+		const float Total = FixedMassKg + 2.0f * DriveAssemblyKg;
+		return Total > 0.0f ? (FixedMassKg * FixedAt + DriveAssemblyKg * (LeftAt + RightAt)) / Total : FVector::ZeroVector;
+	}
+
+	TArray<FVector> GroundContacts(TConstArrayView<FWheelSample> Wheels, float ToleranceCm)
+	{
+		TArray<FVector> Out;
+		for (const FWheelSample& W : Wheels)
+		{
+			if (W.IsDown(ToleranceCm))
+			{
+				Out.Add(FVector(W.Hub.X, W.Hub.Y, W.GroundZ));
+			}
+		}
+		return Out;
+	}
+
+	float SupportMarginCm(TConstArrayView<FVector2D> Contacts, const FVector2D& ComXY)
+	{
+		return Contacts.Num() > 0 ? static_cast<float>(RammsCurb::HullMargin(Contacts, ComXY)) : NoSupportMarginCm;
 	}
 
 	FEdgeFrame EdgeFrame(const FVector& Heading, float LeftDistCm, float RightDistCm, float HalfTrackCm)

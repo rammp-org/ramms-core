@@ -83,6 +83,37 @@ namespace RammsRammpGen1Curb
 	 *  (which ride the translators), each at its distance along the heading. */
 	float CentreOfMass(float FixedMassKg, float FixedDistCm, float DriveAssemblyKg, float LeftDistCm, float RightDistCm);
 
+	/** The same centre of mass in space: the chassis-fixed mass at FixedAt and the two drive assemblies at
+	 *  LeftAt and RightAt; zero with no mass. */
+	FVector CentreOfMassAt(float FixedMassKg, const FVector& FixedAt, float DriveAssemblyKg, const FVector& LeftAt,
+		const FVector& RightAt);
+
+	/** A wheel as measured: its hub, its radius, and the ground straight under its hub, when a trace found any. */
+	struct FWheelSample
+	{
+		FVector Hub = FVector::ZeroVector;
+		float	RadiusCm = 0.0f;
+		bool	bGroundFound = false;
+		float	GroundZ = 0.0f;
+
+		/** Its bottom over the ground under it (cm, negative: pressed into it); 0 with no ground found. */
+		float GapCm() const { return bGroundFound ? static_cast<float>(Hub.Z) - RadiusCm - GroundZ : 0.0f; }
+		/** On the ground: there is ground under it, and its bottom is within ToleranceCm of it. */
+		bool IsDown(float ToleranceCm) const { return bGroundFound && GapCm() <= ToleranceCm; }
+	};
+
+	/** Where the wheels that are down (FWheelSample::IsDown) touch the ground: under each one's hub, at the
+	 *  ground's height there. */
+	TArray<FVector> GroundContacts(TConstArrayView<FWheelSample> Wheels, float ToleranceCm);
+
+	/** The stability margin with no wheel on the ground: the robot is off it, the lowest margin there is. */
+	inline constexpr float NoSupportMarginCm = -1.0e4f;
+
+	/** The stability margin (cm): how far inside the wheels on the ground -- the convex hull of where they touch
+	 *  it, Contacts -- the centre of mass stands, straight down (RammsCurb::HullMargin: negative outside it, and
+	 *  with fewer than three contacts off one line, at best 0); NoSupportMarginCm with none. */
+	float SupportMarginCm(TConstArrayView<FVector2D> Contacts, const FVector2D& ComXY);
+
 	/** An edge's frame, from where two lines parallel to the heading -- HalfTrackCm either side of the robot's centre
 	 *  line, left and right -- meet it, each that far along the heading. */
 	struct FEdgeFrame
