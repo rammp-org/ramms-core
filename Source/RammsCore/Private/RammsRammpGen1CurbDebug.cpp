@@ -172,9 +172,7 @@ void URammsRammpGen1CurbController::TickDebugView(float DeltaTime)
 
 		// The margins: the centre of mass inside the wheels on the ground, and ahead of the drive axle (the rear-lift
 		// rule's); the frame over the edge, in a crossing.
-		TArray<RammsRammpGen1Curb::FWheelSample> Wheels;
-		SampleWheels(Wheels);
-		const TArray<FVector> Contacts = RammsRammpGen1Curb::GroundContacts(Wheels, Config.TouchToleranceCm);
+		const TArray<FVector> Contacts = RammsRammpGen1Curb::GroundContacts(WheelsThisTick(), Config.TouchToleranceCm);
 		const FVector		  Com = ComNow();
 		if (Contacts.Num() > 0)
 		{
@@ -424,9 +422,8 @@ void URammsRammpGen1CurbController::DrawDebugRobot(const UWorld* World) const
 	};
 
 	// Each wheel: a ring in its state's colour, where its support's command would put it (a dot, tied to it), and its gap
-	// over the ground under it.
-	TArray<RammsRammpGen1Curb::FWheelSample> Wheels;
-	SampleWheels(Wheels);
+	// over the ground under it (this tick's sample: the graphs' and the measurements' too).
+	const TArray<RammsRammpGen1Curb::FWheelSample>& Wheels = WheelsThisTick();
 	for (int32 i = 0; i < Wheels.Num(); ++i)
 	{
 		const RammsRammpGen1Curb::FWheelSample& W = Wheels[i];
@@ -574,11 +571,11 @@ float URammsRammpGen1CurbController::PaintDebugPanel(const RammsCurb::FDebugPain
 	{
 		return 0.0f;
 	}
-	float		Y = 0.0f;
-	const float X = 0.0f;
+	float					   Y = 0.0f;
+	const float				   X = 0.0f;
+	TArray<RammsCurb::FKeyRow> Rows;
 	if (WantsDebugKey())
 	{
-		TArray<RammsCurb::FKeyRow> Rows;
 		if (DebugView.bTerrain)
 		{
 			Rows.Add({ TEXT("curb"), { { Colours::Near, TEXT("near level") }, { Colours::Far, TEXT("far level") }, { Colours::Edge, TEXT("edge") }, { Colours::Bad, TEXT("no curb") } } });
@@ -589,11 +586,17 @@ float URammsRammpGen1CurbController::PaintDebugPanel(const RammsCurb::FDebugPain
 			Rows.Add({ TEXT("support"), { { FColor::White, TEXT("wheels down, commanded height") }, { Colours::Good, TEXT("centre of mass 5 cm in") }, { Colours::Warn, TEXT("inside") }, { Colours::Bad, TEXT("outside") } } });
 			Rows.Add({ TEXT("up"), { { Colours::Measured, TEXT("measured") }, { RammpGen1VerticalColour, TEXT("vertical") } } });
 		}
-		if (DebugView.bGraphs)
-		{
-			// The charts' conventions, kept out of their titles so that each title and its legend fit on one line.
-			Rows.Add({ TEXT("charts"), { { FColor(150, 155, 160), TEXT("thin: commanded") }, { FColor(150, 155, 160), TEXT("dashed: the speed law, the rear-lift rule, aft") }, { FColor(150, 155, 160), TEXT("rider: at the seat") } } });
-		}
+	}
+	if (DebugView.bGraphs)
+	{
+		// The charts' conventions, kept out of their titles so that each title and its legend fit on one line: with the
+		// graphs whenever they are on, a layer in the world keyed or not. Series lines are solid (DrawGraph); only the
+		// level lines across a chart are dashed.
+		const FColor Conventions(150, 155, 160);
+		Rows.Add({ TEXT("charts"), { { Conventions, TEXT("thin: commanded, what the speed law wants") }, { Conventions, TEXT("dashed: zero, the rear-lift rule, aft") }, { Conventions, TEXT("rider: at the seat") } } });
+	}
+	if (Rows.Num() > 0)
+	{
 		Y += RammsCurb::DrawKey(P, X, Y, Width, Rows, bDraw) + 4.0f;
 	}
 	if (DebugView.bGraphs)
@@ -618,9 +621,9 @@ float URammsRammpGen1CurbController::PaintDebugPanel(const RammsCurb::FDebugPain
 			const FGraphMark ZeroMark[] = { { 0.0f, Zero } };
 			float			 G = Y;
 
-			// The chassis's speed, the rider's, the command and what the speed law wants (rolling).
+			// The chassis's speed, the rider's, and thin, the command and what the speed law wants (rolling).
 			const FGraphLine SpeedLines[] = { { EGraphSeries::Speed, Meas, TEXT("chassis") }, { EGraphSeries::RiderSpeed, FLinearColor(Colours::Rider), TEXT("rider") },
-				{ EGraphSeries::SpeedCommand, Cmd, TEXT("commanded") }, { EGraphSeries::SpeedTarget, Wants, TEXT("wants"), true } };
+				{ EGraphSeries::SpeedCommand, Cmd, TEXT("commanded"), true }, { EGraphSeries::SpeedTarget, Wants, TEXT("wants"), true } };
 			G = RammsCurb::DrawGraph(P, X, G, Width, H, TEXT("ground speed"), Samples, TFrom, Span, SpeedLines, ZeroMark, 10.0f, TEXT("cm/s")) + Gap;
 
 			// The wheels at the tread: against the chassis's speed, they show slip (the drive wheels' less the translators').

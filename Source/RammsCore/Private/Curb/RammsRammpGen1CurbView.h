@@ -5,11 +5,13 @@
 #include "CoreMinimal.h"
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbScope.h"
+#include "Curb/RammsRammpGen1Curb.h"
 
 /**
  * What the RAMMP Gen1 curb controller's debug view (URammsRammpGen1CurbController::DebugView, drawn in
  * RammsRammpGen1CurbDebug.cpp) keeps between frames, beyond the graphs, the labels and the panel every curb controller's
- * view keeps (RammsCurb::FDebugScope). Nothing here feeds back into the controller.
+ * view keeps (RammsCurb::FDebugScope). Nothing here feeds back into the controller (the wheels' sample, shared with the
+ * crossing's measurements, is only what they would have measured themselves).
  */
 namespace RammsRammpGen1Curb
 {
@@ -48,5 +50,12 @@ namespace RammsRammpGen1Curb
 
 		/** The terrain layer's last look ahead, while no crossing runs. */
 		FViewCurb Preview;
+
+		/** The wheels as measured this tick (URammsRammpGen1CurbController::WheelsThisTick), and when: the frame and the
+		 *  backend's time. One sample a tick serves the crossing's measurements, the graphs and the robot layer alike: the
+		 *  same traces, made once (the bodies do not move within the controller's tick). */
+		TArray<FWheelSample> Wheels;
+		uint64				 WheelsFrame = MAX_uint64;
+		double				 WheelsSimTime = -1.0;
 	};
 } // namespace RammsRammpGen1Curb

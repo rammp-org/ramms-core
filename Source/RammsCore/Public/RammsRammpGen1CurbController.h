@@ -540,7 +540,8 @@ private:
 	bool Moving() const;
 	void StartTouchdown(ESupport Support, float LevelZ);
 	bool StepTouchdown(float Dt);
-	void DriveAt(float SpeedCmS, bool bDriveWheels, bool bFrontOmni);
+	/** bApproach: SpeedCmS is the approach speed, which SpeedSetBy says (bDriveApproach). */
+	void DriveAt(float SpeedCmS, bool bDriveWheels, bool bFrontOmni, bool bApproach = false);
 	void HoldWheels(bool bFrontHubsToo = false); // the front omni wheels' hubs freewheel unless asked
 	void ReleaseWheels();
 	void StowArm();				   // arm.stow, and the arm's rate axes gathered for HoldArm
@@ -577,6 +578,9 @@ private:
 	/** Every wheel as measured, in this order: the drive wheels, the front omni wheels, the rear omni wheels (by ESupport),
 	 *  left then right. */
 	void SampleWheels(TArray<RammsRammpGen1Curb::FWheelSample>& Out) const;
+	/** SampleWheels' wheels, measured once a tick (at the first call in it) and kept for the rest of it: the crossing's
+	 *  measurements, the graphs and the robot layer each want them. */
+	const TArray<RammsRammpGen1Curb::FWheelSample>& WheelsThisTick() const;
 	/** The centre of mass of the config's mass model (world): the chassis-fixed mass, and each drive assembly at its hub. */
 	FVector ComNow() const;
 	/** Where the frame's underside (Config.Frame*) crosses the edge's line, its least height over the upper level (cm,
@@ -585,7 +589,8 @@ private:
 	/** A support's height (its table's, cm) at its lift's angle, measured or as last commanded -- by this controller in a
 	 *  crossing, by whichever controller has the lifts otherwise; false for a command when none has been given. */
 	bool LiftHeightCm(ESupport S, bool bCommanded, float& OutCm) const;
-	/** What sets the chassis's speed in a crossing now, in words (the debug view's). */
+	/** What sets the chassis's speed in a crossing now, in words (the debug view's): put together when asked, from what the
+	 *  drive or the rolling speed law noted on the last tick. */
 	FString SpeedSetBy() const;
 
 	TPimplPtr<RammsRammpGen1Curb::FCrossingMeter> Meter;
@@ -630,6 +635,33 @@ private:
 		float LevelZ = 0.0f;
 		float PlanCm = 0.0f; // the support's height for contact, as measured when it began
 	};
+	/** What the rolling speed law held to on a tick (the debug view's: SpeedSetBy). */
+	enum class EBlendSpeed : uint8
+	{
+		Starting, // no tick of the law yet
+		Approach, // the approach speed, the front omni wheels still short of BlendNearCm from the edge
+		Crawl,	  // the crawl speed
+		Slowing,  // under it, for a stop short of the edge (BlendStop)
+		Held,	  // stopped short of the edge for it
+		Stopping  // after the crossing, to rest in the starting pose
+	};
+	/** A stop short of the edge the rolling crossing makes, and what it waits for (BlendStopWords puts it in words). */
+	enum class EBlendStopFor : uint8
+	{
+		None,
+		Height,			// the chassis to reach its crossing height
+		Clear,			// Support's pair to clear the level at LevelZ
+		FrontDownFirst, // the front omni wheels down on the far level, before the drive wheels go up
+		DriveDownFirst	// the drive wheels down on the far level and the translators aft, before the rear omni wheels go up
+	};
+	struct FBlendStop
+	{
+		EBlendStopFor For = EBlendStopFor::None;
+		ESupport	  Support = ESupport::Front;
+		float		  LevelZ = 0.0f;
+	};
+	/** A stop's words: what it waits for, as the status and the debug view say it. */
+	FString BlendStopWords(const FBlendStop& Stop) const;
 	/** Rolling at SpeedCmS: the drive wheels (unless free) at it plus the translators' speed, the front omni wheels' hubs at it. */
 	void RollAt(float SpeedCmS);
 	/** The log; Display becomes the phase. */
@@ -675,7 +707,7 @@ private:
 	bool							   bFrontHubsHeld = false; // HoldWheels has the powered front omni wheels' hubs at rest
 	FString							   StickWhy, CancelWhy, CrossingStatus;
 	float							   SavedDriveCmS = 0.0f; // the drive a pause stopped, for the resume
-	bool							   bSavedDriveWheels = false, bSavedDriveFront = false, bSavedFrontHubs = false;
+	bool							   bSavedDriveWheels = false, bSavedDriveFront = false, bSavedFrontHubs = false, bSavedDriveApproach = false;
 
 	FLift Lifts[NumLifts];
 	float StartCmd[NumLifts] = {}; // where the crossing found each lift (its last command): a finished crossing returns there
@@ -695,9 +727,13 @@ private:
 	int32		BlendEnd = 0;		 // after the rear is down: 1 translators back, 2 to the stance, 3 stopping
 	float		BlendV = 0.0f;		 // the speed it rolls at (cm/s)
 	float		BlendWantCmS = 0.0f; // what its speed law asked for on the last tick, before the acceleration limit (cm/s)
-	FString		BlendSpeedBy;		 // and what set that, in words (the debug view's)
 	double		BlendFrontAt = -1.0; // when the front omni wheels reached the edge, and the rear's touchdown (s)
 	double		BlendRearOn = -1.0;
+	// What the speed law held to on its last tick, the stop short of the edge that slowed or held it (if one did), and the
+	// front omni wheels' distance short of the edge then (cm): the debug view's, put in words by SpeedSetBy when asked.
+	EBlendSpeed BlendSpeed = EBlendSpeed::Starting;
+	FBlendStop	BlendStop;
+	float		BlendFrontNearCm = 0.0f;
 
 	// Touchdown.
 	ESupport TouchSupport = ESupport::Drive;
@@ -709,6 +745,7 @@ private:
 	// Driving (cm/s along the heading; 0 holds).
 	float		  DriveCmS = 0.0f;
 	bool		  bDriveWheels = false, bDriveFront = false;
+	bool		  bDriveApproach = false; // DriveCmS is the approach speed (DriveAt's bApproach), not the creep
 	TArray<FName> Braked;
 	TArray<FName> ArmAxes; // the arm's rate axes, held at rest while a crossing runs
 	double		  LastSimTime = -1.0;
