@@ -1233,6 +1233,9 @@ enum class ERammsCurbSensingView : uint8
  * costs a little each frame and, with Sensing or Terrain on while no crossing
  * runs, a detection scan every PreviewIntervalSeconds (a few hundred traces);
  * all off, it costs nothing. Nothing in it changes what the controller does.
+ * The RAMMP Gen1 controller (URammsRammpGen1CurbController) has one too, drawn
+ * the same way: Terrain, Robot, Graphs (its own) and Labels; Sensing and Plan
+ * are Gen2's only.
  */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbDebugView

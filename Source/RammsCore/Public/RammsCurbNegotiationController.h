@@ -16,11 +16,6 @@ class URammsRobotBaseComponent;
 class URamms5BarLinkageController;
 class UCanvas;
 class APlayerController;
-class SWidget;
-class SRammsCurbScope;
-class SRammsCurbLabels;
-class UGameViewportClient;
-class ULocalPlayer;
 namespace RammsCurb
 {
 	struct FMeasuredSeat;
@@ -1298,8 +1293,9 @@ private:
 
 	/** What the view keeps between frames: the last detection scan's traces
 	 *  (mutable: a detection is const and records them as it makes them), the
-	 *  terrain monitor's probes and their trail, the graphs' samples
-	 *  (Private/Curb). */
+	 *  terrain monitor's probes and their trail, the graphs' samples, the
+	 *  labels and the panel and overlay they are drawn in (Private/Curb; the
+	 *  last four as RAMMP Gen1's are, RammsCurbScope). */
 	mutable TPimplPtr<RammsCurb::FDebugViewState> DebugState;
 	/** The graphs' and colour key's draw over the viewport (UDebugDrawService). */
 	FDelegateHandle DebugDrawHandle;
@@ -1322,23 +1318,11 @@ private:
 	float PaintDebugPanel(const RammsCurb::FDebugPainter& Painter, float Width, float Height, bool bDraw) const;
 	/** A layer drawn in the world wants its colour key. */
 	bool WantsDebugKey() const;
-	/** A HUD hosts the key and graphs panel (its widget is alive). */
-	bool IsDebugPanelHosted() const;
-	/** That panel's widget, while a HUD holds it. */
-	TWeakPtr<SWidget> DebugPanelWidget;
-	friend class SRammsCurbScope;
 
 	/** The world layers' labels, on the player's screen under the HUD's panels
 	 *  (the debug canvas would draw them over the panels): a Slate overlay,
 	 *  there while labels are; the viewport canvas without a game viewport. */
 	void UpdateDebugLabelOverlay(bool bWanted);
-	/** The labels, each at its point on screen (Project: world to the
-	 *  painter's frame; false when off screen). */
-	void								PaintDebugLabels(const RammsCurb::FDebugPainter& Painter, TFunctionRef<bool(const FVector&, FVector2D&)> Project) const;
-	TSharedPtr<SWidget>					DebugLabelOverlay;
-	TWeakObjectPtr<UGameViewportClient> DebugLabelViewport;
-	TWeakObjectPtr<ULocalPlayer>		DebugLabelPlayer;
-	friend class SRammsCurbLabels;
 	/** The terrain the view shows: the crossing's while one runs or after, else
 	 *  the last scan's. */
 	const FRammsCurbTerrain* DebugTerrain() const;

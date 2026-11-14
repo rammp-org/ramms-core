@@ -3,14 +3,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Curb/RammsCurbScope.h"
 #include "Curb/RammsCurbTerrainFit.h"
 #include "RammsCurbTerrain.h"
 
 /**
  * The curb controller's debug view (URammsCurbNegotiationController::DebugView,
  * drawn in RammsCurbNegotiationDebug.cpp): what it keeps between frames, and
- * the few sums it draws from, kept here so the tests can reach them. Nothing
- * here feeds back into the controller.
+ * the few sums it draws from, kept here so the tests can reach them. What it
+ * shares with RAMMP Gen1's view -- the graphs, the colour key, the labels and
+ * the panel they are drawn in -- is in RammsCurbScope.h. Nothing here feeds
+ * back into the controller.
  */
 namespace RammsCurb
 {
@@ -92,88 +95,10 @@ namespace RammsCurb
 	double ProbeErrorCm(const FRammsCurbTerrain& Terrain, const FVector2D& BiasCm, const FVector2D& XY, bool bHit, double Z,
 		double BottomZ);
 
-	/** The series the graphs plot. */
-	enum class EGraphSeries : uint8
-	{
-		/** The chassis speed measured, commanded, and the floor (cm/s). */
-		Speed,
-		SpeedCommand,
-		SpeedFloor,
-		/** The rider's ground speed, at the seat platform's pivot (cm/s): the
-		 *  chassis' plus the seat's own shift along it. */
-		RiderSpeed,
-		/** The base's inclination measured and planned (deg). */
-		Tilt,
-		TiltPlanned,
-		/** The stability margin measured and planned (cm). */
-		Margin,
-		MarginPlanned,
-		Num,
-	};
-
-	/** One sample of every series, each valid or not (Valid, a bit per
-	 *  EGraphSeries). */
-	struct FDebugGraphSample
-	{
-		/** Simulated time (s). */
-		double T = 0.0;
-		float  Values[static_cast<int32>(EGraphSeries::Num)] = {};
-		uint32 Valid = 0;
-
-		void Set(EGraphSeries Series, float Value)
-		{
-			Values[static_cast<int32>(Series)] = Value;
-			Valid |= 1u << static_cast<uint32>(Series);
-		}
-		bool  Has(EGraphSeries Series) const { return (Valid & (1u << static_cast<uint32>(Series))) != 0; }
-		float Get(EGraphSeries Series) const { return Values[static_cast<int32>(Series)]; }
-	};
-
-	/** A graph's vertical range: the valid samples of Series in Samples, and
-	 *  Always (a limit or a zero line drawn with them), padded; at least
-	 *  MinSpan tall. */
-	FVector2D GraphRange(TConstArrayView<FDebugGraphSample> Samples, TConstArrayView<EGraphSeries> Series,
-		TConstArrayView<float> Always, float MinSpan);
-
-	/** The convex hull of Points, counter-clockwise, as indices into them
-	 *  (Andrew's monotone chain; collinear points left out). Fewer than three
-	 *  distinct points: those there are. */
-	TArray<int32> ConvexHull2D(TConstArrayView<FVector2D> Points);
-
-	/** Text the world layers put beside what they draw, drawn over the
-	 *  viewport at At's place on screen (a map need not have a HUD, which
-	 *  DrawDebugString needs). */
-	struct FDebugLabel
-	{
-		FVector At = FVector::ZeroVector;
-		FString Text;
-		FColor	Colour = FColor::White;
-	};
-
-	/** Boxes, lines and text at points in its own frame (Slate units, y down):
-	 *  what the colour key and the graphs are drawn with, over the viewport's
-	 *  canvas or into the HUD panel's Slate widget. */
-	struct FDebugPainter
-	{
-		float LineHeight = 15.0f;
-
-		virtual ~FDebugPainter() = default;
-		virtual void  Box(float X, float Y, float W, float H, const FLinearColor& Colour) const = 0;
-		virtual void  Line(float X0, float Y0, float X1, float Y1, const FLinearColor& Colour, float Thickness = 1.0f) const = 0;
-		virtual float Text(float X, float Y, const FString& S, const FLinearColor& Colour) const = 0;
-		virtual float Width(const FString& S) const = 0;
-
-		void Dashed(float X0, float X1, float Y, const FLinearColor& Colour) const
-		{
-			for (float X = X0; X < X1; X += 8.0f)
-			{
-				Line(X, Y, FMath::Min(X + 4.0f, X1), Y, Colour);
-			}
-		}
-	};
-
-	/** What the view keeps between frames. */
-	struct FDebugViewState
+	/** What the view keeps between frames: the graphs, the labels and the
+	 *  panel and overlay they are drawn in (FDebugScope), and the sensing
+	 *  layer's scan and probes. */
+	struct FDebugViewState : FDebugScope
 	{
 		FDebugScan Scan;
 		/** A detection is recording its traces into Capture. */
@@ -187,11 +112,5 @@ namespace RammsCurb
 		/** This tick's probes, and the trail of older hits (game time). */
 		TArray<FDebugProbe> Probes;
 		TArray<FDebugProbe> Trail;
-
-		/** The graphs' samples, oldest first. */
-		TArray<FDebugGraphSample> Graph;
-
-		/** This tick's labels. */
-		TArray<FDebugLabel> Labels;
 	};
 } // namespace RammsCurb

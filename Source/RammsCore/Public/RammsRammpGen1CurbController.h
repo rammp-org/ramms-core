@@ -7,19 +7,25 @@
 #include "RammsControlContributor.h"
 #include "RammsCurbNegotiationTypes.h"
 #include "RammsDriveMode.h"
+#include "RammsHUDPanelProvider.h"
 #include "Templates/PimplPtr.h"
 #include "RammsRammpGen1CurbController.generated.h"
 
 class URammsRobotBaseComponent;
 class USceneComponent;
+class UCanvas;
+class APlayerController;
 namespace RammsCurb
 {
 	class FStickGate;
 	class FAssistWatch;
+	struct FDebugPainter;
 } // namespace RammsCurb
 namespace RammsRammpGen1Curb
 {
 	class FCrossingMeter;
+	struct FViewState;
+	struct FWheelSample;
 } // namespace RammsRammpGen1Curb
 
 /** Where a RAMMP Gen1 curb crossing is (curb.phase). */
@@ -361,9 +367,15 @@ struct RAMMSCORE_API FRammsRammpGen1CurbStats
  * status) and hands straight back. As a selector's initial mode it starts nothing and hands back. Another mode
  * being selected aborts it. The rear-lift rule's mass model has the robot's arm stowed: where the control
  * surface has one, a crossing stows it (arm.stow) and holds its arm.* rate axes at rest until it ends.
+ *
+ * Its debug view (DebugView, the "Curb view" switches; RammsRammpGen1CurbDebug.cpp) is drawn as Gen2's is: the curb it
+ * finds (Terrain), the robot as the crossing sees it (Robot: each wheel and its lift, the wheels on the ground and the
+ * centre of mass over them, the frame over the edge, the attitude, the step and what sets the speed), and strip charts
+ * of the speeds, the tilt, the margins, the lifts and the translators (Graphs), in the HUD's "Curb view" panel
+ * (IRammsHUDPanelProvider) or over the viewport.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
-class RAMMSCORE_API URammsRammpGen1CurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode
+class RAMMSCORE_API URammsRammpGen1CurbController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode, public IRammsHUDPanelProvider
 {
 	GENERATED_BODY()
 
@@ -394,6 +406,12 @@ public:
 	 *  crossing under way keeps the style it started with. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	ERammsRammpGen1CurbStyle Style = ERammsRammpGen1CurbStyle::Blended;
+
+	/** What the debug view draws (FRammsCurbDebugView): the curb found (bTerrain), the robot's state (bRobot), graphs
+	 *  (bGraphs) and labels (bLabels); Sensing and bPlan are Gen2's and draw nothing here. Also switched from the robot's
+	 *  control panel, the "Curb view" group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Debug")
+	FRammsCurbDebugView DebugView;
 
 	/** Start a crossing of the curb ahead. False, with the reason, when it cannot. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Curb")
@@ -444,6 +462,11 @@ public:
 	virtual FText GetDriveModeDisplayName() const override;
 	virtual bool  IsDriveModeActive() const override { return bModeActive; }
 	virtual void  SetDriveModeActive(bool bActive) override;
+
+	// --- IRammsHUDPanelProvider
+	/** The debug view's colour key and graphs as a HUD panel ("Curb view", as Gen2's), wanted while there is something to
+	 *  show; with no HUD to host it they are drawn over the viewport instead. */
+	virtual void GetHUDPanels(TArray<FRammsHUDPanelDesc>& OutPanels) const override;
 
 protected:
 	virtual void BeginPlay() override;
@@ -551,8 +574,44 @@ private:
 	/** This tick's measurements (GetStats), while a crossing runs. */
 	void   MeasureTick();
 	double SimNow() const; // the backend's clock, or the world's when it keeps none
+	/** Every wheel as measured, in this order: the drive wheels, the front omni wheels, the rear omni wheels (by ESupport),
+	 *  left then right. */
+	void SampleWheels(TArray<RammsRammpGen1Curb::FWheelSample>& Out) const;
+	/** The centre of mass of the config's mass model (world): the chassis-fixed mass, and each drive assembly at its hub. */
+	FVector ComNow() const;
+	/** Where the frame's underside (Config.Frame*) crosses the edge's line, its least height over the upper level (cm,
+	 *  negative: into the curb); false while it is not over the edge. */
+	bool FrameOverEdge(float& OutClearanceCm) const;
+	/** A support's height (its table's, cm) at its lift's angle, measured or as last commanded -- by this controller in a
+	 *  crossing, by whichever controller has the lifts otherwise; false for a command when none has been given. */
+	bool LiftHeightCm(ESupport S, bool bCommanded, float& OutCm) const;
+	/** What sets the chassis's speed in a crossing now, in words (the debug view's). */
+	FString SpeedSetBy() const;
 
 	TPimplPtr<RammsRammpGen1Curb::FCrossingMeter> Meter;
+
+	// The debug view (DebugView; RammsRammpGen1CurbDebug.cpp).
+	/** What the view keeps between frames: the graphs, the labels and the panel and overlay they are drawn in, the speeds'
+	 *  windows, the look ahead (Private/Curb). Mutable: the HUD's panel reaches it through a const call. */
+	mutable TPimplPtr<RammsRammpGen1Curb::FViewState> DebugState;
+	/** The labels', and with no HUD to host them the colour key's and the graphs', draw over the viewport
+	 *  (UDebugDrawService). */
+	FDelegateHandle DebugDrawHandle;
+	/** Once a tick, whatever path the tick took: the look ahead, the graphs' sample, the world layers drawn. */
+	void TickDebugView(float DeltaTime);
+	/** The layers, in the world. */
+	void DrawDebugTerrain(const UWorld* World) const;
+	void DrawDebugRobot(const UWorld* World) const;
+	/** The labels over the viewport, and the colour key and the graphs too while no HUD hosts them as a panel. */
+	void DrawDebugOverlay(UCanvas* Canvas, APlayerController* Player);
+	/** The colour key and the graphs, Width wide (Height tall, or as tall as they need when 0), from the painter's origin
+	 *  down; their height. */
+	float PaintDebugPanel(const RammsCurb::FDebugPainter& Painter, float Width, float Height, bool bDraw) const;
+	/** A layer drawn in the world wants its colour key. */
+	bool WantsDebugKey() const;
+	/** The rear-lift rule's centre of mass ahead of the drive axle (cm), Com the centre of mass: in a crossing as the rule
+	 *  measures it, along the edge's normal; along the chassis's heading otherwise. */
+	float ComAheadForView(const FVector& Com) const;
 
 	// The rolling crossing (Style Blended). Each pair's state, by ESupport.
 	enum class EPair : uint8
@@ -635,6 +694,8 @@ private:
 	bool		bPressed = false;	 // the drive wheels have been set down again once
 	int32		BlendEnd = 0;		 // after the rear is down: 1 translators back, 2 to the stance, 3 stopping
 	float		BlendV = 0.0f;		 // the speed it rolls at (cm/s)
+	float		BlendWantCmS = 0.0f; // what its speed law asked for on the last tick, before the acceleration limit (cm/s)
+	FString		BlendSpeedBy;		 // and what set that, in words (the debug view's)
 	double		BlendFrontAt = -1.0; // when the front omni wheels reached the edge, and the rear's touchdown (s)
 	double		BlendRearOn = -1.0;
 

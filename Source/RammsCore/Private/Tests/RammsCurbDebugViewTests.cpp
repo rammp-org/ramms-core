@@ -1,8 +1,10 @@
 // Tests for the curb controller's debug view (Private/Curb/RammsCurbDebugView.h):
 // how a scan sample is classed against the planes its scan found, a terrain
 // probe's error against the surface planned on, the support polygon's hull,
-// a graph's range -- on a made-up step, made-up samples -- and the view's
-// switches on the control surface, set and read back as the panel does.
+// a graph's range, the graphs' sample buffer, and a strip chart and a colour
+// key as a painter is asked to draw them (Private/Curb/RammsCurbScope.h, what
+// RAMMP Gen1's view shares) -- on a made-up step, made-up samples -- and the
+// view's switches on the control surface, set and read back as the panel does.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -36,6 +38,24 @@ namespace
 	{
 		return { FVector2D(X, Y), 120.0, -100.0, Z, true };
 	}
+
+	/** A painter that draws nothing and keeps what it was asked to draw: each
+	 *  text, and how many lines and boxes. Every character is 6 wide. */
+	struct FCurbScopeTestPainter : RammsCurb::FDebugPainter
+	{
+		mutable TArray<FString> Texts;
+		mutable int32			Lines = 0;
+		mutable int32			Boxes = 0;
+
+		virtual void  Box(float, float, float, float, const FLinearColor&) const override { ++Boxes; }
+		virtual void  Line(float, float, float, float, const FLinearColor&, float) const override { ++Lines; }
+		virtual float Text(float, float, const FString& S, const FLinearColor&) const override
+		{
+			Texts.Add(S);
+			return Width(S);
+		}
+		virtual float Width(const FString& S) const override { return 6.0f * S.Len(); }
+	};
 } // namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbDebugViewClassify,
@@ -135,6 +155,85 @@ bool FRammsCurbDebugViewGraphRange::RunTest(const FString& Parameters)
 	TestNearlyEqual(TEXT("one value: at least MinSpan tall"), Flat.Y - Flat.X, 5.0, 1e-4);
 	const FVector2D None = RammsCurb::GraphRange({}, Speed, {}, 5.0f);
 	TestTrue(TEXT("nothing to show: 0 to MinSpan"), None.Equals(FVector2D(0.0, 5.0)));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbDebugViewGraphBuffer,
+	"Ramms.Curb.DebugView.GraphBuffer",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbDebugViewGraphBuffer::RunTest(const FString& Parameters)
+{
+	using RammsCurb::EGraphSeries;
+	TArray<RammsCurb::FDebugGraphSample> Graph;
+	// Ten seconds at 10 Hz, keeping the last 2.05.
+	for (int32 k = 0; k <= 100; ++k)
+	{
+		RammsCurb::FDebugGraphSample S;
+		S.T = k * 0.1;
+		S.Set(EGraphSeries::Speed, static_cast<float>(k));
+		RammsCurb::AddGraphSample(Graph, S, 2.05);
+	}
+	TestEqual(TEXT("the last 2.05 s: 21 samples"), Graph.Num(), 21);
+	TestTrue(TEXT("oldest first, none older than the span"), Graph.Num() > 0 && Graph[0].T >= 10.0 - 2.05 && FMath::IsNearlyEqual(Graph.Last().T, 10.0, 1e-9));
+	TestTrue(TEXT("each keeps its values"), Graph.Num() > 0 && Graph.Last().Has(EGraphSeries::Speed) && Graph.Last().Get(EGraphSeries::Speed) == 100.0f);
+	TestFalse(TEXT("...and only those set"), Graph.Num() > 0 && Graph.Last().Has(EGraphSeries::SpeedCommand));
+
+	// A time before the last: the simulation was reset, the graphs start again.
+	RammsCurb::FDebugGraphSample Reset;
+	Reset.T = 1.0;
+	RammsCurb::AddGraphSample(Graph, Reset, 2.05);
+	TestEqual(TEXT("a reset starts again"), Graph.Num(), 1);
+	RammsCurb::AddGraphSample(Graph, Reset, 2.05);
+	TestEqual(TEXT("the same time again is no reset"), Graph.Num(), 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbDebugViewDrawing,
+	"Ramms.Curb.DebugView.Drawing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbDebugViewDrawing::RunTest(const FString& Parameters)
+{
+	using RammsCurb::EGraphSeries;
+	// A second of samples: the speed 0..10 throughout, its command 2k from the sixth on.
+	TArray<RammsCurb::FDebugGraphSample> Samples;
+	for (int32 k = 0; k <= 10; ++k)
+	{
+		RammsCurb::FDebugGraphSample& S = Samples.AddDefaulted_GetRef();
+		S.T = k * 0.1;
+		S.Set(EGraphSeries::Speed, static_cast<float>(k));
+		if (k >= 5)
+		{
+			S.Set(EGraphSeries::SpeedCommand, 2.0f * k);
+		}
+	}
+	const RammsCurb::FGraphLine Lines[] = { { EGraphSeries::Speed, FLinearColor::White, TEXT("chassis") },
+		{ EGraphSeries::SpeedCommand, FLinearColor::White, nullptr, true } };
+	const RammsCurb::FGraphMark Marks[] = { { 0.0f, FLinearColor::White } };
+	FCurbScopeTestPainter		P;
+	P.LineHeight = 10.0f;
+	const float Bottom = RammsCurb::DrawGraph(P, 0.0f, 5.0f, 200.0f, 40.0f, TEXT("speed"), Samples, 0.0, 1.0, Lines, Marks, 5.0f, TEXT("cm/s"));
+	TestEqual(TEXT("its bottom: the title's line, then the chart"), Bottom, 5.0f + 10.0f + 2.0f + 40.0f);
+	TestTrue(TEXT("the title"), P.Texts.Contains(FString(TEXT("speed"))));
+	TestTrue(TEXT("a named line's latest value"), P.Texts.Contains(FString(TEXT("chassis 10.0"))));
+	TestEqual(TEXT("no words for a line with no name: the title, one value, the range's ends"), P.Texts.Num(), 4);
+	TestTrue(TEXT("the range covers both lines (the command's 20)"), P.Texts.Contains(FString(TEXT("22 cm/s"))));
+	TestEqual(TEXT("one background"), P.Boxes, 1);
+	// Ten segments of the speed, five of the command, and the zero line dashed every 8 px across 200.
+	TestEqual(TEXT("the lines drawn"), P.Lines, 10 + 5 + 25);
+
+	// A key, wide enough for a row on one line, and too narrow for any two chips on one.
+	const RammsCurb::FKeyRow Rows[] = { { TEXT("wheels"), { { FColor::Green, TEXT("down") }, { FColor::Cyan, TEXT("up") }, { FColor::Yellow, TEXT("lifting") } } } };
+	FCurbScopeTestPainter	 K;
+	K.LineHeight = 10.0f;
+	TestEqual(TEXT("a key on one line"), RammsCurb::DrawKey(K, 0.0f, 0.0f, 1000.0f, Rows, /*bDraw=*/true), 10.0f + 4.0f);
+	TestEqual(TEXT("...its title and its chips' words"), K.Texts.Num(), 4);
+	TestEqual(TEXT("...a square each"), K.Boxes, 3);
+	FCurbScopeTestPainter Narrow;
+	Narrow.LineHeight = 10.0f;
+	TestEqual(TEXT("a narrow key wraps before each chip"), RammsCurb::DrawKey(Narrow, 0.0f, 0.0f, 60.0f, Rows, /*bDraw=*/false), 3.0f * (10.0f + 2.0f) + 10.0f + 4.0f);
+	TestEqual(TEXT("...and, measured only, draws nothing"), Narrow.Texts.Num() + Narrow.Boxes + Narrow.Lines, 0);
 	return true;
 }
 
