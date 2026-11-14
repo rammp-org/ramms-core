@@ -324,6 +324,7 @@ namespace
 		const FGeometry*		 Geometry = nullptr;
 		FSlateWindowElementList* Elements = nullptr;
 		FSlateFontInfo			 Font;
+		float					 Scale = 1.0f; // the geometry's scale: text is measured as drawn
 		mutable int32			 Layer = 0;
 
 		virtual void Box(float X, float Y, float W, float H, const FLinearColor& Colour) const override
@@ -358,7 +359,11 @@ namespace
 		}
 		virtual float Width(const FString& S) const override
 		{
-			return static_cast<float>(FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(S, Font).X);
+			// Measured at the scale the text is drawn at (the panel's DPI scale), in local units: glyph advances
+			// are snapped at the drawn size, so text measured at scale 1 comes out narrower than it is drawn and
+			// the key's next chip would start over its last letters.
+			const float S1 = FMath::Max(Scale, 0.01f);
+			return static_cast<float>(FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(S, Font, S1).X) / S1;
 		}
 	};
 } // namespace
@@ -389,6 +394,7 @@ public:
 		FCurbScopeSlatePainter P;
 		P.Font = Font;
 		P.LineHeight = LineHeight;
+		P.Scale = LastScale;
 		// As tall as it needs at the width it was last given (the key wraps).
 		const float Width = LastWidth > 1.0f ? LastWidth : DefaultWidth;
 		return FVector2D(DefaultWidth, PaintFn(P, Width, /*Height=*/0.0f, /*bDraw=*/false));
@@ -405,6 +411,8 @@ public:
 		P.Layer = LayerId;
 		const FVector2f Size = AllottedGeometry.GetLocalSize();
 		LastWidth = Size.X;
+		LastScale = AllottedGeometry.Scale;
+		P.Scale = LastScale;
 		if (OwnerObject.IsValid() && PaintFn)
 		{
 			PaintFn(P, Size.X, Size.Y, /*bDraw=*/true);
@@ -424,6 +432,7 @@ private:
 	RammsCurb::FPaintScope		  PaintFn;
 	FSlateFontInfo				  Font;
 	mutable float				  LastWidth = 0.0f;
+	mutable float				  LastScale = 1.0f;
 
 	// Repainted every frame: the graphs move with the simulation.
 	virtual bool ComputeVolatility() const override { return true; }
