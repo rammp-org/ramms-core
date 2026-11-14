@@ -3600,7 +3600,7 @@ void URammsCurbNegotiationController::Abort()
 		// Asked again while a per-wheel crossing is being braked to rest (after a
 		// fault or an abort): every wheel braked at once, as the per-axle gait
 		// does.
-		EndStopping(TEXT("Abort called while braking to rest: every wheel braked at once"));
+		EndStopping(TEXT("Abort called while braking to rest: every wheel braked at once"), EStopEnd::Asked);
 	}
 }
 
@@ -3999,7 +3999,7 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 	CommandWheels(DriveSpeed, Tuning.HeadingGain * HeadingErrorRad);
 	if (bAtRest)
 	{
-		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving), /*bAtRest=*/true);
+		EndStopping(FString::Printf(TEXT("at rest (%.1f cm/s)"), Moving), EStopEnd::AtRest);
 	}
 	else if (StopElapsed > StopTimeoutSeconds)
 	{
@@ -4008,15 +4008,17 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 		// legs as measured. Not at rest after the time allowed is not.
 		EndStopping(bLegsLate ? FString::Printf(TEXT("at rest, but a leg not on its target after %.0f s: the wheels braked"), StopTimeoutSeconds)
 							  : FString::Printf(TEXT("not at rest after %.0f s (%.1f cm/s measured): the wheels braked"), StopTimeoutSeconds, Moving),
-			/*bAtRest=*/bLegsLate);
+			bLegsLate ? EStopEnd::AtRest : EStopEnd::Abnormal);
 	}
 }
 
-void URammsCurbNegotiationController::EndStopping(const FString& Why, bool bAtRest)
+void URammsCurbNegotiationController::EndStopping(const FString& Why, EStopEnd How)
 {
-	if (!bAtRest)
+	if (How != EStopEnd::AtRest)
 	{
-		CancelRetry(Why); // braked to rest is the only way out of a stop that a retry may follow
+		// Braked to rest is the only way out of a stop that a retry may follow. One that ended neither at rest nor at
+		// the rider's asking is not tried again from where it stands at all, by itself or by hand.
+		CancelRetry(Why, /*bForgetHere=*/How == EStopEnd::Abnormal);
 	}
 	bStopping = false;
 	DriveSpeed = 0.0f;
@@ -4032,6 +4034,13 @@ void URammsCurbNegotiationController::EndStopping(const FString& Why, bool bAtRe
 
 void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 {
+	if (!bActive && !bOwnHandBack)
+	{
+		// The rider's choice of mode stands, whether this mode had the robot or not: the selector stands down every
+		// mode but the one chosen, so choosing another after a refusal at rest handed the robot back comes here too,
+		// with this mode already inactive.
+		CancelRetry(TEXT("another drive mode was selected"));
+	}
 	if (bDriveModeActive == bActive)
 	{
 		return;
@@ -4056,10 +4065,6 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 	if (!bActive)
 	{
 		bHandBackPending = false;
-		if (!bOwnHandBack)
-		{
-			CancelRetry(TEXT("another drive mode was selected")); // the rider's choice of mode stands
-		}
 		if (IsNegotiating())
 		{
 			// The other mode takes the robot over at once: nothing to brake for.
@@ -6304,7 +6309,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				// handed back as after a reset mid-crossing.
 				HoldWheels();
 				bHandBackPending = true;
-				CancelRetry(TEXT("the simulation was reset"));
+				CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while the wheels were held: held again where they are"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -6348,7 +6353,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				{
 					Executor->End();
 				}
-				CancelRetry(TEXT("the simulation was reset"));
+				CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while braking to rest"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -7406,8 +7411,23 @@ void URammsCurbNegotiationController::FaultHard(const FString& Why, bool bRampDo
 	Finish(ERammsCurbPhase::Faulted, Why, bRampDown);
 }
 
-void URammsCurbNegotiationController::CancelRetry(const FString& Why)
+void URammsCurbNegotiationController::CancelRetry(const FString& Why, bool bForgetHere)
 {
+	if (bForgetHere && bRetryable && !bRetryPending)
+	{
+		// Nothing pending (the retry made, or never one), but a start from here still counted as one: the status says
+		// why it no longer does.
+		bRetryable = false;
+		Status = EndStatus = FString::Printf(TEXT("%s; then %s, so not tried again from here"), *EndStatus, *Why);
+		const FString Line = FString::Printf(TEXT("t=%5.2fs not tried again from here: %s"), Elapsed, *Why);
+		StepLog.Add(Line);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': %s"), *GetNameSafe(GetOwner()), *Line);
+		return;
+	}
+	if (bForgetHere)
+	{
+		bRetryable = false;
+	}
 	if (!bRetryPending)
 	{
 		return;
@@ -7449,7 +7469,7 @@ void URammsCurbNegotiationController::StepRetry(float DeltaTime)
 	}
 	else if (RetryLastTime >= 0.0 && Now < RetryLastTime)
 	{
-		CancelRetry(TEXT("the simulation was reset"));
+		CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 		return;
 	}
 	RetryLastTime = Now;

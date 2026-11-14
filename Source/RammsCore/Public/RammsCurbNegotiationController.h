@@ -1081,8 +1081,18 @@ private:
 	void CancelByRider(const FString& Why);
 	/** After a fault or an abort: one tick of braking the robot to rest, the
 	 *  legs holding their targets; the wheels braked once it is at rest. */
-	void  StepStopping(float DeltaTime);
-	void  EndStopping(const FString& Why, bool bAtRest = false); // anything but bAtRest cancels a pending retry
+	void StepStopping(float DeltaTime);
+	/** How a braking stop ended: braked to rest, at the rider's asking (Abort), or neither -- a tilt, a runaway, a
+	 *  robot it cannot measure, not at rest in time. */
+	enum class EStopEnd : uint8
+	{
+		AtRest,
+		Asked,
+		Abnormal
+	};
+	/** Anything but AtRest cancels a pending retry; Abnormal also ends a start from where it stopped counting as one
+	 *  (RetryHere). */
+	void  EndStopping(const FString& Why, EStopEnd How = EStopEnd::Abnormal);
 	void  SetActiveModeThroughSelector(FName ModeId);
 	float AxleProgress(ERammsCurbAxle Axle) const;
 
@@ -1352,8 +1362,9 @@ private:
 	bool RetryHere() const;
 	/** The pending retry (bRetryOnceAfterFault), once the robot has stood measured at rest half a second. */
 	void StepRetry(float DeltaTime);
-	/** Drop a pending retry, saying why it was not made. */
-	void CancelRetry(const FString& Why);
+	/** Drop a pending retry, saying why it was not made. bForgetHere (an abnormal stop, a reset): nor does a start from
+	 *  where it stopped count as one any more (RetryHere), pending or not -- what stopped it may still be there. */
+	void CancelRetry(const FString& Why, bool bForgetHere = false);
 	/** Finish as a fault about the robot itself (a tilt, a runaway, unmeasured, a reset): never tried again. */
 	void	  FaultHard(const FString& Why, bool bRampDown = true);
 	bool	  bFaultSafety = false;
