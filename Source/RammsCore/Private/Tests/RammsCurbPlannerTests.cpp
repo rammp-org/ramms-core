@@ -4350,4 +4350,94 @@ bool FRammsCurbExecutorStickPause::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorFinishInPlace,
+	"Ramms.Curb.Executor.FinishInPlace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorFinishInPlace::RunTest(const FString& Parameters)
+{
+	// The rider lets go for good once the rear wheels can touch down on the far
+	// surface (anywhere from where the plan has the last wheel leave its window
+	// to the plan's end): the robot brakes to rest within its braking distance
+	// as a pause brakes it, sets the wheels still up down where it stands, takes
+	// the centre wheels home and the base and the seat to the plan's end there,
+	// and is done -- every wheel on the ground on the far side, no lift begun --
+	// the stick held forward again meanwhile changing nothing (the executor
+	// keeps to the finish).
+	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+	{
+		for (const bool bUp : { true, false })
+		{
+			const FString				   What = FString::Printf(TEXT("%s %s"), Id, bUp ? TEXT("up") : TEXT("down"));
+			const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+			const RammsCurb::FCurbSchedule S = RammsCurb::PlanCrossing(In);
+			if (!TestTrue(FString::Printf(TEXT("%s planned"), *What), S.IsValid()))
+			{
+				continue;
+			}
+			const RammsCurb::FExecDryRunResult Free = RammsCurb::ExecDryRun(In, S);
+			if (!TestTrue(FString::Printf(TEXT("%s: crosses with the stick held (%s)"), *What, *Free.FaultWhy), Free.bDone))
+			{
+				continue;
+			}
+			const FRammsCurbTuning& T = In.Tuning;
+			// Braked from the drive speed at Deceleration, the chassis a drive lag
+			// and a tick behind the command.
+			const double Braking = T.DriveSpeed * T.DriveSpeed / (2.0 * T.Deceleration) + T.DriveSpeed * 0.3 + 2.0;
+			// Where the last wheel leaves its window (the rear's, on this robot):
+			// from there every wheel may be set down where it is.
+			double SPoint = 0.0;
+			for (const RammsCurb::FWheelPlan& P : S.Wheels)
+			{
+				SPoint = FMath::Max(SPoint, P.SLand);
+			}
+			const double SEnd = Free.DoneAtCm;
+			int32		 Runs = 0, ShortOfEnd = 0;
+			for (double At = SPoint + 1.0; At < SEnd; At += 10.0)
+			{
+				RammsCurb::FExecDryRunOptions O;
+				O.FinishInPlaceAtTravelCm = At;
+				const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, O);
+				const FString					   How = FString::Printf(TEXT("%s, let go at %.0f cm"), *What, At);
+				TestTrue(FString::Printf(TEXT("%s: done (%.1f s, ended %s%s%s)"), *How, R.Seconds, RammsCurb::ExecPhaseName(R.EndPhase),
+							 R.bFaulted ? TEXT(": ") : TEXT(""), *R.FaultWhy),
+					R.bDone && !R.bFaulted);
+				TestTrue(FString::Printf(TEXT("%s: finished in place (from %.1f cm)"), *How, R.InPlaceAtCm), R.InPlaceAtCm >= 0.0);
+				TestTrue(FString::Printf(TEXT("%s: stopped within its braking distance of there (%.1f cm, %.1f allowed)"), *How, R.InPlaceTravelCm, Braking),
+					R.InPlaceTravelCm <= Braking);
+				TestTrue(FString::Printf(TEXT("%s: at rest (%.2f cm/s)"), *How, R.FinalSpeedCmS), R.FinalSpeedCmS < 0.5);
+				TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *How), R.KeepOffViolations, 0);
+				TestEqual(FString::Printf(TEXT("%s: lifted wheels into the terrain"), *How), R.IntoTerrain, 0);
+				TestEqual(FString::Printf(TEXT("%s: ticks with a forbidden set off the ground"), *How), R.Counts.ForbiddenTicks, 0);
+				TestEqual(FString::Printf(TEXT("%s: ticks with a loaded wheel in its window"), *How), R.Counts.WindowTicks, 0);
+				TestEqual(FString::Printf(TEXT("%s: lifts begun with the stick let go"), *How), R.BegunWhilePaused, 0);
+				TestTrue(FString::Printf(TEXT("%s: the robot stands (least margin %.2f cm)"), *How, R.MinMarginCm), R.MinMarginCm >= T.MinLiveStabilityMarginCm);
+				TestTrue(FString::Printf(TEXT("%s: the base within 2 deg of the plan (%.2f)"), *How, R.MaxTiltDeg), R.MaxTiltDeg <= 2.0);
+				// Every wheel set down on the far side: its centre past the edge, its
+				// bottom on (or pressed into) the surface under it.
+				for (int32 i = 0; i < R.FinalPastEdgeCm.Num() && i < R.FinalBottomCm.Num(); ++i)
+				{
+					TestTrue(FString::Printf(TEXT("%s: '%s' on the ground on the far side (%.1f cm past the edge, its bottom %+.2f cm)"), *How,
+								 *In.Legs[i].Name.ToString(), R.FinalPastEdgeCm[i], R.FinalBottomCm[i]),
+						R.FinalPastEdgeCm[i] >= 0.0 && R.FinalBottomCm[i] <= 1.0);
+				}
+				ShortOfEnd += R.FinalTravelCm < SEnd - 1.0 ? 1 : 0;
+				if (HasAnyErrors())
+				{
+					for (const FString& L : R.Log)
+					{
+						AddInfo(FString::Printf(TEXT("%s log: %s"), *How, *L));
+					}
+					return true;
+				}
+				++Runs;
+			}
+			TestTrue(FString::Printf(TEXT("%s: let go somewhere from where the rear may land (%.0f cm) to the end (%.0f)"), *What, SPoint, SEnd), Runs > 0);
+			AddInfo(FString::Printf(TEXT("%s: let go at %d points from %.0f to %.0f cm, each finished in place; %d short of the plan's end"), *What, Runs,
+				SPoint, SEnd, ShortOfEnd));
+		}
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -299,6 +299,8 @@ namespace RammsCurb
 		ExternalCap = TNumericLimits<double>::Max();
 		OperatorScale = 1.0;
 		bOperatorPaused = false;
+		bFinishInPlace = false;
+		FinishAttitude = FVector2D::ZeroVector;
 		// The runtime checks start afresh.
 		bFault = false;
 		bSafetyFault = false;
@@ -387,12 +389,99 @@ namespace RammsCurb
 
 	void FExecutor::SetOperator(double Scale, bool bPaused)
 	{
+		// Finishing in place, the stick no longer moves the robot: it is braked to
+		// rest where it is, and the crossing ends there.
+		if (bFinishInPlace)
+		{
+			OperatorScale = 0.0;
+			bOperatorPaused = false;
+			return;
+		}
 		if (bRunning && !bHalted && bPaused != bOperatorPaused)
 		{
 			Log(bPaused ? FString(TEXT("pausing: the rider's stick is not held forward")) : FString(TEXT("the rider's stick held forward: going on")));
 		}
 		OperatorScale = FMath::Clamp(Scale, 0.0, 1.0);
 		bOperatorPaused = bPaused;
+	}
+
+	bool FExecutor::CanFinishInPlace() const
+	{
+		if (!bRunning || bHalted || Wheels.Num() == 0 || Plan.Wheels.Num() != Wheels.Num())
+		{
+			return false;
+		}
+		for (int32 i = 0; i < Wheels.Num(); ++i)
+		{
+			const FExecWheel& W = Wheels[i];
+			// Across: planted on the far surface, taking load there, or being set
+			// down on it.
+			if (W.Plane == 1)
+			{
+				continue;
+			}
+			// Off the ground for its crossing and past its window, over the far
+			// surface: it may be set down where it is (LandingWork's gate is
+			// behind it). A wheel still on the near side, or held up from the
+			// drive stance, needs the robot to travel on.
+			const bool bUp = W.State == ERammsCurbWheelState::Lifting || W.State == ERammsCurbWheelState::Clear;
+			if (!bUp || W.LandedPastCm < Plan.Wheels[i].DDown)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool FExecutor::FinishInPlace(const FString& Why)
+	{
+		if (bFinishInPlace)
+		{
+			return true;
+		}
+		if (!CanFinishInPlace())
+		{
+			return false;
+		}
+		bFinishInPlace = true;
+		OperatorScale = 0.0;
+		bOperatorPaused = false;
+		// The attitude the base is taken to starts where the plan had it as of
+		// the last tick, and moves on to the plan's end from there.
+		FinishAttitude = PlannedAttitude;
+		// A planned stop's re-pose is the plan's: the finish's own pose takes its
+		// place.
+		bDwelling = false;
+		const FPlanAt End = Between(SEnd);
+		Log(FString::Printf(TEXT("finishing in place (%s): braked to rest at %.1f cm, %.1f short of the plan's end; the wheels still up set down, "
+								 "then the centre wheels home, the base to %+.2f / %+.2f deg and the seat to %+.1f cm where the robot stands"),
+			*Why, S, FMath::Max(0.0, SEnd - S), End.Pitch, End.Roll, Plan.bSeatPlanned ? Plan.SeatEndX : End.SeatX));
+		return true;
+	}
+
+	FExecutor::FPlanAt FExecutor::StepFinishPose(const FExecMeasure& Measure, double Dt, FVector2D& OutEndAttitude)
+	{
+		FPlanAt Out = Between(SEnd);
+		// The chassis as high over the far surface where it stands as the plan has
+		// it at its end: on a sloping far surface the plan's height there differs
+		// from here by the surface's own rise along the travel still left.
+		const FRammsCurbPlane& Far = M->GetTerrain().Far;
+		Out.B += Far.HeightAt(Measure.OriginXY) - Far.HeightAt(Measure.OriginXY + Plan.Heading * (SEnd - S));
+		// The seat where the plan ends it (a planned seat may still be on its way
+		// there at the plan's last sample).
+		if (Plan.bSeatPlanned)
+		{
+			Out.SeatX = Plan.SeatEndX;
+		}
+		// The base turned from where it was to the plan's end attitude no faster
+		// than a planned tilt (the legs' servo lag behind it, as along the plan).
+		OutEndAttitude = FVector2D(Out.Pitch, Out.Roll);
+		const FVector2D Off = OutEndAttitude - FinishAttitude;
+		const double	Step = FMath::Max(0.0, static_cast<double>(In.Tuning.TiltRateDegPerSec)) * FMath::Max(0.0, Dt);
+		FinishAttitude = Off.Size() <= Step ? OutEndAttitude : FinishAttitude + Off.GetSafeNormal() * Step;
+		Out.Pitch = FinishAttitude.X;
+		Out.Roll = FinishAttitude.Y;
+		return Out;
 	}
 
 	void FExecutor::Halt(const FString& Why)
@@ -946,9 +1035,9 @@ namespace RammsCurb
 	{
 		const FWheelPlan&		P = Plan.Wheels[Leg];
 		const FRammsCurbTuning& T = In.Tuning;
-		if (bOperatorPaused)
+		if (bOperatorPaused || bFinishInPlace)
 		{
-			OutWhy = TEXT("the rider's stick is not held forward");
+			OutWhy = bFinishInPlace ? TEXT("the crossing is finishing in place") : TEXT("the rider's stick is not held forward");
 			return false;
 		}
 		if (!Level.bLevelled)
@@ -1663,10 +1752,13 @@ namespace RammsCurb
 				Measure.AttitudeDeg.Y, Plan.bLevelInAtRest ? TEXT(", standing still") : TEXT("")));
 		}
 
-		// The plan a servo lag ahead, and here.
+		// The plan a servo lag ahead, and here. Finishing in place, both are the
+		// pose the crossing ends in, where the robot stands (StepFinishPose): the
+		// robot no longer travels along the plan.
 		const double  AheadCm = VHat * T.ServoLagSeconds;
-		const FPlanAt Ahead = Between(S + AheadCm);
-		const FPlanAt Here = Between(S);
+		FVector2D	  FinishEndAttitude = FVector2D::ZeroVector;
+		const FPlanAt Ahead = bFinishInPlace ? StepFinishPose(Measure, Dt, FinishEndAttitude) : Between(S + AheadCm);
+		const FPlanAt Here = bFinishInPlace ? Ahead : Between(S);
 		PlannedAttitude = FVector2D(Here.Pitch, Here.Roll);
 
 		// The base against its planned attitude, once it has been levelled in:
@@ -1812,7 +1904,10 @@ namespace RammsCurb
 		}
 
 		// The chassis height: from where it stands to the plan's, then the plan's
-		// a servo lag ahead; at a planned stop, to where it leaves from.
+		// a servo lag ahead; at a planned stop, to where it leaves from; finishing
+		// in place, to the plan's end height where the robot stands. BaseTo: where
+		// it is headed this tick.
+		double BaseTo = BCmd;
 		if (bLevelInBegun)
 		{
 			double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].B : Ahead.B;
@@ -1837,11 +1932,15 @@ namespace RammsCurb
 			{
 				ReachLowerCm = FMath::Max(0.0, FMath::Min(ReachLowerCm - ReachReleaseCmS * Dt, Between(S).B - BCmd));
 			}
-			else if (ReachDrop() > 0.0 && bHeldBack)
+			else if (ReachDrop() > 0.0 && bHeldBack && !bFinishInPlace)
 			{
 				ReachLowerCm = FMath::Max(ReachLowerCm, ReachDrop() + ReachDropExtraCm);
 			}
-			const double Drop = FMath::Min(ReachLowerCm, Room);
+			// Finishing in place, none: the chassis comes down to the plan's end
+			// height, where every leg reaches its ground (the plan's corridor
+			// there), and a landing leg at its reach waits on that as it would on
+			// the plan's own travel.
+			const double Drop = bFinishInPlace ? 0.0 : FMath::Min(ReachLowerCm, Room);
 			if (Drop > 0.0)
 			{
 				To = FMath::Min(To, Between(S).B - Drop);
@@ -1893,7 +1992,10 @@ namespace RammsCurb
 					Log(TEXT("the chassis follows the plan's height again"));
 				}
 			}
-			BCmd = StepTowards(BCmd, To, BH * Dt * (bDwelling ? 1.0 : 1.5));
+			// (Following the plan, with room to catch up with it; at rest -- a planned
+			// stop, finishing in place -- at BaseHeightSpeed itself.)
+			BCmd = StepTowards(BCmd, To, BH * Dt * (bDwelling || bFinishInPlace ? 1.0 : 1.5));
+			BaseTo = To;
 			if (!bLoweredDown)
 			{
 				// The level-in's first stage: the corners the stance holds up are
@@ -2108,8 +2210,10 @@ namespace RammsCurb
 					}
 					break;
 				case ERammsCurbWheelState::Clear:
-					// Past its window where it will be set down (the plan's landing).
-					if (W.LandedPastCm >= P.DDown && S >= P.SLand - 1.0)
+					// Past its window where it will be set down (the plan's landing) --
+					// finishing in place, where it is: the robot no longer travels on
+					// to the plan's position for it.
+					if (W.LandedPastCm >= P.DDown && (S >= P.SLand - 1.0 || bFinishInPlace))
 					{
 						W.Plane = 1;
 						SetState(i, ERammsCurbWheelState::Planting, FString());
@@ -2323,16 +2427,20 @@ namespace RammsCurb
 		// the centre wheels hold their fore/aft until it is down -- the walk the
 		// plan makes from there on is for the robot standing on it. They then lag
 		// the plan, which slows the robot and holds the lifts that need them.
+		// Finishing in place, the plan's end has every wheel down, so the walk
+		// home waits for each wheel still up to be set down.
 		int32 LateLeg = INDEX_NONE;
 		for (int32 j = 0; j < N && LateLeg == INDEX_NONE; ++j)
 		{
-			LateLeg = IsAirborne(Wheels[j].State) && S > Plan.Wheels[j].SLoaded ? j : INDEX_NONE;
+			LateLeg = IsAirborne(Wheels[j].State) && (S > Plan.Wheels[j].SLoaded || bFinishInPlace) ? j : INDEX_NONE;
 		}
 		if ((LateLeg != INDEX_NONE) != bCentresHeld)
 		{
 			bCentresHeld = LateLeg != INDEX_NONE;
-			Log(bCentresHeld ? FString::Printf(TEXT("the centre wheels hold their fore/aft: '%s' is not down where the plan has it (%.1f)"),
-								   *In.Legs[LateLeg].Name.ToString(), Plan.Wheels[LateLeg].SLoaded)
+			Log(bCentresHeld ? (bFinishInPlace ? FString::Printf(TEXT("the centre wheels hold their fore/aft: finishing in place, '%s' is still to be set down"),
+													 *In.Legs[LateLeg].Name.ToString())
+											   : FString::Printf(TEXT("the centre wheels hold their fore/aft: '%s' is not down where the plan has it (%.1f)"),
+													 *In.Legs[LateLeg].Name.ToString(), Plan.Wheels[LateLeg].SLoaded))
 							 : FString(TEXT("the centre wheels walk on")));
 		}
 
@@ -2346,12 +2454,13 @@ namespace RammsCurb
 			if (bCentre && bLevelInBegun && bLoweredDown)
 			{
 				// A 5-bar walks to the plan's fore/aft a servo lag ahead; at a planned
-				// stop, to where the robot leaves from.
+				// stop, to where the robot leaves from; finishing in place, home, at
+				// CenterShiftSpeed itself (nothing to catch up with).
 				const int32	 Side = M->Side(i);
 				const double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : Ahead.X[Side];
 				if (!bCentresHeld)
 				{
-					W.CmdX = StepTowards(W.CmdX, To, CSS * 1.25 * Dt);
+					W.CmdX = StepTowards(W.CmdX, To, CSS * (bFinishInPlace ? 1.0 : 1.25) * Dt);
 				}
 			}
 			if (!bLevelInBegun)
@@ -2454,7 +2563,13 @@ namespace RammsCurb
 			const FModelSeat& Seat = In.Model.Seat;
 			const double	  SeatHere = Here.SeatX;
 			double			  Want = SeatHere;
-			if (Plan.bSeatPlanned)
+			if (bFinishInPlace)
+			{
+				// Finishing in place: where the plan ends it (Here, the finish's pose),
+				// from where it is -- no lead: the robot no longer travels.
+				Want = SeatHere;
+			}
+			else if (Plan.bSeatPlanned)
 			{
 				// A planned seat is one it can follow, the plan verified with it
 				// there: followed a servo lag ahead, and past the plan's last
@@ -2695,8 +2810,9 @@ namespace RammsCurb
 			{
 				StopCap = BrakingSpeed(LagBrakingDistance(static_cast<float>(SStop - S), static_cast<float>(VHat), DriveLagSeconds),
 					T.Deceleration);
-				// Not with the rider's stick let go: the re-pose waits for it.
-				if (S >= SStop - 1.0 && VHat < HoldSpeedCmS && !bOperatorPaused)
+				// Not with the rider's stick let go: the re-pose waits for it. Nor
+				// finishing in place, which makes its own.
+				if (S >= SStop - 1.0 && VHat < HoldSpeedCmS && !bOperatorPaused && !bFinishInPlace)
 				{
 					bDwelling = true;
 					DwellFor = 0.0;
@@ -2829,8 +2945,9 @@ namespace RammsCurb
 		Limit(StopCap, EExecTerm::PlannedStop);
 		Limit(ExternalCap, EExecTerm::External);
 		// The rider's stick: held part way, that share of the plan's speed; not
-		// held forward, a stop, braked at Deceleration (below).
-		if (bOperatorPaused)
+		// held forward -- or finishing in place, which the stick let go into -- a
+		// stop, braked at Deceleration (below).
+		if (bOperatorPaused || bFinishInPlace)
 		{
 			Limit(0.0, EExecTerm::Operator);
 		}
@@ -2938,14 +3055,15 @@ namespace RammsCurb
 		const bool bWaitTerm = By == EExecTerm::Deadline || By == EExecTerm::Track || By == EExecTerm::External || By == EExecTerm::Margin
 			|| By == EExecTerm::Swing;
 		auto Waits = [&](double Under) { return Braking < Under || (VTarget < Under && bWaitTerm); };
-		if (bOperatorPaused)
+		if (bOperatorPaused || bFinishInPlace)
 		{
-			// Paused by the rider: whatever else would hold the robot waits with it,
-			// and is no hold -- the robot is not waiting on the crossing.
+			// Paused by the rider, or finishing in place: whatever else would hold
+			// the robot waits with it, and is no hold -- the robot is not waiting on
+			// the crossing (finishing in place, nothing left of it needs travel).
 			if (bHolding)
 			{
 				bHolding = false;
-				Log(TEXT("hold over: the rider's stick is not held forward"));
+				Log(bFinishInPlace ? FString(TEXT("hold over: finishing in place")) : FString(TEXT("hold over: the rider's stick is not held forward")));
 				Phase = Level.bLevelled ? EExecPhase::Cross : EExecPhase::Prepare;
 			}
 		}
@@ -2983,9 +3101,26 @@ namespace RammsCurb
 			}
 		}
 
-		// Done: past where the plan ends the crossing, every wheel on the far side
-		// and every leg where it was sent.
-		if (Phase == EExecPhase::Settle && S >= SEnd)
+		// Finishing in place, the plan's end is reached where the robot stands once
+		// every command has reached the pose it ends in: the chassis' height, the
+		// base's attitude, the centre wheels home, every support leg on its
+		// target. (The seat and the legs following their commands are Done's own
+		// checks, below, as at the plan's end.)
+		bool bFinishPoseReached = false;
+		if (bFinishInPlace)
+		{
+			bFinishPoseReached = bCaughtUp && FMath::Abs(BCmd - BaseTo) <= ExecCaughtUpCm && (FinishAttitude - FinishEndAttitude).IsNearlyZero(1e-6);
+			for (int32 Side = 0; Side < 2 && bFinishPoseReached; ++Side)
+			{
+				const int32 C = Centre[Side];
+				bFinishPoseReached = C == INDEX_NONE || FMath::Abs(Wheels[C].CmdX - Here.X[Side]) <= ExecCaughtUpCm;
+			}
+		}
+		// Done: past where the plan ends the crossing (or, finishing in place, at
+		// its end pose where the robot stands), every wheel on the far side and
+		// every leg where it was sent.
+		const TCHAR* const Waiting = bFinishInPlace ? TEXT("waiting") : TEXT("rolling on");
+		if (Phase == EExecPhase::Settle && (bFinishInPlace ? bFinishPoseReached : S >= SEnd))
 		{
 			// A support leg pressed into its surface stops short of its command by
 			// up to its preload.
@@ -3001,7 +3136,8 @@ namespace RammsCurb
 			// and rocked the robot.
 			if (bSettled && In.Model.Seat.Shifts())
 			{
-				const double SeatEnd = Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX;
+				// (Finishing in place, Here is the finish's pose: the seat's end.)
+				const double SeatEnd = bFinishInPlace ? Here.SeatX : (Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX);
 				const bool	 bSeatThere = FMath::Abs(SeatCmdX - SeatEnd) <= SeatSettleCm
 					&& (!Measure.Seat.bValid || FMath::Abs(Measure.Seat.Pivot.X - SeatEnd) <= SeatSettleCm);
 				if (!bSeatThere)
@@ -3010,19 +3146,20 @@ namespace RammsCurb
 					if (!bLoggedSeatWait)
 					{
 						bLoggedSeatWait = true;
-						Log(FString::Printf(TEXT("settled but the seat is at %+.1f cm (sent %+.1f) on its way to %+.1f: rolling on until it is there"),
-							Measure.Seat.bValid ? Measure.Seat.Pivot.X : SeatCmdX, SeatCmdX, SeatEnd));
+						Log(FString::Printf(TEXT("settled but the seat is at %+.1f cm (sent %+.1f) on its way to %+.1f: %s until it is there"),
+							Measure.Seat.bValid ? Measure.Seat.Pivot.X : SeatCmdX, SeatCmdX, SeatEnd, Waiting));
 					}
 				}
 			}
 			// And the base back at the plan's attitude (level by SEnd): the legs
 			// carry it round behind the plan, most of all at the end of a tilted
-			// plan's easing out. Rolling on in Settle until it is, for a while.
+			// plan's easing out. Rolling on in Settle until it is, for a while
+			// (finishing in place, waiting where it stands).
 			if (SettledAt < 0.0)
 			{
 				SettledAt = Elapsed;
 			}
-			const FPlanAt End = Between(S);
+			const FPlanAt End = bFinishInPlace ? Here : Between(S);
 			const bool	  bBaseBack = FMath::Abs(Measure.AttitudeDeg.X - End.Pitch) <= DoneAttitudeToleranceDeg
 				&& FMath::Abs(Measure.AttitudeDeg.Y - End.Roll) <= DoneAttitudeToleranceDeg;
 			if (bSettled && !bBaseBack && Elapsed - SettledAt < DoneAttitudeWaitSeconds)
@@ -3031,16 +3168,17 @@ namespace RammsCurb
 				if (!bLoggedBaseWait)
 				{
 					bLoggedBaseWait = true;
-					Log(FString::Printf(TEXT("settled, the base %+.2f / %+.2f deg off the plan's attitude: rolling on until it is within %.2f"),
-						Measure.AttitudeDeg.X - End.Pitch, Measure.AttitudeDeg.Y - End.Roll, DoneAttitudeToleranceDeg));
+					Log(FString::Printf(TEXT("settled, the base %+.2f / %+.2f deg off the plan's attitude: %s until it is within %.2f"),
+						Measure.AttitudeDeg.X - End.Pitch, Measure.AttitudeDeg.Y - End.Roll, Waiting, DoneAttitudeToleranceDeg));
 				}
 			}
 			if (bSettled)
 			{
 				Phase = EExecPhase::Done;
-				Log(bLoggedBaseWait ? FString::Printf(TEXT("done (the base %+.2f / %+.2f deg off the plan's attitude, %.2f s past the end)"),
-										  Measure.AttitudeDeg.X - End.Pitch, Measure.AttitudeDeg.Y - End.Roll, Elapsed - SettledAt)
-									: FString(TEXT("done")));
+				Log(bLoggedBaseWait ? FString::Printf(TEXT("done%s (the base %+.2f / %+.2f deg off the plan's attitude, %.2f s past the end)"),
+										  bFinishInPlace ? TEXT(" in place") : TEXT(""), Measure.AttitudeDeg.X - End.Pitch, Measure.AttitudeDeg.Y - End.Roll,
+										  Elapsed - SettledAt)
+									: FString(bFinishInPlace ? TEXT("done in place") : TEXT("done")));
 			}
 		}
 
@@ -3048,6 +3186,10 @@ namespace RammsCurb
 		if (bOperatorPaused)
 		{
 			Status += TEXT(", paused: the rider's stick is not held forward");
+		}
+		else if (bFinishInPlace && Phase != EExecPhase::Done)
+		{
+			Status += TEXT(", finishing in place: the legs and the seat to the plan's end pose where the robot stands");
 		}
 		if (Phase == EExecPhase::Hold)
 		{
@@ -3448,6 +3590,9 @@ namespace RammsCurb
 		double HaltedFrom = -1.0, LastCmd = Speed, StoppedFor = 0.0;
 		// The rider's stick: when it was let go (s; < 0 not yet), and where (cm).
 		double PausedFrom = -1.0, PausedAtS = 0.0;
+		// Let go for good (FinishInPlaceAtTravelCm): when (s; < 0 not yet), and
+		// when the executor took up finishing in place.
+		double LetGoFrom = -1.0, InPlaceFrom = -1.0;
 		// A re-plan made, waiting ReplanDelaySeconds to be adopted (as one made off
 		// the game thread does); after its adoption, until when its re-fitted
 		// surfaces' biases are watched against where those truly lie.
@@ -3469,8 +3614,23 @@ namespace RammsCurb
 				PausedFrom = Time;
 				PausedAtS = E.GetS();
 			}
-			const bool bPaused = PausedFrom >= 0.0 && Time < PausedFrom + Options.PauseSeconds;
-			E.SetOperator(Options.StickScale, bPaused);
+			// Let go for good, as the controller's stick has it then: paused until
+			// the executor may finish in place, then finishing in place.
+			if (LetGoFrom < 0.0 && E.GetS() >= Options.FinishInPlaceAtTravelCm)
+			{
+				LetGoFrom = Time;
+			}
+			if (LetGoFrom >= 0.0 && InPlaceFrom < 0.0 && E.CanFinishInPlace() && E.FinishInPlace(TEXT("the stick let go (dry run)")))
+			{
+				InPlaceFrom = Time;
+				Out.InPlaceAtCm = E.GetS();
+			}
+			const bool bInPlace = InPlaceFrom >= 0.0;
+			const bool bPauseAsked = PausedFrom >= 0.0 && Time < PausedFrom + Options.PauseSeconds;
+			const bool bPaused = bPauseAsked || (LetGoFrom >= 0.0 && !bInPlace);
+			// Finishing in place, the stick held forward again: the executor keeps
+			// to the finish (SetOperator ignored).
+			E.SetOperator(bInPlace ? 1.0 : Options.StickScale, bPaused);
 			const bool bLevelInWas = E.HasLevelInBegun();
 			// Halted and stopped, the controller ends the executor (the wheels
 			// braked): from there the legs hold their last commands.
@@ -3576,10 +3736,11 @@ namespace RammsCurb
 				const ERammsCurbWheelState St = E.GetWheels()[i].State;
 				if (St == ERammsCurbWheelState::Lifting && Was[i] == ERammsCurbWheelState::Planted)
 				{
-					if (bPaused)
+					if (bPaused || bInPlace)
 					{
 						++Out.BegunWhilePaused;
-						Note(FString::Printf(TEXT("%.2f s: '%s' lifted with the stick let go"), Time, *In.Legs[i].Name.ToString()));
+						Note(FString::Printf(TEXT("%.2f s: '%s' lifted with the stick let go%s"), Time, *In.Legs[i].Name.ToString(),
+							bInPlace ? TEXT(", finishing in place") : TEXT("")));
 					}
 					for (int32 j = 0; j < N; ++j)
 					{
@@ -3810,10 +3971,14 @@ namespace RammsCurb
 					bRisen = true;
 				}
 			}
-			if (bPaused)
+			if (bPauseAsked)
 			{
 				Out.PausedTravelCm = FMath::Max(Out.PausedTravelCm, E.GetS() - PausedAtS);
 				Out.PausedRestSeconds += FMath::Abs(Speed) < 0.5 ? Dt : 0.0;
+			}
+			if (bInPlace)
+			{
+				Out.InPlaceTravelCm = FMath::Max(Out.InPlaceTravelCm, E.GetS() - Out.InPlaceAtCm);
 			}
 			const bool bStopAhead = E.GetCounts().PlannedStops > 0 || Plan.PlannedStops > 0;
 			if (bRisen && !bStopAhead && HaltedFrom < 0.0)
@@ -3873,6 +4038,7 @@ namespace RammsCurb
 		Out.Counts = E.GetCounts();
 		Out.Seconds = Time;
 		Out.FinalSpeedCmS = Speed;
+		Out.FinalTravelCm = E.GetS();
 		Out.DoneAtCm = E.GetEndS();
 		for (int32 i = 0; i < N; ++i)
 		{

@@ -77,10 +77,34 @@ namespace RammsCurb
 	{
 		FStickDecision	   Out;
 		const EStickIntent Intent = Gate.GetIntent();
+		// The line while the crossing finishes where the robot stands: what it is
+		// doing, and that the stick drives again once it is done (the drive mode
+		// takes it, as after any finish).
+		const TCHAR* const SettlingWhy = TEXT("Finishing in place: settling into the driving pose -- the stick takes over when it is done");
+		// Finishing in place already: on so to the end, whatever the stick. Held
+		// forward again, going on along the plan would pull the legs, which have
+		// left its schedule, back to it.
+		if (Stage.bFinishingInPlace)
+		{
+			Out.Action = EStickAction::FinishInPlace;
+			Out.Why = SettlingWhy;
+			return Out;
+		}
 		if (Intent == EStickIntent::Forward)
 		{
 			Out.Action = EStickAction::Go;
 			Out.Scale = Gate.GetScale();
+			return Out;
+		}
+		// Nothing left of the crossing needs the robot to travel -- the rear wheels
+		// can touch down on the far surface: let go, sideways or back, the robot
+		// is braked to rest and the rest of the crossing made where it stands,
+		// rather than held paused on the rider. A robot paused short of there that
+		// rolled on into it (or a pause that began past it) finishes so too.
+		if (Stage.bRearCanLand)
+		{
+			Out.Action = EStickAction::FinishInPlace;
+			Out.Why = SettlingWhy;
 			return Out;
 		}
 		const bool bBack = Intent == EStickIntent::Back;
