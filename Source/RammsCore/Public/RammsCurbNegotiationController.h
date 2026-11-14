@@ -41,7 +41,10 @@ namespace RammsCurb
 	struct FDebugPainter;
 } // namespace RammsCurb
 
-/**
+/*
+ * (Design notes, kept out of the class doc comment: UHT copies a class's doc comment into one tooltip string, which
+ * MSVC caps at about 16 KB; the short summary just above the class is the tooltip.)
+ *
  * The RAMMP Gen2 curb controller (the lift-drive base; URammsRammpGen1CurbController is Gen1's).
  *
  * Climbs or descends a curb by coordinating every leg and wheel of a robot
@@ -293,6 +296,10 @@ namespace RammsCurb
  * specific. Of a wheel motor it assumes only that the rate the base reports is
  * the one its speed loop holds, and that the angle it reports, where it
  * reports one (not 0), is that rate's integral.
+ */
+/**
+ * The RAMMP Gen2 curb controller: climbs or descends a curb by coordinating every leg and wheel of the
+ * lift-drive base, planned before anything moves (see the design notes above).
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsCurbNegotiationController : public UActorComponent, public IRammsControlContributor, public IRammsDriveMode, public IRammsHUDPanelProvider
