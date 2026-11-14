@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Templates/Function.h"
+#include "UObject/WeakObjectPtr.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 
 class APlayerController;
