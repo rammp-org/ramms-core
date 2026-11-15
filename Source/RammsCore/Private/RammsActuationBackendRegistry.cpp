@@ -19,6 +19,11 @@ namespace RammsActuationBackends
 		GMujocoFactory.Unbind();
 	}
 
+	FRammsActuationBackendFactory GetMujocoFactory()
+	{
+		return GMujocoFactory;
+	}
+
 	IRammsActuationBackend* CreateMujocoBackend(URammsRobotBaseComponent& Base)
 	{
 		return GMujocoFactory.IsBound() ? GMujocoFactory.Execute(Base) : nullptr;

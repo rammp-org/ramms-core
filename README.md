@@ -28,6 +28,9 @@
     - [Arm Configuration](#arm-configuration)
     - [Control Modes](#control-modes)
     - [Joint Configuration (`FRevoluteJointConfig`)](#joint-configuration-frevolutejointconfig)
+  - [Robot Control Surface (`URammsRobotControlSurfaceComponent`)](#robot-control-surface-urammsrobotcontrolsurfacecomponent)
+    - [Sources and holds](#sources-and-holds)
+    - [The drive deadman](#the-drive-deadman)
   - [Sensor Components](#sensor-components)
     - [Time-of-Flight Sensor (`URammsToFSensorComponent`)](#time-of-flight-sensor-urammstfsensorcomponent)
     - [Sonar Sensor (`URammsSonarSensorComponent`)](#sonar-sensor-urammssonarsensorcomponent)
@@ -165,6 +168,82 @@ This helps ensure that consistent code formatting is applied.
  | `MaxTorque` | `39.0` | Maximum torque (N·m) for torque-controlled joints |
  | `PositionStrength` | `5000000.0` | PD position gain for position-controlled joints |
  | `PositionDamping` | `0.0` | PD damping gain |
+
+ ---
+
+## Robot Control Surface (`URammsRobotControlSurfaceComponent`)
+
+ One component per robot that gathers every `IRammsControlContributor` on the
+ actor (drive modes, linkages, seat, arm teleop, cameras, curb crossings...)
+ and the registry motors nobody claims (`motor.<id>`) into one list of
+ controls, and routes commands to them by id: `SetControl`, `TriggerControl`,
+ `ReleaseControl` (Blueprint and Remote Control), or the `IRammsControlSink`
+ interface (input components, RammsAccess, panels). Control kinds:
+ Continuous (a rate held while the input is held), Position and Velocity
+ (targets), Enum, Action and Text.
+
+### Sources and holds
+
+ Every command names its source (`ERammsControlSource`). Autonomy outranks
+ Remote, which outranks local input (Keyboard, Gamepad, Touch), which outranks
+ Script. A Remote or Autonomy command holds its control over lower sources for
+ `ExternalHoldSeconds` (0.3 s) after it was last sent; an equal or lower
+ source yields at once. The source is whatever the caller passes: a Remote
+ Control client can send as Autonomy.
+
+ The robot's own controllers command through `SetControlInternal` /
+ `TriggerControlInternal` (the stance a drive mode takes, a curb crossing
+ holding the arm still). They are arbitrated and held like any command, but
+ they are not a client: the deadman below neither watches them nor counts them
+ as their source being there.
+
+### The drive deadman
+
+ A Continuous or Velocity control held by a Remote or Autonomy source springs
+ back once nothing has been heard from that source on the surface for
+ `DeadmanSeconds` (0.3 s) plus a grace of the last two frames:
+
+ - Heard means any command from that source the surface applied (a set, a
+   trigger, a release, of any control). It is per source, not per control:
+   a client that sends its controls one request at a time is not taken for
+   gone between them, and a control it set once stands while it keeps
+   sending others. Remote Control carries no client identity, so two clients
+   sending as the same source keep each other's commands alive.
+ - A Continuous control goes back as a release from its source would: through
+   its contributor's `ReleaseControl`, or `ApplyControl(DefaultValue)` where
+   it cannot let go; a raw torque motor is commanded its default. A latched
+   command (a drive's external input) goes back with it.
+ - A Velocity control (a raw `motor.<id>` of a velocity actuator, in a robot's
+   low-level mode) is commanded its default -- 0, stop -- rather than released:
+   a released speed servo may coast, and a MuJoCo `<velocity>` actuator cannot
+   let go at all.
+ - Either way the hold goes, so local input takes over at once.
+ - Not touched: Keyboard, Gamepad, Touch and Script commands; the robot's own;
+   Position, Enum, Action and Text controls; a control another source has
+   taken over; one a drive-mode switch moved to another contributor (the mode
+   that stood down zeroed its own command).
+ - A drive-mode switch carries held drive commands into the incoming mode as
+   of when they were sent (`ReapplyHeldControl`): a client that went quiet
+   before the switch gets no fresh lease from it.
+
+ The deadman runs on the core ticker, only while it watches something, on
+ real time (`FPlatformTime`): it springs back while the world is paused, and
+ a client re-sending at 10 Hz keeps to it however the world is dilated. The
+ grace of the last two frames' length means a long frame (an editor throttled
+ to a few frames a second in the background, a hitch) is not taken for
+ silence.
+
+ `DeadmanSeconds` is a class default (`EditDefaultsOnly`), not
+ Blueprint-visible, so neither a Blueprint graph nor Remote Control's property
+ route can change it at run time. `ExternalHoldSeconds` stays
+ Blueprint-writable; both are used within 0.1 to 2 s, whatever they hold.
+ Reports go to `LogRammsControlSurface`: at Log (a refusal at Warning) at most
+ every 5 s per surface, in between at Verbose.
+
+ Clients: re-send held commands at 10 Hz or more and release them when done
+ (ramms-tools' `hold`, `keep_alive` and `drive(seconds=)` do); RammsAccess
+ re-sends every tick and zeroes on its own 250 ms watchdog first. Tests:
+ `Ramms.Control.Deadman.*` (RammsCoreEditor).
 
  ---
 

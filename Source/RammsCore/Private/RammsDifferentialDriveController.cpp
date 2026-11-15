@@ -1503,6 +1503,13 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 	// them while inactive ends and this mode's own begins afresh.
 	SetParkingBrake(false);
 	bDriveModeActive = bActive;
+	// Either way the surface's two axes start from rest. ApplyControl composes
+	// one axis with the other's last value, so a latch left from before a
+	// switch (a turn held when a curb crossing took over) would come back with
+	// the next single-axis command -- and nothing would let go of it: the
+	// surface drops a hold whose control changed hands without releasing it,
+	// trusting the mode that stood down to have let go itself.
+	ControlDriveInput = FVector2D::ZeroVector;
 	bHeldForStance = false;
 	bHoldInactive = false;
 	EndCarry();
