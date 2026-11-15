@@ -119,6 +119,8 @@ This helps ensure that consistent code formatting is applied.
  | `URammsToFSensorComponent` | Time-of-Flight distance sensor (single-point or NxM grid) with GPU ray tracing |
  | `URammsSonarSensorComponent` | Sonar / RADAR cone-beam distance sensor with GPU ray tracing |
  | `URammsIMUSensorComponent` | Inertial measurement unit (accelerometer, gyroscope, orientation) |
+ | `URammsSensorRigComponent` | A robot's sensors as data (`FRammsSensorMount` list): builds ToF / Sonar / IMU components and streamed cameras at BeginPlay |
+ | `URammsSensingBridge` | Remote Control JSON bridge: add / list / read sensors, start camera streams over RMSS |
 
  ---
 
@@ -264,6 +266,38 @@ This helps ensure that consistent code formatting is applied.
  **Blueprint API:**
  - `GetIMUData()` — Latest measurement
  - `OnIMUDataUpdated` — Delegate fired each measurement cycle
+
+ ---
+
+### Sensor Rig (`URammsSensorRigComponent`)
+
+ A list of `FRammsSensorMount`s (name, kind, parent component, socket,
+ relative location / rotation, and the kind's settings), built into real
+ components at BeginPlay and at runtime through `AddMount` (which replaces a
+ mount of the same name) / `RemoveMount`. Every sensor traces / looks along its
+ local +X. A mount whose parent component does not exist is skipped with a
+ warning.
+
+ | Kind | Builds |
+ |---|---|
+ | `ToF` | `URammsToFSensorComponent` (grid when Rows x Columns > 1) |
+ | `Sonar` | `URammsSonarSensorComponent` (`SonarConeDeg` is `BeamHalfAngle`, the cone's half-angle) |
+ | `IMU` | `URammsIMUSensorComponent` |
+ | `Camera` | `UIntrinsicSceneCaptureComponent2D` registered with `UCameraCaptureSubsystem`, plus a `URammsStreamSourceComponent` `<Name>_stream` forwarding only that camera |
+
+ A camera with base channel `C` (`StreamChannel`, or -1 for the lowest `C`
+ whose four channels no stream source in the world uses) streams colour on `C`,
+ depth on `C+100`, motion on `C+200` and the segmentation mask on `C+300`,
+ under the stream ids `camera/<Name>/color`, `camera/<Name>/depth`,
+ `motion/<Name>`, `mask/<Name>` (see RammsStreaming's `RammsCameraStreams.h`).
+ `bStartStreamServerOnBeginPlay` / `bStartCaptureOnBeginPlay` start the RMSS
+ server and capture with the channels the rig's cameras ask for.
+
+ `URammsSensingBridge` exposes the same to Remote Control
+ (`/Script/RammsCore.Default__RammsSensingBridge`), plain strings in and JSON
+ out: `ListSensorsJson`, `AddSensorJson` (snake_case mount JSON),
+ `RemoveSensor`, `ReadSensorJson`, `ReadSensorsJson`, `StartCameraStreamsJson`,
+ `StopCameraStreams`, `GetStreamStatusJson`, `GetSegmentationClassesJson`.
 
  ---
 

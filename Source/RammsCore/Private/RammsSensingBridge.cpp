@@ -1,0 +1,1146 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "RammsSensingBridge.h"
+
+#include "CameraCaptureSegmentation.h"
+#include "CameraCaptureSubsystem.h"
+#include "CameraIntrinsics.h"
+#include "Components/SceneComponent.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
+#include "IntrinsicSceneCaptureComponent2D.h"
+#include "RammsCameraStreams.h"
+#include "RammsIMUSensorComponent.h"
+#include "RammsSensorRigComponent.h"
+#include "RammsSonarSensorComponent.h"
+#include "RammsStreamSourceComponent.h"
+#include "RammsStreamingSubsystem.h"
+#include "RammsToFSensorComponent.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogRammsSensingBridge, Log, All);
+
+namespace RammsSensingBridgeImpl
+{
+	FString ToJsonString(const TSharedRef<FJsonObject>& Obj)
+	{
+		FString																   Out;
+		const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+			TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+		FJsonSerializer::Serialize(Obj, Writer);
+		return Out;
+	}
+
+	TSharedRef<FJsonObject> MakeFailure(const FString& Error)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetBoolField(TEXT("ok"), false);
+		Obj->SetStringField(TEXT("error"), Error);
+		return Obj;
+	}
+
+	FString FailJson(const FString& Error)
+	{
+		return ToJsonString(MakeFailure(Error));
+	}
+
+	TSharedRef<FJsonObject> VectorJson(const FVector& V)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("x"), V.X);
+		Obj->SetNumberField(TEXT("y"), V.Y);
+		Obj->SetNumberField(TEXT("z"), V.Z);
+		return Obj;
+	}
+
+	TSharedRef<FJsonObject> RotatorJson(const FRotator& R)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("pitch"), R.Pitch);
+		Obj->SetNumberField(TEXT("yaw"), R.Yaw);
+		Obj->SetNumberField(TEXT("roll"), R.Roll);
+		return Obj;
+	}
+
+	FString NameOrEmpty(FName Name)
+	{
+		return Name.IsNone() ? FString() : Name.ToString();
+	}
+
+	FName NameFromString(const FString& Text)
+	{
+		const FString Trimmed = Text.TrimStartAndEnd();
+		return Trimmed.IsEmpty() ? FName(NAME_None) : FName(*Trimmed);
+	}
+
+	/** One sensor on an actor: built by a rig, or placed by hand. */
+	struct FSensorRef
+	{
+		AActor*							Actor = nullptr;
+		FString							Name;
+		ERammsSensorKind				Kind = ERammsSensorKind::ToF;
+		USceneComponent*				Component = nullptr;
+		const URammsSensorRigComponent* Rig = nullptr;
+		/** Valid only until the rig changes; used at once. */
+		const FRammsBuiltSensor* Built = nullptr;
+	};
+
+	bool IsCaptureRegistered(const UWorld* World, const UIntrinsicSceneCaptureComponent2D* Camera)
+	{
+		const UCameraCaptureSubsystem* Capture = World ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
+		if (!Capture || !Camera)
+		{
+			return false;
+		}
+		for (const UIntrinsicSceneCaptureComponent2D* Registered : Capture->GetRegisteredCameras())
+		{
+			if (Registered == Camera)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	TArray<FSensorRef> GatherSensors(AActor* Actor)
+	{
+		TArray<FSensorRef> Sensors;
+		if (!IsValid(Actor))
+		{
+			return Sensors;
+		}
+
+		TInlineComponentArray<URammsSensorRigComponent*> Rigs(Actor);
+		for (const URammsSensorRigComponent* Rig : Rigs)
+		{
+			if (!IsValid(Rig))
+			{
+				continue;
+			}
+			for (const FRammsBuiltSensor& Entry : Rig->GetBuiltSensors())
+			{
+				if (!IsValid(Entry.Component))
+				{
+					continue;
+				}
+				FSensorRef Ref;
+				Ref.Actor = Actor;
+				Ref.Name = Entry.Mount.Name.ToString();
+				Ref.Kind = Entry.Mount.Kind;
+				Ref.Component = Entry.Component.Get();
+				Ref.Rig = Rig;
+				Ref.Built = &Entry;
+				Sensors.Add(Ref);
+			}
+		}
+
+		const auto BuiltByARig = [&Rigs](const UActorComponent* Component) {
+			for (const URammsSensorRigComponent* Rig : Rigs)
+			{
+				if (IsValid(Rig) && Rig->FindBuiltByComponent(Component))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+		TInlineComponentArray<USceneComponent*> SceneComponents(Actor);
+		for (USceneComponent* Component : SceneComponents)
+		{
+			if (!IsValid(Component) || BuiltByARig(Component))
+			{
+				continue;
+			}
+			FSensorRef Ref;
+			Ref.Actor = Actor;
+			Ref.Name = Component->GetName();
+			Ref.Component = Component;
+			if (Component->IsA<URammsToFSensorComponent>())
+			{
+				Ref.Kind = ERammsSensorKind::ToF;
+			}
+			else if (Component->IsA<URammsSonarSensorComponent>())
+			{
+				Ref.Kind = ERammsSensorKind::Sonar;
+			}
+			else if (Component->IsA<URammsIMUSensorComponent>())
+			{
+				Ref.Kind = ERammsSensorKind::IMU;
+			}
+			else if (const UIntrinsicSceneCaptureComponent2D* Camera = Cast<UIntrinsicSceneCaptureComponent2D>(Component);
+					 Camera && IsCaptureRegistered(Actor->GetWorld(), Camera))
+			{
+				// Registered cameras only: the capture subsystem's own depth / motion helpers are capture
+				// components on the same actor, never registered themselves.
+				Ref.Kind = ERammsSensorKind::Camera;
+			}
+			else
+			{
+				continue;
+			}
+			Sensors.Add(Ref);
+		}
+		return Sensors;
+	}
+
+	/** Every stream source in the world. */
+	TArray<URammsStreamSourceComponent*> GatherStreamSources(const UWorld* World)
+	{
+		TArray<URammsStreamSourceComponent*> Sources;
+		if (!World)
+		{
+			return Sources;
+		}
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!IsValid(Actor))
+			{
+				continue;
+			}
+			TInlineComponentArray<URammsStreamSourceComponent*> ActorSources(Actor);
+			for (URammsStreamSourceComponent* Source : ActorSources)
+			{
+				if (IsValid(Source))
+				{
+					Sources.Add(Source);
+				}
+			}
+		}
+		return Sources;
+	}
+
+	TSharedRef<FJsonObject> StreamJson(const FRammsCameraStreamDesc& Desc)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("role"), FRammsCameraStreams::RoleName(Desc.Role));
+		Obj->SetStringField(TEXT("stream_id"), Desc.StreamId);
+		Obj->SetNumberField(TEXT("channel"), Desc.Channel);
+		Obj->SetStringField(TEXT("message"), FRammsCameraStreams::MessageName(Desc.Role));
+		Obj->SetStringField(TEXT("fmt"), Desc.Format);
+		return Obj;
+	}
+
+	/** A source's fused RGBD stream, which has no stream id of its own. */
+	TSharedRef<FJsonObject> RgbdStreamJson(const URammsStreamSourceComponent& Source)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("role"), TEXT("rgbd"));
+		Obj->SetStringField(TEXT("stream_id"), FString());
+		Obj->SetNumberField(TEXT("channel"), Source.ChannelID);
+		Obj->SetStringField(TEXT("message"), TEXT("FrameRGBD"));
+		Obj->SetStringField(TEXT("fmt"), TEXT("bgra8+float32"));
+		return Obj;
+	}
+
+	/** The streams a source sends for one camera, as JSON. */
+	void AppendSourceStreams(const URammsStreamSourceComponent& Source, const FString& CameraStreamName,
+		TArray<TSharedPtr<FJsonValue>>& OutStreams)
+	{
+		if (Source.bStreamRGBD)
+		{
+			OutStreams.Add(MakeShared<FJsonValueObject>(RgbdStreamJson(Source)));
+		}
+		for (const FRammsCameraStreamDesc& Desc : Source.DescribeStreams(CameraStreamName))
+		{
+			OutStreams.Add(MakeShared<FJsonValueObject>(StreamJson(Desc)));
+		}
+	}
+
+	/** A hand-placed camera's streams: whatever sources in the world forward it. Also reports the first such
+	 *  source, for the camera's settings. */
+	TArray<TSharedPtr<FJsonValue>> HandPlacedCameraStreams(UIntrinsicSceneCaptureComponent2D* Camera,
+		const URammsStreamSourceComponent**													  OutFirstSource)
+	{
+		TArray<TSharedPtr<FJsonValue>> Streams;
+		if (OutFirstSource)
+		{
+			*OutFirstSource = nullptr;
+		}
+		if (!Camera || !Camera->GetOwner())
+		{
+			return Streams;
+		}
+		const FCameraIdentifier Id = FCameraIdentifier::Generate(Camera);
+		const FString			OwnerPath = Camera->GetOwner()->GetPathName();
+		for (const URammsStreamSourceComponent* Source : GatherStreamSources(Camera->GetWorld()))
+		{
+			if (!Source->AcceptsCamera(Id, OwnerPath))
+			{
+				continue;
+			}
+			if (OutFirstSource && !*OutFirstSource)
+			{
+				*OutFirstSource = Source;
+			}
+			AppendSourceStreams(*Source, Source->GetStreamNameFor(Id), Streams);
+		}
+		return Streams;
+	}
+
+	TSharedRef<FJsonObject> SensorJson(const FSensorRef& Ref)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("actor"), Ref.Actor->GetPathName());
+		Obj->SetStringField(TEXT("actor_name"), Ref.Actor->GetName());
+		Obj->SetStringField(TEXT("name"), Ref.Name);
+		Obj->SetStringField(TEXT("kind"), URammsSensorRigComponent::KindToString(Ref.Kind));
+		Obj->SetStringField(TEXT("component_path"), Ref.Component->GetPathName());
+		if (Ref.Built)
+		{
+			Obj->SetStringField(TEXT("parent"), NameOrEmpty(Ref.Built->Mount.ParentComponent));
+			Obj->SetStringField(TEXT("socket"), NameOrEmpty(Ref.Built->Mount.Socket));
+		}
+		else
+		{
+			const USceneComponent* AttachParent = Ref.Component->GetAttachParent();
+			Obj->SetStringField(TEXT("parent"), AttachParent ? AttachParent->GetName() : FString());
+			Obj->SetStringField(TEXT("socket"), NameOrEmpty(Ref.Component->GetAttachSocketName()));
+		}
+		Obj->SetBoolField(TEXT("rig"), Ref.Rig != nullptr);
+		Obj->SetObjectField(TEXT("location"), VectorJson(Ref.Component->GetComponentLocation()));
+		Obj->SetObjectField(TEXT("rotation"), RotatorJson(Ref.Component->GetComponentRotation()));
+
+		TSharedRef<FJsonObject>		   Settings = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Streams;
+		switch (Ref.Kind)
+		{
+			case ERammsSensorKind::ToF:
+				if (const URammsToFSensorComponent* ToF = Cast<URammsToFSensorComponent>(Ref.Component))
+				{
+					const bool bGrid = ToF->SensorMode == EToFSensorMode::Grid;
+					Settings->SetNumberField(TEXT("rows"), bGrid ? ToF->GridRows : 1);
+					Settings->SetNumberField(TEXT("columns"), bGrid ? ToF->GridColumns : 1);
+					Settings->SetNumberField(TEXT("h_fov_deg"), ToF->HorizontalFOV);
+					Settings->SetNumberField(TEXT("v_fov_deg"), ToF->VerticalFOV);
+					Settings->SetNumberField(TEXT("max_range_cm"), ToF->MaxRange);
+				}
+				break;
+			case ERammsSensorKind::Sonar:
+				if (const URammsSonarSensorComponent* Sonar = Cast<URammsSonarSensorComponent>(Ref.Component))
+				{
+					Settings->SetNumberField(TEXT("max_range_cm"), Sonar->MaxRange);
+					// The component's BeamHalfAngle: the cone's half-angle.
+					Settings->SetNumberField(TEXT("cone_deg"), Sonar->BeamHalfAngle);
+				}
+				break;
+			case ERammsSensorKind::IMU:
+				break;
+			case ERammsSensorKind::Camera:
+			{
+				UIntrinsicSceneCaptureComponent2D* Camera = Cast<UIntrinsicSceneCaptureComponent2D>(Ref.Component);
+				if (!Camera)
+				{
+					break;
+				}
+				const FCameraIntrinsics Intrinsics = Camera->GetActiveIntrinsics();
+				Settings->SetNumberField(TEXT("width"), Intrinsics.ImageWidth);
+				Settings->SetNumberField(TEXT("height"), Intrinsics.ImageHeight);
+				Settings->SetNumberField(TEXT("fov_deg"), Camera->FOVAngle);
+				if (Ref.Built)
+				{
+					const FRammsSensorMount& Mount = Ref.Built->Mount;
+					Settings->SetBoolField(TEXT("color"), Mount.bColor);
+					Settings->SetBoolField(TEXT("depth"), Mount.bDepth);
+					Settings->SetBoolField(TEXT("motion"), Mount.bMotion);
+					Settings->SetBoolField(TEXT("segmentation"), Mount.bSegmentation);
+					Settings->SetNumberField(TEXT("channel"), Ref.Built->Channel);
+					if (const URammsStreamSourceComponent* Source = Cast<URammsStreamSourceComponent>(Ref.Built->StreamSource.Get()))
+					{
+						AppendSourceStreams(*Source, Ref.Name, Streams);
+					}
+				}
+				else
+				{
+					const URammsStreamSourceComponent* Source = nullptr;
+					Streams = HandPlacedCameraStreams(Camera, &Source);
+					Settings->SetBoolField(TEXT("color"), Source && (Source->bStreamRGB || Source->bStreamRGBD));
+					Settings->SetBoolField(TEXT("depth"), Source && (Source->bStreamDepth || Source->bStreamRGBD));
+					Settings->SetBoolField(TEXT("motion"), Source && Source->bStreamMotion);
+					Settings->SetBoolField(TEXT("segmentation"), Source && Source->bStreamSegmentation);
+					Settings->SetNumberField(TEXT("channel"), Source ? Source->ChannelID : -1);
+				}
+				break;
+			}
+			default:
+				break;
+		}
+		Obj->SetObjectField(TEXT("settings"), Settings);
+		Obj->SetArrayField(TEXT("streams"), Streams);
+		return Obj;
+	}
+
+	TSharedRef<FJsonObject> ReadingJson(const FSensorRef& Ref, bool bMeasureNow)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetBoolField(TEXT("ok"), true);
+		Obj->SetStringField(TEXT("name"), Ref.Name);
+		Obj->SetStringField(TEXT("kind"), URammsSensorRigComponent::KindToString(Ref.Kind));
+		Obj->SetStringField(TEXT("actor"), Ref.Actor ? Ref.Actor->GetPathName() : FString());
+
+		switch (Ref.Kind)
+		{
+			case ERammsSensorKind::ToF:
+			{
+				URammsToFSensorComponent* ToF = Cast<URammsToFSensorComponent>(Ref.Component);
+				if (!ToF)
+				{
+					return MakeFailure(TEXT("not a ToF component: ") + Ref.Name);
+				}
+				const FToFSensorData Sample = bMeasureNow ? ToF->MeasureNow() : ToF->GetToFData();
+				Obj->SetNumberField(TEXT("timestamp"), Sample.Timestamp);
+				Obj->SetNumberField(TEXT("rows"), Sample.NumRows);
+				Obj->SetNumberField(TEXT("columns"), Sample.NumColumns);
+				TArray<TSharedPtr<FJsonValue>> Distances;
+				Distances.Reserve(Sample.Distances.Num());
+				for (const float Distance : Sample.Distances)
+				{
+					Distances.Add(MakeShared<FJsonValueNumber>(Distance));
+				}
+				Obj->SetArrayField(TEXT("distances_cm"), Distances);
+				Obj->SetNumberField(TEXT("min_distance_cm"), Sample.MinDistance);
+				Obj->SetBoolField(TEXT("any_hit"), Sample.bAnyHit);
+				// False until the sensor has measured once (it measures at its UpdateRateHz).
+				Obj->SetBoolField(TEXT("has_sample"), Sample.Distances.Num() > 0);
+				break;
+			}
+			case ERammsSensorKind::Sonar:
+			{
+				URammsSonarSensorComponent* Sonar = Cast<URammsSonarSensorComponent>(Ref.Component);
+				if (!Sonar)
+				{
+					return MakeFailure(TEXT("not a Sonar component: ") + Ref.Name);
+				}
+				const FSonarSensorData Sample = bMeasureNow ? Sonar->MeasureNow() : Sonar->GetSonarData();
+				Obj->SetNumberField(TEXT("timestamp"), Sample.Timestamp);
+				Obj->SetNumberField(TEXT("distance_cm"), Sample.Distance);
+				Obj->SetBoolField(TEXT("hit"), Sample.bHit);
+				Obj->SetObjectField(TEXT("hit_location"), VectorJson(Sample.HitLocation));
+				Obj->SetObjectField(TEXT("hit_normal"), VectorJson(Sample.HitNormal));
+				// The GPU trace path cannot resolve the hit actor; it is empty then.
+				Obj->SetStringField(TEXT("hit_actor"), IsValid(Sample.HitActor) ? Sample.HitActor->GetName() : FString());
+				break;
+			}
+			case ERammsSensorKind::IMU:
+			{
+				const URammsIMUSensorComponent* IMU = Cast<URammsIMUSensorComponent>(Ref.Component);
+				if (!IMU)
+				{
+					return MakeFailure(TEXT("not an IMU component: ") + Ref.Name);
+				}
+				// The IMU integrates over ticks; there is no on-demand measurement, so this is always its latest.
+				const FIMUSensorData Sample = IMU->GetIMUData();
+				Obj->SetNumberField(TEXT("timestamp"), Sample.Timestamp);
+				Obj->SetObjectField(TEXT("linear_acceleration"), VectorJson(Sample.LinearAcceleration));
+				Obj->SetObjectField(TEXT("angular_velocity"), VectorJson(Sample.AngularVelocity));
+				TSharedRef<FJsonObject> Orientation = MakeShared<FJsonObject>();
+				Orientation->SetNumberField(TEXT("x"), Sample.Orientation.X);
+				Orientation->SetNumberField(TEXT("y"), Sample.Orientation.Y);
+				Orientation->SetNumberField(TEXT("z"), Sample.Orientation.Z);
+				Orientation->SetNumberField(TEXT("w"), Sample.Orientation.W);
+				Obj->SetObjectField(TEXT("orientation"), Orientation);
+				const FRotator			Euler = Sample.Orientation.Rotator();
+				TSharedRef<FJsonObject> EulerJson = MakeShared<FJsonObject>();
+				EulerJson->SetNumberField(TEXT("roll"), Euler.Roll);
+				EulerJson->SetNumberField(TEXT("pitch"), Euler.Pitch);
+				EulerJson->SetNumberField(TEXT("yaw"), Euler.Yaw);
+				Obj->SetObjectField(TEXT("euler"), EulerJson);
+				// What the component reports, unconverted: UE units, in the sensor's local frame; orientation is
+				// world-space.
+				TSharedRef<FJsonObject> Units = MakeShared<FJsonObject>();
+				Units->SetStringField(TEXT("linear_acceleration"), TEXT("cm/s^2"));
+				Units->SetStringField(TEXT("angular_velocity"), TEXT("deg/s"));
+				Units->SetStringField(TEXT("euler"), TEXT("deg"));
+				Units->SetStringField(TEXT("frame"), TEXT("sensor (acceleration, angular velocity); world (orientation)"));
+				Obj->SetObjectField(TEXT("units"), Units);
+				Obj->SetBoolField(TEXT("includes_gravity"), IMU->bIncludeGravity);
+				break;
+			}
+			case ERammsSensorKind::Camera:
+			default:
+			{
+				TSharedRef<FJsonObject> Failure = MakeFailure(TEXT("cameras stream over RMSS: see its streams"));
+				Failure->SetStringField(TEXT("name"), Ref.Name);
+				Failure->SetStringField(TEXT("kind"), URammsSensorRigComponent::KindToString(Ref.Kind));
+				return Failure;
+			}
+		}
+		return Obj;
+	}
+
+	/** Every actor named by ActorPath ("" = every actor in the world), or none if a non-empty path is not found. */
+	TArray<AActor*> ResolveActors(const FString& ActorPath)
+	{
+		TArray<AActor*> Actors;
+		if (!ActorPath.IsEmpty())
+		{
+			if (AActor* Actor = URammsSensingBridge::FindActor(ActorPath))
+			{
+				Actors.Add(Actor);
+			}
+			return Actors;
+		}
+		if (UWorld* World = URammsSensingBridge::GetSensingWorld())
+		{
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				if (IsValid(*It))
+				{
+					Actors.Add(*It);
+				}
+			}
+		}
+		return Actors;
+	}
+
+	void ReadInt(const FJsonObject& Obj, const TCHAR* Key, int32& InOutValue)
+	{
+		double Value = 0.0;
+		if (Obj.TryGetNumberField(Key, Value))
+		{
+			InOutValue = FMath::RoundToInt32(Value);
+		}
+	}
+
+	void ReadFloat(const FJsonObject& Obj, const TCHAR* Key, float& InOutValue)
+	{
+		double Value = 0.0;
+		if (Obj.TryGetNumberField(Key, Value))
+		{
+			InOutValue = static_cast<float>(Value);
+		}
+	}
+
+	void ReadBool(const FJsonObject& Obj, const TCHAR* Key, bool& InOutValue)
+	{
+		bool Value = false;
+		if (Obj.TryGetBoolField(Key, Value))
+		{
+			InOutValue = Value;
+		}
+	}
+
+	/** [a, b, c] or {KeyA: a, KeyB: b, KeyC: c}. False if Key is present but neither. */
+	bool ReadTriple(const FJsonObject& Obj, const TCHAR* Key, const TCHAR* KeyA, const TCHAR* KeyB, const TCHAR* KeyC,
+		double& A, double& B, double& C, bool& bOutPresent)
+	{
+		bOutPresent = Obj.HasField(Key);
+		if (!bOutPresent)
+		{
+			return true;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+		if (Obj.TryGetArrayField(Key, Array) && Array && Array->Num() >= 3)
+		{
+			return (*Array)[0].IsValid() && (*Array)[0]->TryGetNumber(A)
+				&& (*Array)[1].IsValid() && (*Array)[1]->TryGetNumber(B)
+				&& (*Array)[2].IsValid() && (*Array)[2]->TryGetNumber(C);
+		}
+		const TSharedPtr<FJsonObject>* Nested = nullptr;
+		if (Obj.TryGetObjectField(Key, Nested) && Nested && Nested->IsValid())
+		{
+			A = B = C = 0.0;
+			(*Nested)->TryGetNumberField(KeyA, A);
+			(*Nested)->TryGetNumberField(KeyB, B);
+			(*Nested)->TryGetNumberField(KeyC, C);
+			return true;
+		}
+		return false;
+	}
+
+	bool ParseObject(const FString& Json, TSharedPtr<FJsonObject>& OutObject)
+	{
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+		return FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid();
+	}
+
+	/** Re-register a capture camera that is missing a pass the channels now ask for: the capture subsystem
+	 *  creates a camera's depth / motion passes when it is registered, so a camera registered while a channel
+	 *  was off would otherwise never get that pass. */
+	void EnsureCapturePasses(UCameraCaptureSubsystem& Capture, bool bDepth, bool bMotion)
+	{
+		const bool bSeparateDepthPass = Capture.GetCaptureMode() != ERammsCaptureMode::SingleCaptureColorDepth;
+		for (UIntrinsicSceneCaptureComponent2D* Camera : Capture.GetRegisteredCameras())
+		{
+			if (!IsValid(Camera))
+			{
+				continue;
+			}
+			const bool bMissingMotion = bMotion && !Capture.GetMotionRenderTarget(Camera);
+			const bool bMissingDepth = bDepth && bSeparateDepthPass && !Capture.GetDepthRenderTarget(Camera);
+			if (bMissingMotion || bMissingDepth)
+			{
+				URammsSensorRigComponent::UnregisterCaptureCamera(Capture, Camera);
+				Capture.RegisterCamera(Camera);
+			}
+		}
+	}
+
+	URammsStreamingSubsystem* GetStreaming(const UWorld* World)
+	{
+		UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+		return GameInstance ? GameInstance->GetSubsystem<URammsStreamingSubsystem>() : nullptr;
+	}
+
+	TSharedRef<FJsonObject> StreamStatus(UWorld* World)
+	{
+		TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetBoolField(TEXT("ok"), World != nullptr);
+		if (!World)
+		{
+			Obj->SetStringField(TEXT("error"), TEXT("no world"));
+		}
+
+		const URammsStreamingSubsystem* Streaming = GetStreaming(World);
+		TSharedRef<FJsonObject>			Server = MakeShared<FJsonObject>();
+		Server->SetBoolField(TEXT("running"), Streaming && Streaming->IsServerRunning());
+		Server->SetNumberField(TEXT("port"), Streaming ? Streaming->GetServerPort() : 0);
+		Server->SetNumberField(TEXT("connections"), Streaming ? Streaming->GetConnectionCount() : 0);
+		Obj->SetObjectField(TEXT("server"), Server);
+
+		const UCameraCaptureSubsystem* Capture = World ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
+		TSharedRef<FJsonObject>		   CaptureJson = MakeShared<FJsonObject>();
+		CaptureJson->SetBoolField(TEXT("capturing"), Capture && Capture->IsCapturing());
+		CaptureJson->SetNumberField(TEXT("every_n_frames"), Capture ? Capture->GetCaptureRate() : 0);
+		CaptureJson->SetBoolField(TEXT("color"), Capture && Capture->IsCapturingRGB());
+		CaptureJson->SetBoolField(TEXT("depth"), Capture && Capture->IsCapturingDepth());
+		CaptureJson->SetBoolField(TEXT("motion"), Capture && Capture->IsCapturingMotionVectors());
+		CaptureJson->SetBoolField(TEXT("segmentation"), Capture && Capture->IsCapturingSegmentation());
+		CaptureJson->SetBoolField(TEXT("save_to_disk"), Capture && Capture->IsSerializationEnabled());
+		CaptureJson->SetNumberField(TEXT("cameras"), Capture ? Capture->GetRegisteredCameraCount() : 0);
+		Obj->SetObjectField(TEXT("capture"), CaptureJson);
+
+		// Every registered camera, through every source that forwards it.
+		TArray<TSharedPtr<FJsonValue>> Streams;
+		if (Capture)
+		{
+			const TArray<URammsStreamSourceComponent*> Sources = GatherStreamSources(World);
+			for (UIntrinsicSceneCaptureComponent2D* Camera : Capture->GetRegisteredCameras())
+			{
+				if (!IsValid(Camera) || !Camera->GetOwner())
+				{
+					continue;
+				}
+				const FCameraIdentifier Id = FCameraIdentifier::Generate(Camera);
+				const FString			OwnerPath = Camera->GetOwner()->GetPathName();
+				for (const URammsStreamSourceComponent* Source : Sources)
+				{
+					if (!Source->AcceptsCamera(Id, OwnerPath))
+					{
+						continue;
+					}
+					const FString				   CameraStreamName = Source->GetStreamNameFor(Id);
+					TArray<TSharedPtr<FJsonValue>> SourceStreams;
+					AppendSourceStreams(*Source, CameraStreamName, SourceStreams);
+					for (const TSharedPtr<FJsonValue>& Value : SourceStreams)
+					{
+						const TSharedPtr<FJsonObject>& Stream = Value->AsObject();
+						Stream->SetStringField(TEXT("actor"), OwnerPath);
+						Stream->SetStringField(TEXT("camera"), CameraStreamName);
+						Streams.Add(Value);
+					}
+				}
+			}
+		}
+		Obj->SetArrayField(TEXT("streams"), Streams);
+		return Obj;
+	}
+} // namespace RammsSensingBridgeImpl
+
+namespace SensingImpl = RammsSensingBridgeImpl;
+
+// ---------------------------------------------------------------------------
+// World and actors
+// ---------------------------------------------------------------------------
+
+UWorld* URammsSensingBridge::GetSensingWorld()
+{
+	if (!GEngine)
+	{
+		return nullptr;
+	}
+	for (const FWorldContext& Context : GEngine->GetWorldContexts())
+	{
+		if ((Context.WorldType == EWorldType::PIE || Context.WorldType == EWorldType::Game) && Context.World())
+		{
+			return Context.World();
+		}
+	}
+	for (const FWorldContext& Context : GEngine->GetWorldContexts())
+	{
+		if (Context.WorldType == EWorldType::Editor && Context.World())
+		{
+			return Context.World();
+		}
+	}
+	return nullptr;
+}
+
+AActor* URammsSensingBridge::FindActor(const FString& ActorPath)
+{
+	const FString Path = ActorPath.TrimStartAndEnd();
+	if (Path.IsEmpty())
+	{
+		return nullptr;
+	}
+	// A full object path ("/Game/Maps/Map.Map:PersistentLevel.BP_Robot_C_0").
+	if (Path.Contains(TEXT(".")) || Path.Contains(TEXT("/")))
+	{
+		if (AActor* Actor = Cast<AActor>(StaticFindObject(AActor::StaticClass(), nullptr, *Path)); IsValid(Actor))
+		{
+			return Actor;
+		}
+	}
+	// Else an actor's name (or, in the editor, its label) in the sensing world.
+	if (UWorld* World = GetSensingWorld())
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!IsValid(Actor))
+			{
+				continue;
+			}
+			if (Actor->GetName() == Path || Actor->GetPathName() == Path)
+			{
+				return Actor;
+			}
+#if WITH_EDITOR
+			if (Actor->GetActorLabel() == Path)
+			{
+				return Actor;
+			}
+#endif
+		}
+	}
+	return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Sensors
+// ---------------------------------------------------------------------------
+
+bool URammsSensingBridge::ParseMountJson(const FString& MountJson, FRammsSensorMount& OutMount, FString& OutError)
+{
+	TSharedPtr<FJsonObject> Obj;
+	if (!SensingImpl::ParseObject(MountJson, Obj))
+	{
+		OutError = TEXT("mount is not a JSON object");
+		return false;
+	}
+
+	FString Text;
+	if (Obj->TryGetStringField(TEXT("name"), Text))
+	{
+		OutMount.Name = SensingImpl::NameFromString(Text);
+	}
+	if (OutMount.Name.IsNone())
+	{
+		OutError = TEXT("mount needs a \"name\"");
+		return false;
+	}
+	if (Obj->TryGetStringField(TEXT("kind"), Text))
+	{
+		ERammsSensorKind Kind = OutMount.Kind;
+		if (!URammsSensorRigComponent::KindFromString(Text, Kind))
+		{
+			OutError = FString::Printf(TEXT("unknown kind \"%s\" (tof, sonar, imu, camera)"), *Text);
+			return false;
+		}
+		OutMount.Kind = Kind;
+	}
+	if (Obj->TryGetStringField(TEXT("parent"), Text))
+	{
+		OutMount.ParentComponent = SensingImpl::NameFromString(Text);
+	}
+	if (Obj->TryGetStringField(TEXT("socket"), Text))
+	{
+		OutMount.Socket = SensingImpl::NameFromString(Text);
+	}
+
+	double A = 0.0, B = 0.0, C = 0.0;
+	bool   bPresent = false;
+	if (!SensingImpl::ReadTriple(*Obj, TEXT("location"), TEXT("x"), TEXT("y"), TEXT("z"), A, B, C, bPresent))
+	{
+		OutError = TEXT("\"location\" must be [x, y, z] or {\"x\", \"y\", \"z\"}");
+		return false;
+	}
+	if (bPresent)
+	{
+		OutMount.Location = FVector(A, B, C);
+	}
+	if (!SensingImpl::ReadTriple(*Obj, TEXT("rotation"), TEXT("pitch"), TEXT("yaw"), TEXT("roll"), A, B, C, bPresent))
+	{
+		OutError = TEXT("\"rotation\" must be [pitch, yaw, roll] or {\"pitch\", \"yaw\", \"roll\"}");
+		return false;
+	}
+	if (bPresent)
+	{
+		OutMount.Rotation = FRotator(A, B, C);
+	}
+
+	SensingImpl::ReadInt(*Obj, TEXT("rows"), OutMount.Rows);
+	SensingImpl::ReadInt(*Obj, TEXT("columns"), OutMount.Columns);
+	SensingImpl::ReadFloat(*Obj, TEXT("h_fov_deg"), OutMount.HorizontalFovDeg);
+	SensingImpl::ReadFloat(*Obj, TEXT("v_fov_deg"), OutMount.VerticalFovDeg);
+	SensingImpl::ReadFloat(*Obj, TEXT("max_range_cm"), OutMount.MaxRangeCm);
+	SensingImpl::ReadFloat(*Obj, TEXT("sonar_max_range_cm"), OutMount.SonarMaxRangeCm);
+	SensingImpl::ReadFloat(*Obj, TEXT("sonar_cone_deg"), OutMount.SonarConeDeg);
+	SensingImpl::ReadInt(*Obj, TEXT("width"), OutMount.Width);
+	SensingImpl::ReadInt(*Obj, TEXT("height"), OutMount.Height);
+	SensingImpl::ReadFloat(*Obj, TEXT("fov_deg"), OutMount.FovDeg);
+	SensingImpl::ReadBool(*Obj, TEXT("color"), OutMount.bColor);
+	SensingImpl::ReadBool(*Obj, TEXT("depth"), OutMount.bDepth);
+	SensingImpl::ReadBool(*Obj, TEXT("motion"), OutMount.bMotion);
+	SensingImpl::ReadBool(*Obj, TEXT("segmentation"), OutMount.bSegmentation);
+	SensingImpl::ReadInt(*Obj, TEXT("channel"), OutMount.StreamChannel);
+
+	if (OutMount.Kind == ERammsSensorKind::Camera && (OutMount.Width < 1 || OutMount.Height < 1))
+	{
+		OutError = TEXT("a camera needs a positive width and height");
+		return false;
+	}
+	return true;
+}
+
+FString URammsSensingBridge::ListSensorsJson(const FString& ActorPath)
+{
+	const TArray<AActor*> Actors = SensingImpl::ResolveActors(ActorPath);
+	if (!ActorPath.IsEmpty() && Actors.Num() == 0)
+	{
+		return SensingImpl::FailJson(TEXT("actor not found: ") + ActorPath);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Sensors;
+	for (AActor* Actor : Actors)
+	{
+		for (const SensingImpl::FSensorRef& Ref : SensingImpl::GatherSensors(Actor))
+		{
+			Sensors.Add(MakeShared<FJsonValueObject>(SensingImpl::SensorJson(Ref)));
+		}
+	}
+
+	TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetArrayField(TEXT("sensors"), Sensors);
+	return SensingImpl::ToJsonString(Obj);
+}
+
+FString URammsSensingBridge::AddSensorJson(const FString& ActorPath, const FString& MountJson)
+{
+	AActor* Actor = FindActor(ActorPath);
+	if (!Actor)
+	{
+		return SensingImpl::FailJson(TEXT("actor not found: ") + ActorPath);
+	}
+
+	FRammsSensorMount Mount;
+	FString			  Error;
+	if (!ParseMountJson(MountJson, Mount, Error))
+	{
+		return SensingImpl::FailJson(Error);
+	}
+
+	URammsSensorRigComponent* Rig = Actor->FindComponentByClass<URammsSensorRigComponent>();
+
+	// Say why a mount cannot be built rather than leaving it to the log.
+	if (!Mount.ParentComponent.IsNone())
+	{
+		bool									bParentFound = false;
+		TInlineComponentArray<USceneComponent*> SceneComponents(Actor);
+		for (const USceneComponent* Candidate : SceneComponents)
+		{
+			bParentFound |= IsValid(Candidate) && Candidate->GetFName() == Mount.ParentComponent;
+		}
+		if (!bParentFound)
+		{
+			return SensingImpl::FailJson(FString::Printf(TEXT("%s has no component \"%s\" to mount on"), *Actor->GetName(),
+				*Mount.ParentComponent.ToString()));
+		}
+	}
+	else if (!Actor->GetRootComponent())
+	{
+		return SensingImpl::FailJson(FString::Printf(TEXT("%s has no root component to mount on"), *Actor->GetName()));
+	}
+	if (UObject* Existing = FindObjectFast<UObject>(Actor, Mount.Name); IsValid(Existing))
+	{
+		const UActorComponent* ExistingComponent = Cast<UActorComponent>(Existing);
+		if (!Rig || !ExistingComponent || !Rig->FindBuiltByComponent(ExistingComponent))
+		{
+			return SensingImpl::FailJson(FString::Printf(TEXT("%s already has an object named \"%s\" that is not a rig sensor"),
+				*Actor->GetName(), *Mount.Name.ToString()));
+		}
+	}
+
+	if (!Rig)
+	{
+		const FName RigName = MakeUniqueObjectName(Actor, URammsSensorRigComponent::StaticClass(), FName(TEXT("SensorRig")));
+		Rig = NewObject<URammsSensorRigComponent>(Actor, RigName, RF_Transient);
+		Actor->AddInstanceComponent(Rig);
+		Rig->RegisterComponent(); // begins play now if the actor has
+	}
+
+	if (!Rig->AddMount(Mount))
+	{
+		return SensingImpl::FailJson(FString::Printf(TEXT("could not build \"%s\" (see the log)"), *Mount.Name.ToString()));
+	}
+
+	TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("name"), Mount.Name.ToString());
+	Obj->SetStringField(TEXT("kind"), URammsSensorRigComponent::KindToString(Mount.Kind));
+	Obj->SetStringField(TEXT("rig_path"), Rig->GetPathName());
+	const FRammsBuiltSensor* Built = Rig->FindBuilt(Mount.Name);
+	Obj->SetBoolField(TEXT("built"), Built != nullptr);
+	Obj->SetStringField(TEXT("component_path"), Built && Built->Component ? Built->Component->GetPathName() : FString());
+	if (!Built)
+	{
+		Obj->SetStringField(TEXT("note"), TEXT("the actor has not begun play; the mount is built at BeginPlay"));
+	}
+	else if (Mount.Kind == ERammsSensorKind::Camera)
+	{
+		Obj->SetNumberField(TEXT("channel"), Built->Channel);
+		TArray<TSharedPtr<FJsonValue>> Streams;
+		if (const URammsStreamSourceComponent* Source = Cast<URammsStreamSourceComponent>(Built->StreamSource.Get()))
+		{
+			SensingImpl::AppendSourceStreams(*Source, Mount.Name.ToString(), Streams);
+		}
+		Obj->SetArrayField(TEXT("streams"), Streams);
+	}
+	return SensingImpl::ToJsonString(Obj);
+}
+
+bool URammsSensingBridge::RemoveSensor(const FString& ActorPath, const FString& Name)
+{
+	AActor* Actor = FindActor(ActorPath);
+	if (!Actor)
+	{
+		return false;
+	}
+	const FName MountName = SensingImpl::NameFromString(Name);
+	if (MountName.IsNone())
+	{
+		return false;
+	}
+	bool											 bRemoved = false;
+	TInlineComponentArray<URammsSensorRigComponent*> Rigs(Actor);
+	for (URammsSensorRigComponent* Rig : Rigs)
+	{
+		if (IsValid(Rig) && Rig->RemoveMount(MountName))
+		{
+			bRemoved = true;
+		}
+	}
+	return bRemoved;
+}
+
+FString URammsSensingBridge::ReadSensorJson(const FString& ActorPath, const FString& Name, bool bMeasureNow)
+{
+	AActor* Actor = FindActor(ActorPath);
+	if (!Actor)
+	{
+		return SensingImpl::FailJson(TEXT("actor not found: ") + ActorPath);
+	}
+	for (const SensingImpl::FSensorRef& Ref : SensingImpl::GatherSensors(Actor))
+	{
+		if (Ref.Name.Equals(Name, ESearchCase::IgnoreCase))
+		{
+			return SensingImpl::ToJsonString(SensingImpl::ReadingJson(Ref, bMeasureNow));
+		}
+	}
+	return SensingImpl::FailJson(FString::Printf(TEXT("no sensor \"%s\" on %s"), *Name, *Actor->GetName()));
+}
+
+FString URammsSensingBridge::ReadSensorsJson(const FString& ActorPath)
+{
+	const TArray<AActor*> Actors = SensingImpl::ResolveActors(ActorPath);
+	if (!ActorPath.IsEmpty() && Actors.Num() == 0)
+	{
+		return SensingImpl::FailJson(TEXT("actor not found: ") + ActorPath);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Readings;
+	for (AActor* Actor : Actors)
+	{
+		for (const SensingImpl::FSensorRef& Ref : SensingImpl::GatherSensors(Actor))
+		{
+			if (Ref.Kind != ERammsSensorKind::Camera)
+			{
+				Readings.Add(MakeShared<FJsonValueObject>(SensingImpl::ReadingJson(Ref, false)));
+			}
+		}
+	}
+
+	TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("actor"), Actors.Num() == 1 && !ActorPath.IsEmpty() ? Actors[0]->GetPathName() : ActorPath);
+	Obj->SetArrayField(TEXT("readings"), Readings);
+	return SensingImpl::ToJsonString(Obj);
+}
+
+// ---------------------------------------------------------------------------
+// Streams
+// ---------------------------------------------------------------------------
+
+FString URammsSensingBridge::StartCameraStreamsJson(const FString& OptionsJson)
+{
+	FRammsCameraStreamOptions Options;
+	if (!OptionsJson.TrimStartAndEnd().IsEmpty())
+	{
+		TSharedPtr<FJsonObject> Obj;
+		if (!SensingImpl::ParseObject(OptionsJson, Obj))
+		{
+			return SensingImpl::FailJson(TEXT("options are not a JSON object"));
+		}
+		SensingImpl::ReadInt(*Obj, TEXT("port"), Options.Port);
+		SensingImpl::ReadInt(*Obj, TEXT("every_n_frames"), Options.EveryNFrames);
+		SensingImpl::ReadBool(*Obj, TEXT("color"), Options.bColor);
+		SensingImpl::ReadBool(*Obj, TEXT("depth"), Options.bDepth);
+		SensingImpl::ReadBool(*Obj, TEXT("motion"), Options.bMotion);
+		SensingImpl::ReadBool(*Obj, TEXT("segmentation"), Options.bSegmentation);
+		SensingImpl::ReadBool(*Obj, TEXT("save_to_disk"), Options.bSaveToDisk);
+	}
+	return StartCameraStreams(GetSensingWorld(), Options);
+}
+
+FString URammsSensingBridge::StartCameraStreams(UWorld* World, const FRammsCameraStreamOptions& Options)
+{
+	if (!World)
+	{
+		return SensingImpl::FailJson(TEXT("no world"));
+	}
+
+	FString Error;
+	if (Options.bStartServer)
+	{
+		URammsStreamingSubsystem* Streaming = SensingImpl::GetStreaming(World);
+		if (!Streaming)
+		{
+			Error = TEXT("no game instance, so no RMSS server: streaming needs a play world");
+		}
+		else if (!Streaming->IsServerRunning())
+		{
+			const int32 Port = FMath::Clamp(Options.Port, 1, 65535);
+			if (!Streaming->StartServer(Port))
+			{
+				Error = FString::Printf(TEXT("could not start the RMSS server on port %d"), Port);
+			}
+		}
+	}
+
+	if (Options.bStartCapture)
+	{
+		UCameraCaptureSubsystem* Capture = World->GetSubsystem<UCameraCaptureSubsystem>();
+		if (!Capture)
+		{
+			Error = TEXT("no camera capture subsystem in this world");
+		}
+		else
+		{
+			Capture->SetCaptureChannels(Options.bColor, Options.bDepth, Options.bMotion);
+			Capture->SetCaptureSegmentation(Options.bSegmentation);
+			Capture->SetSerializationEnabled(Options.bSaveToDisk);
+			Capture->SetCaptureRate(FMath::Max(1, Options.EveryNFrames));
+			SensingImpl::EnsureCapturePasses(*Capture, Options.bDepth, Options.bMotion);
+			if (!Capture->IsCapturing())
+			{
+				Capture->StartCapture();
+			}
+			if (!Capture->IsCapturing() && Error.IsEmpty())
+			{
+				Error = TEXT("capture did not start: no camera is registered (add a camera sensor first)");
+			}
+		}
+	}
+
+	TSharedRef<FJsonObject> Status = SensingImpl::StreamStatus(World);
+	if (!Error.IsEmpty())
+	{
+		Status->SetBoolField(TEXT("ok"), false);
+		Status->SetStringField(TEXT("error"), Error);
+		UE_LOG(LogRammsSensingBridge, Warning, TEXT("StartCameraStreams: %s"), *Error);
+	}
+	return SensingImpl::ToJsonString(Status);
+}
+
+bool URammsSensingBridge::StopCameraStreams()
+{
+	UWorld*					 World = GetSensingWorld();
+	UCameraCaptureSubsystem* Capture = World ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
+	if (!Capture)
+	{
+		return false;
+	}
+	Capture->StopCapture();
+	return true;
+}
+
+FString URammsSensingBridge::GetStreamStatusJson()
+{
+	return StreamStatusJsonFor(GetSensingWorld());
+}
+
+FString URammsSensingBridge::StreamStatusJsonFor(UWorld* World)
+{
+	return SensingImpl::ToJsonString(SensingImpl::StreamStatus(World));
+}
+
+FString URammsSensingBridge::GetSegmentationClassesJson()
+{
+	UWorld*									   World = GetSensingWorld();
+	const UCameraCaptureSegmentationSubsystem* Labels = World ? World->GetSubsystem<UCameraCaptureSegmentationSubsystem>() : nullptr;
+	if (!Labels)
+	{
+		return SensingImpl::FailJson(TEXT("no segmentation subsystem: the class table is resolved in a play world"));
+	}
+
+	const TSharedRef<const FCameraCaptureSegTable> Table = Labels->GetTable();
+	TArray<TSharedPtr<FJsonValue>>				   Classes;
+	for (int32 Value = 0; Value < Table->FineNames.Num(); ++Value)
+	{
+		if (Table->FineNames[Value].IsNone())
+		{
+			continue;
+		}
+		const int32				CoarseId = Table->FineToCoarse.IsValidIndex(Value) ? Table->FineToCoarse[Value] : 0;
+		TSharedRef<FJsonObject> Class = MakeShared<FJsonObject>();
+		Class->SetNumberField(TEXT("value"), Value);
+		Class->SetStringField(TEXT("name"), Table->FineNames[Value].ToString());
+		Class->SetStringField(TEXT("coarse"), Table->CoarseNames.IsValidIndex(CoarseId) ? Table->CoarseNames[CoarseId].ToString() : FString());
+		Class->SetNumberField(TEXT("coarse_id"), CoarseId);
+		Classes.Add(MakeShared<FJsonValueObject>(Class));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Coarse;
+	for (int32 Id = 0; Id < Table->CoarseNames.Num(); ++Id)
+	{
+		TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetNumberField(TEXT("id"), Id);
+		Entry->SetStringField(TEXT("name"), Table->CoarseNames[Id].ToString());
+		Coarse.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+
+	TArray<int32> ReservedValues = Table->Reserved.Array();
+	ReservedValues.Sort();
+	TArray<TSharedPtr<FJsonValue>> Reserved;
+	for (const int32 Value : ReservedValues)
+	{
+		Reserved.Add(MakeShared<FJsonValueNumber>(Value));
+	}
+
+	TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetArrayField(TEXT("classes"), Classes);
+	Obj->SetArrayField(TEXT("coarse"), Coarse);
+	Obj->SetArrayField(TEXT("reserved"), Reserved);
+	Obj->SetNumberField(TEXT("num_segment_ids"), FRammsCameraStreams::NumSegmentIds(*Table));
+	return SensingImpl::ToJsonString(Obj);
+}
