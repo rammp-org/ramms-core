@@ -73,6 +73,29 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString ReadSensorsJson(const FString& ActorPath);
 
+	/**
+	 * An IMU reading of any body, no IMU component needed: a virtual sensor on Body, sampled by the physics engine
+	 * that simulates it at the physics rate (URammsPhysicsImuSubsystem). Body: a MuJoCo body name, a component name
+	 * or a bone name on the actor (or on an actor attached to it); "" the actor's main body (its root, else the first
+	 * body an engine simulates). Options (all optional): {"offset": [x, y, z] (cm, body frame), "rotation": [pitch,
+	 * yaw, roll] (the sensor frame in the body frame, deg), "source": "auto|chaos|mujoco|kinematic"}.
+	 *
+	 * The first call starts tracking the point (its first answer may have no sample or no acceleration yet:
+	 * "has_sample" / "has_acceleration" false); later calls read it, and it is dropped once not read for 10 s.
+	 * {"ok", "name", "kind": "IMU", "actor", "body", "component_path", "bone", "source", "has_sample",
+	 * "has_acceleration", "timestamp", "sim_time", "linear_acceleration" (sensor frame, gravity included),
+	 * "angular_velocity" (sensor frame), "angular_acceleration" (sensor frame; with has_acceleration),
+	 * "linear_velocity" (world), "location" (world), "orientation", "euler", "includes_gravity", "units"}.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static FString ReadBodyImuJson(const FString& ActorPath, const FString& Body, const FString& OptionsJson);
+
+	/** {"ok", "actor", "bodies": [{name, engine, component, component_path, bone, default}]}: the bodies of the actor
+	 *  (and of actors attached to it) a physics engine simulates, which ReadBodyImuJson reads at the physics rate, and
+	 *  the actor's root; "default" marks the one Body "" reads. Any other component or bone reads Kinematic. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static FString ListImuBodiesJson(const FString& ActorPath);
+
 	/** Start the RMSS server if it is not running, set the capture channels and segmentation, turn disk writes
 	 *  off unless asked, set the rate and start capture. Options (all optional): {"port", "every_n_frames",
 	 *  "color", "depth", "motion", "segmentation", "save_to_disk"}. Returns the stream status. */
