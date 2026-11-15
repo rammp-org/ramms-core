@@ -33,6 +33,10 @@ namespace RammsActuationBackends
 	/** Clear the registered MuJoCo factory (RammsMujocoSupport shutdown). */
 	RAMMSCORE_API void UnregisterMujocoFactory();
 
+	/** The registered MuJoCo factory (unbound: none), for a caller that puts
+	 *  its own in for a while and this one back after (a test's fake backend). */
+	RAMMSCORE_API FRammsActuationBackendFactory GetMujocoFactory();
+
 	/** Create a MuJoCo backend for the base component, or nullptr when none is
 	 *  registered. The caller owns the result and must call Initialize. */
 	RAMMSCORE_API IRammsActuationBackend* CreateMujocoBackend(URammsRobotBaseComponent& Base);
