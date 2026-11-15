@@ -35,7 +35,9 @@ struct RAMMSCORE_API FRammsSensorMount
 {
 	GENERATED_BODY()
 
-	/** Unique on the actor: the created component's name and, for a camera, its capture id and stream name. */
+	/** Unique on the actor: the created component's name and, for a camera, its capture id and stream name. 1 to 64
+	 *  characters of A-Z a-z 0-9 _ - . , not ending in _depth, _dmv, _seg or _stream (the names of a camera's capture
+	 *  passes and stream source). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor")
 	FName Name;
 
@@ -88,10 +90,12 @@ struct RAMMSCORE_API FRammsSensorMount
 
 	// --- Camera ----------------------------------------------------------------
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera", meta = (ClampMin = "1"))
+	/** Pixels, 1 to 4096 (larger is clamped). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera", meta = (ClampMin = "1", ClampMax = "4096"))
 	int32 Width = 640;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera", meta = (ClampMin = "1"))
+	/** Pixels, 1 to 4096 (larger is clamped). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera", meta = (ClampMin = "1", ClampMax = "4096"))
 	int32 Height = 480;
 
 	/** Horizontal field of view; square pixels and a centred principal point make the rest of the intrinsics. */
@@ -114,7 +118,8 @@ struct RAMMSCORE_API FRammsSensorMount
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera")
 	bool bSegmentation = true;
 
-	/** Base RMSS channel C. -1 = the lowest C whose four channels no stream source in the world uses yet. */
+	/** Base RMSS channel C. -1 = the lowest C whose four channels no stream source in the world uses yet. A C whose
+	 *  channels another source already uses is replaced by a free one (with a warning). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera", meta = (ClampMin = "-1", ClampMax = "65235"))
 	int32 StreamChannel = -1;
 };
@@ -125,7 +130,7 @@ struct RAMMSCORE_API FRammsBuiltSensor
 {
 	GENERATED_BODY()
 
-	/** The mount as it was built. */
+	/** The mount as it was built (camera size clamped). */
 	UPROPERTY()
 	FRammsSensorMount Mount;
 
@@ -140,6 +145,11 @@ struct RAMMSCORE_API FRammsBuiltSensor
 	/** A camera's base RMSS channel as resolved; -1 for other kinds. */
 	UPROPERTY()
 	int32 Channel = -1;
+
+	/** A camera registered with the capture subsystem (its render targets and capture passes exist). Cameras register
+	 *  when camera streams start, not when they are built: a rig baked into a pawn costs nothing until then. */
+	UPROPERTY()
+	bool bCaptureRegistered = false;
 };
 
 /**
@@ -148,12 +158,14 @@ struct RAMMSCORE_API FRammsBuiltSensor
  *
  *  - ToF -> URammsToFSensorComponent, Sonar -> URammsSonarSensorComponent,
  *    IMU -> URammsIMUSensorComponent, each attached at the mount.
- *  - Camera -> a UIntrinsicSceneCaptureComponent2D at the mount, registered
- *    with the world's UCameraCaptureSubsystem, plus a URammsStreamSourceComponent
- *    "<Name>_stream" that forwards only that camera (exact filter) on its base
- *    channel C: colour C, depth C+100, motion C+200, mask C+300, under the
- *    stream ids camera/<Name>/color, camera/<Name>/depth, motion/<Name>,
- *    mask/<Name>.
+ *  - Camera -> a UIntrinsicSceneCaptureComponent2D at the mount plus a
+ *    URammsStreamSourceComponent "<Name>_stream" that forwards only that camera
+ *    (exact filter) on its base channel C: colour C, depth C+100, motion C+200,
+ *    mask C+300, under the stream ids camera/<Name>/color, camera/<Name>/depth,
+ *    motion/<Name>, mask/<Name>. The camera is registered with the world's
+ *    UCameraCaptureSubsystem (render targets, depth / motion / mask passes) only
+ *    once camera streams start (URammsSensingBridge::StartCameraStreams, or
+ *    bStartCaptureOnBeginPlay), or at once when capture is already running.
  *
  * Built components are transient: Mounts is the persistent description, baked
  * into a pawn Blueprint. URammsSensingBridge exposes the same over Remote
@@ -167,11 +179,17 @@ class RAMMSCORE_API URammsSensorRigComponent : public UActorComponent
 public:
 	URammsSensorRigComponent();
 
+	/** Largest camera width / height a mount builds; larger is clamped. */
+	static constexpr int32 MaxCameraSize = 4096;
+
+	/** Longest mount name. */
+	static constexpr int32 MaxMountNameLength = 64;
+
 	/** The sensors, built at BeginPlay. Names must be unique on the actor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors")
 	TArray<FRammsSensorMount> Mounts;
 
-	/** Start camera capture at BeginPlay, with the channels this rig's cameras ask for. */
+	/** Start camera capture at BeginPlay, with the channels this rig's cameras ask for (added to any already on). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors|Streaming")
 	bool bStartCaptureOnBeginPlay = false;
 
@@ -186,17 +204,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors|Streaming", meta = (ClampMin = "1"))
 	int32 CaptureEveryNFrames = 1;
 
-	/** When this rig starts capture, also write the frames to disk (the capture subsystem's serialization). Off:
-	 *  the cameras only stream. */
+	/** When this rig starts capture, also write the frames to disk (the capture subsystem's serialization). Off: a
+	 *  capture session this rig starts only streams, and one already running keeps its own setting. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors|Streaming")
 	bool bSaveCaptureToDisk = false;
 
 	/**
-	 * Add a mount (replacing one of the same name) and, once play has begun, build it now. Returns false if the
-	 * mount has no name or could not be built (missing parent, name taken by another component).
+	 * Add a mount (replacing one of the same name) and, once play has begun, build it now. Returns false, changing
+	 * nothing, if the mount cannot be built (bad or reserved name, missing parent, a name taken by another
+	 * component); the log says why.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors")
 	bool AddMount(const FRammsSensorMount& Mount);
+
+	/** AddMount, saying why it failed. */
+	bool TryAddMount(const FRammsSensorMount& Mount, FString& OutError);
 
 	/** Remove a mount and destroy what it built. Returns false if there was no such mount. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors")
@@ -218,6 +240,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Sensors")
 	TArray<FName> GetBuiltMountNames() const;
 
+	/** Register this rig's built cameras with the world's capture subsystem (those not registered yet). Returns how
+	 *  many it registered. */
+	int32 RegisterCamerasForCapture();
+
 	const FRammsSensorMount*		 FindMount(FName MountName) const;
 	const FRammsBuiltSensor*		 FindBuilt(FName MountName) const;
 	const FRammsBuiltSensor*		 FindBuiltByComponent(const UActorComponent* Component) const;
@@ -229,9 +255,27 @@ public:
 	/** Case-insensitive "tof", "sonar", "imu", "camera". */
 	static bool KindFromString(const FString& Text, ERammsSensorKind& OutKind);
 
+	/** Whether Name may name a mount: 1 to MaxMountNameLength characters of A-Z a-z 0-9 _ - . and not ending in a
+	 *  reserved suffix (_depth, _dmv, _seg, _stream). Checks the string, so an over-long one never becomes an FName. */
+	static bool IsValidMountName(const FString& Name, FString& OutError);
+
 	/** The lowest base channel C >= 0 such that none of C, C+100, C+200, C+300 is a channel of any stream source
 	 *  already in World (each source counted with all four). */
 	static int32 FindFreeStreamChannel(const UWorld* World);
+
+	/** Whether none of base channel C's four channels is used by a stream source in World other than Ignore. */
+	static bool IsStreamChannelFree(const UWorld* World, int32 BaseChannel, const UActorComponent* Ignore = nullptr);
+
+	/** Register every rig camera in World with its capture subsystem (camera streams are starting). Returns how many
+	 *  it registered. */
+	static int32 RegisterRigCamerasForCapture(UWorld* World);
+
+	/**
+	 * Whether the names the capture subsystem gives Camera's passes ("<camera>_depth" / "_dmv" / "_seg") are free on
+	 * its actor, or held by those passes themselves. Registering a camera whose pass name another live object holds
+	 * would make NewObject replace that object (a fatal error for another class). OutConflict names the object.
+	 */
+	static bool AreCaptureHelperNamesFree(const UIntrinsicSceneCaptureComponent2D& Camera, FString* OutConflict = nullptr);
 
 	/**
 	 * Unregister a camera from capture (which destroys the depth / motion / segmentation captures the subsystem
@@ -245,8 +289,16 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-	/** Build one mount now. False (with a warning) if it cannot be. */
-	bool BuildMount(const FRammsSensorMount& Mount);
+	/** Build one mount now (a camera on PreferredChannel if Mount asks for none and that one is free). False, with
+	 *  the reason in OutError and the log, if it cannot be. */
+	bool BuildMount(const FRammsSensorMount& Mount, FString& OutError, int32 PreferredChannel = -1);
+
+	/** Everything BuildMount would refuse, checked without building. Replacing names a built entry whose components
+	 *  are about to go, so its names do not count as taken. */
+	bool CheckMount(const FRammsSensorMount& Mount, const FRammsBuiltSensor* Replacing, FString& OutError) const;
+
+	/** Register Built[BuiltIndex]'s camera with Capture. False (with a warning) if its capture pass names are taken. */
+	bool RegisterBuiltCamera(int32 BuiltIndex, UCameraCaptureSubsystem& Capture);
 
 	/** Destroy what Built[BuiltIndex] made and forget it. */
 	void DestroyBuilt(int32 BuiltIndex);

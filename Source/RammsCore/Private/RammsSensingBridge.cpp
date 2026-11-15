@@ -77,10 +77,20 @@ namespace RammsSensingBridgeImpl
 		return Name.IsNone() ? FString() : Name.ToString();
 	}
 
-	FName NameFromString(const FString& Text)
+	/** Longest component / socket name a caller may pass. FName itself refuses 1024 characters or more with a
+	 *  checkf, so a string from the network is measured before it becomes one. */
+	constexpr int32 MaxReferenceNameLength = 256;
+
+	/** Text trimmed as an FName (None for ""); false, leaving OutName alone, when it is longer than MaxLength. */
+	bool NameFromString(const FString& Text, FName& OutName, int32 MaxLength = MaxReferenceNameLength)
 	{
 		const FString Trimmed = Text.TrimStartAndEnd();
-		return Trimmed.IsEmpty() ? FName(NAME_None) : FName(*Trimmed);
+		if (Trimmed.Len() > MaxLength)
+		{
+			return false;
+		}
+		OutName = Trimmed.IsEmpty() ? FName(NAME_None) : FName(*Trimmed);
+		return true;
 	}
 
 	/** One sensor on an actor: built by a rig, or placed by hand. */
@@ -369,7 +379,11 @@ namespace RammsSensingBridgeImpl
 					Settings->SetBoolField(TEXT("depth"), Source && (Source->bStreamDepth || Source->bStreamRGBD));
 					Settings->SetBoolField(TEXT("motion"), Source && Source->bStreamMotion);
 					Settings->SetBoolField(TEXT("segmentation"), Source && Source->bStreamSegmentation);
-					Settings->SetNumberField(TEXT("channel"), Source ? Source->ChannelID : -1);
+					// No source forwards it: it streams on no channel, so there is none to report.
+					if (Source)
+					{
+						Settings->SetNumberField(TEXT("channel"), Source->ChannelID);
+					}
 				}
 				break;
 			}
@@ -424,6 +438,8 @@ namespace RammsSensingBridgeImpl
 				}
 				const FSonarSensorData Sample = bMeasureNow ? Sonar->MeasureNow() : Sonar->GetSonarData();
 				Obj->SetNumberField(TEXT("timestamp"), Sample.Timestamp);
+				// False until the sensor has measured once: a measurement stamps the world time.
+				Obj->SetBoolField(TEXT("has_sample"), bMeasureNow || Sample.Timestamp > 0.0f);
 				Obj->SetNumberField(TEXT("distance_cm"), Sample.Distance);
 				Obj->SetBoolField(TEXT("hit"), Sample.bHit);
 				Obj->SetObjectField(TEXT("hit_location"), VectorJson(Sample.HitLocation));
@@ -442,6 +458,8 @@ namespace RammsSensingBridgeImpl
 				// The IMU integrates over ticks; there is no on-demand measurement, so this is always its latest.
 				const FIMUSensorData Sample = IMU->GetIMUData();
 				Obj->SetNumberField(TEXT("timestamp"), Sample.Timestamp);
+				// False until the sensor has produced a reading (each one stamps the game time).
+				Obj->SetBoolField(TEXT("has_sample"), Sample.Timestamp > 0.0f);
 				// The engine the latest reading came from: "chaos" / "mujoco" (physics rate) or "kinematic".
 				Obj->SetStringField(TEXT("source"), URammsPhysicsImuSubsystem::SourceName(Sample.Source));
 				Obj->SetObjectField(TEXT("linear_acceleration"), VectorJson(Sample.LinearAcceleration));
@@ -511,7 +529,8 @@ namespace RammsSensingBridgeImpl
 		double Value = 0.0;
 		if (Obj.TryGetNumberField(Key, Value))
 		{
-			InOutValue = FMath::RoundToInt32(Value);
+			// Clamped first: a huge number from the network must not overflow the conversion.
+			InOutValue = FMath::RoundToInt32(FMath::Clamp(Value, static_cast<double>(MIN_int32), static_cast<double>(MAX_int32)));
 		}
 	}
 
@@ -567,24 +586,49 @@ namespace RammsSensingBridgeImpl
 		return FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid();
 	}
 
+	/** Cameras re-registered for a motion pass that still have none (the subsystem's motion material did not load):
+	 *  not tried again, or every StartCameraStreams would rebuild all their passes. */
+	TSet<TWeakObjectPtr<const UIntrinsicSceneCaptureComponent2D>>& CamerasWithoutMotionPass()
+	{
+		static TSet<TWeakObjectPtr<const UIntrinsicSceneCaptureComponent2D>> Cameras;
+		return Cameras;
+	}
+
 	/** Re-register a capture camera that is missing a pass the channels now ask for: the capture subsystem
 	 *  creates a camera's depth / motion passes when it is registered, so a camera registered while a channel
 	 *  was off would otherwise never get that pass. */
 	void EnsureCapturePasses(UCameraCaptureSubsystem& Capture, bool bDepth, bool bMotion)
 	{
 		const bool bSeparateDepthPass = Capture.GetCaptureMode() != ERammsCaptureMode::SingleCaptureColorDepth;
+		TSet<TWeakObjectPtr<const UIntrinsicSceneCaptureComponent2D>>& NoMotionPass = CamerasWithoutMotionPass();
 		for (UIntrinsicSceneCaptureComponent2D* Camera : Capture.GetRegisteredCameras())
 		{
 			if (!IsValid(Camera))
 			{
 				continue;
 			}
-			const bool bMissingMotion = bMotion && !Capture.GetMotionRenderTarget(Camera);
+			const bool bMissingMotion = bMotion && !Capture.GetMotionRenderTarget(Camera) && !NoMotionPass.Contains(Camera);
 			const bool bMissingDepth = bDepth && bSeparateDepthPass && !Capture.GetDepthRenderTarget(Camera);
-			if (bMissingMotion || bMissingDepth)
+			if (!bMissingMotion && !bMissingDepth)
 			{
-				URammsSensorRigComponent::UnregisterCaptureCamera(Capture, Camera);
-				Capture.RegisterCamera(Camera);
+				continue;
+			}
+			// Registering makes the passes under the camera's name + _depth / _dmv / _seg; another object of
+			// such a name would be replaced (fatally, for another class). Leave such a camera as it is.
+			FString Conflict;
+			if (!URammsSensorRigComponent::AreCaptureHelperNamesFree(*Camera, &Conflict))
+			{
+				UE_LOG(LogRammsSensingBridge, Warning, TEXT("Camera %s keeps its capture passes: %s holds one of their names"),
+					*Camera->GetPathName(), *Conflict);
+				continue;
+			}
+			URammsSensorRigComponent::UnregisterCaptureCamera(Capture, Camera);
+			Capture.RegisterCamera(Camera);
+			if (bMotion && !Capture.GetMotionRenderTarget(Camera))
+			{
+				UE_LOG(LogRammsSensingBridge, Warning, TEXT("Camera %s has no motion pass (is the capture subsystem's motion material loaded?)"),
+					*Camera->GetPathName());
+				NoMotionPass.Add(Camera);
 			}
 		}
 	}
@@ -604,11 +648,13 @@ namespace RammsSensingBridgeImpl
 			Obj->SetStringField(TEXT("error"), TEXT("no world"));
 		}
 
+		// The server's port while it runs, else the one StartCameraStreams would open.
 		const URammsStreamingSubsystem* Streaming = GetStreaming(World);
+		const bool						bRunning = Streaming && Streaming->IsServerRunning();
 		TSharedRef<FJsonObject>			Server = MakeShared<FJsonObject>();
-		Server->SetBoolField(TEXT("running"), Streaming && Streaming->IsServerRunning());
-		Server->SetNumberField(TEXT("port"), Streaming ? Streaming->GetServerPort() : 0);
-		Server->SetNumberField(TEXT("connections"), Streaming ? Streaming->GetConnectionCount() : 0);
+		Server->SetBoolField(TEXT("running"), bRunning);
+		Server->SetNumberField(TEXT("port"), bRunning ? Streaming->GetServerPort() : FRammsCameraStreamOptions().Port);
+		Server->SetNumberField(TEXT("connections"), bRunning ? Streaming->GetConnectionCount() : 0);
 		Obj->SetObjectField(TEXT("server"), Server);
 
 		const UCameraCaptureSubsystem* Capture = World ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
@@ -623,12 +669,42 @@ namespace RammsSensingBridgeImpl
 		CaptureJson->SetNumberField(TEXT("cameras"), Capture ? Capture->GetRegisteredCameraCount() : 0);
 		Obj->SetObjectField(TEXT("capture"), CaptureJson);
 
-		// Every registered camera, through every source that forwards it.
-		TArray<TSharedPtr<FJsonValue>> Streams;
+		// Every registered camera and every rig camera (registered once streams start), through every source that
+		// forwards it.
+		TArray<UIntrinsicSceneCaptureComponent2D*> Cameras;
 		if (Capture)
 		{
+			Cameras = Capture->GetRegisteredCameras();
+		}
+		if (World)
+		{
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				if (!IsValid(*It))
+				{
+					continue;
+				}
+				TInlineComponentArray<URammsSensorRigComponent*> Rigs(*It);
+				for (const URammsSensorRigComponent* Rig : Rigs)
+				{
+					if (!IsValid(Rig))
+					{
+						continue;
+					}
+					for (const FRammsBuiltSensor& Entry : Rig->GetBuiltSensors())
+					{
+						if (UIntrinsicSceneCaptureComponent2D* RigCamera = Cast<UIntrinsicSceneCaptureComponent2D>(Entry.Component.Get()))
+						{
+							Cameras.AddUnique(RigCamera);
+						}
+					}
+				}
+			}
+		}
+		TArray<TSharedPtr<FJsonValue>> Streams;
+		{
 			const TArray<URammsStreamSourceComponent*> Sources = GatherStreamSources(World);
-			for (UIntrinsicSceneCaptureComponent2D* Camera : Capture->GetRegisteredCameras())
+			for (UIntrinsicSceneCaptureComponent2D* Camera : Cameras)
 			{
 				if (!IsValid(Camera) || !Camera->GetOwner())
 				{
@@ -882,10 +958,11 @@ AActor* URammsSensingBridge::FindActor(const FString& ActorPath)
 	{
 		return nullptr;
 	}
-	// A full object path ("/Game/Maps/Map.Map:PersistentLevel.BP_Robot_C_0").
+	// A full object path ("/Game/Maps/Map.Map:PersistentLevel.BP_Robot_C_0"). Never a class default object or an
+	// archetype: changing one would change every actor made from it.
 	if (Path.Contains(TEXT(".")) || Path.Contains(TEXT("/")))
 	{
-		if (AActor* Actor = Cast<AActor>(StaticFindObject(AActor::StaticClass(), nullptr, *Path)); IsValid(Actor))
+		if (AActor* Actor = Cast<AActor>(StaticFindObject(AActor::StaticClass(), nullptr, *Path)); IsValid(Actor) && !Actor->IsTemplate())
 		{
 			return Actor;
 		}
@@ -915,6 +992,31 @@ AActor* URammsSensingBridge::FindActor(const FString& ActorPath)
 	return nullptr;
 }
 
+bool URammsSensingBridge::IsPlayWorld(const UWorld* World, FString& OutError)
+{
+	if (World && World->IsGameWorld())
+	{
+		return true;
+	}
+	OutError = TEXT("changing sensing needs a play world (PIE or a game)");
+	return false;
+}
+
+bool URammsSensingBridge::CanChangeSensing(const AActor* Actor, FString& OutError)
+{
+	if (!Actor || Actor->IsTemplate())
+	{
+		OutError = TEXT("changing sensing needs an actor in a play world (PIE or a game), not a class default");
+		return false;
+	}
+	if (!IsPlayWorld(Actor->GetWorld(), OutError))
+	{
+		OutError = FString::Printf(TEXT("%s is not in a play world: changing sensing needs a play world (PIE or a game)"), *Actor->GetName());
+		return false;
+	}
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // Sensors
 // ---------------------------------------------------------------------------
@@ -928,10 +1030,16 @@ bool URammsSensingBridge::ParseMountJson(const FString& MountJson, FRammsSensorM
 		return false;
 	}
 
+	// Names are checked as strings before any becomes an FName: FName refuses very long ones with a checkf.
 	FString Text;
 	if (Obj->TryGetStringField(TEXT("name"), Text))
 	{
-		OutMount.Name = SensingImpl::NameFromString(Text);
+		const FString Name = Text.TrimStartAndEnd();
+		if (!URammsSensorRigComponent::IsValidMountName(Name, OutError))
+		{
+			return false;
+		}
+		OutMount.Name = FName(*Name);
 	}
 	if (OutMount.Name.IsNone())
 	{
@@ -941,20 +1049,22 @@ bool URammsSensingBridge::ParseMountJson(const FString& MountJson, FRammsSensorM
 	if (Obj->TryGetStringField(TEXT("kind"), Text))
 	{
 		ERammsSensorKind Kind = OutMount.Kind;
-		if (!URammsSensorRigComponent::KindFromString(Text, Kind))
+		if (Text.Len() > SensingImpl::MaxReferenceNameLength || !URammsSensorRigComponent::KindFromString(Text, Kind))
 		{
-			OutError = FString::Printf(TEXT("unknown kind \"%s\" (tof, sonar, imu, camera)"), *Text);
+			OutError = FString::Printf(TEXT("unknown kind \"%s\" (tof, sonar, imu, camera)"), *Text.Left(SensingImpl::MaxReferenceNameLength));
 			return false;
 		}
 		OutMount.Kind = Kind;
 	}
-	if (Obj->TryGetStringField(TEXT("parent"), Text))
+	if (Obj->TryGetStringField(TEXT("parent"), Text) && !SensingImpl::NameFromString(Text, OutMount.ParentComponent))
 	{
-		OutMount.ParentComponent = SensingImpl::NameFromString(Text);
+		OutError = FString::Printf(TEXT("\"parent\" is longer than %d characters"), SensingImpl::MaxReferenceNameLength);
+		return false;
 	}
-	if (Obj->TryGetStringField(TEXT("socket"), Text))
+	if (Obj->TryGetStringField(TEXT("socket"), Text) && !SensingImpl::NameFromString(Text, OutMount.Socket))
 	{
-		OutMount.Socket = SensingImpl::NameFromString(Text);
+		OutError = FString::Printf(TEXT("\"socket\" is longer than %d characters"), SensingImpl::MaxReferenceNameLength);
+		return false;
 	}
 
 	double A = 0.0, B = 0.0, C = 0.0;
@@ -983,6 +1093,12 @@ bool URammsSensingBridge::ParseMountJson(const FString& MountJson, FRammsSensorM
 	SensingImpl::ReadFloat(*Obj, TEXT("h_fov_deg"), OutMount.HorizontalFovDeg);
 	SensingImpl::ReadFloat(*Obj, TEXT("v_fov_deg"), OutMount.VerticalFovDeg);
 	SensingImpl::ReadFloat(*Obj, TEXT("max_range_cm"), OutMount.MaxRangeCm);
+	// A sonar also takes the keys ListSensorsJson reports for it ("max_range_cm", "cone_deg"); the sonar_ keys win.
+	if (OutMount.Kind == ERammsSensorKind::Sonar)
+	{
+		SensingImpl::ReadFloat(*Obj, TEXT("max_range_cm"), OutMount.SonarMaxRangeCm);
+		SensingImpl::ReadFloat(*Obj, TEXT("cone_deg"), OutMount.SonarConeDeg);
+	}
 	SensingImpl::ReadFloat(*Obj, TEXT("sonar_max_range_cm"), OutMount.SonarMaxRangeCm);
 	SensingImpl::ReadFloat(*Obj, TEXT("sonar_cone_deg"), OutMount.SonarConeDeg);
 	SensingImpl::ReadInt(*Obj, TEXT("width"), OutMount.Width);
@@ -994,11 +1110,10 @@ bool URammsSensingBridge::ParseMountJson(const FString& MountJson, FRammsSensorM
 	SensingImpl::ReadBool(*Obj, TEXT("segmentation"), OutMount.bSegmentation);
 	SensingImpl::ReadInt(*Obj, TEXT("channel"), OutMount.StreamChannel);
 
-	if (OutMount.Kind == ERammsSensorKind::Camera && (OutMount.Width < 1 || OutMount.Height < 1))
-	{
-		OutError = TEXT("a camera needs a positive width and height");
-		return false;
-	}
+	// A camera is 1 to 4096 pixels each way: larger asks are clamped (the size built is what the sensor reports).
+	OutMount.Width = FMath::Clamp(OutMount.Width, 1, URammsSensorRigComponent::MaxCameraSize);
+	OutMount.Height = FMath::Clamp(OutMount.Height, 1, URammsSensorRigComponent::MaxCameraSize);
+	OutMount.StreamChannel = FMath::Clamp(OutMount.StreamChannel, -1, FRammsCameraStreams::MaxBaseChannel);
 	return true;
 }
 
@@ -1035,7 +1150,7 @@ FString URammsSensingBridge::AddSensorJson(const FString& ActorPath, const FStri
 
 	FRammsSensorMount Mount;
 	FString			  Error;
-	if (!ParseMountJson(MountJson, Mount, Error))
+	if (!CanChangeSensing(Actor, Error) || !ParseMountJson(MountJson, Mount, Error))
 	{
 		return SensingImpl::FailJson(Error);
 	}
@@ -1061,27 +1176,86 @@ FString URammsSensingBridge::AddSensorJson(const FString& ActorPath, const FStri
 	{
 		return SensingImpl::FailJson(FString::Printf(TEXT("%s has no root component to mount on"), *Actor->GetName()));
 	}
+	// Only the sensor a mount of this name built may be replaced; anything else of the name stays.
+	const FRammsBuiltSensor* Replaced = Rig ? Rig->FindBuilt(Mount.Name) : nullptr;
 	if (UObject* Existing = FindObjectFast<UObject>(Actor, Mount.Name); IsValid(Existing))
 	{
-		const UActorComponent* ExistingComponent = Cast<UActorComponent>(Existing);
-		if (!Rig || !ExistingComponent || !Rig->FindBuiltByComponent(ExistingComponent))
+		if (!Replaced || Replaced->Component.Get() != Existing)
 		{
 			return SensingImpl::FailJson(FString::Printf(TEXT("%s already has an object named \"%s\" that is not a rig sensor"),
 				*Actor->GetName(), *Mount.Name.ToString()));
 		}
 	}
 
+	// Limits: sensors per actor (every rig's mounts), rig cameras per world.
+	{
+		TSet<FName>										 ActorMounts;
+		TInlineComponentArray<URammsSensorRigComponent*> ActorRigs(Actor);
+		for (const URammsSensorRigComponent* Each : ActorRigs)
+		{
+			if (!IsValid(Each))
+			{
+				continue;
+			}
+			for (const FRammsSensorMount& EachMount : Each->Mounts)
+			{
+				ActorMounts.Add(EachMount.Name);
+			}
+		}
+		if (!ActorMounts.Contains(Mount.Name) && ActorMounts.Num() >= MaxRigSensorsPerActor)
+		{
+			return SensingImpl::FailJson(FString::Printf(TEXT("%s already has %d rig sensors, the most an actor may have"),
+				*Actor->GetName(), MaxRigSensorsPerActor));
+		}
+	}
+	if (Mount.Kind == ERammsSensorKind::Camera && !(Replaced && Replaced->Mount.Kind == ERammsSensorKind::Camera))
+	{
+		int32 Cameras = 0;
+		for (TActorIterator<AActor> It(Actor->GetWorld()); It; ++It)
+		{
+			if (!IsValid(*It))
+			{
+				continue;
+			}
+			TInlineComponentArray<URammsSensorRigComponent*> Rigs(*It);
+			for (const URammsSensorRigComponent* Each : Rigs)
+			{
+				if (!IsValid(Each))
+				{
+					continue;
+				}
+				for (const FRammsBuiltSensor& Entry : Each->GetBuiltSensors())
+				{
+					Cameras += Entry.Mount.Kind == ERammsSensorKind::Camera ? 1 : 0;
+				}
+			}
+		}
+		if (Cameras >= MaxRigCamerasPerWorld)
+		{
+			return SensingImpl::FailJson(FString::Printf(TEXT("the world already has %d rig cameras, the most it may have"),
+				MaxRigCamerasPerWorld));
+		}
+	}
+
+	bool bNewRig = false;
 	if (!Rig)
 	{
 		const FName RigName = MakeUniqueObjectName(Actor, URammsSensorRigComponent::StaticClass(), FName(TEXT("SensorRig")));
 		Rig = NewObject<URammsSensorRigComponent>(Actor, RigName, RF_Transient);
 		Actor->AddInstanceComponent(Rig);
 		Rig->RegisterComponent(); // begins play now if the actor has
+		bNewRig = true;
 	}
 
-	if (!Rig->AddMount(Mount))
+	if (!Rig->TryAddMount(Mount, Error))
 	{
-		return SensingImpl::FailJson(FString::Printf(TEXT("could not build \"%s\" (see the log)"), *Mount.Name.ToString()));
+		// A failure changes nothing: not even a rig left behind.
+		if (bNewRig)
+		{
+			Actor->RemoveInstanceComponent(Rig);
+			Rig->DestroyComponent();
+		}
+		return SensingImpl::FailJson(FString::Printf(TEXT("could not add \"%s\": %s"), *Mount.Name.ToString(), *Error));
 	}
 
 	TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
@@ -1099,6 +1273,10 @@ FString URammsSensingBridge::AddSensorJson(const FString& ActorPath, const FStri
 	else if (Mount.Kind == ERammsSensorKind::Camera)
 	{
 		Obj->SetNumberField(TEXT("channel"), Built->Channel);
+		if (Mount.StreamChannel >= 0 && Built->Channel != Mount.StreamChannel)
+		{
+			Obj->SetStringField(TEXT("warning"), FString::Printf(TEXT("channel %d's streams are used by another stream source; streaming on %d"), Mount.StreamChannel, Built->Channel));
+		}
 		TArray<TSharedPtr<FJsonValue>> Streams;
 		if (const URammsStreamSourceComponent* Source = Cast<URammsStreamSourceComponent>(Built->StreamSource.Get()))
 		{
@@ -1112,12 +1290,13 @@ FString URammsSensingBridge::AddSensorJson(const FString& ActorPath, const FStri
 bool URammsSensingBridge::RemoveSensor(const FString& ActorPath, const FString& Name)
 {
 	AActor* Actor = FindActor(ActorPath);
-	if (!Actor)
+	FString Error;
+	if (!Actor || !CanChangeSensing(Actor, Error))
 	{
 		return false;
 	}
-	const FName MountName = SensingImpl::NameFromString(Name);
-	if (MountName.IsNone())
+	FName MountName;
+	if (!SensingImpl::NameFromString(Name, MountName, URammsSensorRigComponent::MaxMountNameLength) || MountName.IsNone())
 	{
 		return false;
 	}
@@ -1340,37 +1519,49 @@ FString URammsSensingBridge::StartCameraStreamsJson(const FString& OptionsJson)
 			return SensingImpl::FailJson(TEXT("options are not a JSON object"));
 		}
 		SensingImpl::ReadInt(*Obj, TEXT("port"), Options.Port);
-		SensingImpl::ReadInt(*Obj, TEXT("every_n_frames"), Options.EveryNFrames);
 		SensingImpl::ReadBool(*Obj, TEXT("color"), Options.bColor);
 		SensingImpl::ReadBool(*Obj, TEXT("depth"), Options.bDepth);
 		SensingImpl::ReadBool(*Obj, TEXT("motion"), Options.bMotion);
 		SensingImpl::ReadBool(*Obj, TEXT("segmentation"), Options.bSegmentation);
-		SensingImpl::ReadBool(*Obj, TEXT("save_to_disk"), Options.bSaveToDisk);
+		// Only what is given changes: the rate and disk writes are world-wide.
+		double EveryNFrames = 0.0;
+		if (Obj->TryGetNumberField(TEXT("every_n_frames"), EveryNFrames))
+		{
+			Options.EveryNFrames = FMath::RoundToInt32(FMath::Clamp(EveryNFrames, 1.0, 10000.0));
+		}
+		bool bSaveToDisk = false;
+		if (Obj->TryGetBoolField(TEXT("save_to_disk"), bSaveToDisk))
+		{
+			Options.SaveToDisk = bSaveToDisk;
+		}
 	}
 	return StartCameraStreams(GetSensingWorld(), Options);
 }
 
 FString URammsSensingBridge::StartCameraStreams(UWorld* World, const FRammsCameraStreamOptions& Options)
 {
-	if (!World)
+	FString PlayWorldError;
+	if (!IsPlayWorld(World, PlayWorldError))
 	{
-		return SensingImpl::FailJson(TEXT("no world"));
+		return SensingImpl::FailJson(PlayWorldError);
 	}
 
-	FString Error;
+	TArray<FString> Errors;
 	if (Options.bStartServer)
 	{
 		URammsStreamingSubsystem* Streaming = SensingImpl::GetStreaming(World);
 		if (!Streaming)
 		{
-			Error = TEXT("no game instance, so no RMSS server: streaming needs a play world");
+			Errors.Add(TEXT("no game instance, so no RMSS server"));
 		}
 		else if (!Streaming->IsServerRunning())
 		{
 			const int32 Port = FMath::Clamp(Options.Port, 1, 65535);
 			if (!Streaming->StartServer(Port))
 			{
-				Error = FString::Printf(TEXT("could not start the RMSS server on port %d"), Port);
+				// Most likely another program already listens on the port; the server does not share it.
+				const FString Why = Streaming->GetLastServerError();
+				Errors.Add(FString::Printf(TEXT("could not start the RMSS server on port %d%s%s"), Port, Why.IsEmpty() ? TEXT("") : TEXT(": "), *Why));
 			}
 		}
 	}
@@ -1380,29 +1571,53 @@ FString URammsSensingBridge::StartCameraStreams(UWorld* World, const FRammsCamer
 		UCameraCaptureSubsystem* Capture = World->GetSubsystem<UCameraCaptureSubsystem>();
 		if (!Capture)
 		{
-			Error = TEXT("no camera capture subsystem in this world");
+			Errors.Add(TEXT("no camera capture subsystem in this world"));
 		}
 		else
 		{
-			Capture->SetCaptureChannels(Options.bColor, Options.bDepth, Options.bMotion);
-			Capture->SetCaptureSegmentation(Options.bSegmentation);
-			Capture->SetSerializationEnabled(Options.bSaveToDisk);
-			Capture->SetCaptureRate(FMath::Max(1, Options.EveryNFrames));
-			SensingImpl::EnsureCapturePasses(*Capture, Options.bDepth, Options.bMotion);
-			if (!Capture->IsCapturing())
+			// Capture state is world-wide: channels go on, never off (another camera's stream may need one this
+			// call does not), and disk writes and the rate change only when asked.
+			const bool bWasCapturing = Capture->IsCapturing();
+			const bool bColor = Capture->IsCapturingRGB() || Options.bColor;
+			const bool bDepth = Capture->IsCapturingDepth() || Options.bDepth;
+			const bool bMotion = Capture->IsCapturingMotionVectors() || Options.bMotion;
+			Capture->SetCaptureChannels(bColor, bDepth, bMotion);
+			if (Options.bSegmentation && !Capture->IsCapturingSegmentation())
+			{
+				Capture->SetCaptureSegmentation(true);
+			}
+			if (Options.SaveToDisk.IsSet())
+			{
+				Capture->SetSerializationEnabled(Options.SaveToDisk.GetValue());
+			}
+			else if (!bWasCapturing)
+			{
+				// A session this call starts streams, and writes nothing to disk unless asked.
+				Capture->SetSerializationEnabled(false);
+			}
+			if (Options.EveryNFrames.IsSet())
+			{
+				Capture->SetCaptureRate(FMath::Max(1, Options.EveryNFrames.GetValue()));
+			}
+
+			// Rig cameras join capture now: until camera streams start they have no render targets or passes.
+			URammsSensorRigComponent::RegisterRigCamerasForCapture(World);
+			SensingImpl::EnsureCapturePasses(*Capture, bDepth, bMotion);
+			if (!bWasCapturing)
 			{
 				Capture->StartCapture();
 			}
-			if (!Capture->IsCapturing() && Error.IsEmpty())
+			if (!Capture->IsCapturing())
 			{
-				Error = TEXT("capture did not start: no camera is registered (add a camera sensor first)");
+				Errors.Add(TEXT("capture did not start: no camera is registered (add a camera sensor first)"));
 			}
 		}
 	}
 
 	TSharedRef<FJsonObject> Status = SensingImpl::StreamStatus(World);
-	if (!Error.IsEmpty())
+	if (Errors.Num() > 0)
 	{
+		const FString Error = FString::Join(Errors, TEXT("; "));
 		Status->SetBoolField(TEXT("ok"), false);
 		Status->SetStringField(TEXT("error"), Error);
 		UE_LOG(LogRammsSensingBridge, Warning, TEXT("StartCameraStreams: %s"), *Error);
@@ -1412,8 +1627,13 @@ FString URammsSensingBridge::StartCameraStreams(UWorld* World, const FRammsCamer
 
 bool URammsSensingBridge::StopCameraStreams()
 {
-	UWorld*					 World = GetSensingWorld();
-	UCameraCaptureSubsystem* Capture = World ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
+	UWorld* World = GetSensingWorld();
+	FString Error;
+	if (!IsPlayWorld(World, Error))
+	{
+		return false;
+	}
+	UCameraCaptureSubsystem* Capture = World->GetSubsystem<UCameraCaptureSubsystem>();
 	if (!Capture)
 	{
 		return false;
