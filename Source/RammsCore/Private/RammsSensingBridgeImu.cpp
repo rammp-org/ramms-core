@@ -18,6 +18,7 @@
 #include "RammsPhysicsImuSubsystem.h"
 #include "RammsSensingBridge.h"
 #include "RammsSensorRigComponent.h"
+#include "RammsStreamChannels.h"
 #include "RammsStreamingSubsystem.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -768,7 +769,13 @@ FString URammsSensingBridge::StartImuStreamJson(const FString& ActorPath, const 
 	Stream.BodyName = Imu->GetTrackedBodyName(Handle);
 	Stream.StreamId = FString::Printf(TEXT("imu/%s/%s"), *Stream.ActorName, Stream.Target.IsEmpty() ? *Stream.BodyName : *Stream.Target);
 	Stream.Handle = Handle;
-	Stream.Channel = Options.Channel;
+	// A channel no camera stream source uses either (each takes C, C+100, C+200 and C+300); StartStream checks the
+	// other IMU streams.
+	if (!RammsStreamChannels::PickImuChannel(ActorWorld, Stream.ActorPath, Stream.Target, Options.Channel, Stream.Channel, Error))
+	{
+		Imu->Untrack(Handle);
+		return ImuBridgeImpl::Fail(Error);
+	}
 	FRammsImuStream Started;
 	if (!Streams->StartStream(Stream, Error, Started))
 	{

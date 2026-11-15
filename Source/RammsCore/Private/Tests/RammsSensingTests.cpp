@@ -19,9 +19,11 @@
 #include "Misc/AutomationTest.h"
 #include "RammsCameraStreams.h"
 #include "RammsIMUSensorComponent.h"
+#include "RammsImuStreamSubsystem.h"
 #include "RammsSensingBridge.h"
 #include "RammsSensorRigComponent.h"
 #include "RammsSonarSensorComponent.h"
+#include "RammsStreamChannels.h"
 #include "RammsStreamSourceComponent.h"
 #include "RammsToFSensorComponent.h"
 #include "Serialization/JsonReader.h"
@@ -121,6 +123,7 @@ namespace RammsSensingTests
 		Test.AddExpectedMessagePlain(TEXT("Depth+motion capture will be disabled"), ELogVerbosity::Warning,
 			EAutomationExpectedMessageFlags::Contains, -1);
 		Test.AddExpectedMessagePlain(TEXT("has no motion pass"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+		Test.AddExpectedMessagePlain(TEXT("has no depth pass"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
 	}
 
 	TSharedPtr<FJsonObject> ParseJson(const FString& Json)
@@ -619,6 +622,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsSensingBridgeParseMount, "Ramms.Sensing.B
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRammsSensingBridgeParseMount::RunTest(const FString& Parameters)
 {
+	// A parent is looked up (FNAME_Find), never added: the name must exist, as a real parent component's does.
+	const FName ChassisName(TEXT("chassis"));
+	TestFalse(TEXT("the parent's name exists"), ChassisName.IsNone());
 	FRammsSensorMount Mount;
 	FString			  Error;
 	TestTrue(TEXT("a full mount parses"),
@@ -669,6 +675,25 @@ bool FRammsSensingBridgeParseMount::RunTest(const FString& Parameters)
 	TestTrue(TEXT("unknown kind says so"), Error.Contains(TEXT("lidar")));
 	TestFalse(TEXT("not JSON"), URammsSensingBridge::ParseMountJson(TEXT("front_tof"), Bad, Error));
 	TestFalse(TEXT("bad location"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"location\": \"here\"}"), Bad, Error));
+
+	// Numbers must be finite: JSON's 1e400 reads as infinity.
+	TestFalse(TEXT("an infinite location"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"location\": [1e400, 0, 0]}"), Bad, Error));
+	TestFalse(TEXT("an infinite rotation"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"rotation\": {\"yaw\": -1e400}}"), Bad, Error));
+	TestFalse(TEXT("an infinite range"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"max_range_cm\": 1e400}"), Bad, Error));
+	TestTrue(TEXT("and says which"), Error.Contains(TEXT("max_range_cm")));
+	TestFalse(TEXT("a float past a float's range"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"fov_deg\": 1e300}"), Bad, Error));
+	TestFalse(TEXT("an infinite channel"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"channel\": 1e400}"), Bad, Error));
+	TestFalse(TEXT("a mount 2 km from its parent"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"location\": [200000, 0, 0]}"), Bad, Error));
+	FRammsSensorMount Far;
+	TestTrue(TEXT("a 10 km range parses"), URammsSensingBridge::ParseMountJson(TEXT("{\"name\": \"x\", \"max_range_cm\": 1000000, \"sonar_max_range_cm\": 1000000}"), Far, Error));
+	TestEqual(TEXT("clamped to 1 km"), Far.MaxRangeCm, URammsSensorRigComponent::MaxSensorRangeCm);
+	TestEqual(TEXT("the sonar's too"), Far.SonarMaxRangeCm, URammsSensorRigComponent::MaxSensorRangeCm);
+
+	// A parent or socket whose name exists nowhere names nothing, and is not added to the name table.
+	const FString Unknown = FString::Printf(TEXT("no_such_component_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	TestFalse(TEXT("an unknown parent"), URammsSensingBridge::ParseMountJson(FString::Printf(TEXT("{\"name\": \"x\", \"parent\": \"%s\"}"), *Unknown), Bad, Error));
+	TestFalse(TEXT("an unknown socket"), URammsSensingBridge::ParseMountJson(FString::Printf(TEXT("{\"name\": \"x\", \"socket\": \"%s\"}"), *Unknown), Bad, Error));
+	TestTrue(TEXT("the unknown name was not added"), FName(*Unknown, FNAME_Find).IsNone());
 
 	ERammsSensorKind Kind = ERammsSensorKind::ToF;
 	TestTrue(TEXT("Sonar"), URammsSensorRigComponent::KindFromString(TEXT("Sonar"), Kind) && Kind == ERammsSensorKind::Sonar);
@@ -849,7 +874,8 @@ bool FRammsSensingRigNames::RunTest(const FString& Parameters)
 
 	// The rules, on the string (so an over-long one never becomes an FName).
 	FString Error;
-	TestTrue(TEXT("plain name"), URammsSensorRigComponent::IsValidMountName(TEXT("front_cam-2.left"), Error));
+	TestTrue(TEXT("plain name"), URammsSensorRigComponent::IsValidMountName(TEXT("front_cam-2_left"), Error));
+	TestFalse(TEXT("a dot (an object path's separator)"), URammsSensorRigComponent::IsValidMountName(TEXT("front.cam"), Error));
 	TestFalse(TEXT("empty"), URammsSensorRigComponent::IsValidMountName(FString(), Error));
 	TestFalse(TEXT("65 characters"), URammsSensorRigComponent::IsValidMountName(FString::ChrN(65, TEXT('a')), Error));
 	TestTrue(TEXT("64 characters"), URammsSensorRigComponent::IsValidMountName(FString::ChrN(64, TEXT('a')), Error));
@@ -1076,6 +1102,227 @@ bool FRammsSensingBridgeHandPlacedCamera::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsSensingBridgeActorPaths, "Ramms.Sensing.Bridge.ActorPathLimits",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsSensingBridgeActorPaths::RunTest(const FString& Parameters)
+{
+	using namespace RammsSensingTests;
+	IgnoreEnvironmentWarnings(*this);
+
+	FTestWorld TestWorld;
+	AActor*	   Robot = TestWorld.SpawnRobot();
+	if (!TestNotNull(TEXT("robot"), Robot))
+	{
+		return false;
+	}
+	Robot->DispatchBeginPlay();
+	const FString Path = Robot->GetPathName();
+	TestTrue(TEXT("a real actor path finds the actor"), URammsSensingBridge::FindActor(Path) == Robot);
+	TestTrue(TEXT("so does its name"), URammsSensingBridge::GetSensingWorld() != TestWorld.World || URammsSensingBridge::FindActor(Robot->GetName()) == Robot);
+
+	// Over-long paths are refused before StaticFindObject, which would make an FName of each part (FName checkf-fails on
+	// 1024 characters or more): every bridge call that takes an actor path just answers "not found".
+	const FString Long = TEXT("/") + FString::ChrN(2000, TEXT('a'));
+	TestNull(TEXT("an over-long path finds nothing"), URammsSensingBridge::FindActor(Long));
+	TestNull(TEXT("an over-long dotted path finds nothing"), URammsSensingBridge::FindActor(Path + TEXT(".") + FString::ChrN(1500, TEXT('b'))));
+	TestFalse(TEXT("ListSensorsJson"), IsOk(ParseJson(URammsSensingBridge::ListSensorsJson(Long))));
+	TestFalse(TEXT("AddSensorJson"), IsOk(ParseJson(URammsSensingBridge::AddSensorJson(Long, TEXT("{\"name\": \"x\", \"kind\": \"imu\"}")))));
+	TestFalse(TEXT("RemoveSensor"), URammsSensingBridge::RemoveSensor(Long, TEXT("x")));
+	TestFalse(TEXT("ReadSensorJson"), IsOk(ParseJson(URammsSensingBridge::ReadSensorJson(Long, TEXT("x"), false))));
+	TestFalse(TEXT("ReadSensorsJson"), IsOk(ParseJson(URammsSensingBridge::ReadSensorsJson(Long))));
+	TestFalse(TEXT("ListImuBodiesJson"), IsOk(ParseJson(URammsSensingBridge::ListImuBodiesJson(Long))));
+	TestFalse(TEXT("ReadBodyImuJson"), IsOk(ParseJson(URammsSensingBridge::ReadBodyImuJson(Long, FString(), FString()))));
+
+	// At the limit (1023 characters, one part of 1023) it is still looked up -- and finds nothing.
+	TestNull(TEXT("a path of 1023 characters"), URammsSensingBridge::FindActor(TEXT("/") + FString::ChrN(1022, TEXT('c'))));
+
+	// A path whose parts are no existing names finds nothing and adds none of them to the name table.
+	const FString Unknown = FString::Printf(TEXT("NoSuchActor_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	const FString Package = FString::Printf(TEXT("/Game/NoSuchMap_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	TestNull(TEXT("an unknown actor of a real level"), URammsSensingBridge::FindActor(Path + TEXT(".") + Unknown));
+	TestNull(TEXT("an unknown map"), URammsSensingBridge::FindActor(Package + TEXT(".Map:PersistentLevel.") + Unknown));
+	TestTrue(TEXT("the unknown actor name was not added"), FName(*Unknown, FNAME_Find).IsNone());
+	TestTrue(TEXT("nor the unknown map"), FName(*Package, FNAME_Find).IsNone());
+
+	// A sensor name that exists nowhere is not added either.
+	TestFalse(TEXT("removing an unknown sensor"), URammsSensingBridge::RemoveSensor(Path, Unknown + TEXT("_sensor")));
+	TestTrue(TEXT("its name was not added"), FName(*(Unknown + TEXT("_sensor")), FNAME_Find).IsNone());
+
+	// A socket the parent does not have is refused (a socket name that exists, but not on this parent).
+	const TSharedPtr<FJsonObject> NoSocket =
+		ParseJson(URammsSensingBridge::AddSensorJson(Path, TEXT("{\"name\": \"tof\", \"kind\": \"tof\", \"socket\": \"Root\"}")));
+	TestFalse(TEXT("a socket the parent does not have"), IsOk(NoSocket));
+	TestTrue(TEXT("says so"), NoSocket.IsValid() && NoSocket->GetStringField(TEXT("error")).Contains(TEXT("socket")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsSensingBridgeStopStreams, "Ramms.Sensing.Bridge.StopUndoesOnlyTheStreams",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsSensingBridgeStopStreams::RunTest(const FString& Parameters)
+{
+	using namespace RammsSensingTests;
+	IgnoreEnvironmentWarnings(*this);
+
+	// Disk writes are not for remote callers.
+	const TSharedPtr<FJsonObject> ToDisk = ParseJson(URammsSensingBridge::StartCameraStreamsJson(TEXT("{\"save_to_disk\": true}")));
+	TestFalse(TEXT("save_to_disk over Remote Control is refused"), IsOk(ToDisk));
+	TestTrue(TEXT("and says so"), ToDisk.IsValid() && ToDisk->GetStringField(TEXT("error")).Contains(TEXT("save_to_disk")));
+
+	FTestWorld TestWorld;
+	AActor*	   Robot = TestWorld.SpawnRobot();
+	if (!TestNotNull(TEXT("robot"), Robot))
+	{
+		return false;
+	}
+	// A camera somebody registers for their own recording.
+	UIntrinsicSceneCaptureComponent2D* HandCam = NewObject<UIntrinsicSceneCaptureComponent2D>(Robot, TEXT("HandCam"));
+	HandCam->SetupAttachment(Robot->GetRootComponent());
+	HandCam->RegisterComponent();
+	URammsSensorRigComponent* Rig = FTestWorld::AddRig(Robot, { MakeMount(TEXT("cam"), ERammsSensorKind::Camera) });
+	Robot->DispatchBeginPlay();
+	UCameraCaptureSubsystem* Capture = TestWorld.World->GetSubsystem<UCameraCaptureSubsystem>();
+	if (!TestNotNull(TEXT("capture subsystem"), Capture))
+	{
+		return false;
+	}
+	const auto Registered = [Capture](const USceneComponent* Camera) {
+		return Camera && Capture->GetRegisteredCameras().Contains(Camera);
+	};
+	const auto Status = [&TestWorld](const TCHAR* Key) {
+		const TSharedPtr<FJsonObject>  Json = ParseJson(URammsSensingBridge::StreamStatusJsonFor(TestWorld.World));
+		const TSharedPtr<FJsonObject>* CaptureJson = nullptr;
+		bool						   bValue = false;
+		return Json.IsValid() && Json->TryGetObjectField(TEXT("capture"), CaptureJson) && CaptureJson && (*CaptureJson)->TryGetBoolField(Key, bValue) && bValue;
+	};
+
+	// Somebody's recording: colour only, every 3rd frame, to disk.
+	Capture->SetCaptureChannels(true, false, false);
+	Capture->SetCaptureRate(3);
+	Capture->SetSerializationEnabled(true);
+	Capture->RegisterCamera(HandCam);
+	Capture->StartCapture();
+	TestTrue(TEXT("the recording runs"), Capture->IsCapturing());
+
+	// Somebody else's session does not take rig cameras in: only camera streams do.
+	TestTrue(TEXT("a late rig camera"), Rig->AddMount(MakeMount(TEXT("late_cam"), ERammsSensorKind::Camera)));
+	const USceneComponent* RigCam = Rig->GetSensorComponent(TEXT("cam"));
+	const USceneComponent* LateCam = Rig->GetSensorComponent(TEXT("late_cam"));
+	TestFalse(TEXT("rig cameras are not in the recording"), Registered(RigCam) || Registered(LateCam));
+
+	// The streams join the running session: depth and motion on, every 2nd frame.
+	FRammsCameraStreamOptions Join;
+	Join.bStartServer = false;
+	Join.bSegmentation = false;
+	Join.EveryNFrames = 2;
+	TestTrue(TEXT("streams start"), IsOk(ParseJson(URammsSensingBridge::StartCameraStreams(TestWorld.World, Join))));
+	TestTrue(TEXT("the rig cameras joined"), Registered(RigCam) && Registered(LateCam));
+	TestTrue(TEXT("depth and motion on"), Capture->IsCapturingDepth() && Capture->IsCapturingMotionVectors());
+	TestEqual(TEXT("the rate as asked"), Capture->GetCaptureRate(), 2);
+	TestTrue(TEXT("the status says the streams are on"), Status(TEXT("streams_on")));
+	TestFalse(TEXT("and that they did not start the session"), Status(TEXT("started_by_streams")));
+
+	// Stopping undoes what the streams did, and only that.
+	TestTrue(TEXT("streams stop"), URammsSensingBridge::StopCameraStreamsIn(TestWorld.World));
+	TestTrue(TEXT("the recording still runs"), Capture->IsCapturing());
+	TestTrue(TEXT("with its own camera"), Registered(HandCam));
+	TestFalse(TEXT("the rig cameras left"), Registered(RigCam) || Registered(LateCam));
+	TestTrue(TEXT("colour stays on"), Capture->IsCapturingRGB());
+	TestFalse(TEXT("depth back off"), Capture->IsCapturingDepth());
+	TestFalse(TEXT("motion back off"), Capture->IsCapturingMotionVectors());
+	TestEqual(TEXT("the recording's rate back"), Capture->GetCaptureRate(), 3);
+	TestTrue(TEXT("still writing to disk"), Capture->IsSerializationEnabled());
+	TestFalse(TEXT("the status says the streams are off"), Status(TEXT("streams_on")));
+
+	// With the streams off, a rig camera added is not registered either.
+	TestTrue(TEXT("another rig camera"), Rig->AddMount(MakeMount(TEXT("third_cam"), ERammsSensorKind::Camera)));
+	TestFalse(TEXT("not registered while the streams are off"), Registered(Rig->GetSensorComponent(TEXT("third_cam"))));
+
+	// A session the streams start themselves: it writes nothing to disk, and stopping the streams stops it and puts
+	// the disk setting back.
+	Capture->StopCapture();
+	URammsSensorRigComponent::UnregisterCaptureCamera(*Capture, HandCam);
+	FRammsCameraStreamOptions Own;
+	Own.bStartServer = false;
+	Own.bSegmentation = false;
+	TestTrue(TEXT("streams start a session"), IsOk(ParseJson(URammsSensingBridge::StartCameraStreams(TestWorld.World, Own))));
+	TestTrue(TEXT("capturing"), Capture->IsCapturing());
+	TestFalse(TEXT("a session the streams start writes nothing to disk"), Capture->IsSerializationEnabled());
+	TestTrue(TEXT("the status says they started it"), Status(TEXT("started_by_streams")));
+	TestTrue(TEXT("every rig camera joined"), Registered(RigCam) && Registered(LateCam) && Registered(Rig->GetSensorComponent(TEXT("third_cam"))));
+	TestTrue(TEXT("streams stop"), URammsSensingBridge::StopCameraStreamsIn(TestWorld.World));
+	TestFalse(TEXT("the session they started stopped"), Capture->IsCapturing());
+	TestTrue(TEXT("the disk setting is back"), Capture->IsSerializationEnabled());
+	TestEqual(TEXT("no camera left registered"), Capture->GetRegisteredCameraCount(), 0);
+	Capture->SetSerializationEnabled(false);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsSensingRigImuChannels, "Ramms.Sensing.Rig.CameraAndImuChannels",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsSensingRigImuChannels::RunTest(const FString& Parameters)
+{
+	using namespace RammsSensingTests;
+	IgnoreEnvironmentWarnings(*this);
+	AddExpectedMessagePlain(TEXT("asked for channel"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+
+	FTestWorld TestWorld;
+	AActor*	   Robot = TestWorld.SpawnRobot();
+	if (!TestNotNull(TEXT("robot"), Robot))
+	{
+		return false;
+	}
+	URammsSensorRigComponent* Rig = FTestWorld::AddRig(Robot, {});
+	Robot->DispatchBeginPlay();
+	URammsImuStreamSubsystem* Streams = TestWorld.World->GetSubsystem<URammsImuStreamSubsystem>();
+	if (!TestNotNull(TEXT("IMU stream subsystem"), Streams))
+	{
+		return false;
+	}
+	const auto Make = [](const TCHAR* Actor, const TCHAR* Target, int32 Channel) {
+		FRammsImuStream Stream;
+		Stream.ActorPath = Actor;
+		Stream.ActorName = Actor;
+		Stream.Target = Target;
+		Stream.StreamId = FString::Printf(TEXT("imu/%s/%s"), Actor, Target);
+		Stream.Channel = Channel;
+		return Stream;
+	};
+
+	// An IMU stream on the first IMU channel.
+	FString			Error;
+	FRammsImuStream Started;
+	TestTrue(TEXT("an IMU stream"), Streams->StartStream(Make(TEXT("A"), TEXT("chassis"), -1), Error, Started));
+	const int32 ImuChannel = Started.Channel;
+	TestEqual(TEXT("on the first IMU channel"), ImuChannel, URammsImuStreamSubsystem::FirstChannel);
+
+	// A camera pinned so that its mask (C + 300) would land on the IMU stream's channel streams on a free one.
+	const int32 Clashing = ImuChannel - FRammsCameraStreams::MaskChannelOffset;
+	TestFalse(TEXT("a camera group over the IMU channel is not free"), URammsSensorRigComponent::IsStreamChannelFree(TestWorld.World, Clashing));
+	TestTrue(TEXT("the next one is"), URammsSensorRigComponent::IsStreamChannelFree(TestWorld.World, Clashing + 1));
+	FRammsSensorMount Pinned = MakeMount(TEXT("pinned"), ERammsSensorKind::Camera);
+	Pinned.StreamChannel = Clashing;
+	TestTrue(TEXT("the pinned camera is built"), Rig->AddMount(Pinned));
+	TestEqual(TEXT("on the lowest free channel instead"), Rig->GetStreamChannel(TEXT("pinned")), 0);
+
+	// An IMU stream never takes a camera's channel: asked for one it is refused; given none it skips them.
+	int32 Channel = -1;
+	TestFalse(TEXT("an IMU stream on a camera's depth channel is refused"),
+		RammsStreamChannels::PickImuChannel(TestWorld.World, TEXT("B"), TEXT("seat"), FRammsCameraStreams::DepthChannelOffset, Channel, Error));
+	TestTrue(TEXT("and says why"), Error.Contains(TEXT("camera")));
+	URammsStreamSourceComponent* HandPlaced = NewObject<URammsStreamSourceComponent>(Robot, TEXT("HandSource"));
+	HandPlaced->ChannelID = ImuChannel + 1; // takes ImuChannel + 1, + 101, + 201, + 301
+	HandPlaced->CameraFilter = TEXT("no_such_camera");
+	HandPlaced->RegisterComponent();
+	TestTrue(TEXT("a new IMU stream gets a channel"), RammsStreamChannels::PickImuChannel(TestWorld.World, TEXT("B"), TEXT("seat"), -1, Channel, Error));
+	TestEqual(TEXT("past the other IMU stream's and the camera's"), Channel, ImuChannel + 2);
+	TestTrue(TEXT("a restarted stream"), RammsStreamChannels::PickImuChannel(TestWorld.World, TEXT("A"), TEXT("chassis"), -1, Channel, Error));
+	TestEqual(TEXT("keeps its channel"), Channel, ImuChannel);
+	TestTrue(TEXT("a free channel asked for"), RammsStreamChannels::PickImuChannel(TestWorld.World, TEXT("B"), TEXT("seat"), 5000, Channel, Error));
+	TestEqual(TEXT("is given"), Channel, 5000);
+	TestTrue(TEXT("stop the IMU stream"), Streams->StopStream(TEXT("A"), TEXT("chassis")));
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // The stream conventions (pure)
 // ---------------------------------------------------------------------------
@@ -1155,9 +1402,10 @@ bool FRammsSensingStreamConventions::RunTest(const FString& Parameters)
 		TestEqual(TEXT("mask role"), MaskMeta->GetStringField(TEXT("role")), FString(TEXT("mask")));
 		TestEqual(TEXT("mask stream_id"), MaskMeta->GetStringField(TEXT("stream_id")), FString(TEXT("mask/wrist")));
 		TestEqual(TEXT("mask w is the class grid"), static_cast<int32>(MaskMeta->GetNumberField(TEXT("w"))), 8);
-		TestEqual(TEXT("NumSegmentIDs"), static_cast<int32>(MaskMeta->GetObjectField(TEXT("material_params"))->GetNumberField(TEXT("NumSegmentIDs"))), 8);
+		// The table goes to 7, but the mask holds a 9 the table does not name: NumSegmentIDs covers every value in it.
+		TestEqual(TEXT("NumSegmentIDs"), static_cast<int32>(MaskMeta->GetObjectField(TEXT("material_params"))->GetNumberField(TEXT("NumSegmentIDs"))), 10);
 		TestEqual(TEXT("MaterialScalarParameters.NumSegmentIDs"),
-			static_cast<int32>(MaskMeta->GetObjectField(TEXT("MaterialScalarParameters"))->GetNumberField(TEXT("NumSegmentIDs"))), 8);
+			static_cast<int32>(MaskMeta->GetObjectField(TEXT("MaterialScalarParameters"))->GetNumberField(TEXT("NumSegmentIDs"))), 10);
 		const TSharedPtr<FJsonObject> Classes = MaskMeta->GetObjectField(TEXT("classes"));
 		TestEqual(TEXT("classes[3]"), Classes->GetStringField(TEXT("3")), FString(TEXT("Car")));
 		TestEqual(TEXT("classes[7]"), Classes->GetStringField(TEXT("7")), FString(TEXT("Bench")));
