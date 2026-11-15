@@ -339,7 +339,9 @@ This helps ensure that consistent code formatting is applied.
    `dropped`, `rate_hz`.
  - `StartImuStreamJson(Actor, Target, Options)` / `StopImuStream(Actor, Target)`
    — the same samples streamed over RMSS (play worlds only; starts the server).
-   Options add `port` and `channel` (-1: the lowest free from 1000). Each game
+   Options add `port` and `channel` (-1: the lowest from 1000 that no other IMU
+   stream and no camera stream source uses; a channel a camera source uses is
+   refused). Each game
    tick with new samples sends one `FrameData` message, fmt `imu_f64x18`,
    w = samples, h = 1, 18 little-endian float64 per sample: seq, sim_time,
    linear acceleration xyz (cm/s²), angular velocity xyz (°/s), angular
@@ -360,10 +362,13 @@ This helps ensure that consistent code formatting is applied.
  mount of the same name, or changes nothing when the new one cannot be built) /
  `RemoveMount`. Every sensor traces / looks along its local +X. A mount whose
  parent component does not exist is skipped with a warning. Names are 1 to 64
- characters of `A-Z a-z 0-9 _ - .` and may not end in `_depth`, `_dmv`, `_seg`
- or `_stream`: those are the names of a camera's capture passes and stream
- source, and a camera whose pass names another object already holds is not
- built (creating a pass over another object of its name would be fatal).
+ characters of `A-Z a-z 0-9 _ -` (no `.`: it separates the parts of an object
+ path) and may not end in `_depth`, `_dmv`, `_seg` or `_stream`: those are the
+ names of a camera's capture passes and stream source, and a camera whose pass
+ names another object already holds is not built (creating a pass over another
+ object of its name would be fatal). A mount's location, rotation, fields of
+ view and ranges must be finite, its location at most 1 km from the parent
+ along each axis; ranges are clamped to 1 km.
 
  | Kind | Builds |
  |---|---|
@@ -373,35 +378,48 @@ This helps ensure that consistent code formatting is applied.
  | `Camera` | `UIntrinsicSceneCaptureComponent2D` (1 to 4096 pixels each way), plus a `URammsStreamSourceComponent` `<Name>_stream` forwarding only that camera |
 
  A camera with base channel `C` (`StreamChannel`, or -1 for the lowest `C`
- whose four channels no stream source in the world uses) streams colour on `C`,
- depth on `C+100`, motion on `C+200` and the segmentation mask on `C+300`,
- under the stream ids `camera/<Name>/color`, `camera/<Name>/depth`,
- `motion/<Name>`, `mask/<Name>` (see RammsStreaming's `RammsCameraStreams.h`).
- Cameras that ask for a channel are built first; one whose channels another
- source already uses streams on a free one instead (with a warning). A camera
- replaced through `AddMount` keeps its channel. Names are per actor, so every
- frame carries `actor` (the owner's path): a client picks a robot's camera by
- actor, never by name alone.
+ none of whose four channels a stream source or an IMU stream in the world
+ uses) streams colour on `C`, depth on `C+100`, motion on `C+200` and the
+ segmentation mask on `C+300`, under the stream ids `camera/<Name>/color`,
+ `camera/<Name>/depth`, `motion/<Name>`, `mask/<Name>` (see RammsStreaming's
+ `RammsCameraStreams.h`). Cameras that ask for a channel are built first; one
+ whose channels another source or an IMU stream already uses streams on a free
+ one instead (with a warning). An IMU stream, likewise, never takes a camera's
+ channel (`Private/RammsStreamChannels.h` keeps both apart). A camera replaced
+ through `AddMount` keeps its channel. Names are per actor, so every frame
+ carries `actor` (the owner's path): a client picks a robot's camera by actor,
+ never by name alone.
 
  A rig camera costs nothing until camera streams start: it is registered with
  `UCameraCaptureSubsystem` (render targets, depth / motion / mask passes) by
- `URammsSensingBridge::StartCameraStreams`, by `bStartCaptureOnBeginPlay`, or
- at once when added while capture runs. `bStartStreamServerOnBeginPlay` /
- `bStartCaptureOnBeginPlay` start the RMSS server and capture, turning on the
- channels the rig's cameras ask for.
+ `URammsSensingBridge::StartCameraStreams` (or `bStartCaptureOnBeginPlay`), at
+ once when added while the streams are on, and unregistered by
+ `StopCameraStreams`; a capture session somebody else runs does not take rig
+ cameras in. `bStartStreamServerOnBeginPlay` / `bStartCaptureOnBeginPlay`
+ start the RMSS server and camera streams, turning on the channels the rig's
+ cameras ask for; `CaptureEveryNFrames` and `bSaveCaptureToDisk` apply only to
+ a capture session the rig starts.
 
  `URammsSensingBridge` exposes the same to Remote Control
  (`/Script/RammsCore.Default__RammsSensingBridge`), plain strings in and JSON
  out: `ListSensorsJson`, `AddSensorJson` (snake_case mount JSON),
  `RemoveSensor`, `ReadSensorJson`, `ReadSensorsJson`, `StartCameraStreamsJson`,
  `StopCameraStreams`, `GetStreamStatusJson`, `GetSegmentationClassesJson`.
- Remote Control is reachable from the network, so the bridge is bounded: at
- most 16 rig sensors per actor and 8 rig cameras per world, and changes need a
- play world (PIE or a game), never the editor's level or a class default.
- Capture state is world-wide, so `StartCameraStreamsJson` only adds to it: it
- turns channels on (never off), changes the rate and disk writes only when
- asked (a capture session it starts writes nothing to disk unless asked), and
- refuses a port another program already listens on.
+ Remote Control is reachable from the network, so the bridge is bounded: actor
+ paths of at most 1023 characters made of names that already exist (looked up,
+ never added to the name table), finite numbers, at most 16 rig sensors per
+ actor and 8 rig cameras per world, no disk writes (`"save_to_disk": true` is
+ refused), and changes need a play world (PIE or a game), never the editor's
+ level or a class default. Capture state is world-wide, so camera streams only
+ add to it and take back exactly what they added: `StartCameraStreamsJson`
+ turns channels on (never off), changes the rate only when asked, starts the
+ capture session only if it is not running (one it starts writes nothing to
+ disk), and refuses a port another program already listens on;
+ `StopCameraStreams` unregisters the rig cameras the streams registered, stops
+ the session only if the streams started it, and turns back the channels, rate
+ and disk writes they changed. A capture session somebody started for
+ recording keeps running as it was. `GetStreamStatusJson` says so in
+ `capture.streams_on` / `capture.started_by_streams`.
 
  Segmentation and RammsUI's camera projector both use the custom-depth
  stencil. While segmentation is on, CameraCapture gives every primitive its
