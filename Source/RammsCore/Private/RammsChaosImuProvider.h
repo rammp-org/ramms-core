@@ -30,8 +30,9 @@ namespace Chaos
  * Bodies are held by their physics proxy. A proxy the game thread releases (a destroyed component, recreated
  * physics state) is dropped on the physics thread before Chaos deletes it (the callback watches particle
  * unregistration, and forgets the body's samples), and the game thread hands over the body's new proxy on its next
- * read. A tracked body that is gone, or that is welded into another body, is no longer valid (IsTrackValid): the
- * subsystem resolves the point again.
+ * read (GetSample or ReadHistory). A tracked body that is gone, or that is welded into another body, is no longer
+ * valid (IsTrackValid): the subsystem resolves the point again. The history keeps complete samples only (a body's
+ * first step, or its first on a new proxy, has no acceleration yet and is left out).
  */
 class FRammsChaosImuProvider final : public IRammsImuProvider
 {
@@ -99,6 +100,10 @@ public:
 private:
 	/** The callback on the world's solver, registered on the first track. */
 	bool EnsureCallback();
+
+	/** Give the physics thread the proxy the point's body has now (none once its physics state is gone, a new one once
+	 *  it is recreated, none once it is welded into another body). Every read does this first. */
+	void HandOverProxy(int32 Handle);
 
 	struct FTracked
 	{

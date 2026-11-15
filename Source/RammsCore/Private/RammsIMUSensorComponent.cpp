@@ -9,6 +9,13 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 
+namespace RammsImuSensorImpl
+{
+	/** How long the engine serving a sensor may go without a sample (a body handed a new proxy, a scene recompiled)
+	 *  before the sensor differences its transform instead (s, game time): the subsystem's re-resolution period. */
+	constexpr double MaxPendingRepeatSeconds = 1.0;
+} // namespace RammsImuSensorImpl
+
 URammsIMUSensorComponent::URammsIMUSensorComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -33,8 +40,9 @@ ERammsImuSource URammsIMUSensorComponent::GetRequestedSource() const
 	return Source == ERammsImuSource::Auto && !bUsePhysicsVelocity ? ERammsImuSource::Kinematic : Source;
 }
 
-bool URammsIMUSensorComponent::SamplePhysics(FRammsImuSample& OutSample)
+bool URammsIMUSensorComponent::SamplePhysics(FRammsImuSample& OutSample, bool& bOutPending)
 {
+	bOutPending = false;
 	const ERammsImuSource	   Wanted = GetRequestedSource();
 	URammsPhysicsImuSubsystem* Imu = URammsPhysicsImuSubsystem::Get(this);
 	if (!Imu)
@@ -69,7 +77,18 @@ bool URammsIMUSensorComponent::SamplePhysics(FRammsImuSample& OutSample)
 			return false;
 		}
 	}
-	return Imu->GetTrackedSource(PhysicsHandle) != ERammsImuSource::Kinematic && Imu->GetSample(PhysicsHandle, OutSample) && OutSample.bValid;
+	if (Imu->GetTrackedSource(PhysicsHandle) == ERammsImuSource::Kinematic)
+	{
+		return false;
+	}
+	if (Imu->GetSample(PhysicsHandle, OutSample) && OutSample.bValid)
+	{
+		return true;
+	}
+	// An engine serves the point but has no sample just now (its body was handed a new physics proxy, its scene
+	// recompiled): the engine's next step brings one.
+	bOutPending = true;
+	return false;
 }
 
 void URammsIMUSensorComponent::BeginPlay()
@@ -143,7 +162,21 @@ void URammsIMUSensorComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	// --- The physics engine's sample of this sensor's frame, when one simulates the body it rides on ---
 	// (Chaos / MuJoCo, at the physics rate, at this sensor's point; see Source)
 	FRammsImuSample PhysicsSample;
-	const bool		bPhysicsSample = SamplePhysics(PhysicsSample);
+	bool			bPhysicsPending = false;
+	bool			bPhysicsSample = SamplePhysics(PhysicsSample, bPhysicsPending);
+	if (bPhysicsSample)
+	{
+		LastPhysicsSampleGameTime = GameTime;
+	}
+	else if (bPhysicsPending && bLastMeasurementPhysics && bPreviousPhysicsValid && PreviousPhysicsHandle == PhysicsHandle
+		&& GameTime - LastPhysicsSampleGameTime <= RammsImuSensorImpl::MaxPendingRepeatSeconds)
+	{
+		// The engine still serves this sensor but has no sample for a moment: its last sample again (the same reading
+		// again, below) rather than a switch to differencing and back, which would read one measurement without the
+		// interval's motion.
+		PhysicsSample = PreviousPhysicsSample;
+		bPhysicsSample = true;
+	}
 	if (bPhysicsSample != bLastMeasurementPhysics)
 	{
 		// A change of path: neither differences against the other's state (an engine's point velocity against a

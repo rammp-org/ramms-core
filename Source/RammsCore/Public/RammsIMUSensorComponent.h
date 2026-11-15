@@ -64,8 +64,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnIMUDataUpdated, const FIMUSensorD
  * spans (minus gravity), the gyroscope the mean angular velocity (the turn
  * over the interval divided by its time), both in the sensor frame halfway
  * through the turn. Not one physics step's sample. No new engine step since
- * the last measurement repeats it. The filters, noise, bias and gravity
- * options then apply as before.
+ * the last measurement repeats it, as does a moment (up to a second) in which
+ * the engine has no sample (its body handed a new physics proxy, its scene
+ * recompiled). The filters, noise, bias and gravity options then apply as
+ * before.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsIMUSensorComponent : public USceneComponent
@@ -204,8 +206,9 @@ protected:
 
 private:
 	/** The physics engine's latest sample of this sensor's frame, tracking it first if need be. False when Source
-	 *  resolves to Kinematic or the engine has no sample yet. */
-	bool SamplePhysics(FRammsImuSample& OutSample);
+	 *  resolves to Kinematic or the engine has no sample yet; bOutPending: an engine serves the point but has no
+	 *  sample just now (a moment without one repeats the last reading rather than switching to differencing). */
+	bool SamplePhysics(FRammsImuSample& OutSample, bool& bOutPending);
 
 	/** The point URammsPhysicsImuSubsystem tracks for this sensor (0: none), and the source it was asked for. */
 	int32			PhysicsHandle = 0;
@@ -225,6 +228,9 @@ private:
 
 	/** Whether the last measurement used an engine's samples: a change of path starts the differencing over. */
 	bool bLastMeasurementPhysics = false;
+
+	/** Game time of the last measurement that had a fresh engine sample (s): how long a gap is bridged. */
+	double LastPhysicsSampleGameTime = 0.0;
 
 	/** Game time of the last measurement (s): the interval the transform differencing divides by. */
 	double LastMeasurementTime = 0.0;

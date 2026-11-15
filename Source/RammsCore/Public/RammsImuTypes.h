@@ -68,8 +68,11 @@ struct RAMMSCORE_API FRammsImuSample
 	FVector AngularVelocity = FVector::ZeroVector;
 
 	/** What an accelerometer at the point reads, in world axes (cm/s^2): its acceleration minus gravity, so +|g| up
-	 *  at rest and about zero in free fall. The acceleration the engine's integrator applied over the step (Chaos:
-	 *  the velocity change over the step; MuJoCo: by default the same, ramms.Imu.MuJoCoAcceleration). */
+	 *  at rest and about zero in free fall. The acceleration the engine's integrator applied over a step: for Chaos
+	 *  the velocity change of the step that ENDS at this sample's state, for MuJoCo (by default; see
+	 *  ramms.Imu.MuJoCoAcceleration) that of the step that STARTS at it, the state its forward pass computed. So the
+	 *  two engines' accelerations are a step apart in phase; differencing LinearVelocity across samples gives one
+	 *  convention for both. */
 	UPROPERTY(BlueprintReadOnly, Category = "IMU")
 	FVector ProperAcceleration = FVector::ZeroVector;
 
@@ -86,7 +89,8 @@ struct RAMMSCORE_API FRammsImuSample
 /**
  * The last Capacity samples of one tracked point, one per physics step, numbered by a sequence that only grows (the
  * first sample pushed is 0). SetCapacity allocates (game thread); Push never does, so a physics thread can keep it.
- * Not thread-safe: its owner locks.
+ * Not thread-safe: its owner locks. Providers push complete samples only (bHasAcceleration): a history row always
+ * carries a measured acceleration, never a stand-in zero.
  */
 struct RAMMSCORE_API FRammsImuSampleRing
 {

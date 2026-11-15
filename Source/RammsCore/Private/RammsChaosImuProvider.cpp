@@ -97,7 +97,12 @@ public:
 			Point.Current = State;
 			Point.Latest = FRammsChaosImuProvider::MakeSample(Point.Previous, Point.Current, Sensor.GetLocation(), Sensor.GetRotation(),
 				Sensor.GetLocation() - FVector(Particle->PCom()), Gravity);
-			Point.History.Push(Point.Latest); // sized on the game thread: no allocation here
+			if (Point.Latest.bHasAcceleration)
+			{
+				// Complete samples only: a body's first step (or its first after a new proxy) has no acceleration yet,
+				// and a history row of zeros would read as free fall. Sized on the game thread: no allocation here.
+				Point.History.Push(Point.Latest);
+			}
 		}
 	}
 
@@ -261,18 +266,16 @@ int32 FRammsChaosImuProvider::Track(const FRammsImuBodyRef& Ref)
 		FPoint&	   Point = Table->Points.Add(Handle);
 		Point.PointInBody = Ref.PointInBody;
 	}
-	// Hands the body's proxy over.
-	FRammsImuSample Unused;
-	GetSample(Handle, Unused);
+	HandOverProxy(Handle);
 	return Handle;
 }
 
-bool FRammsChaosImuProvider::GetSample(int32 Handle, FRammsImuSample& OutSample)
+void FRammsChaosImuProvider::HandOverProxy(int32 Handle)
 {
 	const FTracked* Entry = Tracked.Find(Handle);
 	if (!Entry)
 	{
-		return false;
+		return;
 	}
 	// The body's proxy as the game thread holds it now: null once its physics state is gone, a new one once it is
 	// recreated. A body welded into another since it was resolved is not this point's body any more (the subsystem
@@ -287,15 +290,26 @@ bool FRammsChaosImuProvider::GetSample(int32 Handle, FRammsImuSample& OutSample)
 	}
 
 	FScopeLock Guard(&Table->Lock);
-	FPoint*	   Point = Table->Points.Find(Handle);
-	if (!Point)
-	{
-		return false;
-	}
-	if (Point->Proxy != Proxy)
+	if (FPoint* Point = Table->Points.Find(Handle); Point && Point->Proxy != Proxy)
 	{
 		Point->Proxy = Proxy;
 		++Point->Generation;
+	}
+}
+
+bool FRammsChaosImuProvider::GetSample(int32 Handle, FRammsImuSample& OutSample)
+{
+	if (!Tracked.Contains(Handle))
+	{
+		return false;
+	}
+	HandOverProxy(Handle);
+
+	FScopeLock	  Guard(&Table->Lock);
+	const FPoint* Point = Table->Points.Find(Handle);
+	if (!Point)
+	{
+		return false;
 	}
 	if (Point->SeenGeneration != Point->Generation || !Point->Latest.bValid)
 	{
@@ -337,6 +351,10 @@ void FRammsChaosImuProvider::SetHistoryCapacity(int32 Handle, int32 Capacity)
 bool FRammsChaosImuProvider::ReadHistory(int32 Handle, int64 Since, int32 Max, TArray<FRammsImuSample>& OutSamples, int64& OutFirst,
 	int64& OutOldest, int64& OutNext)
 {
+	// A point only read through its history (an RMSS stream's, a Remote Control cursor's) follows its body to a new
+	// proxy too: its physics state may be recreated in one call, which no validity check sees.
+	HandOverProxy(Handle);
+
 	FScopeLock	  Guard(&Table->Lock);
 	const FPoint* Point = Table->Points.Find(Handle);
 	if (!Point || Point->History.GetCapacity() == 0)
