@@ -232,7 +232,9 @@ namespace RammsDrive
 						}
 					}
 				}
-				else if (Surface && !Surface->SetControl(C.Id, Value, ERammsControlSource::Autonomy))
+				// The robot's own command (SetControlInternal): not an Autonomy
+				// client being there, so it keeps no client's commands alive.
+				else if (Surface && !Surface->SetControlInternal(C.Id, Value, ERammsControlSource::Autonomy))
 				{
 					Refused.Add(i);
 				}
@@ -241,7 +243,7 @@ namespace RammsDrive
 		for (const int32 i : Refused)
 		{
 			const FStanceChannel& C = Channels[i];
-			Surface->SetControl(C.Id, static_cast<float>(StanceRampValue(C, Elapsed, Duration)), ERammsControlSource::Autonomy);
+			Surface->SetControlInternal(C.Id, static_cast<float>(StanceRampValue(C, Elapsed, Duration)), ERammsControlSource::Autonomy);
 		}
 	}
 } // namespace RammsDrive
@@ -618,8 +620,9 @@ int32 URammsDriveModeSelector::CommandLinkageAxes(URammsRobotControlSurfaceCompo
 			continue;
 		}
 		// Autonomy: taking a stance is the robot's own doing, and it has to
-		// win over whatever a panel last left on the axis.
-		if (Surface.SetControl(Axis.Id, Value, ERammsControlSource::Autonomy))
+		// win over whatever a panel last left on the axis. Internal: the robot,
+		// not an Autonomy client (it keeps no client's commands alive).
+		if (Surface.SetControlInternal(Axis.Id, Value, ERammsControlSource::Autonomy))
 		{
 			++Commanded;
 		}
@@ -762,11 +765,18 @@ FString URammsDriveModeSelector::ActivateMode(int32 Index, const FRammsDriveMoti
 	// would brake. Only what the outgoing mode is following now: a command
 	// the surface still records but something else has since overwritten is
 	// not the operator's.
+	//
+	// Each with when it was last commanded: carried, a command keeps that time
+	// (ReapplyHeldControl), so a remote client that went quiet before the
+	// switch gets no fresh lease from it and the drive deadman springs it back
+	// on schedule.
 	struct FHeldDrive
 	{
 		FName				Id;
 		float				Value = 0.0f;
 		ERammsControlSource Source = ERammsControlSource::Script;
+		bool				bHeld = false;
+		double				HoldTime = 0.0;
 	};
 	TArray<FHeldDrive, TInlineAllocator<4>> Held;
 	if (Seed && Surface)
@@ -781,7 +791,8 @@ FString URammsDriveModeSelector::ActivateMode(int32 Index, const FRammsDriveMoti
 			if (Surface->GetControlTarget(Axis.Id, Target) && !FMath::IsNearlyZero(Target)
 				&& FMath::IsNearlyEqual(Surface->GetControlValue(Axis.Id), Target, 1e-3f))
 			{
-				Held.Add({ Axis.Id, Target, IRammsControlSink::Execute_GetAxisOwner(Surface, Axis.Id) });
+				FHeldDrive& H = Held.Add_GetRef({ Axis.Id, Target, IRammsControlSink::Execute_GetAxisOwner(Surface, Axis.Id) });
+				H.bHeld = Surface->GetHoldTime(Axis.Id, H.HoldTime);
 			}
 		}
 	}
@@ -819,7 +830,10 @@ FString URammsDriveModeSelector::ActivateMode(int32 Index, const FRammsDriveMoti
 	int32 Carried = 0;
 	for (const FHeldDrive& H : Held)
 	{
-		if (Surface->SetControl(H.Id, H.Value, H.Source))
+		// Nobody held it (a value nothing claims): nothing to keep the time of.
+		const bool bApplied = H.bHeld ? Surface->ReapplyHeldControl(H.Id, H.Value, H.Source, H.HoldTime)
+									  : Surface->SetControlInternal(H.Id, H.Value, H.Source);
+		if (bApplied)
 		{
 			++Carried;
 		}

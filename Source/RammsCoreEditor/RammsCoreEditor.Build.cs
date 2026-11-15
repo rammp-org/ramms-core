@@ -19,7 +19,12 @@ public class RammsCoreEditor : ModuleRules
 				"BlueprintGraph",
 				"Slate",
 				"SlateCore",
-				"RammsCore"
+				"RammsCore",
+				// The control-surface model (its own plugin), which RammsCore's
+				// control-surface headers use: the deadman tests (Private/Tests)
+				// live here, so their test contributor -- a UCLASS -- stays out of
+				// game and Shipping builds.
+				"RammsControl"
 			}
 		);
 	}

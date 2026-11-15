@@ -1041,7 +1041,10 @@ void URammsRammpGen1CurbController::StowArm()
 		}
 		bStow |= Axis.Id == FName("arm.stow");
 	}
-	if (bStow && Surface->TriggerControl(FName("arm.stow"), ERammsControlSource::Autonomy))
+	// The robot's own commands (the Internal calls): not an Autonomy client being there, so they keep no client's
+	// commands alive, and the drive deadman does not watch them -- the hold on the arm lapses on its own once the
+	// crossing stops renewing it (HoldArm, every step).
+	if (bStow && Surface->TriggerControlInternal(FName("arm.stow"), ERammsControlSource::Autonomy))
 	{
 		PhaseLog.Add(TEXT("        the arm stowed for the crossing"));
 	}
@@ -1058,7 +1061,7 @@ void URammsRammpGen1CurbController::HoldArm()
 	{
 		for (const FName Id : ArmAxes)
 		{
-			Surface->SetControl(Id, 0.0f, ERammsControlSource::Autonomy);
+			Surface->SetControlInternal(Id, 0.0f, ERammsControlSource::Autonomy);
 		}
 	}
 }
