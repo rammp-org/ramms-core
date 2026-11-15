@@ -128,7 +128,7 @@ bool FRammsImuLeverArmTest::RunTest(const FString& Parameters)
 	// The cross product turns the way Unreal's quaternions do: a point turned by w dt moves by (w x r) dt.
 	const FVector Spin(0.3, -0.2, 1.5); // rad/s
 	const FVector Lever(40.0, 10.0, -25.0);
-	const double  Dt = 1.0e-4;
+	const double  Dt = 1.0e-5;
 	const FQuat	  Turn(Spin.GetSafeNormal(), Spin.Size() * Dt);
 	NearlyEqualVectors(*this, TEXT("w x r is the velocity a turn gives"), RammsImuMath::PointVelocity(FVector::ZeroVector, Spin, Lever),
 		(Turn.RotateVector(Lever) - Lever) / Dt, 1.0e-2);
