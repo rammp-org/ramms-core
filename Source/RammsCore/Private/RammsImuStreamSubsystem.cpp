@@ -7,6 +7,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "HAL/PlatformTime.h"
 #include "RammsImuMath.h"
 #include "RammsPhysicsImuSubsystem.h"
 #include "RammsStreamingSubsystem.h"
@@ -14,6 +15,8 @@
 #include "Serialization/JsonWriter.h"
 
 static_assert(PLATFORM_LITTLE_ENDIAN, "IMU stream records are little-endian float64, written as the platform stores them");
+
+DEFINE_LOG_CATEGORY_STATIC(LogRammsImuStream, Log, All);
 
 const TCHAR* const RammsImuRecord::FieldNames[RammsImuRecord::NumFields] = {
 	TEXT("seq"), TEXT("sim_time"),
@@ -128,6 +131,40 @@ bool URammsImuStreamSubsystem::StartStream(const FRammsImuStream& Stream, FStrin
 	return true;
 }
 
+bool URammsImuStreamSubsystem::HasRoomFor(const FString& ActorPath, const FString& Target, FString& OutError) const
+{
+	int32 Others = 0;
+	for (const FRammsImuStream& Running : Streams)
+	{
+		if (Running.ActorPath == ActorPath && Running.Target == Target)
+		{
+			return true; // a restart takes the place of the stream it replaces
+		}
+		++Others;
+	}
+	if (Others >= MaxStreams)
+	{
+		OutError = FString::Printf(TEXT("the world runs %d IMU streams already, the most it may (stop one with StopImuStream; a stream no RMSS "
+										"client subscribes to stops by itself after %.0f s)"),
+			MaxStreams, UnwantedTimeoutSeconds);
+		return false;
+	}
+	return true;
+}
+
+bool URammsImuStreamSubsystem::ReleaseStreamPoint(const FString& ActorPath, const FString& Target)
+{
+	for (FRammsImuStream& Running : Streams)
+	{
+		if (Running.ActorPath == ActorPath && Running.Target == Target)
+		{
+			Release(Running);
+			return true;
+		}
+	}
+	return false;
+}
+
 bool URammsImuStreamSubsystem::StopStream(const FString& ActorPath, const FString& Target)
 {
 	for (int32 i = 0; i < Streams.Num(); ++i)
@@ -162,11 +199,31 @@ bool URammsImuStreamSubsystem::Pump(FRammsImuStream& Stream)
 	FRammsImuHistoryRead Read;
 	Imu->ReadHistory(Stream.Handle, Stream.Cursor, URammsPhysicsImuSubsystem::HistoryCapacity, Read);
 	Stream.Cursor = Read.Next;
-	const int32				  Count = Read.Samples.Num();
+
+	// Nobody to send it to (no server, or no client subscribed to the channel): nothing is built, and a stream left so
+	// for UnwantedTimeoutSeconds stops (its client went away without StopImuStream).
 	URammsStreamingSubsystem* Streaming = RammsImuStreamImpl::StreamingOf(World);
-	if (Count == 0 || !Streaming || !Streaming->IsServerRunning())
+	if (!Streaming || !Streaming->IsChannelWanted(Stream.Channel))
 	{
-		return true; // nothing new, or nobody to send it to
+		const double WallNow = FPlatformTime::Seconds();
+		if (Stream.UnwantedSince < 0.0)
+		{
+			Stream.UnwantedSince = WallNow;
+		}
+		else if (WallNow - Stream.UnwantedSince >= UnwantedTimeoutSeconds)
+		{
+			UE_LOG(LogRammsImuStream, Log, TEXT("IMU stream %s on channel %d stopped: no RMSS client has wanted the channel for %.0f s"),
+				*Stream.StreamId, Stream.Channel, UnwantedTimeoutSeconds);
+			return false;
+		}
+		return true;
+	}
+	Stream.UnwantedSince = -1.0;
+
+	const int32 Count = Read.Samples.Num();
+	if (Count == 0)
+	{
+		return true; // nothing new
 	}
 
 	constexpr int32 RecordBytes = static_cast<int32>(RammsImuRecord::NumFields * sizeof(double));

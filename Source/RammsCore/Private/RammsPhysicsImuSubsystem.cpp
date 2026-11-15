@@ -132,7 +132,12 @@ namespace RammsPhysicsImuImpl
 			}
 			const FRammsImuSample& Sample = Point.Differencer.Step(InWorld->GetTimeSeconds(),
 				Point.PointInBody * RammsImuProviders::ComponentFrame(*Body, Point.Bone), FVector(0.0, 0.0, InWorld->GetGravityZ()));
-			Point.History.Push(Sample); // the same frame again replaces itself
+			if (Sample.bHasAcceleration)
+			{
+				// Complete samples only (the first two frames give a pose, then a velocity); the same frame again
+				// replaces itself.
+				Point.History.Push(Sample);
+			}
 		}
 
 		TWeakObjectPtr<UWorld> OwnerWorld;
@@ -209,17 +214,64 @@ int32 URammsPhysicsImuSubsystem::Track(USceneComponent* Component, FVector Local
 int32 URammsPhysicsImuSubsystem::TrackPose(USceneComponent* Component, FName Bone, const FTransform& LocalPose, ERammsImuSource Preferred,
 	float IdleTimeoutSeconds)
 {
+	FString Unused;
+	return TrackPoint(Component, Bone, LocalPose, Preferred, IdleTimeoutSeconds, /*bBridge=*/false, Unused);
+}
+
+int32 URammsPhysicsImuSubsystem::TrackBridgePose(USceneComponent* Component, FName Bone, const FTransform& LocalPose, ERammsImuSource Preferred,
+	float IdleTimeoutSeconds, FString& OutError)
+{
+	return TrackPoint(Component, Bone, LocalPose, Preferred, IdleTimeoutSeconds, /*bBridge=*/true, OutError);
+}
+
+int32 URammsPhysicsImuSubsystem::GetBridgePointCount() const
+{
+	int32 Count = 0;
+	for (const TPair<int32, FTrackedPoint>& Pair : Points)
+	{
+		Count += Pair.Value.bBridge ? 1 : 0;
+	}
+	return Count;
+}
+
+int32 URammsPhysicsImuSubsystem::TrackPoint(USceneComponent* Component, FName Bone, const FTransform& LocalPose, ERammsImuSource Preferred,
+	float IdleTimeoutSeconds, bool bBridge, FString& OutError)
+{
 	if (!IsValid(Component))
 	{
+		OutError = TEXT("no component to track");
 		return 0;
 	}
+	// A refused point is logged once: the IMU component asks again every second and a Remote Control client may poll
+	// many times a second, so later refusals stay quiet until a point is tracked again.
+	const auto Refuse = [this, Component, &OutError](bool& bLogged, const FString& Why) {
+		OutError = Why;
+		if (!bLogged)
+		{
+			bLogged = true;
+			UE_LOG(LogRammsPhysicsImuSubsystem, Warning, TEXT("%s: not tracking an IMU point on %s: %s (further refusals are not logged until a point is tracked again)"),
+				*GetNameSafe(GetWorld()), *Component->GetPathName(), *Why);
+		}
+		return 0;
+	};
 	if (Points.Num() >= MaxTrackedPoints)
 	{
-		UE_LOG(LogRammsPhysicsImuSubsystem, Warning, TEXT("%s: not tracking an IMU point on %s: the world tracks %d already"),
-			*GetNameSafe(GetWorld()), *Component->GetPathName(), MaxTrackedPoints);
-		return 0;
+		return Refuse(bLoggedWorldFull, FString::Printf(TEXT("the world tracks %d IMU points already, the most it may"), MaxTrackedPoints));
+	}
+	if (bBridge && GetBridgePointCount() >= MaxBridgePoints)
+	{
+		return Refuse(bLoggedBridgeFull,
+			FString::Printf(TEXT("Remote Control holds %d IMU points already, the most it may (points nobody reads are dropped after a "
+								 "while; stop the IMU streams no longer needed)"),
+				MaxBridgePoints));
+	}
+	bLoggedWorldFull = false;
+	if (bBridge)
+	{
+		bLoggedBridgeFull = false;
 	}
 	FTrackedPoint Point;
+	Point.bBridge = bBridge;
 	Point.Component = Component;
 	Point.Bone = Bone;
 	Point.LocalPose = LocalPose;

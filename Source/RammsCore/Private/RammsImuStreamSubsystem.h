@@ -38,11 +38,18 @@ struct FRammsImuStream
 	int32				   Handle = 0;	 // its URammsPhysicsImuSubsystem point
 	int32				   Channel = -1; // RMSS channel
 	int64				   Cursor = -1;	 // the next sample sequence to send (-1: from now)
+
+	/** Wall time since when no RMSS client has wanted the channel (-1: one does). */
+	double UnwantedSince = -1.0;
 };
 
 /**
  * The world's IMU streams: each game tick, every stream with new physics-step samples sends them as one RMSS
  * FrameData message ("imu_f64x18") through URammsStreamingSubsystem. Play worlds only.
+ *
+ * At most MaxStreams per world. A stream no RMSS client has wanted (subscribed to its channel, or to every channel)
+ * for UnwantedTimeoutSeconds stops by itself, its point released: a client that went away without StopImuStream
+ * leaves nothing running. Nothing is built for a channel nobody wants.
  */
 UCLASS()
 class URammsImuStreamSubsystem : public UTickableWorldSubsystem
@@ -63,6 +70,21 @@ public:
 
 	const TArray<FRammsImuStream>& GetStreams() const { return Streams; }
 
+	/** IMU streams one world runs at most. */
+	static constexpr int32 MaxStreams = 8;
+
+	/** Seconds a stream runs with no RMSS client wanting its channel before it stops (wall time). */
+	double UnwantedTimeoutSeconds = 30.0;
+
+	/** Whether a stream of ActorPath / Target may start: a restart always may; a new one while fewer than MaxStreams
+	 *  run. False and why in OutError. */
+	bool HasRoomFor(const FString& ActorPath, const FString& Target, FString& OutError) const;
+
+	/** Release the point of the running stream of ActorPath / Target, if any, ahead of a restart (it keeps its entry,
+	 *  and so its channel, until StartStream replaces it; one left without a point stops on the next tick). True when
+	 *  there was one. */
+	bool ReleaseStreamPoint(const FString& ActorPath, const FString& Target);
+
 	// UTickableWorldSubsystem
 	virtual void	Deinitialize() override;
 	virtual void	Tick(float DeltaTime) override;
@@ -76,7 +98,8 @@ protected:
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
 private:
-	/** Send what the stream's point gathered since its cursor; false when the point is gone. */
+	/** Send what the stream's point gathered since its cursor; false when the point is gone, or no RMSS client has
+	 *  wanted its channel for UnwantedTimeoutSeconds. */
 	bool Pump(FRammsImuStream& Stream);
 
 	/** Untrack a stream's point. */

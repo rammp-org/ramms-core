@@ -281,7 +281,9 @@ This helps ensure that consistent code formatting is applied.
  divided by the engine time it spans (gravity then added as an accelerometer
  feels it), the gyroscope the mean angular velocity (the turn over the
  interval divided by its time), both in the sensor frame halfway through the
- turn. No new engine step since the last measurement repeats it. `Kinematic`
+ turn. No new engine step since the last measurement repeats it, as does a
+ moment (up to a second) in which the engine has no sample (its body handed a
+ new physics proxy, its scene recompiled). `Kinematic`
  differences the component's transform at the game rate (over the time since
  the last measurement). Filters, dead-bands, noise, bias and `bIncludeGravity`
  apply the same way to every source.
@@ -306,9 +308,16 @@ This helps ensure that consistent code formatting is applied.
    (`HistoryCapacity` = 1024, over 2 s of MuJoCo's 500 Hz);
    `ReadHistory(Handle, Since, Max, Out)` returns those from a sequence number
    on (`Since` < 0: none, just the cursor), the next cursor and how many were
-   dropped. The sequence goes on when a point moves to another engine.
+   dropped. The sequence goes on when a point moves to another engine. The
+   ring keeps complete samples only: a Kinematic point's first two frames (a
+   pose, then a velocity) and an engine's first step on a body (or on its new
+   physics proxy) carry no acceleration and are left out, so every row has a
+   measured acceleration.
  - At most `MaxTrackedPoints` = 64 points per world (IMU components and bridge
-   reads together); more are refused.
+   reads together); more are refused. The sensing bridge (`TrackBridgePose`)
+   may hold at most `MaxBridgePoints` = 32 of them, so a Remote Control client
+   that leaves points behind cannot take the robots' own IMU components'. A
+   refusal is logged once, not on every retry, until a point is tracked again.
  - Every point is resolved again each second, and at once when its provider
    reports its body gone: a robot whose physics comes up later, that is handed
    to another engine (a URLab robot switched to Chaos), or a component moved
@@ -318,8 +327,8 @@ This helps ensure that consistent code formatting is applied.
 
  | Provider | Module | Samples |
  |---|---|---|
- | Chaos | RammsCore | After every solver step (a sim callback's PostSolve): the body's velocity at its centre of mass and angular velocity, accelerations as their change over the step, the lever arm to the point. Gravity is the solver's for that body (its gravity group's; none when its gravity is off). Stamped with the step's end. |
- | MuJoCo | RammsMujocoSupport | After every URLab step: `mj_rnePostConstraint`, then `mj_objectVelocity` / `mj_objectAcceleration` of the body frame and the lever arm. By default the acceleration the integrator applied, (qvel after − qvel before) / timestep (as Chaos); `ramms.Imu.MuJoCoAcceleration 1` reports MuJoCo's own accelerometer convention, the forward pass's qacc, instead. Stamped with the step's start (the state its forward pass computed). A body Unreal poses (mocap) is left to Kinematic. |
+ | Chaos | RammsCore | After every solver step (a sim callback's PostSolve): the body's velocity at its centre of mass and angular velocity, accelerations as their change over the step (the step that ends at the sample), the lever arm to the point. Gravity is the solver's for that body (its gravity group's; none when its gravity is off). Stamped with the step's end. A body whose physics state is recreated is followed to its new proxy on the next read (a sample or a history read). |
+ | MuJoCo | RammsMujocoSupport | After every URLab step: `mj_rnePostConstraint`, then `mj_objectVelocity` / `mj_objectAcceleration` of the body frame and the lever arm. By default the acceleration the integrator applied, (qvel after − qvel before) / timestep, over the step that starts at the sample (a step ahead of Chaos' in phase); `ramms.Imu.MuJoCoAcceleration 1` reports MuJoCo's own accelerometer convention, the forward pass's qacc, instead. Stamped with the step's start (the state its forward pass computed; RK4: the end, its last stage's state). Serves a body only while its compiled scene has it: until the scene compiles, when it fails to, or once a recompile leaves the body out, the point is Kinematic. A body Unreal poses (mocap) is left to Kinematic. |
  | Kinematic | RammsCore | The point's frame differenced at the game rate. |
 
  Over Remote Control (`URammsSensingBridge`, `Private/RammsSensingBridgeImu.cpp`;
@@ -348,7 +357,13 @@ This helps ensure that consistent code formatting is applied.
    fields, units, source, actor, target, body, `first_seq`, `count`,
    `dropped`. `GetStreamStatusJson` lists IMU streams with role `imu`.
 
- Points the bridge tracks are dropped after 10 s without a read.
+ Points the bridge tracks are dropped after 10 s without a read; it holds at
+ most 32 (`MaxBridgePoints`) of a world's 64. At most 8 IMU streams run per
+ world (`URammsImuStreamSubsystem::MaxStreams`; a restart takes its own
+ place); a stream no RMSS client has subscribed to (its channel, or every
+ channel) for 30 s stops by itself, and nothing is built for a channel nobody
+ wants. The stream's `port` is clamped to 1..65535. Body and target names are
+ at most 256 characters.
 
  ---
 

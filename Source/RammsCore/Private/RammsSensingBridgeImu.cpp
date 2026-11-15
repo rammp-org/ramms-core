@@ -31,6 +31,20 @@ namespace RammsSensingBridgeImuImpl
 	/** The RMSS port a stream starts the server on when none is given. */
 	constexpr int32 DefaultStreamPort = 30030;
 
+	/** The longest body / target name a caller may give (as the main bridge's names). */
+	constexpr int32 MaxImuNameLength = 256;
+
+	/** A body / target name from a caller, trimmed; false (OutError) when it is too long to be any name. */
+	bool CheckImuName(const FString& Text, const TCHAR* What, FString& OutError)
+	{
+		if (Text.TrimStartAndEnd().Len() > MaxImuNameLength)
+		{
+			OutError = FString::Printf(TEXT("%s is longer than %d characters"), What, MaxImuNameLength);
+			return false;
+		}
+		return true;
+	}
+
 	// --- JSON ------------------------------------------------------------------
 
 	FString ToJson(const TSharedRef<FJsonObject>& Obj)
@@ -257,6 +271,10 @@ namespace RammsSensingBridgeImuImpl
 	bool FindImuBody(AActor& Actor, URammsPhysicsImuSubsystem& Imu, const FString& Name, USceneComponent*& OutComponent, FName& OutBone,
 		FString& OutError)
 	{
+		if (!CheckImuName(Name, TEXT("the body name"), OutError))
+		{
+			return false;
+		}
 		TArray<FRammsImuBodyRef> Bodies;
 		Imu.ListBodies(Actor, Bodies);
 		const FString Wanted = Name.TrimStartAndEnd();
@@ -292,13 +310,15 @@ namespace RammsSensingBridgeImuImpl
 				}
 			}
 		}
-		const FName AsName(*Wanted);
+		// A bone or socket that exists has an FName already: only look one up, so a caller's text never adds a name to
+		// the name table (which only grows) and none can be too long for it.
+		const FName AsName(*Wanted, FNAME_Find);
 		for (AActor* Each : Actors)
 		{
 			TInlineComponentArray<USkeletalMeshComponent*> Meshes(Each);
 			for (USkeletalMeshComponent* Mesh : Meshes)
 			{
-				if (IsValid(Mesh) && !Mesh->GetSocketBoneName(AsName).IsNone())
+				if (!AsName.IsNone() && IsValid(Mesh) && !Mesh->GetSocketBoneName(AsName).IsNone())
 				{
 					OutComponent = Mesh;
 					OutBone = AsName;
@@ -361,6 +381,10 @@ namespace RammsSensingBridgeImuImpl
 	bool ResolveImuTarget(AActor& Actor, URammsPhysicsImuSubsystem& Imu, const FString& Target, const FImuOptions& Options, FImuTarget& Out,
 		FString& OutError)
 	{
+		if (!CheckImuName(Target, TEXT("the target"), OutError))
+		{
+			return false;
+		}
 		if (URammsIMUSensorComponent* Sensor = FindImuSensor(Actor, Target))
 		{
 			Out.Component = Sensor;
@@ -399,18 +423,8 @@ namespace RammsSensingBridgeImuImpl
 		return Tracks;
 	}
 
-	FString TrackRefusal(const URammsPhysicsImuSubsystem& Imu, const USceneComponent& Component)
-	{
-		if (Imu.GetTrackedCount() >= URammsPhysicsImuSubsystem::MaxTrackedPoints)
-		{
-			return FString::Printf(TEXT("the world tracks %d IMU points already, the most it may"),
-				static_cast<int32>(URammsPhysicsImuSubsystem::MaxTrackedPoints));
-		}
-		return TEXT("could not track ") + Component.GetName();
-	}
-
-	/** The point a target's key names, tracked (dropped after 10 s without a read) on first use. 0 and OutError when
-	 *  it cannot be. */
+	/** The point a target's key names, tracked (dropped after 10 s without a read) on first use, against the bridge's
+	 *  own quota (URammsPhysicsImuSubsystem::MaxBridgePoints). 0 and OutError when it cannot be. */
 	int32 AcquireTrack(UWorld& World, URammsPhysicsImuSubsystem& Imu, const FImuTarget& Target, FString& OutError)
 	{
 		TMap<FString, FImuReadTrack>& Tracks = ImuReadTracks();
@@ -430,10 +444,9 @@ namespace RammsSensingBridgeImuImpl
 		}
 		FImuReadTrack Started;
 		Started.World = &World;
-		Started.Handle = Imu.TrackPose(Target.Component, Target.Bone, Target.LocalPose, Target.Preferred, ImuReadIdleSeconds);
+		Started.Handle = Imu.TrackBridgePose(Target.Component, Target.Bone, Target.LocalPose, Target.Preferred, ImuReadIdleSeconds, OutError);
 		if (Started.Handle == 0)
 		{
-			OutError = TrackRefusal(Imu, *Target.Component);
 			return 0;
 		}
 		Tracks.Add(Target.Key, Started);
@@ -747,16 +760,34 @@ FString URammsSensingBridge::StartImuStreamJson(const FString& ActorPath, const 
 	{
 		return ImuBridgeImpl::Fail(Error);
 	}
-	if (!Streaming->IsServerRunning() && !Streaming->StartServer(Options.Port))
+	const FString StreamActorPath = Actor->GetPathName();
+	const FString StreamTarget = Target.TrimStartAndEnd();
+	if (!Streams->HasRoomFor(StreamActorPath, StreamTarget, Error))
 	{
-		return ImuBridgeImpl::Fail(FString::Printf(TEXT("the RMSS server did not start on port %d"), Options.Port));
+		return ImuBridgeImpl::Fail(Error);
+	}
+	if (!Streaming->IsServerRunning())
+	{
+		// As the camera streams do: a port outside 1..65535 would bind an ephemeral port or be truncated.
+		const int32 Port = FMath::Clamp(Options.Port, 1, 65535);
+		if (!Streaming->StartServer(Port))
+		{
+			const FString Why = Streaming->GetLastServerError();
+			return ImuBridgeImpl::Fail(FString::Printf(TEXT("the RMSS server did not start on port %d%s%s"), Port, Why.IsEmpty() ? TEXT("") : TEXT(": "), *Why));
+		}
 	}
 
-	// The stream's own point: no idle timeout, every step's sample kept for it.
-	const int32 Handle = Imu->TrackPose(Resolved.Component, Resolved.Bone, Resolved.LocalPose, Resolved.Preferred);
+	// The stream's own point (no idle timeout: the stream reads it every tick, and stops when no client wants it),
+	// every step's sample kept for it, on the bridge's quota. A restart at the quota first gives back the point of
+	// the stream it replaces.
+	int32 Handle = Imu->TrackBridgePose(Resolved.Component, Resolved.Bone, Resolved.LocalPose, Resolved.Preferred, 0.0f, Error);
+	if (Handle == 0 && Streams->ReleaseStreamPoint(StreamActorPath, StreamTarget))
+	{
+		Handle = Imu->TrackBridgePose(Resolved.Component, Resolved.Bone, Resolved.LocalPose, Resolved.Preferred, 0.0f, Error);
+	}
 	if (Handle == 0)
 	{
-		return ImuBridgeImpl::Fail(ImuBridgeImpl::TrackRefusal(*Imu, *Resolved.Component));
+		return ImuBridgeImpl::Fail(Error);
 	}
 	Imu->EnableHistory(Handle);
 

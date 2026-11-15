@@ -119,8 +119,9 @@ public:
 	// --- IMU (RammsSensingBridgeImu.cpp) -----------------------------------------
 	// Physics-rate inertial data of any body or IMU sensor (URammsPhysicsImuSubsystem). Units: cm, cm/s, cm/s^2, deg,
 	// deg/s, deg/s^2, s. Accelerations read as an accelerometer does (gravity included: +|g| up at rest). A world
-	// tracks at most 64 points (URammsPhysicsImuSubsystem::MaxTrackedPoints); points these functions track are
-	// dropped after 10 s without a read.
+	// tracks at most 64 points (URammsPhysicsImuSubsystem::MaxTrackedPoints), of which these functions may hold 32
+	// (MaxBridgePoints; the rest stay for IMU components); points they track are dropped after 10 s without a read.
+	// Body and target names are at most 256 characters.
 
 	/**
 	 * An IMU reading of any body, no IMU component needed: a virtual sensor on Body, sampled by the physics engine
@@ -168,6 +169,9 @@ public:
 	 * "imu_f64x18", w = samples, h = 1, 18 little-endian float64 per sample (seq, sim_time, linear acceleration xyz,
 	 * angular velocity xyz, angular acceleration xyz, linear velocity xyz, orientation xyzw), stream_id
 	 * "imu/<actor name>/<target>" (the body's name for Target ""). Starting a stream already running restarts it.
+	 * At most 8 streams per world (URammsImuStreamSubsystem::MaxStreams), each on one of the bridge's points; a stream
+	 * no RMSS client has subscribed to (its channel, or every channel) for 30 s stops by itself. "port" is clamped to
+	 * 1..65535.
 	 * {"ok", "actor", "target", "body", "source", "stream_id", "channel", "message": "FrameData", "fmt", "server"}.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")

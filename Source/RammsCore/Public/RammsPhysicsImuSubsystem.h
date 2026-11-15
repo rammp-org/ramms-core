@@ -68,7 +68,12 @@ struct RAMMSCORE_API FRammsImuHistoryRead
  * physics comes up later (MuJoCo compiles, a Chaos articulation builds), is handed to another engine, or loses the
  * body it rode on moves to whatever serves it now. Its sample sequence goes on across such a move.
  *
- * At most MaxTrackedPoints points per world (IMU components and sensing-bridge reads together).
+ * At most MaxTrackedPoints points per world (IMU components and sensing-bridge reads together), of which the sensing
+ * bridge (Remote Control) may hold MaxBridgePoints (TrackBridgePose): a client that leaves points behind cannot take
+ * the robots' own IMU components' points. A refusal is logged once, not on every retry, until a point is tracked again.
+ *
+ * History (EnableHistory / ReadHistory) keeps complete samples only: a Kinematic point's first two frames (a pose, then
+ * a velocity) and an engine's first step on a body carry no acceleration and are left out of it.
  *
  * Engines plug in through RammsImuProviders (RammsCore's Chaos provider, RammsMujocoSupport's MuJoCo one).
  */
@@ -80,6 +85,9 @@ class RAMMSCORE_API URammsPhysicsImuSubsystem : public UTickableWorldSubsystem
 public:
 	/** Points one world tracks at most. */
 	static constexpr int32 MaxTrackedPoints = 64;
+
+	/** Of those, the points the sensing bridge (Remote Control readers and IMU streams) may hold at once. */
+	static constexpr int32 MaxBridgePoints = 32;
 
 	/** Samples a point with history keeps: over 2 s of MuJoCo's 500 Hz. */
 	static constexpr int32 HistoryCapacity = 1024;
@@ -97,6 +105,11 @@ public:
 	 *  MaxTrackedPoints already. */
 	int32 TrackPose(USceneComponent* Component, FName Bone, const FTransform& LocalPose, ERammsImuSource Preferred,
 		float IdleTimeoutSeconds = 0.0f);
+
+	/** TrackPose for the sensing bridge: the point also counts against MaxBridgePoints. A handle > 0, or 0 and why in
+	 *  OutError. */
+	int32 TrackBridgePose(USceneComponent* Component, FName Bone, const FTransform& LocalPose, ERammsImuSource Preferred,
+		float IdleTimeoutSeconds, FString& OutError);
 
 	/** The point's latest sample (world space, at the point). False before its engine has sampled it. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensors|IMU")
@@ -121,6 +134,9 @@ public:
 
 	/** How many points this world tracks. */
 	int32 GetTrackedCount() const { return Points.Num(); }
+
+	/** How many of them the sensing bridge holds (TrackBridgePose). */
+	int32 GetBridgePointCount() const;
 
 	/** From now on keep the point's samples, one per physics step (HistoryCapacity of them). Allocates once. */
 	void EnableHistory(int32 Handle);
@@ -175,7 +191,13 @@ private:
 		bool bHistory = false;
 		/** The point's sequence numbers are the provider's plus this: they go on across a change of provider. */
 		int64 SeqBase = 0;
+		/** Tracked for the sensing bridge (TrackBridgePose): counted against MaxBridgePoints. */
+		bool bBridge = false;
 	};
+
+	/** TrackPose / TrackBridgePose. */
+	int32 TrackPoint(USceneComponent* Component, FName Bone, const FTransform& LocalPose, ERammsImuSource Preferred, float IdleTimeoutSeconds,
+		bool bBridge, FString& OutError);
 
 	/** The provider for an engine, made on first use (null when no engine registered one). */
 	IRammsImuProvider* GetProvider(ERammsImuSource Source);
@@ -197,4 +219,8 @@ private:
 	TMap<int32, FTrackedPoint>							 Points;
 	TMap<ERammsImuSource, TSharedPtr<IRammsImuProvider>> Providers;
 	int32												 NextHandle = 1;
+	/** A refusal has been logged since the last point was tracked (the world's limit, the bridge's): log the next one
+	 *  only after a track succeeds again. */
+	bool bLoggedWorldFull = false;
+	bool bLoggedBridgeFull = false;
 };
