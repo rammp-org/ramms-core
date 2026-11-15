@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "RammsImuTypes.h"
 #include "RammsIMUSensorComponent.generated.h"
 
 /**
@@ -29,6 +30,11 @@ struct RAMMSCORE_API FIMUSensorData
 	/** Timestamp of the measurement (seconds since game start) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU")
 	float Timestamp = 0.0f;
+
+	/** Where the measurement came from (never Auto): Chaos or MuJoCo, sampled at the physics rate, or Kinematic,
+	 *  differenced from the sensor's transform at the game rate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU")
+	ERammsImuSource Source = ERammsImuSource::Kinematic;
 };
 
 /** Fired each time a new IMU measurement is produced */
@@ -40,6 +46,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnIMUDataUpdated, const FIMUSensorD
  * and orientation. Supports configurable noise, bias, and update rate.
  * Inherits from USceneComponent so it can be attached to any bone, socket,
  * or other component. Uses the component's own world transform as the sensor frame.
+ *
+ * Source picks the data: by default (Auto) the physics engine that simulates
+ * the body the sensor rides on, sampled every physics step at the sensor's
+ * point (URammsPhysicsImuSubsystem): MuJoCo for a URLab body, Chaos for a
+ * simulating primitive or skeletal bone. Elsewhere, and until that engine
+ * has a sample, the transform is differenced at the game rate (Kinematic).
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCORE_API URammsIMUSensorComponent : public USceneComponent
@@ -56,6 +68,16 @@ public:
 	/** Whether the accelerometer output includes gravitational acceleration */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Configuration")
 	bool bIncludeGravity = true;
+
+	/**
+	 * Where the readings come from. Auto: the engine that simulates the body this sensor is attached to (MuJoCo
+	 * for a URLab body or anything below one, Chaos for a simulating primitive or bone), at the physics rate; else
+	 * Kinematic. Chaos / MuJoCo ask for that engine (Auto when it does not simulate the body). Kinematic: the
+	 * transform differenced at the game rate (with bUsePhysicsVelocity, the nearest simulating primitive's
+	 * velocity). Auto with bUsePhysicsVelocity off stays Kinematic, as before.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Configuration")
+	ERammsImuSource Source = ERammsImuSource::Auto;
 
 	/** Update rate in Hz (0 = every tick) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "IMU|Configuration", meta = (ClampMin = "0.0"))
@@ -154,10 +176,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Sensors|IMU")
 	FIMUSensorData GetIMUData() const { return CurrentData; }
 
+	/** The source the latest reading actually came from (Chaos, MuJoCo or Kinematic). */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Sensors|IMU")
+	ERammsImuSource GetActiveSource() const { return CurrentData.Source; }
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	/** The physics engine's latest sample of this sensor's frame, tracking it first if need be. False when Source
+	 *  resolves to Kinematic or the engine has no sample yet. */
+	bool SamplePhysics(FRammsImuSample& OutSample);
+
+	/** The point URammsPhysicsImuSubsystem tracks for this sensor (0: none), and the source it was asked for. */
+	int32			PhysicsHandle = 0;
+	ERammsImuSource TrackedSource = ERammsImuSource::Auto;
+
 	// Internal state for velocity/acceleration computation
 	FVector	   PreviousVelocity = FVector::ZeroVector;
 	FTransform PreviousTransform = FTransform::Identity;
