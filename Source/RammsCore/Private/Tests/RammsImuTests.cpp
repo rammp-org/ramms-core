@@ -3,7 +3,9 @@
 // point (and picks again when the body changes), and Chaos itself in a ticking world: a box at rest reads +|g| up, a
 // box in free fall reads only the centripetal acceleration of its spin, a box spinning about an off-centre centre of
 // mass is read about that centre, a box with gravity off reads nothing, IMU components read the interval's motion in
-// their own frame, and every step's samples reach Remote Control through a cursor.
+// their own frame, and every step's samples reach Remote Control through a cursor. Remote Control's share of the
+// points and of the streams, refusals logged once, names it may not turn into FNames, and a Chaos body whose physics
+// state is recreated: every reader follows it, no history row is a stand-in zero, the IMU component stays on Chaos.
 
 #include "CoreMinimal.h"
 #include "Components/BoxComponent.h"
@@ -13,6 +15,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "RammsChaosImuProvider.h"
@@ -455,22 +458,38 @@ bool FRammsImuSelectionTest::RunTest(const FString& Parameters)
 	Imu->ListBodies(*Crate, Bodies);
 	TestTrue(TEXT("the crate lists its box first"), Bodies.Num() >= 1 && Bodies[0].Body.Get() == Box && Bodies[0].Source == ERammsImuSource::Chaos);
 
-	// A point's history: every sample from a cursor on, its sequence going on when the point moves to another engine.
+	// A point's history: every complete sample from a cursor on, its sequence going on when the point moves to another
+	// engine. The plain actor moves at a steady 600 cm/s along X, one frame at a time; the Kinematic point's first
+	// frames give a pose (tracked at game time 0), then a velocity: only the frames after, which have an acceleration,
+	// are kept, so no row reads a stand-in zero.
 	Imu->EnableHistory(PlainHandle);
-	Imu->Tick(0.0f); // the Kinematic point takes its frame (the same game time: one sample)
+	for (int32 Frame = 1; Frame <= 4; ++Frame)
+	{
+		Plain->SetActorLocation(FVector(10.0 * Frame, 0.0, 500.0));
+		Scratch.World->Tick(LEVELTICK_All, 1.0f / 60.0f);
+	}
 	FRammsImuHistoryRead Read;
 	TestTrue(TEXT("reads the history"), Imu->ReadHistory(PlainHandle, 0, 16, Read));
-	TestTrue(TEXT("one sample, seq 0"), Read.Samples.Num() == 1 && Read.FirstSeq == 0 && Read.Next == 1 && Read.Dropped == 0);
-	TestTrue(TEXT("start now: no samples, the cursor"), Imu->ReadHistory(PlainHandle, -1, 16, Read) && Read.Samples.Num() == 0 && Read.Next == 1);
+	TestTrue(FString::Printf(TEXT("complete samples only: frames 2 to 4 (%d from seq %lld, next %lld)"), Read.Samples.Num(), Read.FirstSeq, Read.Next),
+		Read.Samples.Num() == 3 && Read.FirstSeq == 0 && Read.Next == 3 && Read.Dropped == 0);
+	for (const FRammsImuSample& Kept : Read.Samples)
+	{
+		TestTrue(TEXT("a kept sample has its acceleration"), Kept.bHasAcceleration);
+		NearlyEqualVectors(*this, TEXT("a steady speed reads +|g| up"), Kept.ProperAcceleration, FVector(0.0, 0.0, -Scratch.World->GetGravityZ()), 1.0e-2);
+	}
+	const int64 KinematicNext = Read.Next;
+	TestTrue(TEXT("start now: no samples, the cursor"), Imu->ReadHistory(PlainHandle, -1, 16, Read) && Read.Samples.Num() == 0 && Read.Next == KinematicNext);
 
 	// The body a point rides on changes: re-attached under the simulating box, the plain point moves to Chaos; its
-	// sequence goes on from 1 (the sample before is gone with the Kinematic point, and counted as dropped).
+	// sequence goes on from where the Kinematic one ended (the samples before are gone with it, and counted as dropped).
 	Mast->AttachToComponent(Box, FAttachmentTransformRules::KeepWorldTransform);
 	Imu->RefreshPoints(/*bForceResolve=*/true);
 	TestEqual(TEXT("re-attached under a simulating box: Chaos"), Imu->GetTrackedSource(PlainHandle), ERammsImuSource::Chaos);
 	TestTrue(TEXT("riding on the box"), Imu->GetTrackedBody(PlainHandle) == Box);
-	TestTrue(TEXT("the sequence goes on"), Imu->ReadHistory(PlainHandle, 1, 16, Read) && Read.Next == 1 && Read.Dropped == 0);
-	TestTrue(TEXT("the moved point's old samples count as dropped"), Imu->ReadHistory(PlainHandle, 0, 16, Read) && Read.Next == 1 && Read.Dropped == 1);
+	// (An async physics step still in flight may have added a Chaos sample since: it follows on.)
+	TestTrue(TEXT("the sequence goes on"), Imu->ReadHistory(PlainHandle, KinematicNext, 16, Read) && Read.Dropped == 0 && (Read.Samples.Num() == 0 || Read.FirstSeq == KinematicNext) && Read.Next == KinematicNext + Read.Samples.Num());
+	TestTrue(TEXT("the moved point's old samples count as dropped"),
+		Imu->ReadHistory(PlainHandle, 0, 16, Read) && Read.Dropped == KinematicNext && Read.Next == KinematicNext + Read.Samples.Num());
 
 	// ...and when its component moves onto another body.
 	UBoxComponent* OtherBox = nullptr;
@@ -850,6 +869,411 @@ bool FRammsImuChaosRestAndFreeFallTest::RunTest(const FString& Parameters)
 
 	Run->Started = FPlatformTime::Seconds();
 	ADD_LATENT_AUTOMATION_COMMAND(FRammsImuChaosRunCommand(this, Run));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Remote Control's share of the points, and its names
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsImuBridgeQuotaTest, "Ramms.Sensing.Imu.BridgeQuota",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsImuBridgeQuotaTest::RunTest(const FString& Parameters)
+{
+	using namespace RammsImuTests;
+	FImuTestWorld Scratch;
+	if (!TestNotNull(TEXT("world"), Scratch.World))
+	{
+		return false;
+	}
+	URammsPhysicsImuSubsystem* Imu = URammsPhysicsImuSubsystem::Get(Scratch.World);
+	if (!TestNotNull(TEXT("the IMU subsystem"), Imu))
+	{
+		return false;
+	}
+	AActor*			 Plain = Scratch.SpawnPlain(FVector(0.0, 0.0, 500.0));
+	USceneComponent* Mast = FImuTestWorld::AddChild(Plain, Plain->GetRootComponent(), TEXT("Mast"), FVector(0.0, 0.0, 30.0));
+
+	// Remote Control (a client that never stops its streams, or reads many distinct offsets) holds at most
+	// MaxBridgePoints; a refusal says why and is logged once however often the client asks again.
+	TArray<int32> Bridge;
+	FString		  Error;
+	for (int32 i = 0; i < URammsPhysicsImuSubsystem::MaxBridgePoints; ++i)
+	{
+		const int32 Handle = Imu->TrackBridgePose(Mast, NAME_None, FTransform(FVector(static_cast<double>(i), 0.0, 0.0)), ERammsImuSource::Kinematic, 0.0f, Error);
+		if (!TestTrue(TEXT("the bridge tracks up to its quota"), Handle > 0))
+		{
+			break;
+		}
+		Bridge.Add(Handle);
+	}
+	TestEqual(TEXT("the bridge's points are counted"), Imu->GetBridgePointCount(), static_cast<int32>(URammsPhysicsImuSubsystem::MaxBridgePoints));
+	AddExpectedMessagePlain(TEXT("Remote Control holds"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	for (int32 Retry = 0; Retry < 5; ++Retry)
+	{
+		Error.Reset();
+		TestEqual(TEXT("one more bridge point is refused"), Imu->TrackBridgePose(Mast, NAME_None, FTransform::Identity, ERammsImuSource::Kinematic, 0.0f, Error), 0);
+	}
+	TestTrue(FString::Printf(TEXT("the refusal says why (%s)"), *Error), Error.Contains(TEXT("Remote Control holds")));
+
+	// The IMU components keep the rest of the world's points.
+	TArray<int32> Components;
+	while (Imu->GetTrackedCount() < URammsPhysicsImuSubsystem::MaxTrackedPoints)
+	{
+		const int32 Handle = Imu->TrackPose(Mast, NAME_None, FTransform::Identity, ERammsImuSource::Kinematic);
+		if (!TestTrue(TEXT("components track the rest"), Handle > 0))
+		{
+			break;
+		}
+		Components.Add(Handle);
+	}
+	TestEqual(TEXT("the components' share"), Components.Num(), URammsPhysicsImuSubsystem::MaxTrackedPoints - URammsPhysicsImuSubsystem::MaxBridgePoints);
+	// A component asks again every second while the world is full: logged once.
+	AddExpectedMessagePlain(TEXT("the world tracks 64 IMU points already"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	for (int32 Retry = 0; Retry < 5; ++Retry)
+	{
+		TestEqual(TEXT("a component past the world's limit is refused"), Imu->TrackPose(Mast, NAME_None, FTransform::Identity, ERammsImuSource::Kinematic), 0);
+	}
+	for (const int32 Handle : Bridge)
+	{
+		Imu->Untrack(Handle);
+	}
+	for (const int32 Handle : Components)
+	{
+		Imu->Untrack(Handle);
+	}
+
+	// A bridge point nobody reads is dropped after its idle time.
+	const int32 Idle = Imu->TrackBridgePose(Mast, NAME_None, FTransform::Identity, ERammsImuSource::Kinematic, 0.05f, Error);
+	TestTrue(TEXT("a bridge point with an idle time"), Idle > 0);
+	FPlatformProcess::Sleep(0.1f);
+	Imu->RefreshPoints(/*bForceResolve=*/false);
+	TestFalse(TEXT("not read for its idle time: dropped"), Imu->IsTracked(Idle));
+	TestEqual(TEXT("the bridge holds none"), Imu->GetBridgePointCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsImuBridgeNamesTest, "Ramms.Sensing.Imu.BridgeNames",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsImuBridgeNamesTest::RunTest(const FString& Parameters)
+{
+	using namespace RammsImuTests;
+	FImuTestWorld Scratch;
+	if (!TestNotNull(TEXT("world"), Scratch.World))
+	{
+		return false;
+	}
+	UBoxComponent* Box = nullptr;
+	AActor*		   Crate = Scratch.SpawnBox(FVector(0.0, 0.0, 200.0), FVector(20.0), /*bSimulate=*/true, &Box);
+	const FString  Path = Crate->GetPathName();
+	const auto	   Fails = [](const FString& Json, const TCHAR* Needle) {
+		const TSharedPtr<FJsonObject> Reply = ParseImuJson(Json);
+		bool						  bOk = true;
+		FString						  Why;
+		return Reply.IsValid() && Reply->TryGetBoolField(TEXT("ok"), bOk) && !bOk && Reply->TryGetStringField(TEXT("error"), Why) && Why.Contains(Needle);
+	};
+
+	// A name far past FName's limit (1024) is refused before any FName is made of it: no fatal check, over any of the
+	// calls that take one.
+	const FString Long = FString::ChrN(2000, TEXT('b'));
+	TestTrue(TEXT("ReadBodyImuJson refuses a 2000-character body"), Fails(URammsSensingBridge::ReadBodyImuJson(Path, Long, TEXT("")), TEXT("longer than")));
+	TestTrue(TEXT("ReadImuSamplesJson refuses a 2000-character target"), Fails(URammsSensingBridge::ReadImuSamplesJson(Path, Long, TEXT("")), TEXT("longer than")));
+
+	// A name that is no body, component or bone is not added to the name table (which never shrinks) on the way.
+	const TCHAR* Unknown = TEXT("ramms_imu_test_no_such_bone_5c1e0d7a");
+	TestTrue(TEXT("an unknown body is refused"), Fails(URammsSensingBridge::ReadBodyImuJson(Path, Unknown, TEXT("")), TEXT("has no body")));
+	TestTrue(TEXT("an unknown target is refused"), Fails(URammsSensingBridge::ReadImuSamplesJson(Path, Unknown, TEXT("")), TEXT("has no body")));
+	TestTrue(TEXT("and no FName was made of it"), FName(Unknown, FNAME_Find).IsNone());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// IMU stream limits (no RMSS server in a scratch world: a stream there is never wanted)
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsImuStreamLimitsTest, "Ramms.Sensing.Imu.StreamLimits",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsImuStreamLimitsTest::RunTest(const FString& Parameters)
+{
+	using namespace RammsImuTests;
+	FImuTestWorld Scratch;
+	if (!TestNotNull(TEXT("world"), Scratch.World))
+	{
+		return false;
+	}
+	URammsImuStreamSubsystem*  Streams = Scratch.World->GetSubsystem<URammsImuStreamSubsystem>();
+	URammsPhysicsImuSubsystem* Imu = URammsPhysicsImuSubsystem::Get(Scratch.World);
+	if (!TestNotNull(TEXT("the IMU stream subsystem"), Streams) || !TestNotNull(TEXT("the IMU subsystem"), Imu))
+	{
+		return false;
+	}
+	AActor*			 Plain = Scratch.SpawnPlain(FVector(0.0, 0.0, 500.0));
+	USceneComponent* Mast = FImuTestWorld::AddChild(Plain, Plain->GetRootComponent(), TEXT("Mast"), FVector(0.0, 0.0, 30.0));
+	const FString	 ActorPath = Plain->GetPathName();
+	FString			 Error;
+	// A stream as StartImuStreamJson starts one: its own bridge point, with history.
+	const auto Start = [&](const FString& Target) {
+		FRammsImuStream Stream;
+		Stream.Actor = Plain;
+		Stream.ActorPath = ActorPath;
+		Stream.ActorName = Plain->GetName();
+		Stream.Target = Target;
+		Stream.StreamId = FString::Printf(TEXT("imu/%s/%s"), *Stream.ActorName, *Target);
+		Stream.Handle = Imu->TrackBridgePose(Mast, NAME_None, FTransform::Identity, ERammsImuSource::Kinematic, 0.0f, Error);
+		Imu->EnableHistory(Stream.Handle);
+		FRammsImuStream Started;
+		return Stream.Handle > 0 && Streams->StartStream(Stream, Error, Started) ? Started.Handle : 0;
+	};
+
+	// At most MaxStreams per world; a restart takes the place of the stream it replaces.
+	TArray<int32> Handles;
+	for (int32 i = 0; i < URammsImuStreamSubsystem::MaxStreams; ++i)
+	{
+		const FString Target = FString::Printf(TEXT("t%d"), i);
+		TestTrue(FString::Printf(TEXT("stream %s has room"), *Target), Streams->HasRoomFor(ActorPath, Target, Error));
+		Handles.Add(Start(Target));
+		TestTrue(TEXT("started"), Handles.Last() > 0);
+	}
+	Error.Reset();
+	TestFalse(TEXT("a ninth stream has no room"), Streams->HasRoomFor(ActorPath, TEXT("ninth"), Error));
+	TestTrue(FString::Printf(TEXT("and says why (%s)"), *Error), Error.Contains(TEXT("IMU streams already")));
+	TestTrue(TEXT("a restart of a running one has"), Streams->HasRoomFor(ActorPath, TEXT("t0"), Error));
+
+	// A restart at the bridge's quota gives back the replaced stream's point first: it stays listed (and keeps its
+	// channel for StartStream) without a point, and is dropped on the next tick if nothing replaces it.
+	TestTrue(TEXT("the replaced stream's point is released"), Streams->ReleaseStreamPoint(ActorPath, TEXT("t0")) && !Imu->IsTracked(Handles[0]));
+	TestEqual(TEXT("still listed until replaced"), Streams->GetStreams().Num(), URammsImuStreamSubsystem::MaxStreams);
+	TestFalse(TEXT("no stream, no point to release"), Streams->ReleaseStreamPoint(ActorPath, TEXT("ninth")));
+	Streams->Tick(0.0f); // (also starts the others' unwanted clocks: there is no RMSS server here)
+	TestEqual(TEXT("a stream left without a point stops"), Streams->GetStreams().Num(), URammsImuStreamSubsystem::MaxStreams - 1);
+
+	// A stream no RMSS client wants (here: no server at all) stops by itself after the timeout, its point released.
+	Streams->UnwantedTimeoutSeconds = 0.05;
+	Streams->Tick(0.0f);
+	TestEqual(TEXT("still running within the timeout"), Streams->GetStreams().Num(), URammsImuStreamSubsystem::MaxStreams - 1);
+	FPlatformProcess::Sleep(0.1f);
+	Streams->Tick(0.0f);
+	TestEqual(TEXT("unwanted for the timeout: stopped"), Streams->GetStreams().Num(), 0);
+	bool bAnyTracked = false;
+	for (const int32 Handle : Handles)
+	{
+		bAnyTracked |= Imu->IsTracked(Handle);
+	}
+	TestFalse(TEXT("their points released"), bAnyTracked);
+	TestEqual(TEXT("the bridge holds none"), Imu->GetBridgePointCount(), 0);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Chaos: a body whose physics state is recreated (a new proxy in one call)
+// ---------------------------------------------------------------------------
+
+namespace RammsImuTests
+{
+	struct FRecreateRun
+	{
+		FImuTestWorld			   Scratch;
+		URammsPhysicsImuSubsystem* Imu = nullptr;
+		UBoxComponent*			   Box = nullptr;
+		URammsIMUSensorComponent*  Sensor = nullptr;
+		FString					   BoxPath;
+		/** A point read through ReadHistory only, as an IMU stream reads its own. */
+		int32 HistoryOnly = 0;
+		int64 HistoryCursor = -1;
+		/** ReadImuSamplesJson's cursor on the bridge's point (which ReadBodyImuJson reads too). */
+		int64  BridgeCursor = -1;
+		int32  Frames = 0;
+		int32  RecreatedAtFrame = INDEX_NONE;
+		double RecreatedAtSimTime = 0.0;
+		double LatestSimTime = 0.0;
+		double Started = 0.0;
+		int32  HistoryRowsAfter = 0;
+		int32  BridgeRowsAfter = 0;
+		/** History rows (either reader) after settling whose accelerometer reads under LowRowCm: a box at rest feels
+		 *  |g|, so such a row is a stand-in zero. */
+		int32  LowRows = 0;
+		double LowestRow = TNumericLimits<double>::Max();
+		bool   bCursorBroken = false;
+		/** The IMU component's measurements after its first Chaos one that were not Chaos. */
+		bool   bSensorOnChaos = false;
+		int32  SensorOffChaos = 0;
+		double WorstSensorError = 0.0;
+	};
+
+	/** Settled on the floor by then (s of Chaos time). */
+	constexpr double RecreateSettleSeconds = 0.6;
+	/** Under this an accelerometer at rest reads no gravity: a row of zeros. */
+	constexpr double LowRowCm = 300.0;
+} // namespace RammsImuTests
+
+/** Ticks a box at rest, recreates its physics state, and checks every reader keeps reading it. */
+class FRammsImuRecreateCommand : public IAutomationLatentCommand
+{
+public:
+	FRammsImuRecreateCommand(FAutomationTestBase* InTest, TSharedRef<RammsImuTests::FRecreateRun> InRun)
+		: Test(InTest)
+		, Run(InRun)
+	{
+	}
+
+	void CheckRow(double SimTime, double AccelerationSize)
+	{
+		using namespace RammsImuTests;
+		if (SimTime > RecreateSettleSeconds)
+		{
+			Run->LowestRow = FMath::Min(Run->LowestRow, AccelerationSize);
+			Run->LowRows += AccelerationSize < LowRowCm ? 1 : 0;
+		}
+	}
+
+	virtual bool Update() override
+	{
+		using namespace RammsImuTests;
+		UWorld* World = Run->Scratch.World;
+		if (!World || !Run->Imu || !Run->Box || !Run->Sensor)
+		{
+			return true;
+		}
+		World->Tick(LEVELTICK_All, 1.0f / 60.0f);
+		++Run->Frames;
+		const bool bRecreated = Run->RecreatedAtFrame != INDEX_NONE;
+
+		// The history-only point: never GetSample, so only ReadHistory can hand its body's new proxy over.
+		FRammsImuHistoryRead Read;
+		Run->Imu->ReadHistory(Run->HistoryOnly, Run->HistoryCursor, URammsPhysicsImuSubsystem::HistoryCapacity, Read);
+		if (Run->HistoryCursor >= 0 && Read.Samples.Num() > 0)
+		{
+			Run->bCursorBroken |= Read.FirstSeq != Run->HistoryCursor + Read.Dropped;
+		}
+		for (const FRammsImuSample& Row : Read.Samples)
+		{
+			Run->LatestSimTime = FMath::Max(Run->LatestSimTime, Row.SimTimeSeconds);
+			Run->HistoryRowsAfter += bRecreated && Row.SimTimeSeconds > Run->RecreatedAtSimTime ? 1 : 0;
+			CheckRow(Row.SimTimeSeconds, Row.ProperAcceleration.Size());
+		}
+		Run->HistoryCursor = Read.Next;
+
+		// The bridge's point, read both ways each frame as a client may: a reading (GetSample), then the samples.
+		const TCHAR* Options = TEXT("{\"offset\": [0, 0, 20]}");
+		URammsSensingBridge::ReadBodyImuJson(Run->BoxPath, TEXT(""), Options);
+		const FString				  SamplesOptions = FString::Printf(TEXT("{\"offset\": [0, 0, 20], \"since\": %lld}"), Run->BridgeCursor);
+		const TSharedPtr<FJsonObject> Reply = ParseImuJson(URammsSensingBridge::ReadImuSamplesJson(Run->BoxPath, TEXT(""), SamplesOptions));
+		bool						  bOk = false;
+		if (!Reply.IsValid() || !Reply->TryGetBoolField(TEXT("ok"), bOk) || !bOk)
+		{
+			Run->bCursorBroken = true;
+		}
+		else
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Samples = nullptr;
+			Reply->TryGetArrayField(TEXT("samples"), Samples);
+			int64 Expected = Run->BridgeCursor + static_cast<int64>(Reply->GetNumberField(TEXT("dropped")));
+			for (int32 i = 0; Samples && i < Samples->Num(); ++i)
+			{
+				const TSharedPtr<FJsonObject>  Entry = (*Samples)[i]->AsObject();
+				const double				   SimTime = Entry->GetNumberField(TEXT("sim_time"));
+				const TSharedPtr<FJsonObject>* Accel = nullptr;
+				if (Run->BridgeCursor >= 0)
+				{
+					Run->bCursorBroken |= static_cast<int64>(Entry->GetNumberField(TEXT("seq"))) != Expected++;
+				}
+				if (Entry->TryGetObjectField(TEXT("linear_acceleration"), Accel) && Accel)
+				{
+					const FVector Value((*Accel)->GetNumberField(TEXT("x")), (*Accel)->GetNumberField(TEXT("y")), (*Accel)->GetNumberField(TEXT("z")));
+					CheckRow(SimTime, Value.Size());
+				}
+				Run->BridgeRowsAfter += bRecreated && SimTime > Run->RecreatedAtSimTime ? 1 : 0;
+			}
+			Run->BridgeCursor = static_cast<int64>(Reply->GetNumberField(TEXT("next")));
+		}
+
+		// The IMU component on the box: once on Chaos, it stays on Chaos through the new proxy (the moment without a
+		// sample repeats its last reading), reading +|g| at rest.
+		const FIMUSensorData Data = Run->Sensor->GetIMUData();
+		if (Data.Source == ERammsImuSource::Chaos)
+		{
+			Run->bSensorOnChaos = true;
+		}
+		else if (Run->bSensorOnChaos)
+		{
+			++Run->SensorOffChaos;
+		}
+		if (Run->bSensorOnChaos && Data.SimTimeSeconds > RecreateSettleSeconds)
+		{
+			Run->WorstSensorError = FMath::Max(Run->WorstSensorError, FMath::Abs(Data.LinearAcceleration.Size() - ImuGravityCm));
+		}
+
+		if (!bRecreated)
+		{
+			if (Run->LatestSimTime > 1.0)
+			{
+				// Destroyed and created again in one call: the body instance is valid throughout, so only the reads
+				// can notice the new proxy.
+				Run->Box->RecreatePhysicsState();
+				Run->RecreatedAtFrame = Run->Frames;
+				Run->RecreatedAtSimTime = Run->LatestSimTime;
+			}
+			else if (Run->Frames > 600 || FPlatformTime::Seconds() - Run->Started > 120.0)
+			{
+				Test->AddError(FString::Printf(TEXT("no Chaos history after %d frames (latest %.2f s)"), Run->Frames, Run->LatestSimTime));
+				return true;
+			}
+			return false;
+		}
+		if (Run->Frames - Run->RecreatedAtFrame < 90)
+		{
+			return false; // 1.5 s of game time after the recreate
+		}
+
+		Test->TestTrue(FString::Printf(TEXT("a point read only through its history follows the new proxy (%d rows after)"), Run->HistoryRowsAfter),
+			Run->HistoryRowsAfter >= 30);
+		Test->TestTrue(FString::Printf(TEXT("the bridge's point follows it too (%d rows after)"), Run->BridgeRowsAfter), Run->BridgeRowsAfter >= 30);
+		Test->TestFalse(TEXT("each history read follows on from the last"), Run->bCursorBroken);
+		Test->TestEqual(FString::Printf(TEXT("no history row reads a stand-in zero (lowest %.1f cm/s^2)"), Run->LowestRow), Run->LowRows, 0);
+		Test->TestTrue(TEXT("the IMU component read Chaos"), Run->bSensorOnChaos);
+		Test->TestEqual(TEXT("the IMU component never fell back to differencing"), Run->SensorOffChaos, 0);
+		Test->TestTrue(FString::Printf(TEXT("the IMU component read +|g| at rest throughout (worst %.1f cm/s^2 off)"), Run->WorstSensorError),
+			Run->WorstSensorError < ImuChaosAccelSlackCm * 6.0);
+		return true;
+	}
+
+private:
+	FAutomationTestBase*					Test;
+	TSharedRef<RammsImuTests::FRecreateRun> Run;
+};
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsImuChaosRecreatedTest, "Ramms.Sensing.Imu.ChaosPhysicsStateRecreated",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsImuChaosRecreatedTest::RunTest(const FString& Parameters)
+{
+	using namespace RammsImuTests;
+	TSharedRef<FRecreateRun> Run = MakeShared<FRecreateRun>();
+	if (!TestNotNull(TEXT("world"), Run->Scratch.World))
+	{
+		return false;
+	}
+	Run->Imu = URammsPhysicsImuSubsystem::Get(Run->Scratch.World);
+	if (!TestNotNull(TEXT("the IMU subsystem"), Run->Imu))
+	{
+		return false;
+	}
+	// A floor, and a box resting on it (dropped half a centimetre) with an IMU component on top.
+	Run->Scratch.SpawnBox(FVector(0.0, 0.0, -10.0), FVector(2000.0, 2000.0, 10.0), /*bSimulate=*/false);
+	AActor* Crate = Run->Scratch.SpawnBox(FVector(0.0, 0.0, 20.5), FVector(20.0), /*bSimulate=*/true, &Run->Box);
+	Run->BoxPath = Crate->GetPathName();
+	Run->Sensor = FImuTestWorld::AddImu(Crate, Run->Box, TEXT("Imu"), FVector(0.0, 0.0, 20.0), FRotator::ZeroRotator);
+	Crate->DispatchBeginPlay();
+
+	Run->HistoryOnly = Run->Imu->TrackPose(Run->Box, NAME_None, FTransform(FVector(0.0, 0.0, 20.0)), ERammsImuSource::Auto);
+	TestEqual(TEXT("the box is on Chaos"), Run->Imu->GetTrackedSource(Run->HistoryOnly), ERammsImuSource::Chaos);
+	Run->Imu->EnableHistory(Run->HistoryOnly);
+
+	Run->Started = FPlatformTime::Seconds();
+	ADD_LATENT_AUTOMATION_COMMAND(FRammsImuRecreateCommand(this, Run));
 	return true;
 }
 
