@@ -45,8 +45,9 @@ struct RAMMSCORE_API FRammsImuSample
 	UPROPERTY(BlueprintReadOnly, Category = "IMU")
 	ERammsImuSource Source = ERammsImuSource::Kinematic;
 
-	/** The time of the state, on the producing engine's clock (s): MuJoCo's mjData::time, the Chaos solver's time
-	 *  at the end of the step, or the world's game time for Kinematic. */
+	/** The time of the state (pose and velocities), on the producing engine's clock (s): the Chaos solver's time at
+	 *  the end of the step, MuJoCo's mjData::time at the start of the step (the state its forward pass computed), or
+	 *  the world's game time for Kinematic. */
 	UPROPERTY(BlueprintReadOnly, Category = "IMU")
 	double SimTimeSeconds = 0.0;
 
@@ -67,7 +68,8 @@ struct RAMMSCORE_API FRammsImuSample
 	FVector AngularVelocity = FVector::ZeroVector;
 
 	/** What an accelerometer at the point reads, in world axes (cm/s^2): its acceleration minus gravity, so +|g| up
-	 *  at rest and about zero in free fall. */
+	 *  at rest and about zero in free fall. The acceleration the engine's integrator applied over the step (Chaos:
+	 *  the velocity change over the step; MuJoCo: by default the same, ramms.Imu.MuJoCoAcceleration). */
 	UPROPERTY(BlueprintReadOnly, Category = "IMU")
 	FVector ProperAcceleration = FVector::ZeroVector;
 
@@ -75,8 +77,40 @@ struct RAMMSCORE_API FRammsImuSample
 	UPROPERTY(BlueprintReadOnly, Category = "IMU")
 	FVector AngularAcceleration = FVector::ZeroVector;
 
-	/** The gravity the producing engine applies (cm/s^2, world): the point's coordinate acceleration is
-	 *  ProperAcceleration + Gravity. */
+	/** The gravity the producing engine applies to the body (cm/s^2, world; zero for a body it applies none to):
+	 *  the point's coordinate acceleration is ProperAcceleration + Gravity. */
 	UPROPERTY(BlueprintReadOnly, Category = "IMU")
 	FVector Gravity = FVector::ZeroVector;
+};
+
+/**
+ * The last Capacity samples of one tracked point, one per physics step, numbered by a sequence that only grows (the
+ * first sample pushed is 0). SetCapacity allocates (game thread); Push never does, so a physics thread can keep it.
+ * Not thread-safe: its owner locks.
+ */
+struct RAMMSCORE_API FRammsImuSampleRing
+{
+	/** Keep the last Capacity samples (0: keep none). Drops what it held; the sequence goes on from where it was. */
+	void SetCapacity(int32 Capacity);
+
+	int32 GetCapacity() const { return Buffer.Num(); }
+
+	/** Add a sample (nothing without capacity). A sample stamped with the newest one's time replaces it, so a step
+	 *  an engine takes in several passes leaves its final state. */
+	void Push(const FRammsImuSample& Sample);
+
+	/** The sequence number the next sample gets. */
+	int64 GetNextSeq() const { return Next; }
+
+	/** The oldest sequence number kept (GetNextSeq when the ring is empty). */
+	int64 GetOldestSeq() const { return Next - Count; }
+
+	/** Append up to Max samples from sequence Since on (clamped to the kept range), oldest first; returns the
+	 *  sequence of the first one appended (where the read started). */
+	int64 Read(int64 Since, int32 Max, TArray<FRammsImuSample>& Out) const;
+
+private:
+	TArray<FRammsImuSample> Buffer;
+	int64					Next = 0;
+	int32					Count = 0;
 };

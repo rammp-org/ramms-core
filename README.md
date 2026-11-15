@@ -32,6 +32,7 @@
     - [Time-of-Flight Sensor (`URammsToFSensorComponent`)](#time-of-flight-sensor-urammstfsensorcomponent)
     - [Sonar Sensor (`URammsSonarSensorComponent`)](#sonar-sensor-urammssonarsensorcomponent)
     - [IMU Sensor (`URammsIMUSensorComponent`)](#imu-sensor-urammsimusensorcomponent)
+    - [Physics-rate IMU data (`URammsPhysicsImuSubsystem`)](#physics-rate-imu-data-urammsphysicsimusubsystem)
   - [GPU Ray Tracing System](#gpu-ray-tracing-system)
     - [Architecture](#architecture)
     - [Project Setup](#project-setup)
@@ -245,8 +246,9 @@ This helps ensure that consistent code formatting is applied.
  | Property | Default | Description |
  |---|---|---|
  | `bIncludeGravity` | `true` | Include gravitational acceleration in output |
+ | `Source` | `Auto` | Where readings come from: `Auto` (the engine that simulates the body the sensor rides on), `Chaos`, `MuJoCo`, `Kinematic` (see below) |
  | `UpdateRateHz` | `100.0` | Measurement rate |
- | `bUsePhysicsVelocity` | `true` | Use physics velocity (avoids double-differentiation jitter) |
+ | `bUsePhysicsVelocity` | `true` | Use physics velocity (avoids double-differentiation jitter); off under `Auto` means `Kinematic` |
  | `AccelSmoothingFactor` | `0.0` | EMA filter for accelerometer (0 = none, 1 = max) |
  | `GyroSmoothingFactor` | `0.0` | EMA filter for gyroscope |
  | `AccelDeadBand` | `0.0` cm/s² | Accelerometer dead-band threshold |
@@ -262,10 +264,91 @@ This helps ensure that consistent code formatting is applied.
  - `AngularVelocity` — Sensor-local frame (°/s)
  - `Orientation` — World-space quaternion
  - `Timestamp` — Seconds since game start
+ - `Source` — The engine the reading came from: `Chaos` / `MuJoCo` (physics rate) or `Kinematic`
+ - `SimTimeSeconds` — Chaos / MuJoCo: the engine's time of the state the reading ends at (0 for `Kinematic`)
 
  **Blueprint API:**
  - `GetIMUData()` — Latest measurement
+ - `GetActiveSource()` — The source of the latest measurement
  - `OnIMUDataUpdated` — Delegate fired each measurement cycle
+
+ **Sources.** Under `Auto` (with `bUsePhysicsVelocity`) the sensor asks
+ `URammsPhysicsImuSubsystem` for its frame: MuJoCo for a URLab body (or
+ anything attached below one), Chaos for a simulating primitive or skeletal
+ bone, else `Kinematic`. With an engine's samples a measurement covers the
+ whole interval since the previous one, as a real IMU's filtered output
+ does: the accelerometer reads the point's velocity change over the interval
+ divided by the engine time it spans (gravity then added as an accelerometer
+ feels it), the gyroscope the mean angular velocity (the turn over the
+ interval divided by its time), both in the sensor frame halfway through the
+ turn. No new engine step since the last measurement repeats it. `Kinematic`
+ differences the component's transform at the game rate (over the time since
+ the last measurement). Filters, dead-bands, noise, bias and `bIncludeGravity`
+ apply the same way to every source.
+
+ ---
+
+### Physics-rate IMU data (`URammsPhysicsImuSubsystem`)
+
+ A world subsystem that tracks points on bodies and keeps the physics
+ engine's sample of each, every physics step: the IMU component's source, and
+ the sensing bridge's for bodies that carry no IMU component. Everything is in
+ world space and Unreal units at the point (`FRammsImuSample`: location cm,
+ orientation, velocity cm/s, angular velocity °/s, proper acceleration cm/s²
+ — what an accelerometer reads, +|g| up at rest, about 0 in free fall —,
+ angular acceleration °/s², the gravity the engine applies to that body, and
+ the engine time of the state).
+
+ - `TrackPose(Component, Bone, LocalPose, Preferred, IdleTimeoutSeconds)` /
+   `Track(...)`, `GetSample`, `Untrack`, `GetTrackedSource`,
+   `GetTrackedBodyName`, `GetTrackedBody`.
+ - `EnableHistory(Handle)` keeps every physics step's sample in a ring
+   (`HistoryCapacity` = 1024, over 2 s of MuJoCo's 500 Hz);
+   `ReadHistory(Handle, Since, Max, Out)` returns those from a sequence number
+   on (`Since` < 0: none, just the cursor), the next cursor and how many were
+   dropped. The sequence goes on when a point moves to another engine.
+ - At most `MaxTrackedPoints` = 64 points per world (IMU components and bridge
+   reads together); more are refused.
+ - Every point is resolved again each second, and at once when its provider
+   reports its body gone: a robot whose physics comes up later, that is handed
+   to another engine (a URLab robot switched to Chaos), or a component moved
+   onto another body follows.
+
+ Engines plug in as `IRammsImuProvider`s through `RammsImuProviders::Register`:
+
+ | Provider | Module | Samples |
+ |---|---|---|
+ | Chaos | RammsCore | After every solver step (a sim callback's PostSolve): the body's velocity at its centre of mass and angular velocity, accelerations as their change over the step, the lever arm to the point. Gravity is the solver's for that body (its gravity group's; none when its gravity is off). Stamped with the step's end. |
+ | MuJoCo | RammsMujocoSupport | After every URLab step: `mj_rnePostConstraint`, then `mj_objectVelocity` / `mj_objectAcceleration` of the body frame and the lever arm. By default the acceleration the integrator applied, (qvel after − qvel before) / timestep (as Chaos); `ramms.Imu.MuJoCoAcceleration 1` reports MuJoCo's own accelerometer convention, the forward pass's qacc, instead. Stamped with the step's start (the state its forward pass computed). A body Unreal poses (mocap) is left to Kinematic. |
+ | Kinematic | RammsCore | The point's frame differenced at the game rate. |
+
+ Over Remote Control (`URammsSensingBridge`, `Private/RammsSensingBridgeImu.cpp`;
+ accelerations read as an accelerometer does, sensor frame; velocity and
+ orientation world):
+
+ - `ReadBodyImuJson(Actor, Body, Options)` — a reading of any body (a MuJoCo
+   body, a component, a bone; `""` the actor's main body), options `offset`,
+   `rotation`, `source`. `sim_time` only when there is a sample.
+ - `ListImuBodiesJson(Actor)` — the bodies an engine simulates, and which one
+   `""` reads.
+ - `ReadImuSamplesJson(Actor, Target, Options)` — every physics step's sample
+   since a cursor: `Target` an IMU sensor's name or a body; options as above
+   plus `since` (omitted or -1: start now) and `max`; returns `samples`
+   (`seq`, `sim_time`, `linear_acceleration`, `angular_velocity`,
+   `angular_acceleration`, `linear_velocity`, `orientation`), `next`,
+   `dropped`, `rate_hz`.
+ - `StartImuStreamJson(Actor, Target, Options)` / `StopImuStream(Actor, Target)`
+   — the same samples streamed over RMSS (play worlds only; starts the server).
+   Options add `port` and `channel` (-1: the lowest free from 1000). Each game
+   tick with new samples sends one `FrameData` message, fmt `imu_f64x18`,
+   w = samples, h = 1, 18 little-endian float64 per sample: seq, sim_time,
+   linear acceleration xyz (cm/s²), angular velocity xyz (°/s), angular
+   acceleration xyz (°/s²), linear velocity xyz (cm/s, world), orientation
+   xyzw (world). Stream id `imu/<actor name>/<target>`; the metadata names the
+   fields, units, source, actor, target, body, `first_seq`, `count`,
+   `dropped`. `GetStreamStatusJson` lists IMU streams with role `imu`.
+
+ Points the bridge tracks are dropped after 10 s without a read.
 
  ---
 

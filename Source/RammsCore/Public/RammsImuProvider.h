@@ -37,8 +37,9 @@ struct RAMMSCORE_API FRammsImuBodyRef
 
 /**
  * A physics engine's IMU data source, per world: it tracks points on the bodies it simulates and samples them every
- * physics step (on its own thread), keeping only the latest sample of each. RammsCore owns this interface and a
- * Chaos provider; RammsMujocoSupport registers a MuJoCo one, so RammsCore depends on no engine plugin.
+ * physics step (on its own thread), keeping the latest sample of each and, when asked, a ring of every step's.
+ * RammsCore owns this interface and a Chaos provider; RammsMujocoSupport registers a MuJoCo one, so RammsCore depends
+ * on no engine plugin.
  *
  * All calls are on the game thread. URammsPhysicsImuSubsystem is the usual client.
  */
@@ -66,6 +67,25 @@ public:
 	virtual bool GetSample(int32 Handle, FRammsImuSample& OutSample) = 0;
 
 	virtual void Untrack(int32 Handle) = 0;
+
+	/** False once the body a tracked point was resolved on can no longer serve it (destroyed, re-welded into
+	 *  another body, handed to another engine): the subsystem resolves the point again. */
+	virtual bool IsTrackValid(int32 Handle) const { return true; }
+
+	/** Keep the last Capacity samples of a tracked point, one per physics step (0: stop). Allocates; the physics
+	 *  thread then fills the ring without allocating. */
+	virtual void SetHistoryCapacity(int32 Handle, int32 Capacity) {}
+
+	/**
+	 * Append up to Max kept samples of a tracked point from the provider's sequence number Since on (clamped to what
+	 * is kept), oldest first. OutFirst: the sequence of the first one appended; [OutOldest, OutNext): what is kept.
+	 * False when the point keeps no history.
+	 */
+	virtual bool ReadHistory(int32 Handle, int64 Since, int32 Max, TArray<FRammsImuSample>& OutSamples, int64& OutFirst,
+		int64& OutOldest, int64& OutNext)
+	{
+		return false;
+	}
 
 	/** The bodies of Actor (and of actors attached to it) this engine simulates, main body first. */
 	virtual void ListBodies(AActor& Actor, TArray<FRammsImuBodyRef>& OutBodies) const {}

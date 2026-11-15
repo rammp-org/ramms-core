@@ -73,29 +73,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString ReadSensorsJson(const FString& ActorPath);
 
-	/**
-	 * An IMU reading of any body, no IMU component needed: a virtual sensor on Body, sampled by the physics engine
-	 * that simulates it at the physics rate (URammsPhysicsImuSubsystem). Body: a MuJoCo body name, a component name
-	 * or a bone name on the actor (or on an actor attached to it); "" the actor's main body (its root, else the first
-	 * body an engine simulates). Options (all optional): {"offset": [x, y, z] (cm, body frame), "rotation": [pitch,
-	 * yaw, roll] (the sensor frame in the body frame, deg), "source": "auto|chaos|mujoco|kinematic"}.
-	 *
-	 * The first call starts tracking the point (its first answer may have no sample or no acceleration yet:
-	 * "has_sample" / "has_acceleration" false); later calls read it, and it is dropped once not read for 10 s.
-	 * {"ok", "name", "kind": "IMU", "actor", "body", "component_path", "bone", "source", "has_sample",
-	 * "has_acceleration", "timestamp", "sim_time", "linear_acceleration" (sensor frame, gravity included),
-	 * "angular_velocity" (sensor frame), "angular_acceleration" (sensor frame; with has_acceleration),
-	 * "linear_velocity" (world), "location" (world), "orientation", "euler", "includes_gravity", "units"}.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
-	static FString ReadBodyImuJson(const FString& ActorPath, const FString& Body, const FString& OptionsJson);
-
-	/** {"ok", "actor", "bodies": [{name, engine, component, component_path, bone, default}]}: the bodies of the actor
-	 *  (and of actors attached to it) a physics engine simulates, which ReadBodyImuJson reads at the physics rate, and
-	 *  the actor's root; "default" marks the one Body "" reads. Any other component or bone reads Kinematic. */
-	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
-	static FString ListImuBodiesJson(const FString& ActorPath);
-
 	/** Start the RMSS server if it is not running, set the capture channels and segmentation, turn disk writes
 	 *  off unless asked, set the rate and start capture. Options (all optional): {"port", "every_n_frames",
 	 *  "color", "depth", "motion", "segmentation", "save_to_disk"}. Returns the stream status. */
@@ -115,6 +92,67 @@ public:
 	 *  values in a mask stream mean. Needs a play world (the class table lives in its segmentation subsystem). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString GetSegmentationClassesJson();
+
+	// --- IMU (RammsSensingBridgeImu.cpp) -----------------------------------------
+	// Physics-rate inertial data of any body or IMU sensor (URammsPhysicsImuSubsystem). Units: cm, cm/s, cm/s^2, deg,
+	// deg/s, deg/s^2, s. Accelerations read as an accelerometer does (gravity included: +|g| up at rest). A world
+	// tracks at most 64 points (URammsPhysicsImuSubsystem::MaxTrackedPoints); points these functions track are
+	// dropped after 10 s without a read.
+
+	/**
+	 * An IMU reading of any body, no IMU component needed: a virtual sensor on Body, sampled by the physics engine
+	 * that simulates it at the physics rate (URammsPhysicsImuSubsystem). Body: a MuJoCo body name, a component name
+	 * or a bone name on the actor (or on an actor attached to it); "" the actor's main body (its root, else the first
+	 * body an engine simulates). Options (all optional): {"offset": [x, y, z] (cm, body frame), "rotation": [pitch,
+	 * yaw, roll] (the sensor frame in the body frame, deg), "source": "auto|chaos|mujoco|kinematic"}.
+	 *
+	 * The first call starts tracking the point (its first answer may have no sample or no acceleration yet:
+	 * "has_sample" / "has_acceleration" false); later calls read it, and it is dropped once not read for 10 s.
+	 * {"ok", "name", "kind": "IMU", "actor", "body", "component_path", "bone", "source", "has_sample",
+	 * "has_acceleration", "timestamp", "sim_time" (only with has_sample), "linear_acceleration" (sensor frame,
+	 * gravity included), "angular_velocity" (sensor frame), "angular_acceleration" (sensor frame; with
+	 * has_acceleration), "linear_velocity" (world), "location" (world), "orientation", "euler", "includes_gravity",
+	 * "units"}.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static FString ReadBodyImuJson(const FString& ActorPath, const FString& Body, const FString& OptionsJson);
+
+	/** {"ok", "actor", "bodies": [{name, engine, component, component_path, bone, default}]}: the bodies of the actor
+	 *  (and of actors attached to it) a physics engine simulates, which ReadBodyImuJson reads at the physics rate, and
+	 *  the actor's root; "default" marks the one Body "" reads. Any other component or bone reads Kinematic. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static FString ListImuBodiesJson(const FString& ActorPath);
+
+	/**
+	 * Every physics step's sample of an IMU point since a cursor (up to 1024 kept: over 2 s of MuJoCo's 500 Hz).
+	 * Target: an IMU sensor's name (as ListSensorsJson names it), else a body as ReadBodyImuJson takes it ("" the
+	 * default body). Options (all optional): "offset", "rotation", "source" as ReadBodyImuJson's (body targets only);
+	 * "since": the "next" of the last call (omitted or -1: start now, no samples, only "next"); "max": at most this
+	 * many samples (default 1024).
+	 * {"ok", "actor", "target", "body", "source", "units", "samples": [{"seq", "sim_time" (s),
+	 * "linear_acceleration" (sensor frame, cm/s^2, gravity included), "angular_velocity" (sensor frame, deg/s),
+	 * "angular_acceleration" (sensor frame, deg/s^2), "linear_velocity" (world, cm/s), "orientation" (world
+	 * {x, y, z, w})}] oldest first, "next", "dropped" (samples lost between since and the oldest kept), "rate_hz"
+	 * (from the samples' sim_time; 0 with fewer than two)}.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static FString ReadImuSamplesJson(const FString& ActorPath, const FString& Target, const FString& OptionsJson);
+
+	/**
+	 * Stream every physics step's sample of an IMU point over RMSS (needs a play world; starts the RMSS server if it
+	 * is not running). Target and options as ReadImuSamplesJson's, plus "port" (30030) and "channel" (-1: the lowest
+	 * free channel from 1000). Each game tick with new samples sends one FrameData message on the channel: fmt
+	 * "imu_f64x18", w = samples, h = 1, 18 little-endian float64 per sample (seq, sim_time, linear acceleration xyz,
+	 * angular velocity xyz, angular acceleration xyz, linear velocity xyz, orientation xyzw), stream_id
+	 * "imu/<actor name>/<target>" (the body's name for Target ""). Starting a stream already running restarts it.
+	 * {"ok", "actor", "target", "body", "source", "stream_id", "channel", "message": "FrameData", "fmt", "server"}.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static FString StartImuStreamJson(const FString& ActorPath, const FString& Target, const FString& OptionsJson);
+
+	/** Stop an IMU stream StartImuStreamJson started. False when there is none for that actor and target. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
+	static bool StopImuStream(const FString& ActorPath, const FString& Target);
 
 	// --- C++ ---------------------------------------------------------------------
 

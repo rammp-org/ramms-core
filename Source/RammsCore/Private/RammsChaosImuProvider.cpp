@@ -18,8 +18,9 @@
 /**
  * Samples the tracked bodies after every solver step (PostSolve: the step's velocities are final; the positions are
  * the step's new ones, P / Q, which the solver copies to X / R right after). PostSolve runs once per evolution step:
- * when the solver splits one step in several, each overwrites the last and the step's end time stamps the final one.
- * Presimulate is requested only because the solver calls it on every callback that asks for a simulation hook.
+ * when the solver splits one step in several, each overwrites the last (in the ring too) and the step's end time
+ * stamps the final one. Presimulate is requested only because the solver calls it on every callback that asks for a
+ * simulation hook.
  */
 class FRammsChaosImuCallback : public Chaos::TSimCallbackObject<Chaos::FSimCallbackNoInput, Chaos::FSimCallbackNoOutput, Chaos::ESimCallbackOptions::Presimulate | Chaos::ESimCallbackOptions::PostSolve | Chaos::ESimCallbackOptions::ParticleUnregister>
 {
@@ -42,17 +43,17 @@ public:
 		using FPoint = FRammsChaosImuProvider::FPoint;
 		using FStepState = FRammsChaosImuProvider::FStepState;
 
-		const double Now = GetSimTime_Internal() + GetDeltaTime_Internal();
-		FScopeLock	 Guard(&Table->Lock);
+		const double					  Now = GetSimTime_Internal() + GetDeltaTime_Internal();
+		Chaos::FPhysicsSolverBase*		  Solver = GetSolver();
+		const Chaos::FPBDRigidsEvolution* Evolution = Solver ? Solver->CastChecked().GetEvolution() : nullptr;
+		FScopeLock						  Guard(&Table->Lock);
 		for (TPair<int32, FPoint>& Pair : Table->Points)
 		{
 			FPoint& Point = Pair.Value;
 			if (Point.SeenGeneration != Point.Generation)
 			{
 				Point.SeenGeneration = Point.Generation;
-				Point.Previous = FStepState();
-				Point.Current = FStepState();
-				Point.Latest = FRammsImuSample();
+				FRammsChaosImuProvider::ForgetBodyState(Point);
 			}
 			// Null until the physics thread has registered the particle.
 			Chaos::FGeometryParticleHandle* Handle = Point.Proxy ? Point.Proxy->GetHandle_LowLevel() : nullptr;
@@ -63,6 +64,22 @@ public:
 			const Chaos::FGenericParticleHandle Particle(Handle);
 			const FTransform					BodyWorld(FQuat(Particle->GetQ()), FVector(Particle->GetP()));
 			const FTransform					Sensor = Point.PointInBody * BodyWorld;
+
+			// The gravity the solver applies to this body: its group's, none when its gravity is off. A kinematic or
+			// static body gets none from the solver; it reads the world's, as a held object would.
+			FVector Gravity = FVector::ZeroVector;
+			if (Evolution)
+			{
+				const Chaos::FPBDRigidParticleHandle* Rigid = Particle->CastToRigidParticle();
+				if (!Particle->IsDynamic())
+				{
+					Gravity = FVector(Evolution->GetGravityForces().GetAcceleration(0));
+				}
+				else if (Rigid && Rigid->GravityEnabled())
+				{
+					Gravity = FVector(Evolution->GetGravityForces().GetAcceleration(Rigid->GravityGroupIndex()));
+				}
+			}
 
 			FStepState State;
 			State.bValid = true;
@@ -79,13 +96,15 @@ public:
 			}
 			Point.Current = State;
 			Point.Latest = FRammsChaosImuProvider::MakeSample(Point.Previous, Point.Current, Sensor.GetLocation(), Sensor.GetRotation(),
-				Sensor.GetLocation() - FVector(Particle->PCom()), Point.Gravity);
+				Sensor.GetLocation() - FVector(Particle->PCom()), Gravity);
+			Point.History.Push(Point.Latest); // sized on the game thread: no allocation here
 		}
 	}
 
 	virtual void OnParticleUnregistered_Internal(TArray<TTuple<Chaos::FUniqueIdx, Chaos::FSingleParticlePhysicsProxy*>>& UnregisteredProxies) override
 	{
-		// Called before Chaos deletes these proxies: no point may read one after this.
+		// Called before Chaos deletes these proxies: no point may read one after this. A point whose body is gone
+		// has no sample to give either (the game thread may not hand it a new proxy before it next reads).
 		FScopeLock Guard(&Table->Lock);
 		for (const TTuple<Chaos::FUniqueIdx, Chaos::FSingleParticlePhysicsProxy*>& Entry : UnregisteredProxies)
 		{
@@ -94,6 +113,7 @@ public:
 				if (Pair.Value.Proxy == Entry.Get<1>())
 				{
 					Pair.Value.Proxy = nullptr;
+					FRammsChaosImuProvider::ForgetBodyState(Pair.Value);
 				}
 			}
 		}
@@ -135,6 +155,13 @@ FRammsChaosImuProvider::~FRammsChaosImuProvider()
 		Callback = nullptr;
 		CallbackSolver = nullptr;
 	}
+}
+
+void FRammsChaosImuProvider::ForgetBodyState(FPoint& Point)
+{
+	Point.Previous = FStepState();
+	Point.Current = FStepState();
+	Point.Latest = FRammsImuSample();
 }
 
 bool FRammsChaosImuProvider::EnsureCallback()
@@ -234,7 +261,7 @@ int32 FRammsChaosImuProvider::Track(const FRammsImuBodyRef& Ref)
 		FPoint&	   Point = Table->Points.Add(Handle);
 		Point.PointInBody = Ref.PointInBody;
 	}
-	// Hands the body's proxy and the world's gravity over.
+	// Hands the body's proxy over.
 	FRammsImuSample Unused;
 	GetSample(Handle, Unused);
 	return Handle;
@@ -248,17 +275,16 @@ bool FRammsChaosImuProvider::GetSample(int32 Handle, FRammsImuSample& OutSample)
 		return false;
 	}
 	// The body's proxy as the game thread holds it now: null once its physics state is gone, a new one once it is
-	// recreated.
+	// recreated. A body welded into another since it was resolved is not this point's body any more (the subsystem
+	// resolves the point again): it gets no proxy, so its samples stop rather than turn up in another body's frame.
 	Chaos::FSingleParticlePhysicsProxy* Proxy = nullptr;
 	if (UPrimitiveComponent* Prim = Entry->Body.Get())
 	{
-		if (FBodyInstance* Body = FindBody(*Prim, Entry->Bone); Body && Body->IsValidBodyInstance())
+		if (FBodyInstance* Body = FindBody(*Prim, Entry->Bone); Body && Body->IsValidBodyInstance() && Body->OwnerComponent.Get() == Prim)
 		{
 			Proxy = Body->GetPhysicsActor();
 		}
 	}
-	const UWorld* OwnerWorld = World.Get();
-	const FVector Gravity(0.0, 0.0, OwnerWorld ? OwnerWorld->GetGravityZ() : 0.0);
 
 	FScopeLock Guard(&Table->Lock);
 	FPoint*	   Point = Table->Points.Find(Handle);
@@ -271,7 +297,6 @@ bool FRammsChaosImuProvider::GetSample(int32 Handle, FRammsImuSample& OutSample)
 		Point->Proxy = Proxy;
 		++Point->Generation;
 	}
-	Point->Gravity = Gravity;
 	if (Point->SeenGeneration != Point->Generation || !Point->Latest.bValid)
 	{
 		return false;
@@ -285,6 +310,43 @@ void FRammsChaosImuProvider::Untrack(int32 Handle)
 	Tracked.Remove(Handle);
 	FScopeLock Guard(&Table->Lock);
 	Table->Points.Remove(Handle);
+}
+
+bool FRammsChaosImuProvider::IsTrackValid(int32 Handle) const
+{
+	const FTracked*		 Entry = Tracked.Find(Handle);
+	UPrimitiveComponent* Prim = Entry ? Entry->Body.Get() : nullptr;
+	if (!Prim)
+	{
+		return false;
+	}
+	const FBodyInstance* Body = FindBody(*Prim, Entry->Bone);
+	return Body && Body->IsValidBodyInstance() && Body->OwnerComponent.Get() == Prim;
+}
+
+void FRammsChaosImuProvider::SetHistoryCapacity(int32 Handle, int32 Capacity)
+{
+	// Sized here, on the game thread; the physics thread only writes into it.
+	FScopeLock Guard(&Table->Lock);
+	if (FPoint* Point = Table->Points.Find(Handle))
+	{
+		Point->History.SetCapacity(Capacity);
+	}
+}
+
+bool FRammsChaosImuProvider::ReadHistory(int32 Handle, int64 Since, int32 Max, TArray<FRammsImuSample>& OutSamples, int64& OutFirst,
+	int64& OutOldest, int64& OutNext)
+{
+	FScopeLock	  Guard(&Table->Lock);
+	const FPoint* Point = Table->Points.Find(Handle);
+	if (!Point || Point->History.GetCapacity() == 0)
+	{
+		return false;
+	}
+	OutFirst = Point->History.Read(Since, Max, OutSamples);
+	OutOldest = Point->History.GetOldestSeq();
+	OutNext = Point->History.GetNextSeq();
+	return true;
 }
 
 void FRammsChaosImuProvider::ListBodies(AActor& Actor, TArray<FRammsImuBodyRef>& OutBodies) const

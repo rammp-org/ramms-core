@@ -23,12 +23,15 @@ namespace Chaos
  *
  * Each step reads the body's velocity at its centre of mass and its angular velocity from the solver, and the
  * accelerations as the first difference of those over the step (the solver's own dt); the lever arm from the
- * centre of mass to the point gives the point's. Only tracked bodies are read, and each keeps only its latest
- * sample, under a lock the game thread takes to read it.
+ * centre of mass to the point gives the point's. Gravity is the one the solver applies to that body (its gravity
+ * group's, none when its gravity is off; the world's for a kinematic body). Only tracked bodies are read; each keeps
+ * its latest sample and, when asked, a ring of every step's, under a lock the game thread takes to read them.
  *
  * Bodies are held by their physics proxy. A proxy the game thread releases (a destroyed component, recreated
  * physics state) is dropped on the physics thread before Chaos deletes it (the callback watches particle
- * unregistration), and the game thread hands over the body's new proxy on its next read.
+ * unregistration, and forgets the body's samples), and the game thread hands over the body's new proxy on its next
+ * read. A tracked body that is gone, or that is welded into another body, is no longer valid (IsTrackValid): the
+ * subsystem resolves the point again.
  */
 class FRammsChaosImuProvider final : public IRammsImuProvider
 {
@@ -42,6 +45,10 @@ public:
 	virtual int32			Track(const FRammsImuBodyRef& Ref) override;
 	virtual bool			GetSample(int32 Handle, FRammsImuSample& OutSample) override;
 	virtual void			Untrack(int32 Handle) override;
+	virtual bool			IsTrackValid(int32 Handle) const override;
+	virtual void			SetHistoryCapacity(int32 Handle, int32 Capacity) override;
+	virtual bool			ReadHistory(int32 Handle, int64 Since, int32 Max, TArray<FRammsImuSample>& OutSamples, int64& OutFirst,
+				   int64& OutOldest, int64& OutNext) override;
 	virtual void			ListBodies(AActor& Actor, TArray<FRammsImuBodyRef>& OutBodies) const override;
 
 	/** Prim's body instance (a welded primitive's weld parent's) or, for a skeletal mesh, the body of BoneOrSocket's
@@ -68,14 +75,14 @@ public:
 		// Written on the game thread.
 		Chaos::FSingleParticlePhysicsProxy* Proxy = nullptr; // also nulled by the physics thread on unregistration
 		FTransform							PointInBody = FTransform::Identity;
-		FVector								Gravity = FVector::ZeroVector;
 		uint32								Generation = 0; // bumped whenever the body changes: the history starts over
 
-		// Written on the physics thread.
-		uint32			SeenGeneration = MAX_uint32;
-		FStepState		Previous;
-		FStepState		Current;
-		FRammsImuSample Latest;
+		// Written on the physics thread (History sized on the game thread).
+		uint32				SeenGeneration = MAX_uint32;
+		FStepState			Previous;
+		FStepState			Current;
+		FRammsImuSample		Latest;
+		FRammsImuSampleRing History;
 	};
 
 	/** The points, shared by the provider and the physics-thread callback. */
@@ -84,6 +91,10 @@ public:
 		FCriticalSection	Lock;
 		TMap<int32, FPoint> Points;
 	};
+
+	/** Forget the latest sample and the step history a point's accelerations difference against (its body is gone
+	 *  or changed); its ring keeps what it holds. */
+	static void ForgetBodyState(FPoint& Point);
 
 private:
 	/** The callback on the world's solver, registered on the first track. */
