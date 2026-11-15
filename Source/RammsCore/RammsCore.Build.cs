@@ -54,6 +54,10 @@ public class RammsCore : ModuleRules
 				"Slate",
 				"SlateCore",
 				"PhysicsCore",
+				// The Chaos IMU provider: a physics-rate callback on the world's solver reading
+				// the tracked bodies' particles (RammsChaosImuProvider).
+				"Chaos",
+				"ChaosCore",
 				"AnimationCore",
 				"RHI",
 				"RHICore",
