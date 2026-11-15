@@ -54,6 +54,10 @@ public class RammsCore : ModuleRules
 				"Slate",
 				"SlateCore",
 				"PhysicsCore",
+				// The Chaos IMU provider: a physics-rate callback on the world's solver reading
+				// the tracked bodies' particles (RammsChaosImuProvider).
+				"Chaos",
+				"ChaosCore",
 				"AnimationCore",
 				"RHI",
 				"RHICore",
@@ -65,6 +69,13 @@ public class RammsCore : ModuleRules
 				"Json",
 				"JsonUtilities", // control surface as JSON for Remote Control
 				"EnhancedInput", // URammsControlInputComponent
+				// The sensor rig's cameras: UIntrinsicSceneCaptureComponent2D
+				// registered with UCameraCaptureSubsystem, streamed by a
+				// URammsStreamSourceComponent. Private: the public headers
+				// forward-declare (or use base classes) so consumers of this
+				// module need neither. Neither plugin depends on RammsCore.
+				"CameraCapture",
+				"RammsStreaming",
 			}
 			);
 

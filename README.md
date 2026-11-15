@@ -28,10 +28,14 @@
     - [Arm Configuration](#arm-configuration)
     - [Control Modes](#control-modes)
     - [Joint Configuration (`FRevoluteJointConfig`)](#joint-configuration-frevolutejointconfig)
+  - [Robot Control Surface (`URammsRobotControlSurfaceComponent`)](#robot-control-surface-urammsrobotcontrolsurfacecomponent)
+    - [Sources and holds](#sources-and-holds)
+    - [The drive deadman](#the-drive-deadman)
   - [Sensor Components](#sensor-components)
     - [Time-of-Flight Sensor (`URammsToFSensorComponent`)](#time-of-flight-sensor-urammstfsensorcomponent)
     - [Sonar Sensor (`URammsSonarSensorComponent`)](#sonar-sensor-urammssonarsensorcomponent)
     - [IMU Sensor (`URammsIMUSensorComponent`)](#imu-sensor-urammsimusensorcomponent)
+    - [Physics-rate IMU data (`URammsPhysicsImuSubsystem`)](#physics-rate-imu-data-urammsphysicsimusubsystem)
   - [GPU Ray Tracing System](#gpu-ray-tracing-system)
     - [Architecture](#architecture)
     - [Project Setup](#project-setup)
@@ -119,6 +123,8 @@ This helps ensure that consistent code formatting is applied.
  | `URammsToFSensorComponent` | Time-of-Flight distance sensor (single-point or NxM grid) with GPU ray tracing |
  | `URammsSonarSensorComponent` | Sonar / RADAR cone-beam distance sensor with GPU ray tracing |
  | `URammsIMUSensorComponent` | Inertial measurement unit (accelerometer, gyroscope, orientation) |
+ | `URammsSensorRigComponent` | A robot's sensors as data (`FRammsSensorMount` list): builds ToF / Sonar / IMU components and streamed cameras at BeginPlay |
+ | `URammsSensingBridge` | Remote Control JSON bridge: add / list / read sensors, start camera streams over RMSS |
 
  ---
 
@@ -162,6 +168,82 @@ This helps ensure that consistent code formatting is applied.
  | `MaxTorque` | `39.0` | Maximum torque (N·m) for torque-controlled joints |
  | `PositionStrength` | `5000000.0` | PD position gain for position-controlled joints |
  | `PositionDamping` | `0.0` | PD damping gain |
+
+ ---
+
+## Robot Control Surface (`URammsRobotControlSurfaceComponent`)
+
+ One component per robot that gathers every `IRammsControlContributor` on the
+ actor (drive modes, linkages, seat, arm teleop, cameras, curb crossings...)
+ and the registry motors nobody claims (`motor.<id>`) into one list of
+ controls, and routes commands to them by id: `SetControl`, `TriggerControl`,
+ `ReleaseControl` (Blueprint and Remote Control), or the `IRammsControlSink`
+ interface (input components, RammsAccess, panels). Control kinds:
+ Continuous (a rate held while the input is held), Position and Velocity
+ (targets), Enum, Action and Text.
+
+### Sources and holds
+
+ Every command names its source (`ERammsControlSource`). Autonomy outranks
+ Remote, which outranks local input (Keyboard, Gamepad, Touch), which outranks
+ Script. A Remote or Autonomy command holds its control over lower sources for
+ `ExternalHoldSeconds` (0.3 s) after it was last sent; an equal or lower
+ source yields at once. The source is whatever the caller passes: a Remote
+ Control client can send as Autonomy.
+
+ The robot's own controllers command through `SetControlInternal` /
+ `TriggerControlInternal` (the stance a drive mode takes, a curb crossing
+ holding the arm still). They are arbitrated and held like any command, but
+ they are not a client: the deadman below neither watches them nor counts them
+ as their source being there.
+
+### The drive deadman
+
+ A Continuous or Velocity control held by a Remote or Autonomy source springs
+ back once nothing has been heard from that source on the surface for
+ `DeadmanSeconds` (0.3 s) plus a grace of the last two frames:
+
+ - Heard means any command from that source the surface applied (a set, a
+   trigger, a release, of any control). It is per source, not per control:
+   a client that sends its controls one request at a time is not taken for
+   gone between them, and a control it set once stands while it keeps
+   sending others. Remote Control carries no client identity, so two clients
+   sending as the same source keep each other's commands alive.
+ - A Continuous control goes back as a release from its source would: through
+   its contributor's `ReleaseControl`, or `ApplyControl(DefaultValue)` where
+   it cannot let go; a raw torque motor is commanded its default. A latched
+   command (a drive's external input) goes back with it.
+ - A Velocity control (a raw `motor.<id>` of a velocity actuator, in a robot's
+   low-level mode) is commanded its default -- 0, stop -- rather than released:
+   a released speed servo may coast, and a MuJoCo `<velocity>` actuator cannot
+   let go at all.
+ - Either way the hold goes, so local input takes over at once.
+ - Not touched: Keyboard, Gamepad, Touch and Script commands; the robot's own;
+   Position, Enum, Action and Text controls; a control another source has
+   taken over; one a drive-mode switch moved to another contributor (the mode
+   that stood down zeroed its own command).
+ - A drive-mode switch carries held drive commands into the incoming mode as
+   of when they were sent (`ReapplyHeldControl`): a client that went quiet
+   before the switch gets no fresh lease from it.
+
+ The deadman runs on the core ticker, only while it watches something, on
+ real time (`FPlatformTime`): it springs back while the world is paused, and
+ a client re-sending at 10 Hz keeps to it however the world is dilated. The
+ grace of the last two frames' length means a long frame (an editor throttled
+ to a few frames a second in the background, a hitch) is not taken for
+ silence.
+
+ `DeadmanSeconds` is a class default (`EditDefaultsOnly`), not
+ Blueprint-visible, so neither a Blueprint graph nor Remote Control's property
+ route can change it at run time. `ExternalHoldSeconds` stays
+ Blueprint-writable; both are used within 0.1 to 2 s, whatever they hold.
+ Reports go to `LogRammsControlSurface`: at Log (a refusal at Warning) at most
+ every 5 s per surface, in between at Verbose.
+
+ Clients: re-send held commands at 10 Hz or more and release them when done
+ (ramms-tools' `hold`, `keep_alive` and `drive(seconds=)` do); RammsAccess
+ re-sends every tick and zeroes on its own 250 ms watchdog first. Tests:
+ `Ramms.Control.Deadman.*` (RammsCoreEditor).
 
  ---
 
@@ -243,8 +325,9 @@ This helps ensure that consistent code formatting is applied.
  | Property | Default | Description |
  |---|---|---|
  | `bIncludeGravity` | `true` | Include gravitational acceleration in output |
+ | `Source` | `Auto` | Where readings come from: `Auto` (the engine that simulates the body the sensor rides on), `Chaos`, `MuJoCo`, `Kinematic` (see below) |
  | `UpdateRateHz` | `100.0` | Measurement rate |
- | `bUsePhysicsVelocity` | `true` | Use physics velocity (avoids double-differentiation jitter) |
+ | `bUsePhysicsVelocity` | `true` | Use physics velocity (avoids double-differentiation jitter); off under `Auto` means `Kinematic` |
  | `AccelSmoothingFactor` | `0.0` | EMA filter for accelerometer (0 = none, 1 = max) |
  | `GyroSmoothingFactor` | `0.0` | EMA filter for gyroscope |
  | `AccelDeadBand` | `0.0` cm/s² | Accelerometer dead-band threshold |
@@ -260,10 +343,186 @@ This helps ensure that consistent code formatting is applied.
  - `AngularVelocity` — Sensor-local frame (°/s)
  - `Orientation` — World-space quaternion
  - `Timestamp` — Seconds since game start
+ - `Source` — The engine the reading came from: `Chaos` / `MuJoCo` (physics rate) or `Kinematic`
+ - `SimTimeSeconds` — Chaos / MuJoCo: the engine's time of the state the reading ends at (0 for `Kinematic`)
 
  **Blueprint API:**
  - `GetIMUData()` — Latest measurement
+ - `GetActiveSource()` — The source of the latest measurement
  - `OnIMUDataUpdated` — Delegate fired each measurement cycle
+
+ **Sources.** Under `Auto` (with `bUsePhysicsVelocity`) the sensor asks
+ `URammsPhysicsImuSubsystem` for its frame: MuJoCo for a URLab body (or
+ anything attached below one), Chaos for a simulating primitive or skeletal
+ bone, else `Kinematic`. With an engine's samples a measurement covers the
+ whole interval since the previous one, as a real IMU's filtered output
+ does: the accelerometer reads the point's velocity change over the interval
+ divided by the engine time it spans (gravity then added as an accelerometer
+ feels it), the gyroscope the mean angular velocity (the turn over the
+ interval divided by its time), both in the sensor frame halfway through the
+ turn. No new engine step since the last measurement repeats it, as does a
+ moment (up to a second) in which the engine has no sample (its body handed a
+ new physics proxy, its scene recompiled). `Kinematic`
+ differences the component's transform at the game rate (over the time since
+ the last measurement). Filters, dead-bands, noise, bias and `bIncludeGravity`
+ apply the same way to every source.
+
+ ---
+
+### Physics-rate IMU data (`URammsPhysicsImuSubsystem`)
+
+ A world subsystem that tracks points on bodies and keeps the physics
+ engine's sample of each, every physics step: the IMU component's source, and
+ the sensing bridge's for bodies that carry no IMU component. Everything is in
+ world space and Unreal units at the point (`FRammsImuSample`: location cm,
+ orientation, velocity cm/s, angular velocity °/s, proper acceleration cm/s²
+ — what an accelerometer reads, +|g| up at rest, about 0 in free fall —,
+ angular acceleration °/s², the gravity the engine applies to that body, and
+ the engine time of the state).
+
+ - `TrackPose(Component, Bone, LocalPose, Preferred, IdleTimeoutSeconds)` /
+   `Track(...)`, `GetSample`, `Untrack`, `GetTrackedSource`,
+   `GetTrackedBodyName`, `GetTrackedBody`.
+ - `EnableHistory(Handle)` keeps every physics step's sample in a ring
+   (`HistoryCapacity` = 1024, over 2 s of MuJoCo's 500 Hz);
+   `ReadHistory(Handle, Since, Max, Out)` returns those from a sequence number
+   on (`Since` < 0: none, just the cursor), the next cursor and how many were
+   dropped. The sequence goes on when a point moves to another engine. The
+   ring keeps complete samples only: a Kinematic point's first two frames (a
+   pose, then a velocity) and an engine's first step on a body (or on its new
+   physics proxy) carry no acceleration and are left out, so every row has a
+   measured acceleration.
+ - At most `MaxTrackedPoints` = 64 points per world (IMU components and bridge
+   reads together); more are refused. The sensing bridge (`TrackBridgePose`)
+   may hold at most `MaxBridgePoints` = 32 of them, so a Remote Control client
+   that leaves points behind cannot take the robots' own IMU components'. A
+   refusal is logged once, not on every retry, until a point is tracked again.
+ - Every point is resolved again each second, and at once when its provider
+   reports its body gone: a robot whose physics comes up later, that is handed
+   to another engine (a URLab robot switched to Chaos), or a component moved
+   onto another body follows.
+
+ Engines plug in as `IRammsImuProvider`s through `RammsImuProviders::Register`:
+
+ | Provider | Module | Samples |
+ |---|---|---|
+ | Chaos | RammsCore | After every solver step (a sim callback's PostSolve): the body's velocity at its centre of mass and angular velocity, accelerations as their change over the step (the step that ends at the sample), the lever arm to the point. Gravity is the solver's for that body (its gravity group's; none when its gravity is off). Stamped with the step's end. A body whose physics state is recreated is followed to its new proxy on the next read (a sample or a history read). |
+ | MuJoCo | RammsMujocoSupport | After every URLab step: `mj_rnePostConstraint`, then `mj_objectVelocity` / `mj_objectAcceleration` of the body frame and the lever arm. By default the acceleration the integrator applied, (qvel after − qvel before) / timestep, over the step that starts at the sample (a step ahead of Chaos' in phase); `ramms.Imu.MuJoCoAcceleration 1` reports MuJoCo's own accelerometer convention, the forward pass's qacc, instead. Stamped with the step's start (the state its forward pass computed; RK4: the end, its last stage's state). Serves a body only while its compiled scene has it: until the scene compiles, when it fails to, or once a recompile leaves the body out, the point is Kinematic. A body Unreal poses (mocap) is left to Kinematic. |
+ | Kinematic | RammsCore | The point's frame differenced at the game rate. |
+
+ Over Remote Control (`URammsSensingBridge`, `Private/RammsSensingBridgeImu.cpp`;
+ accelerations read as an accelerometer does, sensor frame; velocity and
+ orientation world):
+
+ - `ReadBodyImuJson(Actor, Body, Options)` — a reading of any body (a MuJoCo
+   body, a component, a bone; `""` the actor's main body), options `offset`,
+   `rotation`, `source`. `sim_time` only when there is a sample.
+ - `ListImuBodiesJson(Actor)` — the bodies an engine simulates, and which one
+   `""` reads.
+ - `ReadImuSamplesJson(Actor, Target, Options)` — every physics step's sample
+   since a cursor: `Target` an IMU sensor's name or a body; options as above
+   plus `since` (omitted or -1: start now) and `max`; returns `samples`
+   (`seq`, `sim_time`, `linear_acceleration`, `angular_velocity`,
+   `angular_acceleration`, `linear_velocity`, `orientation`), `next`,
+   `dropped`, `rate_hz`.
+ - `StartImuStreamJson(Actor, Target, Options)` / `StopImuStream(Actor, Target)`
+   — the same samples streamed over RMSS (play worlds only; starts the server).
+   Options add `port` and `channel` (-1: the lowest from 1000 that no other IMU
+   stream and no camera stream source uses; a channel a camera source uses is
+   refused). Each game
+   tick with new samples sends one `FrameData` message, fmt `imu_f64x18`,
+   w = samples, h = 1, 18 little-endian float64 per sample: seq, sim_time,
+   linear acceleration xyz (cm/s²), angular velocity xyz (°/s), angular
+   acceleration xyz (°/s²), linear velocity xyz (cm/s, world), orientation
+   xyzw (world). Stream id `imu/<actor name>/<target>`; the metadata names the
+   fields, units, source, actor, target, body, `first_seq`, `count`,
+   `dropped`. `GetStreamStatusJson` lists IMU streams with role `imu`.
+
+ Points the bridge tracks are dropped after 10 s without a read; it holds at
+ most 32 (`MaxBridgePoints`) of a world's 64. At most 8 IMU streams run per
+ world (`URammsImuStreamSubsystem::MaxStreams`; a restart takes its own
+ place); a stream no RMSS client has subscribed to (its channel, or every
+ channel) for 30 s stops by itself, and nothing is built for a channel nobody
+ wants. The stream's `port` is clamped to 1..65535. Body and target names are
+ at most 256 characters.
+
+ ---
+
+### Sensor Rig (`URammsSensorRigComponent`)
+
+ A list of `FRammsSensorMount`s (name, kind, parent component, socket,
+ relative location / rotation, and the kind's settings), built into real
+ components at BeginPlay and at runtime through `AddMount` (which replaces a
+ mount of the same name, or changes nothing when the new one cannot be built) /
+ `RemoveMount`. Every sensor traces / looks along its local +X. A mount whose
+ parent component does not exist is skipped with a warning. Names are 1 to 64
+ characters of `A-Z a-z 0-9 _ -` (no `.`: it separates the parts of an object
+ path) and may not end in `_depth`, `_dmv`, `_seg` or `_stream`: those are the
+ names of a camera's capture passes and stream source, and a camera whose pass
+ names another object already holds is not built (creating a pass over another
+ object of its name would be fatal). A mount's location, rotation, fields of
+ view and ranges must be finite, its location at most 1 km from the parent
+ along each axis; ranges are clamped to 1 km.
+
+ | Kind | Builds |
+ |---|---|
+ | `ToF` | `URammsToFSensorComponent` (grid when Rows x Columns > 1) |
+ | `Sonar` | `URammsSonarSensorComponent` (`SonarConeDeg` is `BeamHalfAngle`, the cone's half-angle) |
+ | `IMU` | `URammsIMUSensorComponent` |
+ | `Camera` | `UIntrinsicSceneCaptureComponent2D` (1 to 4096 pixels each way), plus a `URammsStreamSourceComponent` `<Name>_stream` forwarding only that camera |
+
+ A camera with base channel `C` (`StreamChannel`, or -1 for the lowest `C`
+ none of whose four channels a stream source or an IMU stream in the world
+ uses) streams colour on `C`, depth on `C+100`, motion on `C+200` and the
+ segmentation mask on `C+300`, under the stream ids `camera/<Name>/color`,
+ `camera/<Name>/depth`, `motion/<Name>`, `mask/<Name>` (see RammsStreaming's
+ `RammsCameraStreams.h`). Cameras that ask for a channel are built first; one
+ whose channels another source or an IMU stream already uses streams on a free
+ one instead (with a warning). An IMU stream, likewise, never takes a camera's
+ channel (`Private/RammsStreamChannels.h` keeps both apart). A camera replaced
+ through `AddMount` keeps its channel. Names are per actor, so every frame
+ carries `actor` (the owner's path): a client picks a robot's camera by actor,
+ never by name alone.
+
+ A rig camera costs nothing until camera streams start: it is registered with
+ `UCameraCaptureSubsystem` (render targets, depth / motion / mask passes) by
+ `URammsSensingBridge::StartCameraStreams` (or `bStartCaptureOnBeginPlay`), at
+ once when added while the streams are on, and unregistered by
+ `StopCameraStreams`; a capture session somebody else runs does not take rig
+ cameras in. `bStartStreamServerOnBeginPlay` / `bStartCaptureOnBeginPlay`
+ start the RMSS server and camera streams, turning on the channels the rig's
+ cameras ask for; `CaptureEveryNFrames` and `bSaveCaptureToDisk` apply only to
+ a capture session the rig starts.
+
+ `URammsSensingBridge` exposes the same to Remote Control
+ (`/Script/RammsCore.Default__RammsSensingBridge`), plain strings in and JSON
+ out: `ListSensorsJson`, `AddSensorJson` (snake_case mount JSON),
+ `RemoveSensor`, `ReadSensorJson`, `ReadSensorsJson`, `StartCameraStreamsJson`,
+ `StopCameraStreams`, `GetStreamStatusJson`, `GetSegmentationClassesJson`.
+ Remote Control is reachable from the network, so the bridge is bounded: actor
+ paths of at most 1023 characters made of names that already exist (looked up,
+ never added to the name table), finite numbers, at most 16 rig sensors per
+ actor and 8 rig cameras per world, no disk writes (`"save_to_disk": true` is
+ refused), and changes need a play world (PIE or a game), never the editor's
+ level or a class default. Capture state is world-wide, so camera streams only
+ add to it and take back exactly what they added: `StartCameraStreamsJson`
+ turns channels on (never off), changes the rate only when asked, starts the
+ capture session only if it is not running (one it starts writes nothing to
+ disk), and refuses a port another program already listens on;
+ `StopCameraStreams` unregisters the rig cameras the streams registered, stops
+ the session only if the streams started it, and turns back the channels, rate
+ and disk writes they changed. A capture session somebody started for
+ recording keeps running as it was. `GetStreamStatusJson` says so in
+ `capture.streams_on` / `capture.started_by_streams`.
+
+ Segmentation and RammsUI's camera projector both use the custom-depth
+ stencil. While segmentation is on, CameraCapture gives every primitive its
+ class value as stencil, overwriting the 200 a `URammsCameraProjectorComponent`
+ target surface is marked with (`TargetStencilValue`) and its grid mesh's
+ `PGMCustomStencilValue` (1). A world that uses both lists those values in
+ `ReservedStencilValues` under `[/Script/CameraCapture.CameraCaptureSegmentationSettings]`
+ in `DefaultGame.ini`: surfaces already rendering custom depth with a reserved
+ value keep it (and read as that value in the mask).
 
  ---
 

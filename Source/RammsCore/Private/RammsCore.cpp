@@ -3,6 +3,8 @@
 #include "RammsCore.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
+#include "RammsChaosImuProvider.h"
+#include "RammsImuProvider.h"
 #include "ShaderCore.h"
 
 #define LOCTEXT_NAMESPACE "FRammsCoreModule"
@@ -32,10 +34,14 @@ void FRammsCoreModule::StartupModule()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("RammsCore: Shader directory not found at: %s"), *PluginShaderDir);
 	}
+
+	// Physics-rate IMU data from Chaos (URammsPhysicsImuSubsystem); RammsMujocoSupport registers MuJoCo's.
+	RammsImuProviders::Register(ERammsImuSource::Chaos, FRammsImuProviderFactory::CreateStatic(&MakeRammsChaosImuProvider));
 }
 
 void FRammsCoreModule::ShutdownModule()
 {
+	RammsImuProviders::Unregister(ERammsImuSource::Chaos);
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -23,7 +23,7 @@ namespace
 	constexpr float Accel = 60.0f;
 	constexpr float Decel = 60.0f;
 	constexpr float Tau = 0.1f;
-	constexpr float Tolerance = 1.0f;
+	constexpr float SpeedLawTolerance = 1.0f;
 
 	/** Seconds for a ramp to take Speed from From to To on ticks of Dt. */
 	float RampSeconds(float From, float To, float Acceleration, float Deceleration, float Dt)
@@ -223,16 +223,16 @@ bool FRammsCurbSpeedLawLegMoveSeconds::RunTest(const FString& Parameters)
 	// A command 9 cm from its goal at 18 cm/s arrives in 0.5 s, the leg a lag
 	// (1.8 cm) behind it, which a first-order servo closes to 1 cm in
 	// tau * ln(1.8).
-	TestEqual(TEXT("ramp, then the lag's tail"), RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, Tau, Tolerance),
+	TestEqual(TEXT("ramp, then the lag's tail"), RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, Tau, SpeedLawTolerance),
 		0.5f + Tau * FMath::Loge(1.8f), 1e-5f);
-	TestEqual(TEXT("the sign of the move does not matter"), RammsCurb::LegMoveSeconds(-9.0f, 18.0f, 0.0f, Tau, Tolerance),
-		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, Tau, Tolerance), 1e-6f);
+	TestEqual(TEXT("the sign of the move does not matter"), RammsCurb::LegMoveSeconds(-9.0f, 18.0f, 0.0f, Tau, SpeedLawTolerance),
+		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, Tau, SpeedLawTolerance), 1e-6f);
 	TestEqual(TEXT("a leg lagging more than the model trails by its own error"),
-		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 4.0f, Tau, Tolerance), 0.5f + Tau * FMath::Loge(4.0f), 1e-5f);
+		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 4.0f, Tau, SpeedLawTolerance), 0.5f + Tau * FMath::Loge(4.0f), 1e-5f);
 	TestEqual(TEXT("a command already there: only the leg's own error to close"),
-		RammsCurb::LegMoveSeconds(0.0f, 18.0f, 3.0f, Tau, Tolerance), Tau * FMath::Loge(3.0f), 1e-5f);
-	TestEqual(TEXT("a settled leg is done"), RammsCurb::LegMoveSeconds(0.0f, 18.0f, 0.6f, Tau, Tolerance), 0.0f);
-	TestEqual(TEXT("a slow ramp inside the tolerance has no tail"), RammsCurb::LegMoveSeconds(2.0f, 5.0f, 0.0f, Tau, Tolerance),
+		RammsCurb::LegMoveSeconds(0.0f, 18.0f, 3.0f, Tau, SpeedLawTolerance), Tau * FMath::Loge(3.0f), 1e-5f);
+	TestEqual(TEXT("a settled leg is done"), RammsCurb::LegMoveSeconds(0.0f, 18.0f, 0.6f, Tau, SpeedLawTolerance), 0.0f);
+	TestEqual(TEXT("a slow ramp inside the tolerance has no tail"), RammsCurb::LegMoveSeconds(2.0f, 5.0f, 0.0f, Tau, SpeedLawTolerance),
 		0.4f, 1e-5f);
 
 	// A lift from 0 towards 15 cm at 30 cm/s: the command gets there in 0.5 s,
@@ -414,7 +414,7 @@ bool FRammsCurbSpeedLawNoLagStepFactor::RunTest(const FString& Parameters)
 	for (float Error = 0.0f; Error <= 6.0f; Error += 0.01f)
 	{
 		FDeadlineChain Chain;
-		Chain.AddTime(RammsCurb::LegMoveSeconds(10.0f, 30.0f, Error, Tau, Tolerance));
+		Chain.AddTime(RammsCurb::LegMoveSeconds(10.0f, 30.0f, Error, Tau, SpeedLawTolerance));
 		const float Cap = Chain.Speed(25.0f, Decel);
 		if (Last > 0.0f)
 		{

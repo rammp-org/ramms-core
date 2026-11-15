@@ -10,6 +10,8 @@
 #include "TimerManager.h"
 #include "RammsControlSurfaceRegistry.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogRammsControlSurface, Log, All);
+
 URammsRobotControlSurfaceComponent::URammsRobotControlSurfaceComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -66,6 +68,7 @@ int32 URammsRobotControlSurfaceComponent::GetCentreRequests(FName Id) const
 
 void URammsRobotControlSurfaceComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	StopDeadmanTicker();
 	if (UWorld* World = GetWorld())
 	{
 		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
@@ -227,7 +230,7 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 				// child actor rather than a mistake on this one. Without the
 				// actor in the message the two are indistinguishable.
 				const AActor* From = Pair.Value->GetTypedOuter<AActor>();
-				UE_LOG(LogTemp, Warning,
+				UE_LOG(LogRammsControlSurface, Warning,
 					TEXT("[ControlSurface] '%s': control '%s' contributed twice (second from '%s' on '%s') — first wins. ")
 						TEXT("Control ids must be unique across everything this surface gathers, including carried actors. ")
 							TEXT("Some contributors derive ids from their component name and can be renamed; others publish fixed ")
@@ -328,7 +331,7 @@ void URammsRobotControlSurfaceComponent::RebuildControlSurface()
 	}
 	bBuilt = true;
 	++Version;
-	UE_LOG(LogTemp, Log, TEXT("[ControlSurface] '%s': %d controls in %d groups from %d contributors (%d raw motors); version %d."),
+	UE_LOG(LogRammsControlSurface, Log, TEXT("[ControlSurface] '%s': %d controls in %d groups from %d contributors (%d raw motors); version %d."),
 		*Owner->GetName(), Surface.Axes.Num(), Surface.Groups.Num(), Contributors.Num(),
 		Surface.Axes.FilterByPredicate([this](const FRammsControlAxis& A) { return A.Group == UnclaimedMotorGroup; }).Num(), Version);
 }
@@ -361,18 +364,301 @@ bool URammsRobotControlSurfaceComponent::MayDrive(FName Id, ERammsControlSource 
 	}
 	// A higher-priority holder keeps the control for ExternalHoldSeconds
 	// after its last command; equal or lower priority yields at once.
-	if (Priority(H->Source) > Priority(Source) && FPlatformTime::Seconds() - H->Time < ExternalHoldSeconds)
+	if (Priority(H->Source) > Priority(Source) && ClockNow() - H->Time < GetExternalHoldSecondsClamped())
 	{
 		return false;
 	}
 	return true;
 }
 
-void URammsRobotControlSurfaceComponent::Hold(FName Id, ERammsControlSource Source)
+void URammsRobotControlSurfaceComponent::Hold(FName Id, ERammsControlSource Source, double Time)
 {
 	FHold& H = Holds.FindOrAdd(Id);
 	H.Source = Source;
-	H.Time = FPlatformTime::Seconds();
+	H.Time = Time;
+}
+
+float URammsRobotControlSurfaceComponent::GetExternalHoldSecondsClamped() const
+{
+	// Clamped where used: the field is Blueprint-writable (and so writable over
+	// Remote Control's property route), and ClampMin reaches only the details
+	// panel. A NaN clamps to the top.
+	return FMath::Clamp(ExternalHoldSeconds, MinHoldSeconds, MaxHoldSeconds);
+}
+
+float URammsRobotControlSurfaceComponent::GetDeadmanSecondsClamped() const
+{
+	return FMath::Clamp(DeadmanSeconds, MinHoldSeconds, MaxHoldSeconds);
+}
+
+double URammsRobotControlSurfaceComponent::ClockNow() const
+{
+	return ClockOverride ? ClockOverride() : FPlatformTime::Seconds();
+}
+
+void URammsRobotControlSurfaceComponent::SetClockForTesting(TFunction<double()> Clock)
+{
+	ClockOverride = MoveTemp(Clock);
+}
+
+bool URammsRobotControlSurfaceComponent::GetHoldTime(FName Id, double& OutTime) const
+{
+	const FHold* H = Holds.Find(Id);
+	OutTime = H ? H->Time : 0.0;
+	return H != nullptr;
+}
+
+// --- the drive deadman ----------------------------------------------------------
+
+bool URammsRobotControlSurfaceComponent::IsDeadmanSource(ERammsControlSource Source)
+{
+	return Source == ERammsControlSource::Remote || Source == ERammsControlSource::Autonomy;
+}
+
+bool URammsRobotControlSurfaceComponent::IsDeadmanKind(ERammsControlKind Kind)
+{
+	return Kind == ERammsControlKind::Continuous || Kind == ERammsControlKind::Velocity;
+}
+
+void URammsRobotControlSurfaceComponent::NoteHeard(ERammsControlSource Source)
+{
+	if (Source == ERammsControlSource::Remote)
+	{
+		HeardRemote = ClockNow();
+	}
+	else if (Source == ERammsControlSource::Autonomy)
+	{
+		HeardAutonomy = ClockNow();
+	}
+}
+
+double URammsRobotControlSurfaceComponent::LastHeard(ERammsControlSource Source) const
+{
+	return Source == ERammsControlSource::Remote  ? HeardRemote
+		: Source == ERammsControlSource::Autonomy ? HeardAutonomy
+												  : 0.0;
+}
+
+void URammsRobotControlSurfaceComponent::UpdateDeadman(FName Id, ERammsControlKind Kind, ERammsControlSource Source, ECommandOrigin Origin)
+{
+	if (Origin != ECommandOrigin::Robot && IsDeadmanKind(Kind) && IsDeadmanSource(Source))
+	{
+		DeadmanWatch.Add(Id);
+		StartDeadmanTicker();
+	}
+	else
+	{
+		// Taken over by a source whose commands stand, by the robot itself, or a
+		// control whose commands stand.
+		DeadmanWatch.Remove(Id);
+	}
+}
+
+void URammsRobotControlSurfaceComponent::StartDeadmanTicker()
+{
+	if (DeadmanTicker.IsValid())
+	{
+		return;
+	}
+	// Its first frame is counted from the command that started it, so a first
+	// run a frame late (or after a hitch) is given that frame's grace.
+	LastDeadmanCheck = ClockNow();
+	PreviousDeadmanGap = 0.0;
+	// The core ticker rather than this component's tick: it runs while the
+	// world is paused, as the real-time holds it times do, and it needs no
+	// tick function on a component Blueprints already carry without one.
+	TWeakObjectPtr<URammsRobotControlSurfaceComponent> WeakThis(this);
+	DeadmanTicker = FTSTicker::GetCoreTicker().AddTicker(TEXT("RammsControlSurfaceDeadman"), 0.0f,
+		[WeakThis](float) { return StepDeadmanTicker(WeakThis); });
+}
+
+void URammsRobotControlSurfaceComponent::StopDeadmanTicker()
+{
+	if (DeadmanTicker.IsValid())
+	{
+		// Safe from inside the entry's own callback (the core ticker only marks
+		// an entry that is running on this thread).
+		FTSTicker::RemoveTicker(DeadmanTicker);
+	}
+	DeadmanTicker.Reset();
+}
+
+bool URammsRobotControlSurfaceComponent::StepDeadmanTicker(const TWeakObjectPtr<URammsRobotControlSurfaceComponent>& WeakSurface)
+{
+	URammsRobotControlSurfaceComponent* Self = WeakSurface.Get();
+	if (Self == nullptr)
+	{
+		return false; // gone (destroyed or collected): the entry goes with it
+	}
+	if (Self->TickDeadman(Self->ClockNow()))
+	{
+		return true;
+	}
+	// Nothing left to watch: stop until the next deadman command. Removing the
+	// entry here, not just returning false, so a test running this by hand
+	// leaves no second entry behind once a new command starts one.
+	Self->StopDeadmanTicker();
+	return false;
+}
+
+bool URammsRobotControlSurfaceComponent::TickDeadman(double Now)
+{
+	// The grace: the last DeadmanGraceFrames frames. A source is heard at frame
+	// granularity (a Remote Control request is answered in the core ticker, a
+	// RammsAccess intent in the world's tick), and within a frame the deadman
+	// may look before or after it is heard, so a source is only silent once it
+	// has missed more than a frame or two past the window.
+	static_assert(DeadmanGraceFrames == 2, "the grace below sums the last two frames");
+	const double Gap = FMath::Max(0.0, Now - LastDeadmanCheck);
+	const double Grace = Gap + PreviousDeadmanGap;
+	PreviousDeadmanGap = Gap;
+	LastDeadmanCheck = Now;
+	ExpireQuietHolds(Now, Grace);
+	return DeadmanWatch.Num() > 0;
+}
+
+int32 URammsRobotControlSurfaceComponent::ExpireQuietHolds(double Now, double Grace)
+{
+	const double Window = static_cast<double>(GetDeadmanSecondsClamped()) + FMath::Max(0.0, Grace);
+
+	// Find the quiet ones first and spring them back after: a release can
+	// rebuild the surface (the drive-mode selector's contributors do), which
+	// changes Holds and Surface under an iterator.
+	struct FQuiet
+	{
+		FName				Id;
+		ERammsControlSource Source;
+		ERammsControlKind	Kind;
+	};
+	TArray<FQuiet, TInlineAllocator<8>> Quiet;
+	double								Longest = 0.0;
+	for (auto It = DeadmanWatch.CreateIterator(); It; ++It)
+	{
+		const FName				 Id = *It;
+		const FHold*			 H = Holds.Find(Id);
+		const FRammsControlAxis* Axis = Surface.Find(Id);
+		if (H == nullptr || !IsDeadmanSource(H->Source) || Axis == nullptr || !IsDeadmanKind(Axis->Kind))
+		{
+			// Released, taken over by a source whose commands stand, dropped by a
+			// rebuild (it changed hands), or no longer a kind that lapses.
+			It.RemoveCurrent();
+			continue;
+		}
+		// Per source: anything heard from it since keeps its commands.
+		const double Quietness = Now - FMath::Max(H->Time, LastHeard(H->Source));
+		if (Quietness >= Window)
+		{
+			Longest = FMath::Max(Longest, Quietness);
+			Quiet.Add({ Id, H->Source, Axis->Kind });
+			It.RemoveCurrent();
+		}
+	}
+	if (Quiet.Num() == 0)
+	{
+		return 0;
+	}
+
+	int32			SprungBack = 0;
+	TArray<FString> Sprung;
+	TArray<FString> Refused;
+	for (const FQuiet& Entry : Quiet)
+	{
+		// A spring-back before this one may have rebuilt the surface: a control
+		// that is gone, or has changed hands, is forgotten, not sprung back.
+		const FHold*			 H = Holds.Find(Entry.Id);
+		const FRammsControlAxis* Axis = Surface.Find(Entry.Id);
+		if (H == nullptr || H->Source != Entry.Source || Axis == nullptr || Axis->Kind != Entry.Kind)
+		{
+			continue;
+		}
+		// Continuous: as the source itself letting go would (the holder may
+		// always release). Velocity: stopped -- commanded its default -- rather
+		// than let go of. A refusal leaves the hold to lapse as any hold does;
+		// not retried.
+		const bool	  bBack = Entry.Kind == ERammsControlKind::Velocity ? StopHeldVelocity(Entry.Id) : ReleaseHeld(Entry.Id, Entry.Source);
+		const FString Name = FString::Printf(TEXT("%s (%s)"), *Entry.Id.ToString(),
+			Entry.Source == ERammsControlSource::Remote ? TEXT("Remote") : TEXT("Autonomy"));
+		if (bBack)
+		{
+			++SprungBack;
+			Sprung.Add(Name);
+		}
+		else
+		{
+			Refused.Add(Name);
+		}
+	}
+
+	// At Log (refusals at Warning) at most every DeadmanLogRepeatSeconds per
+	// surface; in between, Verbose: a client that keeps dropping in and out,
+	// or the robot's own holds lapsing every crossing, is not news each time.
+	const bool bReport = LastDeadmanReport < 0.0 || Now - LastDeadmanReport >= DeadmanLogRepeatSeconds;
+	if (bReport && (Sprung.Num() > 0 || Refused.Num() > 0))
+	{
+		LastDeadmanReport = Now;
+	}
+	const FString OwnerName = GetNameSafe(GetOwner());
+	if (Sprung.Num() > 0)
+	{
+		const FString List = FString::Join(Sprung, TEXT(", "));
+		if (bReport)
+		{
+			UE_LOG(LogRammsControlSurface, Log, TEXT("[ControlSurface] '%s': deadman: nothing heard for %.2f s (window %.2f s): %s sprang back."),
+				*OwnerName, Longest, Window, *List);
+		}
+		else
+		{
+			UE_LOG(LogRammsControlSurface, Verbose, TEXT("[ControlSurface] '%s': deadman: nothing heard for %.2f s (window %.2f s): %s sprang back."),
+				*OwnerName, Longest, Window, *List);
+		}
+	}
+	if (Refused.Num() > 0)
+	{
+		const FString List = FString::Join(Refused, TEXT(", "));
+		if (bReport)
+		{
+			UE_LOG(LogRammsControlSurface, Warning,
+				TEXT("[ControlSurface] '%s': deadman: could not spring back %s (refused by what drives it); the last command may still be acting."),
+				*OwnerName, *List);
+		}
+		else
+		{
+			UE_LOG(LogRammsControlSurface, Verbose,
+				TEXT("[ControlSurface] '%s': deadman: could not spring back %s (refused by what drives it); the last command may still be acting."),
+				*OwnerName, *List);
+		}
+	}
+	return SprungBack;
+}
+
+bool URammsRobotControlSurfaceComponent::StopHeldVelocity(FName Id)
+{
+	const FRammsControlAxis* Found = Surface.Find(Id);
+	const FRoute*			 Route = Routes.Find(Id);
+	if (!Found || !Route)
+	{
+		return false;
+	}
+	// By value: ApplyControl may rebuild the surface (see ApplyAxis).
+	const float Default = Found->DefaultValue;
+	const FName MotorId = Route->MotorId;
+	bool		bStopped = false;
+	if (IRammsControlContributor* C = ContributorFor(Id))
+	{
+		bStopped = C->ApplyControl(Id, Default);
+	}
+	else if (Base && Base->HasBackend() && !MotorId.IsNone())
+	{
+		Base->SetMotorCommand(MotorId, Default);
+		bStopped = true;
+	}
+	if (bStopped)
+	{
+		Holds.Remove(Id);
+		DeadmanWatch.Remove(Id);
+		Targets.Add(Id, Default); // what it is commanded now
+	}
+	return bStopped;
 }
 
 IRammsControlContributor* URammsRobotControlSurfaceComponent::ContributorFor(FName Id) const
@@ -398,6 +684,21 @@ TArray<UActorComponent*> URammsRobotControlSurfaceComponent::GetContributorCompo
 }
 
 bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float Value, ERammsControlSource Source)
+{
+	return ApplyAxis(Id, Value, Source, ECommandOrigin::Client, 0.0);
+}
+
+bool URammsRobotControlSurfaceComponent::SetControlInternal(FName Id, float Value, ERammsControlSource Source)
+{
+	return ApplyAxis(Id, Value, Source, ECommandOrigin::Robot, 0.0);
+}
+
+bool URammsRobotControlSurfaceComponent::ReapplyHeldControl(FName Id, float Value, ERammsControlSource Source, double HoldTime)
+{
+	return ApplyAxis(Id, Value, Source, ECommandOrigin::Carried, HoldTime);
+}
+
+bool URammsRobotControlSurfaceComponent::ApplyAxis(FName Id, float Value, ERammsControlSource Source, ECommandOrigin Origin, double HoldTime)
 {
 	EnsureBuilt();
 	const FRammsControlAxis* Found = Surface.Find(Id);
@@ -425,13 +726,35 @@ bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float 
 	}
 	if (bApplied)
 	{
-		Hold(Id, Source);
+		// A carried command keeps the time it was given (the source has said
+		// nothing since); anything else is held from now.
+		Hold(Id, Source, Origin == ECommandOrigin::Carried ? HoldTime : ClockNow());
 		Targets.Add(Id, Clamped);
+		UpdateDeadman(Id, Axis.Kind, Source, Origin);
+		if (Origin == ECommandOrigin::Client)
+		{
+			NoteHeard(Source);
+		}
 	}
 	return bApplied;
 }
 
 bool URammsRobotControlSurfaceComponent::TriggerAction_Implementation(FName Id, ERammsControlSource Source)
+{
+	const bool bTriggered = TriggerAxis(Id, Source);
+	if (bTriggered)
+	{
+		NoteHeard(Source);
+	}
+	return bTriggered;
+}
+
+bool URammsRobotControlSurfaceComponent::TriggerControlInternal(FName Id, ERammsControlSource Source)
+{
+	return TriggerAxis(Id, Source);
+}
+
+bool URammsRobotControlSurfaceComponent::TriggerAxis(FName Id, ERammsControlSource Source)
 {
 	EnsureBuilt();
 	const FRammsControlAxis* Axis = Surface.Find(Id);
@@ -448,6 +771,16 @@ bool URammsRobotControlSurfaceComponent::TriggerAction_Implementation(FName Id, 
 
 bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ERammsControlSource Source)
 {
+	const bool bReleased = ReleaseHeld(Id, Source);
+	if (bReleased)
+	{
+		NoteHeard(Source);
+	}
+	return bReleased;
+}
+
+bool URammsRobotControlSurfaceComponent::ReleaseHeld(FName Id, ERammsControlSource Source)
+{
 	EnsureBuilt();
 	const FRammsControlAxis* Found = Surface.Find(Id);
 	const FRoute*			 Route = Routes.Find(Id);
@@ -456,7 +789,7 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 		return false;
 	}
 	// By value: ReleaseControl may rebuild the surface, and everything below
-	// reads the axis again afterwards. See SetAxis_Implementation.
+	// reads the axis again afterwards. See ApplyAxis.
 	const FRammsControlAxis Axis = *Found;
 	const FName				MotorId = Route->MotorId;
 	// Only the holder (or nobody) releases; a lower-priority source can't
@@ -492,6 +825,7 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 	if (bReleased)
 	{
 		Holds.Remove(Id);
+		DeadmanWatch.Remove(Id);
 
 		// Some controls cannot be let go of one at a time. A 5-bar's height and
 		// fore/aft are two axes over one pair of motors, so releasing either

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Containers/Ticker.h"
 #include "RammsControlTypes.h"
 #include "RammsControlSurfaceProvider.h"
 #include "RammsControlSink.h"
@@ -92,9 +93,38 @@ public:
 	 *  rejected, so the walk clamps rather than trusts. */
 	static constexpr int32 MaxChildActorGatherDepth = 8;
 
-	/** How long a Remote / Autonomy command holds a control over local input. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.0"))
+	/** How long a Remote / Autonomy command holds a control over local input
+	 *  (equal or lower priority yields at once). Clamped to [MinHoldSeconds,
+	 *  MaxHoldSeconds] where it is used, whatever it is set to: it is
+	 *  Blueprint-writable, so reachable from a Blueprint graph or Remote
+	 *  Control's property route, and ClampMin reaches only the details panel.
+	 *  The drive deadman has its own window (DeadmanSeconds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Control Surface", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float ExternalHoldSeconds = 0.3f;
+
+	/**
+	 * The drive deadman's window: how long a Continuous or Velocity control a
+	 * Remote / Autonomy source holds lasts once nothing more is heard from
+	 * that source (see ExpireQuietHolds), before a grace of the last
+	 * DeadmanGraceFrames frames. Clamped to [MinHoldSeconds, MaxHoldSeconds]
+	 * where it is used.
+	 *
+	 * Class defaults only, and not Blueprint-visible: a safety window is set
+	 * on the robot, not changed at run time -- in particular not by a Remote
+	 * Control client, whose property route can write any Blueprint-writable or
+	 * instance-editable property. (Public in C++ for tests.)
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "Control Surface", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float DeadmanSeconds = 0.3f;
+
+	/** The range ExternalHoldSeconds and DeadmanSeconds are clamped to where used. */
+	static constexpr float MinHoldSeconds = 0.1f;
+	static constexpr float MaxHoldSeconds = 2.0f;
+
+	/** ExternalHoldSeconds as arbitration uses it. */
+	float GetExternalHoldSecondsClamped() const;
+	/** DeadmanSeconds as the deadman uses it. */
+	float GetDeadmanSecondsClamped() const;
 
 	/**
 	 * The surface that governs Component: the one on its own actor, or failing
@@ -189,6 +219,124 @@ public:
 	 *  that saw fewer while held waits for centre. */
 	int32 GetCentreRequests(FName Id) const;
 
+	// --- the drive deadman ------------------------------------------------------
+
+	/** The sources whose motion commands last only while they are heard from:
+	 *  Remote and Autonomy, the ones that drive from outside the robot. */
+	static bool IsDeadmanSource(ERammsControlSource Source);
+
+	/** The kinds of control the deadman watches: Continuous and Velocity, the
+	 *  ones that keep the robot moving for as long as they stand. Position,
+	 *  Enum, Action and Text controls stand until changed. */
+	static bool IsDeadmanKind(ERammsControlKind Kind);
+
+	/** The deadman's grace is the length of the last this-many frames. */
+	static constexpr int32 DeadmanGraceFrames = 2;
+
+	/** The deadman reports at Log at most this often per surface; what it has
+	 *  to say in between goes to Verbose. */
+	static constexpr double DeadmanLogRepeatSeconds = 5.0;
+
+	/**
+	 * The drive deadman, once.
+	 *
+	 * A Continuous or Velocity control a Remote or Autonomy source holds
+	 * springs back once nothing has been heard from that source on this
+	 * surface for DeadmanSeconds + Grace before Now. Heard is per source, not
+	 * per control: any command from it that this surface applies (a set, a
+	 * trigger, a release, of any control) is the client still being there --
+	 * the signal RammsAccess's packet watchdog uses -- so a client that sends
+	 * its controls one request at a time is not taken for gone between them,
+	 * and a control it set once stays while it keeps sending others. Remote
+	 * Control carries no client identity, and Source is whatever the caller
+	 * passes: two clients sending as the same source keep each other's
+	 * commands alive.
+	 *
+	 * Springing back:
+	 *  - a Continuous control goes back as a ReleaseControl from that source
+	 *    would: through its contributor's ReleaseControl, or
+	 *    ApplyControl(DefaultValue) where it cannot let go; a raw motor is
+	 *    commanded its DefaultValue;
+	 *  - a Velocity control is commanded its DefaultValue (0: stop), through
+	 *    its contributor's ApplyControl or the raw motor's command, rather
+	 *    than released: a released speed servo may coast, or keep its last
+	 *    command (a MuJoCo <velocity> actuator cannot let go).
+	 * Either way the hold goes, so local input takes over at once. A command
+	 * latched behind the control (a drive's external input) goes back with
+	 * it, and a client that dropped off the network stops the robot instead
+	 * of leaving it on its last command.
+	 *
+	 * Not touched: Keyboard, Gamepad, Touch and Script commands; the robot's
+	 * own (SetControlInternal); Position, Enum, Action and Text controls; a
+	 * control another source has taken over since; one a rebuild of the
+	 * surface dropped because it changed hands (the contributor that stood
+	 * down let go of it: drive modes zero their commands when they do).
+	 *
+	 * Now is on the clock the holds are timed on (FPlatformTime::Seconds, as
+	 * MayDrive's arbitration is, unless a test set its own): real time, which
+	 * is what a client re-sending at 10 Hz keeps to, however the world is
+	 * paused or dilated. Grace is what the ticker adds for the frame rate: the
+	 * length of the last DeadmanGraceFrames frames, so a long frame (an editor
+	 * throttled in the background, a hitch) is not taken for silence.
+	 *
+	 * Runs on the core ticker, once a frame, only while such a control is
+	 * held. Public so a test can step it on its own clock. Returns how many
+	 * controls sprang back.
+	 */
+	int32 ExpireQuietHolds(double Now, double Grace = 0.0);
+
+	/** How many controls the deadman is watching now. */
+	int32 GetDeadmanWatchCount() const { return DeadmanWatch.Num(); }
+
+	/** Whether the deadman's core-ticker entry is registered (only while it
+	 *  watches something). */
+	bool IsDeadmanTickerActive() const { return DeadmanTicker.IsValid(); }
+
+	/**
+	 * What the deadman's core-ticker entry does each frame, for the surface
+	 * WeakSurface refers to: nothing, and false (the entry goes), once that
+	 * surface is gone; else ExpireQuietHolds at the surface's clock with the
+	 * grace of its last DeadmanGraceFrames frames, and false -- the entry
+	 * removed -- once nothing is left to watch. Public so a test can run it
+	 * without ticking the core ticker.
+	 */
+	static bool StepDeadmanTicker(const TWeakObjectPtr<URammsRobotControlSurfaceComponent>& WeakSurface);
+
+	// --- the robot's own commands, and commands carried over ----------------
+
+	/**
+	 * SetControl for the robot's own controllers (the stance a drive mode
+	 * takes, a curb crossing holding the arm still): arbitrated and held
+	 * exactly like SetControl, but not a client's command. It is not heard as
+	 * its source being there, and the deadman does not watch it, so a
+	 * controller sending as Autonomy keeps no Autonomy client's commands
+	 * alive, and its own hold simply lapses. C++ only: nothing remote
+	 * reaches it.
+	 */
+	bool SetControlInternal(FName Id, float Value, ERammsControlSource Source);
+
+	/** TriggerControl for the robot's own controllers: not heard as its source
+	 *  being there (see SetControlInternal). */
+	bool TriggerControlInternal(FName Id, ERammsControlSource Source);
+
+	/** When Id was last commanded by its holder, on this surface's clock; false
+	 *  when nobody holds it. */
+	bool GetHoldTime(FName Id, double& OutTime) const;
+
+	/**
+	 * Apply a command something already held, as of HoldTime: a drive-mode
+	 * switch carrying the operator's drive commands into the incoming mode.
+	 * Arbitrated and applied as SetControl is, but held from HoldTime rather
+	 * than now, and not heard as its source being there: a client that went
+	 * quiet before the switch gets no fresh lease from it, and the deadman
+	 * springs its command back on the schedule it was on.
+	 */
+	bool ReapplyHeldControl(FName Id, float Value, ERammsControlSource Source, double HoldTime);
+
+	/** Run arbitration and the deadman on Clock instead of
+	 *  FPlatformTime::Seconds (unbound: real time again). Tests only. */
+	void SetClockForTesting(TFunction<double()> Clock);
+
 	// --- IRammsControlSurfaceProvider ---------------------------------------
 	virtual FRammsControlSurface GetControlSurface_Implementation() const override;
 	virtual int32				 GetControlSurfaceVersion_Implementation() const override;
@@ -222,14 +370,35 @@ private:
 		double				Time = 0.0;
 	};
 
+	/** Who a command comes from, for the deadman: a client (heard, and watched
+	 *  where its kind and source are the deadman's), the robot itself (neither),
+	 *  or a held command carried over as of its own time (watched, not heard). */
+	enum class ECommandOrigin : uint8
+	{
+		Client,
+		Robot,
+		Carried,
+	};
+
 	UFUNCTION()
 	void OnRegistryLoaded(URammsRobotBaseComponent* InBase);
 
 	static int32			  Priority(ERammsControlSource Source);
 	bool					  MayDrive(FName Id, ERammsControlSource Source) const;
-	void					  Hold(FName Id, ERammsControlSource Source);
+	void					  Hold(FName Id, ERammsControlSource Source, double Time);
 	IRammsControlContributor* ContributorFor(FName Id) const;
 	void					  EnsureBuilt() const;
+	/** The clock holds and the deadman run on (FPlatformTime, unless a test set one). */
+	double ClockNow() const;
+
+	/** SetAxis, for Origin. HoldTime: when the hold starts (Carried only). */
+	bool ApplyAxis(FName Id, float Value, ERammsControlSource Source, ECommandOrigin Origin, double HoldTime);
+	/** TriggerAction without the hearing. */
+	bool TriggerAxis(FName Id, ERammsControlSource Source);
+	/** ReleaseAxis without the hearing: what the deadman lets go through. */
+	bool ReleaseHeld(FName Id, ERammsControlSource Source);
+	/** Command a held Velocity control its DefaultValue and drop the hold. */
+	bool StopHeldVelocity(FName Id);
 
 	UPROPERTY(Transient)
 	TObjectPtr<URammsRobotBaseComponent> Base;
@@ -241,6 +410,37 @@ private:
 	TMap<FName, float> Targets;
 	/** RequireCentre's asks, per control. */
 	TMap<FName, int32> CentreRequests;
+
+	/** Continuous / Velocity controls a deadman source holds: ExpireQuietHolds' list. */
+	TSet<FName> DeadmanWatch;
+	/** When each deadman source was last heard from on this surface (ClockNow;
+	 *  0: never). */
+	double HeardRemote = 0.0;
+	double HeardAutonomy = 0.0;
+	/** The core-ticker entry that runs ExpireQuietHolds while DeadmanWatch has
+	 *  anything; invalid when idle. */
+	FTSTicker::FDelegateHandle DeadmanTicker;
+	/** ClockNow when the ticker last ran ExpireQuietHolds (until its first run:
+	 *  when it was started). */
+	double LastDeadmanCheck = 0.0;
+	/** The frame before that one's length (0 until it has run twice). */
+	double PreviousDeadmanGap = 0.0;
+	/** ClockNow when the deadman last reported at Log (< 0: never). */
+	double LastDeadmanReport = -1.0;
+	/** A test's clock (unbound: FPlatformTime::Seconds). */
+	TFunction<double()> ClockOverride;
+	/** Source was heard from now (a no-op for any but a deadman source). */
+	void NoteHeard(ERammsControlSource Source);
+	/** When Source was last heard from (0: never). */
+	double LastHeard(ERammsControlSource Source) const;
+	/** After a command was applied: watch Id if it is Source's and lapses,
+	 *  forget it otherwise. */
+	void UpdateDeadman(FName Id, ERammsControlKind Kind, ERammsControlSource Source, ECommandOrigin Origin);
+	void StartDeadmanTicker();
+	void StopDeadmanTicker();
+	/** One frame of the ticker at Now: the grace from the frame lengths, then
+	 *  ExpireQuietHolds. True while there is anything left to watch. */
+	bool TickDeadman(double Now);
 	/** Append Actor's contributor-bearing components, then those of its child
 	 *  actors, depth-first and bounded. */
 	void GatherContributorComponents(AActor* Actor, int32 Depth, TSet<AActor*>& Visited,
