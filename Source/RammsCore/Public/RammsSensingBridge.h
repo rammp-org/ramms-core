@@ -10,20 +10,28 @@ class AActor;
 class UWorld;
 struct FRammsSensorMount;
 
-/** What StartCameraStreamsJson (or a rig's BeginPlay) asks of the stream server and the capture subsystem. */
+/**
+ * What StartCameraStreamsJson (or a rig's BeginPlay) asks of the stream server and the capture subsystem. Capture
+ * state is world-wide and other cameras may rely on it, so only what is asked for changes: channels are turned on,
+ * never off, and the rate and disk writes change only when given.
+ */
 struct RAMMSCORE_API FRammsCameraStreamOptions
 {
+	/** The RMSS port, used when the server is not running yet. */
 	int32 Port = 30030;
-	int32 EveryNFrames = 1;
-	bool  bColor = true;
-	bool  bDepth = true;
-	bool  bMotion = true;
-	bool  bSegmentation = true;
-	/** Leave the capture subsystem's disk serialization on. Off: the cameras only stream. */
-	bool bSaveToDisk = false;
+	/** Capture every N frames. Unset: the capture subsystem keeps its rate. */
+	TOptional<int32> EveryNFrames;
+	/** Capture channels to turn on (a channel already on stays on). */
+	bool bColor = true;
+	bool bDepth = true;
+	bool bMotion = true;
+	bool bSegmentation = true;
+	/** Write the frames to disk too (the capture subsystem's serialization). Unset: a capture session this call starts
+	 *  only streams; one already running keeps its setting. */
+	TOptional<bool> SaveToDisk;
 	/** Start the RMSS server if it is not running. */
 	bool bStartServer = true;
-	/** Set the capture channels and start capture. */
+	/** Turn the channels on, register the rig cameras and start capture. */
 	bool bStartCapture = true;
 };
 
@@ -40,6 +48,15 @@ struct RAMMSCORE_API FRammsCameraStreamOptions
  * Sensors are the components a URammsSensorRigComponent built ("rig": true)
  * and ToF / Sonar / IMU components and capture-registered cameras placed by
  * hand ("rig": false, named by their component name).
+ *
+ * Remote Control is reachable from the network, so what a caller can change is
+ * bounded: sensor names are 1 to 64 characters of A-Z a-z 0-9 _ - . and do not
+ * end in _depth / _dmv / _seg / _stream; cameras are at most 4096 x 4096
+ * (larger is clamped); an actor has at most 16 rig sensors and a world at most
+ * 8 rig cameras; and changes (AddSensorJson, RemoveSensor,
+ * StartCameraStreamsJson, StopCameraStreams) need a play world (PIE or a game),
+ * never the editor's level or a class default. Reads also answer in the editor
+ * world.
  */
 UCLASS()
 class RAMMSCORE_API URammsSensingBridge : public UBlueprintFunctionLibrary
@@ -52,14 +69,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString ListSensorsJson(const FString& ActorPath);
 
-	/** Add a sensor from a snake_case mount JSON (missing keys take the FRammsSensorMount defaults), adding a
-	 *  rig to the actor if it has none, and build it now. {"ok", "name", "component_path"}; a camera adds
-	 *  "channel" and "streams". */
+	/** Add a sensor from a snake_case mount JSON (missing keys take the FRammsSensorMount defaults; a sonar also takes
+	 *  "max_range_cm" / "cone_deg", the keys ListSensorsJson reports), adding a rig to the actor if it has none, and
+	 *  build it now. {"ok", "name", "component_path"}; a camera adds "channel" and "streams" (and "warning" when it
+	 *  could not have the channel it asked for). A failure changes nothing. Needs a play world. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString AddSensorJson(const FString& ActorPath, const FString& MountJson);
 
-	/** Remove a rig sensor (and, for a camera, its stream source). False if no rig on the actor has it; a
-	 *  hand-placed component is not removed. */
+	/** Remove a rig sensor (and, for a camera, its stream source). False if no rig on the actor has it, or the actor
+	 *  is not in a play world; a hand-placed component is not removed. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static bool RemoveSensor(const FString& ActorPath, const FString& Name);
 
@@ -73,18 +91,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString ReadSensorsJson(const FString& ActorPath);
 
-	/** Start the RMSS server if it is not running, set the capture channels and segmentation, turn disk writes
-	 *  off unless asked, set the rate and start capture. Options (all optional): {"port", "every_n_frames",
-	 *  "color", "depth", "motion", "segmentation", "save_to_disk"}. Returns the stream status. */
+	/** Start the RMSS server if it is not running (refusing a port another program listens on), turn on the capture
+	 *  channels asked for (never off: other cameras may need them), register the rig cameras with capture and start
+	 *  it. Disk writes: "save_to_disk" if given, else off for a capture session this starts and unchanged for one
+	 *  already running; the rate changes only when "every_n_frames" is given. Options (all optional): {"port",
+	 *  "every_n_frames", "color", "depth", "motion", "segmentation", "save_to_disk"}. Needs a play world. Returns the
+	 *  stream status. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString StartCameraStreamsJson(const FString& OptionsJson);
 
-	/** Stop capture; the server stays up. False if the world has no capture subsystem. */
+	/** Stop capture; the server stays up. False if the world is not a play world or has no capture subsystem. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static bool StopCameraStreams();
 
 	/** {"ok", "server": {running, port, connections}, "capture": {capturing, every_n_frames, color, depth, motion,
-	 *  segmentation, save_to_disk, cameras}, "streams": [{actor, camera, role, stream_id, channel, message, fmt}]} */
+	 *  segmentation, save_to_disk, cameras}, "streams": [{actor, camera, role, stream_id, channel, message, fmt}]}.
+	 *  "port" is the server's while it runs, else the default 30030. "streams" lists every registered camera and
+	 *  every rig camera (registered or not yet). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString GetStreamStatusJson();
 
@@ -159,8 +182,19 @@ public:
 	/** The world these functions act on: the play world, else the editor world. */
 	static UWorld* GetSensingWorld();
 
-	/** An actor by full object path, or by name in the sensing world. */
+	/** An actor by full object path, or by name in the sensing world. Never a class default object or archetype. */
 	static AActor* FindActor(const FString& ActorPath);
+
+	/** Whether the bridge may change sensing on Actor: it is in a play world (PIE or a game) and not a template.
+	 *  Else OutError says so. */
+	static bool CanChangeSensing(const AActor* Actor, FString& OutError);
+
+	/** Whether World is a play world (PIE or a game). Else OutError says so. */
+	static bool IsPlayWorld(const UWorld* World, FString& OutError);
+
+	/** The bridge's limits (see the class comment). */
+	static constexpr int32 MaxRigSensorsPerActor = 16;
+	static constexpr int32 MaxRigCamerasPerWorld = 8;
 
 	/** Parse a mount JSON (see AddSensorJson) onto OutMount, which keeps its values for missing keys. */
 	static bool ParseMountJson(const FString& MountJson, FRammsSensorMount& OutMount, FString& OutError);

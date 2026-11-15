@@ -357,30 +357,60 @@ This helps ensure that consistent code formatting is applied.
  A list of `FRammsSensorMount`s (name, kind, parent component, socket,
  relative location / rotation, and the kind's settings), built into real
  components at BeginPlay and at runtime through `AddMount` (which replaces a
- mount of the same name) / `RemoveMount`. Every sensor traces / looks along its
- local +X. A mount whose parent component does not exist is skipped with a
- warning.
+ mount of the same name, or changes nothing when the new one cannot be built) /
+ `RemoveMount`. Every sensor traces / looks along its local +X. A mount whose
+ parent component does not exist is skipped with a warning. Names are 1 to 64
+ characters of `A-Z a-z 0-9 _ - .` and may not end in `_depth`, `_dmv`, `_seg`
+ or `_stream`: those are the names of a camera's capture passes and stream
+ source, and a camera whose pass names another object already holds is not
+ built (creating a pass over another object of its name would be fatal).
 
  | Kind | Builds |
  |---|---|
  | `ToF` | `URammsToFSensorComponent` (grid when Rows x Columns > 1) |
  | `Sonar` | `URammsSonarSensorComponent` (`SonarConeDeg` is `BeamHalfAngle`, the cone's half-angle) |
  | `IMU` | `URammsIMUSensorComponent` |
- | `Camera` | `UIntrinsicSceneCaptureComponent2D` registered with `UCameraCaptureSubsystem`, plus a `URammsStreamSourceComponent` `<Name>_stream` forwarding only that camera |
+ | `Camera` | `UIntrinsicSceneCaptureComponent2D` (1 to 4096 pixels each way), plus a `URammsStreamSourceComponent` `<Name>_stream` forwarding only that camera |
 
  A camera with base channel `C` (`StreamChannel`, or -1 for the lowest `C`
  whose four channels no stream source in the world uses) streams colour on `C`,
  depth on `C+100`, motion on `C+200` and the segmentation mask on `C+300`,
  under the stream ids `camera/<Name>/color`, `camera/<Name>/depth`,
  `motion/<Name>`, `mask/<Name>` (see RammsStreaming's `RammsCameraStreams.h`).
- `bStartStreamServerOnBeginPlay` / `bStartCaptureOnBeginPlay` start the RMSS
- server and capture with the channels the rig's cameras ask for.
+ Cameras that ask for a channel are built first; one whose channels another
+ source already uses streams on a free one instead (with a warning). A camera
+ replaced through `AddMount` keeps its channel. Names are per actor, so every
+ frame carries `actor` (the owner's path): a client picks a robot's camera by
+ actor, never by name alone.
+
+ A rig camera costs nothing until camera streams start: it is registered with
+ `UCameraCaptureSubsystem` (render targets, depth / motion / mask passes) by
+ `URammsSensingBridge::StartCameraStreams`, by `bStartCaptureOnBeginPlay`, or
+ at once when added while capture runs. `bStartStreamServerOnBeginPlay` /
+ `bStartCaptureOnBeginPlay` start the RMSS server and capture, turning on the
+ channels the rig's cameras ask for.
 
  `URammsSensingBridge` exposes the same to Remote Control
  (`/Script/RammsCore.Default__RammsSensingBridge`), plain strings in and JSON
  out: `ListSensorsJson`, `AddSensorJson` (snake_case mount JSON),
  `RemoveSensor`, `ReadSensorJson`, `ReadSensorsJson`, `StartCameraStreamsJson`,
  `StopCameraStreams`, `GetStreamStatusJson`, `GetSegmentationClassesJson`.
+ Remote Control is reachable from the network, so the bridge is bounded: at
+ most 16 rig sensors per actor and 8 rig cameras per world, and changes need a
+ play world (PIE or a game), never the editor's level or a class default.
+ Capture state is world-wide, so `StartCameraStreamsJson` only adds to it: it
+ turns channels on (never off), changes the rate and disk writes only when
+ asked (a capture session it starts writes nothing to disk unless asked), and
+ refuses a port another program already listens on.
+
+ Segmentation and RammsUI's camera projector both use the custom-depth
+ stencil. While segmentation is on, CameraCapture gives every primitive its
+ class value as stencil, overwriting the 200 a `URammsCameraProjectorComponent`
+ target surface is marked with (`TargetStencilValue`) and its grid mesh's
+ `PGMCustomStencilValue` (1). A world that uses both lists those values in
+ `ReservedStencilValues` under `[/Script/CameraCapture.CameraCaptureSegmentationSettings]`
+ in `DefaultGame.ini`: surfaces already rendering custom depth with a reserved
+ value keep it (and read as that value in the mask).
 
  ---
 

@@ -20,13 +20,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogRammsSensorRig, Log, All);
 
 namespace RammsSensorRig
 {
-	/** A pinhole camera of Width x Height pixels whose horizontal field of view is FovDeg: square pixels, the
-	 *  principal point at the centre. */
+	/** A pinhole camera of Width x Height pixels (each clamped to 1..MaxCameraSize) whose horizontal field of view is
+	 *  FovDeg: square pixels, the principal point at the centre. */
 	FCameraIntrinsics MakeIntrinsics(int32 Width, int32 Height, float FovDeg)
 	{
 		FCameraIntrinsics Intrinsics;
-		Intrinsics.ImageWidth = FMath::Max(1, Width);
-		Intrinsics.ImageHeight = FMath::Max(1, Height);
+		Intrinsics.ImageWidth = FMath::Clamp(Width, 1, URammsSensorRigComponent::MaxCameraSize);
+		Intrinsics.ImageHeight = FMath::Clamp(Height, 1, URammsSensorRigComponent::MaxCameraSize);
 		const double HalfFovRad = FMath::DegreesToRadians(FMath::Clamp(static_cast<double>(FovDeg), 1.0, 170.0) * 0.5);
 		const double Focal = (Intrinsics.ImageWidth * 0.5) / FMath::Tan(HalfFovRad);
 		Intrinsics.FocalLengthX = static_cast<float>(Focal);
@@ -59,6 +59,52 @@ namespace RammsSensorRig
 
 	/** The captures UCameraCaptureSubsystem makes for a registered camera, named after it. */
 	const TCHAR* const CaptureHelperSuffixes[] = { TEXT("_depth"), TEXT("_dmv"), TEXT("_seg") };
+
+	/** No mount may end in these: they are the names of a camera's capture passes and its stream source. */
+	const TCHAR* const ReservedNameSuffixes[] = { TEXT("_depth"), TEXT("_dmv"), TEXT("_seg"), TEXT("_stream") };
+
+	/** Every channel a stream source in World uses (each source counted with all four roles' channels), but Ignore's. */
+	TSet<int32> UsedStreamChannels(const UWorld* World, const UActorComponent* Ignore)
+	{
+		TSet<int32> Used;
+		if (!World)
+		{
+			return Used;
+		}
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			const AActor* Actor = *It;
+			if (!IsValid(Actor))
+			{
+				continue;
+			}
+			TInlineComponentArray<URammsStreamSourceComponent*> Sources(Actor);
+			for (const URammsStreamSourceComponent* Source : Sources)
+			{
+				if (!IsValid(Source) || Source == Ignore)
+				{
+					continue;
+				}
+				for (const ERammsCameraStreamRole Role : FRammsCameraStreams::AllRoles())
+				{
+					Used.Add(Source->ChannelID + FRammsCameraStreams::ChannelOffset(Role));
+				}
+			}
+		}
+		return Used;
+	}
+
+	bool IsGroupFree(const TSet<int32>& Used, int32 BaseChannel)
+	{
+		for (const ERammsCameraStreamRole Role : FRammsCameraStreams::AllRoles())
+		{
+			if (Used.Contains(BaseChannel + FRammsCameraStreams::ChannelOffset(Role)))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 } // namespace RammsSensorRig
 
 URammsSensorRigComponent::URammsSensorRigComponent()
@@ -74,9 +120,24 @@ void URammsSensorRigComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Cameras that ask for a channel first, so the free channels the others are given never take theirs.
+	const auto IsPinnedCamera = [](const FRammsSensorMount& Mount) {
+		return Mount.Kind == ERammsSensorKind::Camera && Mount.StreamChannel >= 0;
+	};
+	FString Error;
 	for (const FRammsSensorMount& Mount : Mounts)
 	{
-		BuildMount(Mount);
+		if (IsPinnedCamera(Mount))
+		{
+			BuildMount(Mount, Error);
+		}
+	}
+	for (const FRammsSensorMount& Mount : Mounts)
+	{
+		if (!IsPinnedCamera(Mount))
+		{
+			BuildMount(Mount, Error);
+		}
 	}
 
 	if (bStartStreamServerOnBeginPlay || bStartCaptureOnBeginPlay)
@@ -108,11 +169,14 @@ void URammsSensorRigComponent::StartStreamingFromBeginPlay()
 	FRammsCameraStreamOptions Options;
 	Options.Port = StreamPort;
 	Options.EveryNFrames = CaptureEveryNFrames;
-	Options.bSaveToDisk = bSaveCaptureToDisk;
+	if (bSaveCaptureToDisk)
+	{
+		Options.SaveToDisk = true;
+	}
 	Options.bStartServer = bStartStreamServerOnBeginPlay;
 	Options.bStartCapture = bStartCaptureOnBeginPlay;
 
-	// Capture what this rig's cameras stream; nothing more.
+	// The channels this rig's cameras ask for, added to whatever is already on.
 	Options.bColor = Options.bDepth = Options.bMotion = Options.bSegmentation = false;
 	bool bAnyCamera = false;
 	for (const FRammsBuiltSensor& Entry : Built)
@@ -147,34 +211,82 @@ void URammsSensorRigComponent::StartStreamingFromBeginPlay()
 
 bool URammsSensorRigComponent::AddMount(const FRammsSensorMount& Mount)
 {
+	FString Error;
+	if (!TryAddMount(Mount, Error))
+	{
+		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: AddMount: %s"), *GetPathName(), *Error);
+		return false;
+	}
+	return true;
+}
+
+bool URammsSensorRigComponent::TryAddMount(const FRammsSensorMount& Mount, FString& OutError)
+{
 	if (Mount.Name.IsNone())
 	{
-		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: AddMount needs a name"), *GetPathName());
+		OutError = TEXT("a mount needs a name");
+		return false;
+	}
+	if (!IsValidMountName(Mount.Name.ToString(), OutError))
+	{
 		return false;
 	}
 
-	// Replace the description first, so a rig that has not begun play builds the new one at BeginPlay.
-	const int32 Existing = Mounts.IndexOfByPredicate([&Mount](const FRammsSensorMount& M) { return M.Name == Mount.Name; });
+	// Refuse before anything changes: a replacement that cannot be built must not cost the sensor it replaces.
+	const int32 BuiltIndex = Built.IndexOfByPredicate([&Mount](const FRammsBuiltSensor& B) { return B.Mount.Name == Mount.Name; });
+	if (HasBegunPlay() && !CheckMount(Mount, BuiltIndex != INDEX_NONE ? &Built[BuiltIndex] : nullptr, OutError))
+	{
+		return false;
+	}
+
+	// The description, so a rig that has not begun play builds it at BeginPlay.
+	const int32		  Existing = Mounts.IndexOfByPredicate([&Mount](const FRammsSensorMount& M) { return M.Name == Mount.Name; });
+	FRammsSensorMount PreviousMount;
 	if (Existing != INDEX_NONE)
 	{
+		PreviousMount = Mounts[Existing];
 		Mounts[Existing] = Mount;
 	}
 	else
 	{
 		Mounts.Add(Mount);
 	}
-
 	if (!HasBegunPlay())
 	{
 		return true;
 	}
 
-	const int32 BuiltIndex = Built.IndexOfByPredicate([&Mount](const FRammsBuiltSensor& B) { return B.Mount.Name == Mount.Name; });
+	// A replaced camera that asks for no particular channel keeps the one it had, so subscribed clients keep it.
+	int32			  PreferredChannel = -1;
+	bool			  bHadBuilt = false;
+	FRammsSensorMount PreviousBuilt;
 	if (BuiltIndex != INDEX_NONE)
 	{
+		bHadBuilt = true;
+		PreviousBuilt = Built[BuiltIndex].Mount;
+		PreferredChannel = Built[BuiltIndex].Channel;
 		DestroyBuilt(BuiltIndex);
 	}
-	return BuildMount(Mount);
+	if (BuildMount(Mount, OutError, PreferredChannel))
+	{
+		return true;
+	}
+
+	// CheckMount passed, so this should not happen; put back what was there.
+	if (Existing != INDEX_NONE)
+	{
+		Mounts[Existing] = PreviousMount;
+	}
+	else
+	{
+		Mounts.RemoveAll([&Mount](const FRammsSensorMount& M) { return M.Name == Mount.Name; });
+	}
+	if (bHadBuilt)
+	{
+		FString Ignored;
+		BuildMount(PreviousBuilt, Ignored, PreferredChannel);
+	}
+	return false;
 }
 
 bool URammsSensorRigComponent::RemoveMount(FName MountName)
@@ -283,51 +395,88 @@ bool URammsSensorRigComponent::KindFromString(const FString& Text, ERammsSensorK
 	return false;
 }
 
-int32 URammsSensorRigComponent::FindFreeStreamChannel(const UWorld* World)
+bool URammsSensorRigComponent::IsValidMountName(const FString& Name, FString& OutError)
 {
-	TSet<int32> Used;
-	if (World)
+	if (Name.IsEmpty() || Name.Len() > MaxMountNameLength)
 	{
-		for (TActorIterator<AActor> It(World); It; ++It)
+		OutError = FString::Printf(TEXT("a sensor name has 1 to %d characters (this one has %d)"), MaxMountNameLength, Name.Len());
+		return false;
+	}
+	for (const TCHAR Char : Name)
+	{
+		const bool bAllowed = (Char >= TEXT('A') && Char <= TEXT('Z')) || (Char >= TEXT('a') && Char <= TEXT('z'))
+			|| (Char >= TEXT('0') && Char <= TEXT('9')) || Char == TEXT('_') || Char == TEXT('-') || Char == TEXT('.');
+		if (!bAllowed)
 		{
-			const AActor* Actor = *It;
-			if (!IsValid(Actor))
-			{
-				continue;
-			}
-			TInlineComponentArray<URammsStreamSourceComponent*> Sources(Actor);
-			for (const URammsStreamSourceComponent* Source : Sources)
-			{
-				if (!IsValid(Source))
-				{
-					continue;
-				}
-				for (const ERammsCameraStreamRole Role : FRammsCameraStreams::AllRoles())
-				{
-					Used.Add(Source->ChannelID + FRammsCameraStreams::ChannelOffset(Role));
-				}
-			}
+			OutError = FString::Printf(TEXT("sensor name \"%s\": only A-Z a-z 0-9 _ - . are allowed"), *Name);
+			return false;
 		}
 	}
-
-	const int32 Highest = MAX_uint16 - FRammsCameraStreams::MaxChannelOffset;
-	for (int32 Base = 0; Base <= Highest; ++Base)
+	for (const TCHAR* Suffix : RammsSensorRig::ReservedNameSuffixes)
 	{
-		bool bFree = true;
-		for (const ERammsCameraStreamRole Role : FRammsCameraStreams::AllRoles())
+		if (Name.EndsWith(Suffix, ESearchCase::IgnoreCase))
 		{
-			if (Used.Contains(Base + FRammsCameraStreams::ChannelOffset(Role)))
-			{
-				bFree = false;
-				break;
-			}
+			OutError = FString::Printf(
+				TEXT("sensor name \"%s\" may not end in %s: a camera's capture passes and stream source are named that way"), *Name,
+				Suffix);
+			return false;
 		}
-		if (bFree)
+	}
+	return true;
+}
+
+int32 URammsSensorRigComponent::FindFreeStreamChannel(const UWorld* World)
+{
+	const TSet<int32> Used = RammsSensorRig::UsedStreamChannels(World, nullptr);
+	for (int32 Base = 0; Base <= FRammsCameraStreams::MaxBaseChannel; ++Base)
+	{
+		if (RammsSensorRig::IsGroupFree(Used, Base))
 		{
 			return Base;
 		}
 	}
 	return 0;
+}
+
+bool URammsSensorRigComponent::IsStreamChannelFree(const UWorld* World, int32 BaseChannel, const UActorComponent* Ignore)
+{
+	return FRammsCameraStreams::IsValidBaseChannel(BaseChannel)
+		&& RammsSensorRig::IsGroupFree(RammsSensorRig::UsedStreamChannels(World, Ignore), BaseChannel);
+}
+
+bool URammsSensorRigComponent::AreCaptureHelperNamesFree(const UIntrinsicSceneCaptureComponent2D& Camera, FString* OutConflict)
+{
+	AActor* Owner = Camera.GetOwner();
+	if (!Owner)
+	{
+		return true;
+	}
+	for (const TCHAR* Suffix : RammsSensorRig::CaptureHelperSuffixes)
+	{
+		UObject* Existing = FindObjectFast<UObject>(Owner, FName(*(Camera.GetName() + Suffix)));
+		if (!Existing)
+		{
+			continue;
+		}
+		if (!IsValid(Existing))
+		{
+			// Destroyed, not yet collected: out of the way.
+			RammsSensorRig::RetireName(Existing);
+			continue;
+		}
+		// The camera's own pass (the subsystem attaches each to its camera) is fine.
+		const UIntrinsicSceneCaptureComponent2D* Pass = Cast<UIntrinsicSceneCaptureComponent2D>(Existing);
+		if (Pass && Pass->GetAttachParent() == &Camera)
+		{
+			continue;
+		}
+		if (OutConflict)
+		{
+			*OutConflict = Existing->GetPathName();
+		}
+		return false;
+	}
+	return true;
 }
 
 void URammsSensorRigComponent::UnregisterCaptureCamera(UCameraCaptureSubsystem& Capture, UIntrinsicSceneCaptureComponent2D* Camera)
@@ -348,6 +497,80 @@ void URammsSensorRigComponent::UnregisterCaptureCamera(UCameraCaptureSubsystem& 
 			}
 		}
 	}
+}
+
+int32 URammsSensorRigComponent::RegisterRigCamerasForCapture(UWorld* World)
+{
+	int32 Registered = 0;
+	if (!World)
+	{
+		return Registered;
+	}
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		if (!IsValid(*It))
+		{
+			continue;
+		}
+		TInlineComponentArray<URammsSensorRigComponent*> Rigs(*It);
+		for (URammsSensorRigComponent* Rig : Rigs)
+		{
+			if (IsValid(Rig))
+			{
+				Registered += Rig->RegisterCamerasForCapture();
+			}
+		}
+	}
+	return Registered;
+}
+
+int32 URammsSensorRigComponent::RegisterCamerasForCapture()
+{
+	UWorld*					 World = GetWorld();
+	UCameraCaptureSubsystem* Capture = World ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
+	if (!Capture)
+	{
+		return 0;
+	}
+	int32 Registered = 0;
+	for (int32 i = 0; i < Built.Num(); ++i)
+	{
+		if (Built[i].Mount.Kind == ERammsSensorKind::Camera && !Built[i].bCaptureRegistered && RegisterBuiltCamera(i, *Capture))
+		{
+			++Registered;
+		}
+	}
+	return Registered;
+}
+
+bool URammsSensorRigComponent::RegisterBuiltCamera(int32 BuiltIndex, UCameraCaptureSubsystem& Capture)
+{
+	if (!Built.IsValidIndex(BuiltIndex))
+	{
+		return false;
+	}
+	FRammsBuiltSensor&				   Entry = Built[BuiltIndex];
+	UIntrinsicSceneCaptureComponent2D* Camera = Cast<UIntrinsicSceneCaptureComponent2D>(Entry.Component.Get());
+	if (!IsValid(Camera))
+	{
+		return false;
+	}
+	if (Capture.GetRegisteredCameras().Contains(Camera))
+	{
+		// Registered by something else already.
+		Entry.bCaptureRegistered = true;
+		return false;
+	}
+	FString Conflict;
+	if (!AreCaptureHelperNamesFree(*Camera, &Conflict))
+	{
+		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: camera '%s' not captured: %s holds the name of one of its capture passes"),
+			*GetPathName(), *Entry.Mount.Name.ToString(), *Conflict);
+		return false;
+	}
+	Capture.RegisterCamera(Camera);
+	Entry.bCaptureRegistered = true;
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,49 +612,110 @@ bool URammsSensorRigComponent::IsNameTaken(FName ComponentName) const
 	return Existing != nullptr;
 }
 
-bool URammsSensorRigComponent::BuildMount(const FRammsSensorMount& Mount)
+bool URammsSensorRigComponent::CheckMount(const FRammsSensorMount& Mount, const FRammsBuiltSensor* Replacing, FString& OutError) const
 {
 	AActor* Owner = GetOwner();
-	UWorld* World = GetWorld();
-	if (!Owner || !World)
+	if (!Owner || !GetWorld())
 	{
+		OutError = TEXT("the rig has no actor or world");
 		return false;
 	}
 	if (Mount.Name.IsNone())
 	{
-		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: a mount has no name; skipped"), *GetPathName());
+		OutError = TEXT("a mount needs a name");
 		return false;
 	}
-	if (FindBuilt(Mount.Name))
+	if (!IsValidMountName(Mount.Name.ToString(), OutError))
 	{
-		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: mount '%s' is listed twice; the second is skipped"), *GetPathName(),
-			*Mount.Name.ToString());
+		return false;
+	}
+	const FRammsBuiltSensor* Same = FindBuilt(Mount.Name);
+	if (Same && Same != Replacing)
+	{
+		OutError = FString::Printf(TEXT("mount '%s' is listed twice"), *Mount.Name.ToString());
 		return false;
 	}
 
-	USceneComponent* Parent = ResolveParent(Mount.ParentComponent);
-	if (!Parent)
+	if (Mount.ParentComponent == Mount.Name)
 	{
-		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: mount '%s' skipped: %s has no component '%s'"), *GetPathName(),
-			*Mount.Name.ToString(), *Owner->GetName(),
-			Mount.ParentComponent.IsNone() ? TEXT("(root)") : *Mount.ParentComponent.ToString());
+		OutError = FString::Printf(TEXT("mount '%s' cannot be mounted on itself"), *Mount.Name.ToString());
 		return false;
 	}
+	if (!ResolveParent(Mount.ParentComponent))
+	{
+		OutError = FString::Printf(TEXT("%s has no component '%s' to mount '%s' on"), *Owner->GetName(),
+			Mount.ParentComponent.IsNone() ? TEXT("(root)") : *Mount.ParentComponent.ToString(), *Mount.Name.ToString());
+		return false;
+	}
+
+	// The names this mount creates (and, for a camera, its capture passes will): taken by anything but what a
+	// replacement destroys? A capture pass created over another object of its name is a fatal error.
+	const auto IsTakenByAnother = [this, Owner, Replacing](FName Name) {
+		if (!IsNameTaken(Name))
+		{
+			return false;
+		}
+		const UObject* Existing = FindObjectFast<UObject>(Owner, Name);
+		if (Replacing && Existing)
+		{
+			if (Existing == Replacing->Component.Get() || Existing == Replacing->StreamSource.Get())
+			{
+				return false;
+			}
+			// The replaced camera's own capture passes go with it.
+			const UIntrinsicSceneCaptureComponent2D* Pass = Cast<UIntrinsicSceneCaptureComponent2D>(Existing);
+			if (Pass && Replacing->Component && Pass->GetAttachParent() == Replacing->Component.Get())
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+
+	TArray<FName, TInlineAllocator<5>> Names;
+	Names.Add(Mount.Name);
+	if (Mount.Kind == ERammsSensorKind::Camera)
+	{
+		Names.Add(RammsSensorRig::StreamSourceNameFor(Mount.Name));
+		for (const TCHAR* Suffix : RammsSensorRig::CaptureHelperSuffixes)
+		{
+			Names.Add(FName(*(Mount.Name.ToString() + Suffix)));
+		}
+	}
+	for (const FName& Name : Names)
+	{
+		if (IsTakenByAnother(Name))
+		{
+			OutError = FString::Printf(TEXT("%s already has an object named '%s' (mount '%s')"), *Owner->GetName(), *Name.ToString(),
+				*Mount.Name.ToString());
+			return false;
+		}
+	}
+	return true;
+}
+
+bool URammsSensorRigComponent::BuildMount(const FRammsSensorMount& InMount, FString& OutError, int32 PreferredChannel)
+{
+	AActor* Owner = GetOwner();
+	UWorld* World = GetWorld();
+	if (!CheckMount(InMount, nullptr, OutError) || !Owner || !World)
+	{
+		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: mount '%s' skipped: %s"), *GetPathName(), *InMount.Name.ToString(), *OutError);
+		return false;
+	}
+
+	FRammsSensorMount Mount = InMount;
+	Mount.Width = FMath::Clamp(Mount.Width, 1, MaxCameraSize);
+	Mount.Height = FMath::Clamp(Mount.Height, 1, MaxCameraSize);
+
+	USceneComponent* Parent = ResolveParent(Mount.ParentComponent);
 	if (!Mount.Socket.IsNone() && !Parent->DoesSocketExist(Mount.Socket))
 	{
 		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: mount '%s': %s has no socket '%s'; attached at its origin"),
 			*GetPathName(), *Mount.Name.ToString(), *Parent->GetName(), *Mount.Socket.ToString());
 	}
 
-	const bool	bCamera = Mount.Kind == ERammsSensorKind::Camera;
-	const FName SourceName = RammsSensorRig::StreamSourceNameFor(Mount.Name);
-	if (IsNameTaken(Mount.Name) || (bCamera && IsNameTaken(SourceName)))
-	{
-		UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: mount '%s' skipped: %s already has an object of that name"),
-			*GetPathName(), *Mount.Name.ToString(), *Owner->GetName());
-		return false;
-	}
-
+	const bool		 bCamera = Mount.Kind == ERammsSensorKind::Camera;
 	USceneComponent* Sensor = nullptr;
 	switch (Mount.Kind)
 	{
@@ -476,6 +760,7 @@ bool URammsSensorRigComponent::BuildMount(const FRammsSensorMount& Mount)
 	}
 	if (!Sensor)
 	{
+		OutError = TEXT("unknown sensor kind");
 		return false;
 	}
 
@@ -491,24 +776,40 @@ bool URammsSensorRigComponent::BuildMount(const FRammsSensorMount& Mount)
 	Entry.Mount = Mount;
 	Entry.Component = Sensor;
 
+	UCameraCaptureSubsystem* Capture = bCamera ? World->GetSubsystem<UCameraCaptureSubsystem>() : nullptr;
 	if (bCamera)
 	{
-		UIntrinsicSceneCaptureComponent2D* Camera = CastChecked<UIntrinsicSceneCaptureComponent2D>(Sensor);
-		if (UCameraCaptureSubsystem* Capture = World->GetSubsystem<UCameraCaptureSubsystem>())
-		{
-			// Registered cameras are captured from the next kick on, capture running or not.
-			Capture->RegisterCamera(Camera);
-		}
-		else
+		if (!Capture)
 		{
 			UE_LOG(LogRammsSensorRig, Warning, TEXT("%s: mount '%s': no camera capture subsystem in this world; the camera will not be captured"),
 				*GetPathName(), *Mount.Name.ToString());
 		}
 
-		const int32 MaxBase = MAX_uint16 - FRammsCameraStreams::MaxChannelOffset;
-		Entry.Channel = Mount.StreamChannel >= 0 ? FMath::Min(Mount.StreamChannel, MaxBase) : FindFreeStreamChannel(World);
+		// The channel it asks for, or (a replaced camera) the one it had, if no other source uses it; else a free one.
+		int32 Channel = -1;
+		if (Mount.StreamChannel >= 0)
+		{
+			const int32 Pinned = FMath::Min(Mount.StreamChannel, FRammsCameraStreams::MaxBaseChannel);
+			if (IsStreamChannelFree(World, Pinned))
+			{
+				Channel = Pinned;
+			}
+			else
+			{
+				UE_LOG(LogRammsSensorRig, Warning,
+					TEXT("%s: camera '%s' asked for channel %d, but another stream source already uses %d, %d, %d or %d; it streams on a free channel"),
+					*GetPathName(), *Mount.Name.ToString(), Pinned, Pinned, Pinned + FRammsCameraStreams::DepthChannelOffset,
+					Pinned + FRammsCameraStreams::MotionChannelOffset, Pinned + FRammsCameraStreams::MaskChannelOffset);
+			}
+		}
+		else if (PreferredChannel >= 0 && IsStreamChannelFree(World, PreferredChannel))
+		{
+			Channel = PreferredChannel;
+		}
+		Entry.Channel = Channel >= 0 ? Channel : FindFreeStreamChannel(World);
 
-		URammsStreamSourceComponent* Source = NewObject<URammsStreamSourceComponent>(Owner, SourceName, RF_Transient);
+		URammsStreamSourceComponent* Source =
+			NewObject<URammsStreamSourceComponent>(Owner, RammsSensorRig::StreamSourceNameFor(Mount.Name), RF_Transient);
 		Source->ChannelID = Entry.Channel;
 		Source->CameraFilter = Mount.Name.ToString();
 		Source->bExactCameraFilter = true;
@@ -527,6 +828,13 @@ bool URammsSensorRigComponent::BuildMount(const FRammsSensorMount& Mount)
 	}
 
 	Built.Add(Entry);
+
+	// A camera joins capture (render targets, capture passes) only once camera streams run, so a rig baked into a
+	// pawn costs nothing until then; StartCameraStreams registers it when they start.
+	if (bCamera && Capture && Capture->IsCapturing())
+	{
+		RegisterBuiltCamera(Built.Num() - 1, *Capture);
+	}
 	return true;
 }
 
