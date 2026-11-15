@@ -44,8 +44,8 @@ public:
 		using FStepState = FRammsChaosImuProvider::FStepState;
 
 		const double					  Now = GetSimTime_Internal() + GetDeltaTime_Internal();
-		Chaos::FPhysicsSolverBase*		  Solver = GetSolver();
-		const Chaos::FPBDRigidsEvolution* Evolution = Solver ? Solver->CastChecked().GetEvolution() : nullptr;
+		Chaos::FPhysicsSolverBase*		  SolverBase = GetSolver();
+		const Chaos::FPBDRigidsEvolution* Evolution = SolverBase ? SolverBase->CastChecked().GetEvolution() : nullptr;
 		FScopeLock						  Guard(&Table->Lock);
 		for (TPair<int32, FPoint>& Pair : Table->Points)
 		{
