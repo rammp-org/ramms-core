@@ -66,6 +66,7 @@ int32 URammsRobotControlSurfaceComponent::GetCentreRequests(FName Id) const
 
 void URammsRobotControlSurfaceComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	StopDeadmanTicker();
 	if (UWorld* World = GetWorld())
 	{
 		if (URammsControlSurfaceRegistry* Registry = World->GetSubsystem<URammsControlSurfaceRegistry>())
@@ -375,6 +376,118 @@ void URammsRobotControlSurfaceComponent::Hold(FName Id, ERammsControlSource Sour
 	H.Time = FPlatformTime::Seconds();
 }
 
+// --- the drive deadman ----------------------------------------------------------
+
+bool URammsRobotControlSurfaceComponent::IsDeadmanSource(ERammsControlSource Source)
+{
+	return Source == ERammsControlSource::Remote || Source == ERammsControlSource::Autonomy;
+}
+
+void URammsRobotControlSurfaceComponent::UpdateDeadman(FName Id, ERammsControlKind Kind, ERammsControlSource Source)
+{
+	if (Kind == ERammsControlKind::Continuous && IsDeadmanSource(Source))
+	{
+		DeadmanWatch.Add(Id);
+		StartDeadmanTicker();
+	}
+	else
+	{
+		// Taken over by a source whose commands stand (or a control whose do).
+		DeadmanWatch.Remove(Id);
+	}
+}
+
+void URammsRobotControlSurfaceComponent::StartDeadmanTicker()
+{
+	if (DeadmanTicker.IsValid())
+	{
+		return;
+	}
+	LastDeadmanCheck = 0.0;
+	// The core ticker rather than this component's tick: it runs while the
+	// world is paused, as the real-time holds it times do, and it needs no
+	// tick function on a component Blueprints already carry without one.
+	TWeakObjectPtr<URammsRobotControlSurfaceComponent> WeakThis(this);
+	DeadmanTicker = FTSTicker::GetCoreTicker().AddTicker(TEXT("RammsControlSurfaceDeadman"), 0.0f, [WeakThis](float) {
+		URammsRobotControlSurfaceComponent* Self = WeakThis.Get();
+		if (Self == nullptr)
+		{
+			return false; // gone: the entry goes with it
+		}
+		const double Now = FPlatformTime::Seconds();
+		const double Gap = Self->LastDeadmanCheck > 0.0 ? Now - Self->LastDeadmanCheck : 0.0;
+		Self->LastDeadmanCheck = Now;
+		Self->ExpireQuietHolds(Now, Gap);
+		if (Self->DeadmanWatch.Num() > 0)
+		{
+			return true;
+		}
+		// Nothing left to watch: stop until the next deadman command.
+		Self->DeadmanTicker.Reset();
+		return false;
+	});
+}
+
+void URammsRobotControlSurfaceComponent::StopDeadmanTicker()
+{
+	if (DeadmanTicker.IsValid())
+	{
+		FTSTicker::RemoveTicker(DeadmanTicker);
+	}
+	DeadmanTicker.Reset();
+}
+
+int32 URammsRobotControlSurfaceComponent::ExpireQuietHolds(double Now, double Grace)
+{
+	const double Window = static_cast<double>(ExternalHoldSeconds) + FMath::Max(0.0, Grace);
+
+	// Find the quiet ones first and release them after: a release can rebuild
+	// the surface (the drive-mode selector's contributors do), which changes
+	// Holds and Surface under an iterator.
+	TArray<TPair<FName, ERammsControlSource>, TInlineAllocator<8>> Quiet;
+	double														   Longest = 0.0;
+	for (auto It = DeadmanWatch.CreateIterator(); It; ++It)
+	{
+		const FName				 Id = *It;
+		const FHold*			 H = Holds.Find(Id);
+		const FRammsControlAxis* Axis = Surface.Find(Id);
+		if (H == nullptr || !IsDeadmanSource(H->Source) || Axis == nullptr || Axis->Kind != ERammsControlKind::Continuous)
+		{
+			// Released, taken over by a source whose commands stand, or no
+			// longer a Continuous control here (the surface was rebuilt).
+			It.RemoveCurrent();
+			continue;
+		}
+		if (Now - H->Time >= Window)
+		{
+			Longest = FMath::Max(Longest, Now - H->Time);
+			Quiet.Emplace(Id, H->Source);
+			It.RemoveCurrent();
+		}
+	}
+	if (Quiet.Num() == 0)
+	{
+		return 0;
+	}
+
+	int32			SprungBack = 0;
+	TArray<FString> Names;
+	for (const TPair<FName, ERammsControlSource>& Entry : Quiet)
+	{
+		// As the source itself letting go would: the holder may always release.
+		// A refusal (a contributor standing down) leaves the hold to lapse on
+		// its own, as a ReleaseControl from that source would; not retried.
+		const bool bReleased = ReleaseAxis_Implementation(Entry.Key, Entry.Value);
+		SprungBack += bReleased ? 1 : 0;
+		Names.Add(FString::Printf(TEXT("%s (%s%s)"), *Entry.Key.ToString(),
+			Entry.Value == ERammsControlSource::Remote ? TEXT("Remote") : TEXT("Autonomy"),
+			bReleased ? TEXT("") : TEXT(", refused")));
+	}
+	UE_LOG(LogTemp, Log, TEXT("[ControlSurface] '%s': deadman: %s not set again for %.2f s (window %.2f s): sprung back."),
+		*GetNameSafe(GetOwner()), *FString::Join(Names, TEXT(", ")), Longest, Window);
+	return SprungBack;
+}
+
 IRammsControlContributor* URammsRobotControlSurfaceComponent::ContributorFor(FName Id) const
 {
 	const FRoute* Route = Routes.Find(Id);
@@ -427,6 +540,7 @@ bool URammsRobotControlSurfaceComponent::SetAxis_Implementation(FName Id, float 
 	{
 		Hold(Id, Source);
 		Targets.Add(Id, Clamped);
+		UpdateDeadman(Id, Axis.Kind, Source);
 	}
 	return bApplied;
 }
@@ -492,6 +606,7 @@ bool URammsRobotControlSurfaceComponent::ReleaseAxis_Implementation(FName Id, ER
 	if (bReleased)
 	{
 		Holds.Remove(Id);
+		DeadmanWatch.Remove(Id);
 
 		// Some controls cannot be let go of one at a time. A 5-bar's height and
 		// fore/aft are two axes over one pair of motors, so releasing either
