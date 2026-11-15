@@ -7,7 +7,7 @@
 #include "RammsImuProvider.h"
 #include "UObject/WeakObjectPtr.h"
 
-class FBodyInstance;
+struct FBodyInstance;
 class FRammsChaosImuCallback;
 class UPrimitiveComponent;
 class UWorld;
