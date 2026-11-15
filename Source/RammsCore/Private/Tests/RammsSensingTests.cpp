@@ -551,7 +551,7 @@ bool FRammsSensingBridgeParseMount::RunTest(const FString& Parameters)
 		URammsSensingBridge::ParseMountJson(
 			TEXT("{\"name\": \"cam\", \"kind\": \"camera\", \"location\": {\"x\": 4, \"y\": 5, \"z\": 6}, \"rotation\": {\"yaw\": 90}}"),
 			Sparse, Error));
-	const FRammsSensorMount Defaults;
+	const FRammsSensorMount Defaults = FRammsSensorMount();
 	TestTrue(TEXT("camera kind"), Sparse.Kind == ERammsSensorKind::Camera);
 	TestTrue(TEXT("location object"), Sparse.Location.Equals(FVector(4.0, 5.0, 6.0)));
 	TestTrue(TEXT("rotation object"), Sparse.Rotation.Equals(FRotator(0.0, 90.0, 0.0)));
