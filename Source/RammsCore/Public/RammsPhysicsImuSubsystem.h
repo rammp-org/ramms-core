@@ -17,8 +17,8 @@ class USceneComponent;
  */
 struct RAMMSCORE_API FRammsImuDifferencer
 {
-	/** Take the frame Sensor (cm, world, unscaled) at Time (s). A second call at the same time returns the last sample. */
-	const FRammsImuSample& Step(double Time, const FTransform& Sensor, const FVector& Gravity);
+	/** Take the frame Sensor (cm, world, unscaled) at InTime (s). A second call at the same time returns the last sample. */
+	const FRammsImuSample& Step(double InTime, const FTransform& Sensor, const FVector& Gravity);
 
 	void Reset() { *this = FRammsImuDifferencer(); }
 
