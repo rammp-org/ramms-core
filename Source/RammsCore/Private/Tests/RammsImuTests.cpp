@@ -729,7 +729,7 @@ public:
 		if (Run->Sensor)
 		{
 			Test->TestEqual(TEXT("the IMU component's source"), Run->Sensor->GetActiveSource(), ERammsImuSource::Chaos);
-			Test->TestTrue(TEXT("the IMU component's reading carries the engine's time"), Run->Sensor->GetIMUData().SimTimeSeconds > 3.0);
+			Test->TestTrue(TEXT("the IMU component's reading carries the engine's time"), Run->Sensor->GetIMUData().SimTimeSeconds > Rest.SimTimeSeconds - 0.25); // it ticked before this frame's last step, at most a step or two behind
 			NearlyEqualVectors(*Test, TEXT("the IMU component at rest"), Run->Sensor->GetIMUData().LinearAcceleration,
 				Run->Sensor->GetComponentQuat().UnrotateVector(FVector(0.0, 0.0, -World->GetGravityZ())), ImuChaosAccelSlackCm);
 		}
