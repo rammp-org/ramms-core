@@ -36,8 +36,8 @@ struct RAMMSCORE_API FRammsSensorMount
 	GENERATED_BODY()
 
 	/** Unique on the actor: the created component's name and, for a camera, its capture id and stream name. 1 to 64
-	 *  characters of A-Z a-z 0-9 _ - . , not ending in _depth, _dmv, _seg or _stream (the names of a camera's capture
-	 *  passes and stream source). */
+	 *  characters of A-Z a-z 0-9 _ - (no '.': it separates the parts of an object path), not ending in _depth, _dmv,
+	 *  _seg or _stream (the names of a camera's capture passes and stream source). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor")
 	FName Name;
 
@@ -53,11 +53,12 @@ struct RAMMSCORE_API FRammsSensorMount
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Mount")
 	FName Socket;
 
-	/** cm, relative to the parent (and socket). */
+	/** cm, relative to the parent (and socket); at most MaxMountOffsetCm along each axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Mount")
 	FVector Location = FVector::ZeroVector;
 
-	/** Relative to the parent (and socket). The sensor traces / looks along its local +X. */
+	/** Relative to the parent (and socket). The sensor traces / looks along its local +X. Location, Rotation and the
+	 *  ranges must be finite: a mount with a NaN or infinite one is not built. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Mount")
 	FRotator Rotation = FRotator::ZeroRotator;
 
@@ -76,12 +77,14 @@ struct RAMMSCORE_API FRammsSensorMount
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|ToF", meta = (ClampMin = "1.0", ClampMax = "120.0"))
 	float VerticalFovDeg = 45.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|ToF", meta = (ClampMin = "1.0"))
+	/** cm, 1 to MaxSensorRangeCm (larger is clamped). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|ToF", meta = (ClampMin = "1.0", ClampMax = "100000.0"))
 	float MaxRangeCm = 400.0f;
 
 	// --- Sonar -----------------------------------------------------------------
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Sonar", meta = (ClampMin = "1.0"))
+	/** cm, 1 to MaxSensorRangeCm (larger is clamped). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Sonar", meta = (ClampMin = "1.0", ClampMax = "100000.0"))
 	float SonarMaxRangeCm = 500.0f;
 
 	/** The cone's HALF-angle: URammsSonarSensorComponent::BeamHalfAngle (total beam width is twice this). */
@@ -118,8 +121,9 @@ struct RAMMSCORE_API FRammsSensorMount
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera")
 	bool bSegmentation = true;
 
-	/** Base RMSS channel C. -1 = the lowest C whose four channels no stream source in the world uses yet. A C whose
-	 *  channels another source already uses is replaced by a free one (with a warning). */
+	/** Base RMSS channel C. -1 = the lowest C whose four channels no stream source and no IMU stream in the world uses
+	 *  yet. A C one of whose channels another source or an IMU stream already uses is replaced by a free one (with a
+	 *  warning). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensor|Camera", meta = (ClampMin = "-1", ClampMax = "65235"))
 	int32 StreamChannel = -1;
 };
@@ -146,8 +150,9 @@ struct RAMMSCORE_API FRammsBuiltSensor
 	UPROPERTY()
 	int32 Channel = -1;
 
-	/** A camera registered with the capture subsystem (its render targets and capture passes exist). Cameras register
-	 *  when camera streams start, not when they are built: a rig baked into a pawn costs nothing until then. */
+	/** A camera this rig registered with the capture subsystem (its render targets and capture passes exist). Cameras
+	 *  register when camera streams start, not when they are built, so a rig baked into a pawn costs nothing until
+	 *  then; and they are unregistered when the streams stop. False for a camera something else registered. */
 	UPROPERTY()
 	bool bCaptureRegistered = false;
 };
@@ -164,8 +169,9 @@ struct RAMMSCORE_API FRammsBuiltSensor
  *    mask C+300, under the stream ids camera/<Name>/color, camera/<Name>/depth,
  *    motion/<Name>, mask/<Name>. The camera is registered with the world's
  *    UCameraCaptureSubsystem (render targets, depth / motion / mask passes) only
- *    once camera streams start (URammsSensingBridge::StartCameraStreams, or
- *    bStartCaptureOnBeginPlay), or at once when capture is already running.
+ *    while camera streams are on (URammsSensingBridge::StartCameraStreams, or
+ *    bStartCaptureOnBeginPlay; a camera built while they are joins at once),
+ *    and unregistered when they stop (URammsSensingBridge::StopCameraStreams).
  *
  * Built components are transient: Mounts is the persistent description, baked
  * into a pawn Blueprint. URammsSensingBridge exposes the same over Remote
@@ -185,6 +191,12 @@ public:
 	/** Longest mount name. */
 	static constexpr int32 MaxMountNameLength = 64;
 
+	/** Farthest a mount may sit from its parent along any axis, cm. */
+	static constexpr double MaxMountOffsetCm = 100000.0;
+
+	/** Longest ToF / sonar range a mount builds, cm; larger is clamped. */
+	static constexpr float MaxSensorRangeCm = 100000.0f;
+
 	/** The sensors, built at BeginPlay. Names must be unique on the actor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors")
 	TArray<FRammsSensorMount> Mounts;
@@ -200,12 +212,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors|Streaming", meta = (ClampMin = "1", ClampMax = "65535"))
 	int32 StreamPort = 30030;
 
-	/** Capture rate when this rig starts capture: 1 = every frame. */
+	/** Capture rate when this rig starts the capture session: 1 = every frame. A session already running keeps its
+	 *  rate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors|Streaming", meta = (ClampMin = "1"))
 	int32 CaptureEveryNFrames = 1;
 
-	/** When this rig starts capture, also write the frames to disk (the capture subsystem's serialization). Off: a
-	 *  capture session this rig starts only streams, and one already running keeps its own setting. */
+	/** When this rig starts the capture session, also write the frames to disk (the capture subsystem's
+	 *  serialization). Off: a session this rig starts only streams. A session already running keeps its own setting
+	 *  either way. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sensors|Streaming")
 	bool bSaveCaptureToDisk = false;
 
@@ -244,6 +258,10 @@ public:
 	 *  many it registered. */
 	int32 RegisterCamerasForCapture();
 
+	/** Unregister the cameras this rig registered with capture (their capture passes go with them). Returns how many
+	 *  it unregistered. */
+	int32 UnregisterCamerasFromCapture();
+
 	const FRammsSensorMount*		 FindMount(FName MountName) const;
 	const FRammsBuiltSensor*		 FindBuilt(FName MountName) const;
 	const FRammsBuiltSensor*		 FindBuiltByComponent(const UActorComponent* Component) const;
@@ -255,20 +273,25 @@ public:
 	/** Case-insensitive "tof", "sonar", "imu", "camera". */
 	static bool KindFromString(const FString& Text, ERammsSensorKind& OutKind);
 
-	/** Whether Name may name a mount: 1 to MaxMountNameLength characters of A-Z a-z 0-9 _ - . and not ending in a
+	/** Whether Name may name a mount: 1 to MaxMountNameLength characters of A-Z a-z 0-9 _ - and not ending in a
 	 *  reserved suffix (_depth, _dmv, _seg, _stream). Checks the string, so an over-long one never becomes an FName. */
 	static bool IsValidMountName(const FString& Name, FString& OutError);
 
 	/** The lowest base channel C >= 0 such that none of C, C+100, C+200, C+300 is a channel of any stream source
-	 *  already in World (each source counted with all four). */
+	 *  (each counted with all four) or IMU stream already in World; INDEX_NONE when there is none. */
 	static int32 FindFreeStreamChannel(const UWorld* World);
 
-	/** Whether none of base channel C's four channels is used by a stream source in World other than Ignore. */
+	/** Whether none of base channel C's four channels is used by a stream source in World other than Ignore, or by an
+	 *  IMU stream. */
 	static bool IsStreamChannelFree(const UWorld* World, int32 BaseChannel, const UActorComponent* Ignore = nullptr);
 
 	/** Register every rig camera in World with its capture subsystem (camera streams are starting). Returns how many
 	 *  it registered. */
 	static int32 RegisterRigCamerasForCapture(UWorld* World);
+
+	/** Unregister every camera a rig in World registered with capture (camera streams are stopping). Returns how many
+	 *  it unregistered. */
+	static int32 UnregisterRigCamerasFromCapture(UWorld* World);
 
 	/**
 	 * Whether the names the capture subsystem gives Camera's passes ("<camera>_depth" / "_dmv" / "_seg") are free on

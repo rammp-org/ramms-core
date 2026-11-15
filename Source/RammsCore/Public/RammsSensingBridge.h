@@ -11,9 +11,10 @@ class UWorld;
 struct FRammsSensorMount;
 
 /**
- * What StartCameraStreamsJson (or a rig's BeginPlay) asks of the stream server and the capture subsystem. Capture
- * state is world-wide and other cameras may rely on it, so only what is asked for changes: channels are turned on,
- * never off, and the rate and disk writes change only when given.
+ * What StartCameraStreams (a rig's BeginPlay, or StartCameraStreamsJson) asks of the stream server and the capture
+ * subsystem. Capture state is world-wide and other cameras may rely on it, so only what is asked for changes:
+ * channels are turned on, never off, and the rate and disk writes change only when given. Whatever it changes,
+ * StopCameraStreams changes back.
  */
 struct RAMMSCORE_API FRammsCameraStreamOptions
 {
@@ -27,7 +28,8 @@ struct RAMMSCORE_API FRammsCameraStreamOptions
 	bool bMotion = true;
 	bool bSegmentation = true;
 	/** Write the frames to disk too (the capture subsystem's serialization). Unset: a capture session this call starts
-	 *  only streams; one already running keeps its setting. */
+	 *  only streams; one already running keeps its setting. C++ only (a rig's bSaveCaptureToDisk): Remote Control
+	 *  callers cannot ask for disk writes. */
 	TOptional<bool> SaveToDisk;
 	/** Start the RMSS server if it is not running. */
 	bool bStartServer = true;
@@ -50,13 +52,22 @@ struct RAMMSCORE_API FRammsCameraStreamOptions
  * hand ("rig": false, named by their component name).
  *
  * Remote Control is reachable from the network, so what a caller can change is
- * bounded: sensor names are 1 to 64 characters of A-Z a-z 0-9 _ - . and do not
- * end in _depth / _dmv / _seg / _stream; cameras are at most 4096 x 4096
+ * bounded: actor paths are at most 1023 characters and made of names that
+ * already exist (looked up, never added to the name table); sensor names are 1
+ * to 64 characters of A-Z a-z 0-9 _ - and do not end in _depth / _dmv / _seg /
+ * _stream; every number is finite, a mount at most 1 km from its parent and a
+ * range at most 1 km (larger is clamped); cameras are at most 4096 x 4096
  * (larger is clamped); an actor has at most 16 rig sensors and a world at most
- * 8 rig cameras; and changes (AddSensorJson, RemoveSensor,
- * StartCameraStreamsJson, StopCameraStreams) need a play world (PIE or a game),
- * never the editor's level or a class default. Reads also answer in the editor
- * world.
+ * 8 rig cameras; camera streams never write to disk; and changes
+ * (AddSensorJson, RemoveSensor, StartCameraStreamsJson, StopCameraStreams)
+ * need a play world (PIE or a game), never the editor's level or a class
+ * default. Reads also answer in the editor world.
+ *
+ * Camera streams only add to the world's capture state and take back exactly
+ * what they added: StopCameraStreams unregisters the rig cameras the streams
+ * registered, stops the capture session only if the streams started it, and
+ * turns back the channels, rate and disk writes they changed. A capture
+ * session somebody else started (a recording) keeps running as it was.
  */
 UCLASS()
 class RAMMSCORE_API URammsSensingBridge : public UBlueprintFunctionLibrary
@@ -93,21 +104,24 @@ public:
 
 	/** Start the RMSS server if it is not running (refusing a port another program listens on), turn on the capture
 	 *  channels asked for (never off: other cameras may need them), register the rig cameras with capture and start
-	 *  it. Disk writes: "save_to_disk" if given, else off for a capture session this starts and unchanged for one
-	 *  already running; the rate changes only when "every_n_frames" is given. Options (all optional): {"port",
-	 *  "every_n_frames", "color", "depth", "motion", "segmentation", "save_to_disk"}. Needs a play world. Returns the
-	 *  stream status. */
+	 *  it if it is not running. Nothing is written to disk: a capture session this starts only streams, one already
+	 *  running keeps its setting, and "save_to_disk": true is refused. The rate changes only when "every_n_frames"
+	 *  is given. Options (all optional): {"port", "every_n_frames", "color", "depth", "motion", "segmentation"}.
+	 *  Needs a play world. Returns the stream status. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString StartCameraStreamsJson(const FString& OptionsJson);
 
-	/** Stop capture; the server stays up. False if the world is not a play world or has no capture subsystem. */
+	/** Stop the camera streams: undo what StartCameraStreams did -- unregister the rig cameras it registered, stop the
+	 *  capture session if it started it, turn back the channels, rate and disk writes it changed -- and nothing
+	 *  else; the server stays up. False if the world is not a play world or has no capture subsystem. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static bool StopCameraStreams();
 
 	/** {"ok", "server": {running, port, connections}, "capture": {capturing, every_n_frames, color, depth, motion,
-	 *  segmentation, save_to_disk, cameras}, "streams": [{actor, camera, role, stream_id, channel, message, fmt}]}.
-	 *  "port" is the server's while it runs, else the default 30030. "streams" lists every registered camera and
-	 *  every rig camera (registered or not yet). */
+	 *  segmentation, save_to_disk, cameras, streams_on, started_by_streams}, "streams": [{actor, camera, role,
+	 *  stream_id, channel, message, fmt}]}. "port" is the server's while it runs, else the default 30030.
+	 *  "streams_on": camera streams are on; "started_by_streams": they started the capture session (stopping them
+	 *  stops it). "streams" lists every registered camera and every rig camera (registered or not yet). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Sensing")
 	static FString GetStreamStatusJson();
 
@@ -165,7 +179,8 @@ public:
 	/**
 	 * Stream every physics step's sample of an IMU point over RMSS (needs a play world; starts the RMSS server if it
 	 * is not running). Target and options as ReadImuSamplesJson's, plus "port" (30030) and "channel" (-1: the lowest
-	 * free channel from 1000). Each game tick with new samples sends one FrameData message on the channel: fmt
+	 * channel from 1000 no other IMU stream and no camera stream source uses; a channel a camera source uses is
+	 * refused). Each game tick with new samples sends one FrameData message on the channel: fmt
 	 * "imu_f64x18", w = samples, h = 1, 18 little-endian float64 per sample (seq, sim_time, linear acceleration xyz,
 	 * angular velocity xyz, angular acceleration xyz, linear velocity xyz, orientation xyzw), stream_id
 	 * "imu/<actor name>/<target>" (the body's name for Target ""). Starting a stream already running restarts it.
@@ -186,25 +201,33 @@ public:
 	/** The world these functions act on: the play world, else the editor world. */
 	static UWorld* GetSensingWorld();
 
-	/** An actor by full object path, or by name in the sensing world. Never a class default object or archetype. */
+	/** An actor by full object path, or by name in the sensing world. Never a class default object or archetype. A
+	 *  path longer than MaxActorPathLength, or one with a part that is not a name the name table already has, finds
+	 *  nothing (and is never turned into an FName). */
 	static AActor* FindActor(const FString& ActorPath);
 
 	/** Whether the bridge may change sensing on Actor: it is in a play world (PIE or a game) and not a template.
 	 *  Else OutError says so. */
 	static bool CanChangeSensing(const AActor* Actor, FString& OutError);
 
-	/** Whether World is a play world (PIE or a game). Else OutError says so. */
+	/** Whether World is a play world (PIE or a game; not the editor's preview worlds). Else OutError says so. */
 	static bool IsPlayWorld(const UWorld* World, FString& OutError);
 
 	/** The bridge's limits (see the class comment). */
 	static constexpr int32 MaxRigSensorsPerActor = 16;
 	static constexpr int32 MaxRigCamerasPerWorld = 8;
 
+	/** Longest actor path the bridge looks up: FName's limit (NAME_SIZE - 1). */
+	static constexpr int32 MaxActorPathLength = 1023;
+
 	/** Parse a mount JSON (see AddSensorJson) onto OutMount, which keeps its values for missing keys. */
 	static bool ParseMountJson(const FString& MountJson, FRammsSensorMount& OutMount, FString& OutError);
 
 	/** StartCameraStreamsJson on a given world; returns the status JSON. */
 	static FString StartCameraStreams(UWorld* World, const FRammsCameraStreamOptions& Options);
+
+	/** StopCameraStreams on a given world. */
+	static bool StopCameraStreamsIn(UWorld* World);
 
 	/** GetStreamStatusJson on a given world. */
 	static FString StreamStatusJsonFor(UWorld* World);
