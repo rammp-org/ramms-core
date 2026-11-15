@@ -30,6 +30,14 @@
 		{
 			"Name": "RammsControl",
 			"Enabled": true
+		},
+		{
+			"Name": "CameraCapture",
+			"Enabled": true
+		},
+		{
+			"Name": "RammsStreaming",
+			"Enabled": true
 		}
 	]
 }
