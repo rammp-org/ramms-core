@@ -8,13 +8,21 @@
 #include "HAL/PlatformTime.h"
 #include "RammsImuMath.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogRammsPhysicsImuSubsystem, Log, All);
+
 namespace RammsPhysicsImuImpl
 {
-	/** How often a point that fell back to Kinematic asks the engines again (s). */
+	/** How often every point asks the engines again which one serves it (s). */
 	constexpr double ResolveRetrySeconds = 1.0;
 
 	/** The engines Auto asks, in the order a tie goes. */
 	const ERammsImuSource PhysicsEngines[] = { ERammsImuSource::MuJoCo, ERammsImuSource::Chaos };
+
+	/** Two resolutions name the same body of the same engine. */
+	bool SameBody(const FRammsImuBodyRef& A, const FRammsImuBodyRef& B)
+	{
+		return A.Source == B.Source && A.Body == B.Body && A.Bone == B.Bone;
+	}
 
 	/** The Kinematic source: each point's frame differenced at the game rate, stepped by the subsystem's tick. */
 	class FKinematicProvider final : public IRammsImuProvider
@@ -68,6 +76,34 @@ namespace RammsPhysicsImuImpl
 
 		virtual void Untrack(int32 Handle) override { Points.Remove(Handle); }
 
+		virtual bool IsTrackValid(int32 Handle) const override
+		{
+			const FPoint* Point = Points.Find(Handle);
+			return Point && Point->Body.IsValid();
+		}
+
+		virtual void SetHistoryCapacity(int32 Handle, int32 Capacity) override
+		{
+			if (FPoint* Point = Points.Find(Handle))
+			{
+				Point->History.SetCapacity(Capacity);
+			}
+		}
+
+		virtual bool ReadHistory(int32 Handle, int64 Since, int32 Max, TArray<FRammsImuSample>& OutSamples, int64& OutFirst,
+			int64& OutOldest, int64& OutNext) override
+		{
+			const FPoint* Point = Points.Find(Handle);
+			if (!Point || Point->History.GetCapacity() == 0)
+			{
+				return false;
+			}
+			OutFirst = Point->History.Read(Since, Max, OutSamples);
+			OutOldest = Point->History.GetOldestSeq();
+			OutNext = Point->History.GetNextSeq();
+			return true;
+		}
+
 		void Step()
 		{
 			for (TPair<int32, FPoint>& Pair : Points)
@@ -83,6 +119,7 @@ namespace RammsPhysicsImuImpl
 			FName							Bone;
 			FTransform						PointInBody = FTransform::Identity;
 			FRammsImuDifferencer			Differencer;
+			FRammsImuSampleRing				History;
 		};
 
 		void StepPoint(FPoint& Point) const
@@ -93,8 +130,9 @@ namespace RammsPhysicsImuImpl
 			{
 				return;
 			}
-			Point.Differencer.Step(InWorld->GetTimeSeconds(), Point.PointInBody * RammsImuProviders::ComponentFrame(*Body, Point.Bone),
-				FVector(0.0, 0.0, InWorld->GetGravityZ()));
+			const FRammsImuSample& Sample = Point.Differencer.Step(InWorld->GetTimeSeconds(),
+				Point.PointInBody * RammsImuProviders::ComponentFrame(*Body, Point.Bone), FVector(0.0, 0.0, InWorld->GetGravityZ()));
+			Point.History.Push(Sample); // the same frame again replaces itself
 		}
 
 		TWeakObjectPtr<UWorld> OwnerWorld;
@@ -130,12 +168,15 @@ const FRammsImuSample& FRammsImuDifferencer::Step(double InTime, const FTransfor
 		Sample.AngularVelocity = RammsImuMath::RadiansToDegrees(NewAngularVelocity);
 		if (bHasVelocity)
 		{
-			Sample.ProperAcceleration = RammsImuMath::ProperAcceleration(RammsImuMath::Rate(Velocity, NewVelocity, Dt), Gravity);
-			Sample.AngularAcceleration = RammsImuMath::RadiansToDegrees(RammsImuMath::Rate(AngularVelocityRad, NewAngularVelocity, Dt));
+			// Each velocity belongs to the middle of its interval: the two are half of each interval apart.
+			const double Spacing = 0.5 * (Dt + LastDt);
+			Sample.ProperAcceleration = RammsImuMath::ProperAcceleration(RammsImuMath::Rate(Velocity, NewVelocity, Spacing), Gravity);
+			Sample.AngularAcceleration = RammsImuMath::RadiansToDegrees(RammsImuMath::Rate(AngularVelocityRad, NewAngularVelocity, Spacing));
 			Sample.bHasAcceleration = true;
 		}
 		Velocity = NewVelocity;
 		AngularVelocityRad = NewAngularVelocity;
+		LastDt = Dt;
 		bHasVelocity = true;
 	}
 	Location = NewLocation;
@@ -156,7 +197,7 @@ URammsPhysicsImuSubsystem* URammsPhysicsImuSubsystem::Get(const UObject* WorldCo
 
 double URammsPhysicsImuSubsystem::Now() const
 {
-	// Wall time: an idle point expires and a fallback retries while the game is paused too.
+	// Wall time: an idle point expires and a point is resolved again while the game is paused too.
 	return FPlatformTime::Seconds();
 }
 
@@ -170,6 +211,12 @@ int32 URammsPhysicsImuSubsystem::TrackPose(USceneComponent* Component, FName Bon
 {
 	if (!IsValid(Component))
 	{
+		return 0;
+	}
+	if (Points.Num() >= MaxTrackedPoints)
+	{
+		UE_LOG(LogRammsPhysicsImuSubsystem, Warning, TEXT("%s: not tracking an IMU point on %s: the world tracks %d already"),
+			*GetNameSafe(GetWorld()), *Component->GetPathName(), MaxTrackedPoints);
 		return 0;
 	}
 	FTrackedPoint Point;
@@ -222,6 +269,79 @@ FString URammsPhysicsImuSubsystem::GetTrackedBodyName(int32 Handle) const
 {
 	const FTrackedPoint* Point = Points.Find(Handle);
 	return Point ? Point->Ref.BodyName : FString();
+}
+
+USceneComponent* URammsPhysicsImuSubsystem::GetTrackedBody(int32 Handle) const
+{
+	const FTrackedPoint* Point = Points.Find(Handle);
+	return Point ? Point->Ref.Body.Get() : nullptr;
+}
+
+void URammsPhysicsImuSubsystem::EnableHistory(int32 Handle)
+{
+	FTrackedPoint* Point = Points.Find(Handle);
+	if (!Point || Point->bHistory)
+	{
+		return;
+	}
+	Point->bHistory = true;
+	if (Point->ProviderHandle != INDEX_NONE)
+	{
+		if (IRammsImuProvider* Provider = GetProvider(Point->Ref.Source))
+		{
+			Provider->SetHistoryCapacity(Point->ProviderHandle, HistoryCapacity);
+		}
+	}
+}
+
+bool URammsPhysicsImuSubsystem::ReadHistory(int32 Handle, int64 Since, int32 Max, FRammsImuHistoryRead& Out)
+{
+	Out = FRammsImuHistoryRead();
+	FTrackedPoint* Point = Points.Find(Handle);
+	if (!Point)
+	{
+		return false;
+	}
+	Point->LastRead = Now();
+	EnableHistory(Handle);
+
+	const TSharedPtr<IRammsImuProvider>* Provider = Providers.Find(Point->Ref.Source);
+	int64								 First = 0;
+	int64								 Oldest = 0;
+	int64								 ProviderNext = 0;
+	// A point between providers (none takes it just now) keeps its cursor.
+	Out.Next = FMath::Max(Since, Point->SeqBase);
+	if (!Provider || !Provider->IsValid() || Point->ProviderHandle == INDEX_NONE)
+	{
+		return true;
+	}
+	if (Since < 0)
+	{
+		// Start now: no samples, only where the next one will be.
+		TArray<FRammsImuSample> None;
+		if ((*Provider)->ReadHistory(Point->ProviderHandle, 0, 0, None, First, Oldest, ProviderNext))
+		{
+			Out.Next = Point->SeqBase + ProviderNext;
+		}
+		return true;
+	}
+	const int64 LocalSince = Since - Point->SeqBase; // below the provider's range: what was before is gone
+	if (!(*Provider)->ReadHistory(Point->ProviderHandle, LocalSince, FMath::Clamp(Max, 0, HistoryCapacity), Out.Samples, First, Oldest,
+			ProviderNext))
+	{
+		return true;
+	}
+	if (LocalSince > ProviderNext)
+	{
+		// A cursor ahead of this point (one from a point tracked again since): start now.
+		Out.Samples.Reset();
+		Out.Next = Point->SeqBase + ProviderNext;
+		return true;
+	}
+	Out.FirstSeq = Point->SeqBase + First;
+	Out.Next = Out.FirstSeq + Out.Samples.Num();
+	Out.Dropped = FMath::Max<int64>(Out.FirstSeq - Since, 0);
+	return true;
 }
 
 IRammsImuProvider* URammsPhysicsImuSubsystem::GetProvider(ERammsImuSource Source)
@@ -294,13 +414,50 @@ bool URammsPhysicsImuSubsystem::ResolveBody(USceneComponent& Component, FName Bo
 
 void URammsPhysicsImuSubsystem::ListBodies(AActor& Actor, TArray<FRammsImuBodyRef>& OutBodies)
 {
-	for (const ERammsImuSource Engine : RammsPhysicsImuImpl::PhysicsEngines)
+	TArray<FRammsImuBodyRef> MuJoCoBodies;
+	if (const IRammsImuProvider* MuJoCo = GetProvider(ERammsImuSource::MuJoCo))
 	{
-		if (const IRammsImuProvider* Provider = GetProvider(Engine))
+		MuJoCo->ListBodies(Actor, MuJoCoBodies);
+	}
+	// A URLab body that Chaos simulates is listed by its URLab name; the Chaos body that carries it is not listed
+	// again under its own.
+	TSet<const USceneComponent*> CarriedByChaos;
+	for (const FRammsImuBodyRef& Listed : MuJoCoBodies)
+	{
+		FRammsImuBodyRef Carrier;
+		if (USceneComponent* Body = Listed.Body.Get(); Body && Listed.Source == ERammsImuSource::Chaos
+			&& ResolveBody(*Body, NAME_None, FTransform::Identity, ERammsImuSource::Auto, Carrier) && Carrier.Source == ERammsImuSource::Chaos)
 		{
-			Provider->ListBodies(Actor, OutBodies);
+			CarriedByChaos.Add(Carrier.Body.Get());
 		}
 	}
+	TArray<FRammsImuBodyRef> ChaosBodies;
+	if (const IRammsImuProvider* Chaos = GetProvider(ERammsImuSource::Chaos))
+	{
+		Chaos->ListBodies(Actor, ChaosBodies);
+	}
+	ChaosBodies.RemoveAll([&CarriedByChaos](const FRammsImuBodyRef& Listed) { return Listed.Bone.IsNone() && CarriedByChaos.Contains(Listed.Body.Get()); });
+
+	// The actor's own root body leads (the Chaos provider lists it first when it simulates).
+	const bool bChaosRootFirst = ChaosBodies.Num() > 0 && ChaosBodies[0].Body.Get() == Actor.GetRootComponent();
+	if (bChaosRootFirst)
+	{
+		OutBodies.Add(ChaosBodies[0]);
+		ChaosBodies.RemoveAt(0);
+	}
+	OutBodies.Append(MuJoCoBodies);
+	OutBodies.Append(ChaosBodies);
+}
+
+int32 URammsPhysicsImuSubsystem::TrackWith(const FTrackedPoint& Point, const FRammsImuBodyRef& Ref)
+{
+	IRammsImuProvider* Provider = GetProvider(Ref.Source);
+	const int32		   Handle = Provider ? Provider->Track(Ref) : INDEX_NONE;
+	if (Handle != INDEX_NONE && Point.bHistory)
+	{
+		Provider->SetHistoryCapacity(Handle, HistoryCapacity);
+	}
+	return Handle;
 }
 
 void URammsPhysicsImuSubsystem::Attach(FTrackedPoint& Point)
@@ -314,18 +471,38 @@ void URammsPhysicsImuSubsystem::Attach(FTrackedPoint& Point)
 	}
 	FRammsImuBodyRef Ref;
 	ResolveBody(*Component, Point.Bone, Point.LocalPose, Point.Preferred, Ref);
-	IRammsImuProvider* Provider = GetProvider(Ref.Source);
-	int32			   Handle = Provider ? Provider->Track(Ref) : INDEX_NONE;
-	if (Handle == INDEX_NONE && Ref.Source != ERammsImuSource::Kinematic)
+	Reattach(Point, Ref, /*bForce=*/true);
+}
+
+void URammsPhysicsImuSubsystem::Reattach(FTrackedPoint& Point, const FRammsImuBodyRef& Ref, bool bForce)
+{
+	FRammsImuBodyRef Taken = Ref;
+	int32			 Handle = TrackWith(Point, Taken);
+	if (Handle == INDEX_NONE)
 	{
-		// The engine could not take it (no physics scene): differencing it is.
-		Provider = GetProvider(ERammsImuSource::Kinematic);
-		if (Provider && Provider->Resolve(*Component, Point.Bone, Point.LocalPose, false, Ref))
+		if (!bForce && Point.ProviderHandle != INDEX_NONE)
 		{
-			Handle = Provider->Track(Ref);
+			return; // that engine cannot take it (yet): the provider serving it keeps it
 		}
+		// The engine could not take it (no physics scene): differencing it is. A point already differenced on the
+		// same frame keeps its differencer.
+		USceneComponent*		 Component = Point.Component.Get();
+		const IRammsImuProvider* Kinematic = GetProvider(ERammsImuSource::Kinematic);
+		if (Ref.Source == ERammsImuSource::Kinematic || !Component || !Kinematic
+			|| !Kinematic->Resolve(*Component, Point.Bone, Point.LocalPose, false, Taken))
+		{
+			Detach(Point);
+			Point.Ref = Ref;
+			return;
+		}
+		if (Point.ProviderHandle != INDEX_NONE && RammsPhysicsImuImpl::SameBody(Point.Ref, Taken))
+		{
+			return;
+		}
+		Handle = TrackWith(Point, Taken);
 	}
-	Point.Ref = Ref;
+	Detach(Point);
+	Point.Ref = Taken;
 	Point.ProviderHandle = Handle;
 }
 
@@ -335,16 +512,23 @@ void URammsPhysicsImuSubsystem::Detach(FTrackedPoint& Point)
 	{
 		if (const TSharedPtr<IRammsImuProvider>* Provider = Providers.Find(Point.Ref.Source); Provider && Provider->IsValid())
 		{
+			// The point's sequence goes on where this provider's ends.
+			TArray<FRammsImuSample> None;
+			int64					First = 0;
+			int64					Oldest = 0;
+			int64					ProviderNext = 0;
+			if (Point.bHistory && (*Provider)->ReadHistory(Point.ProviderHandle, 0, 0, None, First, Oldest, ProviderNext))
+			{
+				Point.SeqBase += ProviderNext;
+			}
 			(*Provider)->Untrack(Point.ProviderHandle);
 		}
 	}
 	Point.ProviderHandle = INDEX_NONE;
 }
 
-void URammsPhysicsImuSubsystem::Tick(float DeltaTime)
+void URammsPhysicsImuSubsystem::RefreshPoints(bool bForceResolve)
 {
-	Super::Tick(DeltaTime);
-
 	const double WallNow = Now();
 	for (auto It = Points.CreateIterator(); It; ++It)
 	{
@@ -356,24 +540,42 @@ void URammsPhysicsImuSubsystem::Tick(float DeltaTime)
 			It.RemoveCurrent();
 			continue;
 		}
-		// A point that wanted an engine but got Kinematic asks again now and then: MuJoCo compiles after BeginPlay, a
-		// Chaos articulation builds on its first tick.
-		const bool bFellBack = Point.Preferred != ERammsImuSource::Kinematic
-			&& (Point.Ref.Source == ERammsImuSource::Kinematic || Point.ProviderHandle == INDEX_NONE);
-		if (bFellBack && WallNow >= Point.NextResolve)
+		USceneComponent* Component = Point.Component.Get();
+
+		// The body it rode on is gone or no longer the one it was resolved on: resolve it again at once.
+		const TSharedPtr<IRammsImuProvider>* Provider = Providers.Find(Point.Ref.Source);
+		const bool							 bLost = Point.ProviderHandle == INDEX_NONE || !Provider || !Provider->IsValid() || !(*Provider)->IsTrackValid(Point.ProviderHandle);
+		if (bLost && (bForceResolve || WallNow >= Point.NextInvalidRetry))
 		{
+			Point.NextInvalidRetry = WallNow + RammsPhysicsImuImpl::ResolveRetrySeconds;
+			Point.NextResolve = WallNow + RammsPhysicsImuImpl::ResolveRetrySeconds;
 			FRammsImuBodyRef Ref;
-			if (ResolveBody(*Point.Component.Get(), Point.Bone, Point.LocalPose, Point.Preferred, Ref) && Ref.Source != ERammsImuSource::Kinematic)
-			{
-				Detach(Point);
-				Attach(Point);
-			}
-			else
-			{
-				Point.NextResolve = WallNow + RammsPhysicsImuImpl::ResolveRetrySeconds;
-			}
+			ResolveBody(*Component, Point.Bone, Point.LocalPose, Point.Preferred, Ref);
+			Reattach(Point, Ref, /*bForce=*/true);
+			continue;
+		}
+
+		// Now and then: does another engine (or another body) serve it now? MuJoCo compiles after BeginPlay, a Chaos
+		// articulation builds on its first tick, a robot is switched to Chaos, a body is welded into another.
+		if (Point.Preferred == ERammsImuSource::Kinematic || (!bForceResolve && WallNow < Point.NextResolve))
+		{
+			continue;
+		}
+		Point.NextResolve = WallNow + RammsPhysicsImuImpl::ResolveRetrySeconds;
+		FRammsImuBodyRef Ref;
+		ResolveBody(*Component, Point.Bone, Point.LocalPose, Point.Preferred, Ref);
+		if (!RammsPhysicsImuImpl::SameBody(Ref, Point.Ref))
+		{
+			Reattach(Point, Ref, /*bForce=*/false);
 		}
 	}
+}
+
+void URammsPhysicsImuSubsystem::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	RefreshPoints(/*bForceResolve=*/false);
 
 	if (const TSharedPtr<IRammsImuProvider>* Kinematic = Providers.Find(ERammsImuSource::Kinematic); Kinematic && Kinematic->IsValid())
 	{
