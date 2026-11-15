@@ -1175,14 +1175,14 @@ public:
 			{
 				const TSharedPtr<FJsonObject>  Entry = (*Samples)[i]->AsObject();
 				const double				   SimTime = Entry->GetNumberField(TEXT("sim_time"));
-				const TSharedPtr<FJsonObject>* Accel = nullptr;
+				const TSharedPtr<FJsonObject>* AccelJson = nullptr;
 				if (Run->BridgeCursor >= 0)
 				{
 					Run->bCursorBroken |= static_cast<int64>(Entry->GetNumberField(TEXT("seq"))) != Expected++;
 				}
-				if (Entry->TryGetObjectField(TEXT("linear_acceleration"), Accel) && Accel)
+				if (Entry->TryGetObjectField(TEXT("linear_acceleration"), AccelJson) && AccelJson)
 				{
-					const FVector Value((*Accel)->GetNumberField(TEXT("x")), (*Accel)->GetNumberField(TEXT("y")), (*Accel)->GetNumberField(TEXT("z")));
+					const FVector Value((*AccelJson)->GetNumberField(TEXT("x")), (*AccelJson)->GetNumberField(TEXT("y")), (*AccelJson)->GetNumberField(TEXT("z")));
 					CheckRow(SimTime, Value.Size());
 				}
 				Run->BridgeRowsAfter += bRecreated && SimTime > Run->RecreatedAtSimTime ? 1 : 0;
