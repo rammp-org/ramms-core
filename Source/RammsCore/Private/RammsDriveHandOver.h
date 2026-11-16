@@ -145,7 +145,21 @@ namespace RammsDrive
 		/** A linkage endpoint's height (the main wheel's, up positive), rather
 		 *  than its fore/aft position. */
 		bool bHeight = false;
+		/** One of the stance's LeadMotorIds (FRammsDriveStance): moved first,
+		 *  alone, when the stance is taken from a pose no drive mode set. */
+		bool bLead = false;
+		/** The fastest this channel may move (its units per second, at the
+		 *  S-curve's peak), under the switch's own limit; 0: that limit
+		 *  (FRammsDriveStance::LeadMaxMotorRate for a lead). */
+		double MaxRate = 0.0;
 	};
+
+	/**
+	 * A stance taken from a pose no drive mode set, in one stage -- or, when
+	 * some of its LeadMotorIds move, in two: those first, everything else
+	 * after. OutSecond is empty when no lead moves.
+	 */
+	void SplitLeadStage(const TArray<FStanceChannel>& Channels, TArray<FStanceChannel>& OutFirst, TArray<FStanceChannel>& OutSecond);
 
 	/**
 	 * A stance change in two stages, wheels down before wheels up: where the

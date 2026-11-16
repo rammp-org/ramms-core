@@ -500,6 +500,10 @@ namespace RammsCurb
 		double CmdX = 0.0;
 		/** Where the leg's command is headed this tick (cm, chassis frame). */
 		double TargetZ = 0.0;
+		/** How much higher than it stands the chassis TargetZ was taken over
+		 *  (a lifted wheel aimed for its window: ChassisRiseToWindow); 0 for any
+		 *  other target. */
+		double TargetRiseCm = 0.0;
 		/** The attitude loop's share (cm), while it supports; and the tilt of the
 		 *  plane that best fits the support legs' preloads, taken out (cm): the
 		 *  preloads share the load out among the legs, but do not tilt the base. */
@@ -797,8 +801,14 @@ namespace RammsCurb
 		double SupportTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double Ahead_m, double Preload,
 			const FVector2D& Bias) const;
 		/** The leg's swing target (chassis z, cm): at least WorldZ in the planned
-		 *  attitude and in the measured one. */
-		double SwingTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double WorldZ) const;
+		 *  attitude and in the measured one, over the chassis ChassisRiseCm
+		 *  higher than it stands now (ChassisRiseToWindow). */
+		double SwingTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double WorldZ, double ChassisRiseCm = 0.0) const;
+		/** How much higher (cm) the chassis will stand when the lifted wheel
+		 *  Leg reaches its window -- the plan's height there, as far as it rises
+		 *  by then (Ramms.Curb.LiftAtWindowHeight); 0 within its window, for a
+		 *  chassis coming down, or off. */
+		double ChassisRiseToWindow(int32 Leg) const;
 		/** The highest a lifted wheel must be carried (world, cm) now: ZTop until
 		 *  its drop, then the profile 0.3 s ahead and the far surface's support. */
 		double SwingWorldZ(int32 Leg, const FExecMeasure& Measure, double V) const;

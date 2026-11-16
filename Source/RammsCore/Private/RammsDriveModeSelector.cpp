@@ -195,6 +195,8 @@ namespace RammsDrive
 				const float* Commanded = Selector.State ? Selector.State->MotorCommands.Find(Target.MotorId) : nullptr;
 				C.From = (Commanded && FMath::Abs(*Commanded - At) <= MotorAtCommandTolerance) ? *Commanded : At;
 				C.To = Target.Target;
+				C.bLead = Stance.LeadMotorIds.Contains(Target.MotorId);
+				C.MaxRate = C.bLead ? FMath::Max(0.0, static_cast<double>(Stance.LeadMaxMotorRate)) : 0.0;
 				OutChannels.Add(C);
 			}
 		}

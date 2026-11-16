@@ -357,6 +357,17 @@ namespace
 			 "plan's before it is over its budget on the move (60000, the default: a few hundred milliseconds' worth)."),
 		ECVF_Default);
 
+	TAutoConsoleVariable<int32> CVarCurbPlanWorkBudget(TEXT("Ramms.Curb.PlanWorkBudget"), 600000,
+		TEXT("The most work (instants of the robot evaluated, the same for the same input: not wall time) one grid spends looking for a "
+			 "plan once no plan is level at its own speeds -- the slowed, tilted and planned-stop searches: past it the grid gives up and "
+			 "the crossing is refused, saying so, rather than the robot waiting at the curb while a hard curb's searches run out. The "
+			 "default sits well above what a crossing that plans needs. 0 or less: no budget."),
+		ECVF_Default);
+	int64						PlanWorkBudget()
+	{
+		return static_cast<int64>(CVarCurbPlanWorkBudget.GetValueOnAnyThread());
+	}
+
 	TAutoConsoleVariable<int32> CVarCurbSlowTiltWhenNone(TEXT("Ramms.Curb.SlowTiltWhenNone"), 1,
 		TEXT("Development: 1 (the default) where the tilt search finds no tilt within MaxPlannedTiltDeg at the plans' speeds, it is run "
 			 "again with the plans made slower where they fail (never under the floor), up to the limit, before the planned stops; 0 "
@@ -7601,6 +7612,17 @@ namespace RammsCurb
 	{
 		if (!StoppedWhy.IsEmpty())
 		{
+			return true;
+		}
+		// Over the planning budget once no plan is level at its own speeds (a
+		// level plan found is never given up for it: the fallback searches are
+		// where a refusal spends its time) -- and not once every search has run
+		// (Refused: its own reason says more).
+		const int64 Budget = PlanWorkBudget();
+		if (Budget > 0 && Stage != EPlanStage::Level && Stage != EPlanStage::Refused && Work > Budget)
+		{
+			StoppedWhy = FString::Printf(TEXT("no plan within the planning budget (%lld instants of the robot evaluated; Ramms.Curb.PlanWorkBudget %lld)"),
+				static_cast<long long>(Work), static_cast<long long>(Budget));
 			return true;
 		}
 		if (!Race || !Race->bDone[1 - Slot].load(std::memory_order_acquire))

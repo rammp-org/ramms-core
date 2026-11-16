@@ -4026,8 +4026,8 @@ bool FRammsCurbPlannerEasedLiftsWaitForTheSeat::RunTest(const FString& Parameter
 	// the seat's speed, so square on (every lift waiting on the landing before
 	// it) a slow seat's lifts begin no earlier than an instant one's; at an
 	// angle the lifts ease into one another's room, and only the plans are
-	// checked. (The dry run's robot does not move its seat, so its Settle
-	// would wait on it: not run here.)
+	// checked. (A seated crossing's dry run: Ramms.Curb.Planner.
+	// SeatReturnInHandBack.)
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
 	{
 		RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
@@ -4078,6 +4078,92 @@ bool FRammsCurbPlannerEasedLiftsWaitForTheSeat::RunTest(const FString& Parameter
 		}
 		AddInfo(FString::Printf(TEXT("%s: %d lifts begin later with the slow seat"), Id, Later));
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerWorkBudget,
+	"Ramms.Curb.Planner.WorkBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerWorkBudget::RunTest(const FString& Parameters)
+{
+	// Ramms.Curb.PlanWorkBudget: once no plan is level at its own speeds, a grid
+	// whose work passes the budget gives up and the crossing is refused, saying
+	// so; a level plan is never given up for it.
+	IConsoleVariable* Budget = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.PlanWorkBudget"));
+	if (!TestNotNull(TEXT("Ramms.Curb.PlanWorkBudget"), Budget))
+	{
+		return false;
+	}
+	const int32 Was = Budget->GetInt();
+	ON_SCOPE_EXIT
+	{
+		Budget->Set(Was, ECVF_SetByCode);
+	};
+	RammsCurb::FPlannerInput Level = PlanOn(PlanScenario(TEXT("Square"), true));
+	// A floor the crossing cannot keep, no tilt and no stop (Ramms.Curb.Planner.
+	// FloorRespected): every fallback search runs, and none plans.
+	RammsCurb::FPlannerInput Fallback = Level;
+	Fallback.Tuning.MinSpeedFraction = 0.95f;
+	Fallback.Tuning.MaxPlannedTiltDeg = 0.0f;
+	Fallback.Tuning.bAllowPlannedStop = false;
+
+	Budget->Set(1, ECVF_SetByCode);
+	const RammsCurb::FCurbSchedule Kept = PlanAndLog(*this, Level, TEXT("Square up, budget 1"));
+	TestEqual(TEXT("a level plan is never given up for the budget"), FString(RammsCurb::PlanClassName(Kept.Class)), FString(TEXT("level")));
+	const RammsCurb::FCurbSchedule Over = PlanAndLog(*this, Fallback, TEXT("Square up, floor 95 %, budget 1"));
+	TestEqual(TEXT("past the budget in the fallback searches: refused"), FString(RammsCurb::PlanClassName(Over.Class)), FString(TEXT("refused")));
+	TestTrue(FString::Printf(TEXT("...saying so (%s)"), *Over.Summary), Over.Summary.Contains(TEXT("planning budget")));
+
+	Budget->Set(0, ECVF_SetByCode);
+	const RammsCurb::FCurbSchedule Unbounded = PlanAndLog(*this, Fallback, TEXT("Square up, floor 95 %, no budget"));
+	TestEqual(TEXT("no budget: refused all the same"), FString(RammsCurb::PlanClassName(Unbounded.Class)), FString(TEXT("refused")));
+	TestFalse(FString::Printf(TEXT("...for its own reason (%s)"), *Unbounded.Summary), Unbounded.Summary.Contains(TEXT("planning budget")));
+	TestTrue(FString::Printf(TEXT("...after more work (%lld against %lld)"), static_cast<long long>(Unbounded.PlanWork), static_cast<long long>(Over.PlanWork)),
+		Unbounded.PlanWork > Over.PlanWork);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerSeatReturnInHandBack,
+	"Ramms.Curb.Planner.SeatReturnInHandBack",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerSeatReturnInHandBack::RunTest(const FString& Parameters)
+{
+	// A seated crossing whose hand-back mode brings the seat back aft first
+	// (bSeatReturnsInHandBack): Done does not wait for the seat's return. The dry
+	// run's robot never moves its seat, so waiting for it the crossing would not
+	// be done by the time the one that hands it on is.
+	RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	In.Tuning.LegSpeed = 60.0f;
+	In.Tuning.LegAcceleration = 800.0f;
+	RammsCurb::FModelSeat& Seat = In.Model.Seat;
+	Seat.bHas = true;
+	Seat.ZeroPivot = FVector2D(0.0, 30.0);
+	Seat.MechanismMassKg = 5.0;
+	Seat.PayloadMassKg = 40.0;
+	Seat.PayloadOffset = FVector2D(0.0, 40.0);
+	Seat.HeightCm = 40.0;
+	Seat.XRange = FVector2D(-20.0, 27.0);
+	Seat.ShiftSpeedCmS = 30.0;
+	const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, TEXT("Square up, seated"));
+	if (!TestTrue(FString::Printf(TEXT("planned (%s)"), *S.Summary), S.IsValid()))
+	{
+		return false;
+	}
+	In.bSeatReturnsInHandBack = true;
+	const RammsCurb::FExecDryRunResult Handed = RammsCurb::ExecDryRun(In, S);
+	TestTrue(FString::Printf(TEXT("the seat's return left to the hand-back: done (ended %s: %s)"), RammsCurb::ExecPhaseName(Handed.EndPhase),
+				 *Handed.FaultWhy),
+		Handed.bDone);
+	In.bSeatReturnsInHandBack = false;
+	const RammsCurb::FExecDryRunResult Waited = RammsCurb::ExecDryRun(In, S);
+	// The dry run's seat follows its command, so waiting for it the crossing is
+	// done too -- later, by the seat's return from forward to aft.
+	TestTrue(FString::Printf(TEXT("...waiting for the seat instead: done (ended %s)"), RammsCurb::ExecPhaseName(Waited.EndPhase)), Waited.bDone);
+	TestTrue(FString::Printf(TEXT("...later, by the seat's return (%.2f s against %.2f)"), Waited.Seconds, Handed.Seconds),
+		Waited.Seconds > Handed.Seconds + 0.25);
+	AddInfo(FString::Printf(TEXT("done in %.2f s handing the seat's return on, %.2f s waiting for it"), Handed.Seconds, Waited.Seconds));
 	return true;
 }
 

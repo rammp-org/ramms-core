@@ -479,8 +479,16 @@ namespace
 		double L = TreadsUpL;
 		double K = CornersDownK;
 		int32  Active = Holo;
-		int32  BoundTo[NumModes] = { INDEX_NONE, INDEX_NONE, INDEX_NONE, INDEX_NONE };
-		bool   Held[NumModes] = { false, false, false, false };
+		/** A seat on the stance (both drive modes carry it at SeatHomeX), a
+		 *  lead motor of theirs when bSeatLead: where it is, and whether a
+		 *  corner moved while it was still away from home. */
+		static constexpr double SeatHomeX = -0.6;
+		bool					bSeat = false;
+		bool					bSeatLead = false;
+		double					SeatX = SeatHomeX;
+		bool					bCornerMovedSeatAway = false;
+		int32					BoundTo[NumModes] = { INDEX_NONE, INDEX_NONE, INDEX_NONE, INDEX_NONE };
+		bool					Held[NumModes] = { false, false, false, false };
 		/** A mode stood down whose wheels are held (HoldOutgoingWheels). */
 		bool			  OutgoingHeld[NumModes] = { false, false, false, false };
 		FRammsDriveMotion Stick;
@@ -617,6 +625,10 @@ namespace
 				OutChannels.Add({ FName("linkage.main.height"), false, L, Mode == Diff ? TreadsDownL : TreadsUpL, true });
 			}
 			OutChannels.Add({ FName("crank"), true, K, Mode == Diff ? CornersUpK : CornersDownK, false });
+			if (bSeat)
+			{
+				OutChannels.Add({ FName("seat"), true, SeatX, SeatHomeX, false, bSeatLead });
+			}
 			return true;
 		}
 		virtual void CommandStance(const TArray<FStanceChannel>& Channels, double Elapsed, double Duration) override
@@ -625,8 +637,13 @@ namespace
 			for (const FStanceChannel& C : Channels)
 			{
 				const double V = RammsDrive::StanceRampValue(C, Elapsed, Duration);
-				if (C.bMotor)
+				if (C.Id == FName("seat"))
 				{
+					SeatX = V;
+				}
+				else if (C.bMotor)
+				{
+					bCornerMovedSeatAway |= bSeat && FMath::Abs(V - K) > 1e-9 && FMath::Abs(SeatX - SeatHomeX) > 1e-6;
 					K = V;
 				}
 				else
@@ -1046,6 +1063,68 @@ bool FRammsDriveHandOverSwitchFromNoStance::RunTest(const FString& Parameters)
 		const bool bRamped = R.RampedL.ContainsByPredicate([](double V) { return V > 13.5 && V < 14.5; });
 		TestTrue(TEXT("the linkage ramped through the middle of its travel"), bRamped);
 		TestEqual(TEXT("...to the stance"), R.L, FToyRobot::TreadsUpL, 1e-9);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsDriveHandOverSwitchSeatFirst,
+	"Ramms.Drive.HandOver.Switch.SeatFirst",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsDriveHandOverSwitchSeatFirst::RunTest(const FString& Parameters)
+{
+	const FSwitchConfig Config = ToyConfig();
+	{
+		// The split itself: the leads first and alone when one moves; else one
+		// stage, as before.
+		TArray<FStanceChannel> C;
+		C.Add({ FName("linkage.l.height"), false, 12.0, 16.0, true });
+		C.Add({ FName("crank_front"), true, 1.0, -0.6, false });
+		C.Add({ FName("seat_link1"), true, 0.4, 1.3, false, true });
+		C.Add({ FName("seat_link2"), true, -0.2, -0.6, false, true });
+		TArray<FStanceChannel> First, Second;
+		RammsDrive::SplitLeadStage(C, First, Second);
+		TestTrue(TEXT("the seat's motors first, alone"), First.Num() == 2 && First[0].bLead && First[1].bLead);
+		TestEqual(TEXT("...everything else after"), Second.Num(), 2);
+		// The S-curve's peak is 1.5 times its mean: at the switch's 2 rad/s the
+		// larger lead move (0.9 rad) takes 0.675 s; capped at 0.5 rad/s, 2.7 s.
+		TestEqual(TEXT("the leads at the switch's own rate"), RammsDrive::StanceRampSeconds(First, 0.0, 10.0, 2.0), 0.675, 1e-9);
+		for (FStanceChannel& L : First)
+		{
+			L.MaxRate = 0.5;
+		}
+		TestEqual(TEXT("...and under their own, slower cap"), RammsDrive::StanceRampSeconds(First, 0.0, 10.0, 2.0), 2.7, 1e-9);
+		TestEqual(TEXT("...which never speeds them past the switch's"), RammsDrive::StanceRampSeconds(First, 0.0, 10.0, 0.25), 5.4, 1e-9);
+		C[2].To = C[2].From;
+		C[3].To = C[3].From;
+		RammsDrive::SplitLeadStage(C, First, Second);
+		TestTrue(TEXT("leads already there: one stage"), First.Num() == 4 && Second.Num() == 0);
+	}
+	for (const bool bLead : { true, false })
+	{
+		// A curb crossing's end, the seat still forward: the drive mode handed
+		// to brings it home before a corner moves when the stance leads with
+		// it; without leads, all together (the corners move with the seat away).
+		FToyRobot R;
+		R.Active = FToyRobot::Curb;
+		R.K = 0.8;
+		R.bSeat = true;
+		R.bSeatLead = bLead;
+		R.SeatX = 0.9;
+		R.Settle(FRammsDriveMotion(20.0f, 0.0f, 0.0f));
+		FModeSwitcher S;
+		S.Reset(FToyRobot::Curb);
+		S.Request(R, FToyRobot::Holo, R.Sample(), Config);
+		TestEqual(TEXT("handed over at once"), R.Active, static_cast<int32>(FToyRobot::Holo));
+		TestEqual(bLead ? TEXT("leads: in two stages") : TEXT("no leads: in one stage"), S.GetStageSeconds(1) > 0.0, bLead);
+		for (int32 i = 0; i < 1000 && S.GetPhase() != ESwitchPhase::Idle; ++i)
+		{
+			R.Tick(S, Config);
+		}
+		TestEqual(TEXT("the seat home"), R.SeatX, FToyRobot::SeatHomeX, 1e-9);
+		TestEqual(TEXT("...the corners at the stance"), R.K, FToyRobot::CornersDownK, 1e-9);
+		TestEqual(bLead ? TEXT("leads: no corner moved before the seat was home") : TEXT("no leads: the corners moved with the seat away"),
+			R.bCornerMovedSeatAway, !bLead);
 	}
 	return true;
 }

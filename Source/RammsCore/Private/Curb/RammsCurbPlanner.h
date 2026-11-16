@@ -228,7 +228,12 @@ namespace RammsCurb
 		 *  never under 0): the robot does not wait at rest for the plan
 		 *  (PlanCrossing's work budget). An entry speed over StopSpeedCmS is
 		 *  taken as moving too. */
-		bool			 bOnTheMove = false;
+		bool bOnTheMove = false;
+		/** The drive mode the crossing hands back to brings the seat back aft
+		 *  itself, before its corners move (its stance's LeadMotorIds name the
+		 *  seat's motors): Done does not wait for the seat's return, the hand-back
+		 *  takes it (Ramms.Curb.SeatReturnInHandBack). */
+		bool			 bSeatReturnsInHandBack = false;
 		FRammsCurbTuning Tuning;
 		/** Which centre-wheel paths the level search tries (for tests): no walk,
 		 *  the walking knots, the grid search. */

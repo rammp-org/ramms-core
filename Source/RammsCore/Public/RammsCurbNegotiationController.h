@@ -467,11 +467,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	FString GetStatusLine(ERammsControlTextSeverity& OutSeverity) const;
 
-	/** A fault before any wheel has begun to cross -- the far side not yet confirmed, a plan refused, a hold that
-	 *  lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to rest, once
-	 *  it has stood measured at rest for half a second. Not one about the robot itself (a tilt, near tipping, the
-	 *  base off its planned attitude, a runaway, a robot it cannot measure), and not on a terrain given rather than
-	 *  detected (BeginNegotiationOnTerrain). A stop that does not end at rest, another drive mode selected, Stop, or
+	/** A fault before any wheel has begun to cross -- the far side not yet confirmed, a plan refused on the move, a
+	 *  hold that lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to
+	 *  rest, once it has stood measured at rest for half a second. Not a plan refused at rest (nothing has moved: the
+	 *  same plan again would be refused again), not one about the robot itself (a tilt, near tipping, the base off
+	 *  its planned attitude, a runaway, a robot it cannot measure), and not on a terrain given rather than detected
+	 *  (BeginNegotiationOnTerrain). A stop that does not end at rest, another drive mode selected, Stop, or
 	 *  a reset cancels it. A second fault stays a fault; Cross curb ahead, or curb assist and the stick pushed
 	 *  forward again, tries again by hand. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
@@ -1268,6 +1269,13 @@ private:
 	 *  (IRammsDriveMode::HoldsRobotStill); and the first such mode, or None. */
 	bool  ModeHoldsStill(FName ModeId) const;
 	FName HoldingModeId() const;
+	/** Whether the drive mode ModeId's stance brings the seat back first
+	 *  (FRammsDriveStance::LeadMotorIds name both its 5-bar motors); and
+	 *  whether every mode the crossing may hand back to does
+	 *  (Ramms.Curb.SeatReturnInHandBack on): Done then does not wait for the
+	 *  seat's return. */
+	bool ModeLeadsWithSeat(FName ModeId) const;
+	bool SeatReturnsInHandBack() const;
 	/** The drive mode ModeId on this actor, or null. */
 	IRammsDriveMode* FindDriveMode(FName ModeId) const;
 	/** The mode a crossing that has ended hands the robot back to: the one it
@@ -1396,6 +1404,7 @@ private:
 	bool	  bRetryable = false;
 	bool	  bRetryPending = false;
 	bool	  bRetriedOnce = false;		 // the retry was made: a second fault stays one
+	bool	  bRefusedAtRest = false;	 // the end Finish is told is a plan refused at rest: never tried again
 	bool	  bTerrainGiven = false;	 // BeginNegotiationOnTerrain: development fault injection, never retried
 	double	  RetryWaitSeconds = 0.0;	 // measured at rest for so long
 	double	  RetryElapsedSeconds = 0.0; // since it became pending: one not at rest in time is not made

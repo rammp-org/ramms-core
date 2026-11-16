@@ -41,6 +41,36 @@ namespace RammsCurb
 			return CVarCurbEarlyLiftWaits.GetValueOnAnyThread() != 0;
 		}
 
+		TAutoConsoleVariable<int32> CVarCurbLiftAtWindowHeight(TEXT("Ramms.Curb.LiftAtWindowHeight"), 1,
+			TEXT("1 (the default): a lifted wheel short of its window is carried to its height over the chassis as the chassis will "
+				 "stand when the wheel gets there (the plan's height, as far as the chassis rises by then), not as it stands now -- "
+				 "while the chassis rises, aimed over it as it stood, the command overshot and came back down, and the crank's "
+				 "profile, braking to meet a command coming back toward it, crawled the rest of the way. 0: over the chassis now, "
+				 "as before (development A/B runs)."),
+			ECVF_Default);
+
+		bool LiftAtWindowHeightOn()
+		{
+			return CVarCurbLiftAtWindowHeight.GetValueOnAnyThread() != 0;
+		}
+
+		TAutoConsoleVariable<float> CVarCurbSpeedEaseSeconds(TEXT("Ramms.Curb.SpeedEaseSeconds"), 0.25f,
+			TEXT("Over 0 (the default 0.25 s): the drive command closes on a speed the plan sets (its own, or the centre wheels' walk) "
+				 "with its rate tapering over its last this many seconds -- no faster than (left)/(this) -- instead of at full "
+				 "Acceleration / Deceleration up to it: the base's speed loop, a beat behind a command that stopped braking at once, "
+				 "carried on braking below it, well under a low command at the end of a long brake. Deadlines, "
+				 "holds, level-ins, stops and the stick ramp as before. 0: the plain ramp (development A/B runs)."),
+			ECVF_Default);
+
+		double SpeedEaseSeconds()
+		{
+			return FMath::Max(0.0, static_cast<double>(CVarCurbSpeedEaseSeconds.GetValueOnAnyThread()));
+		}
+
+		/** The least share of Acceleration / Deceleration an eased arrival keeps
+		 *  (SpeedEaseSeconds), so that it gets there. */
+		constexpr double SpeedEaseMinShare = 0.15;
+
 		TAutoConsoleVariable<int32> CVarCurbTakeOverHeldLegs(TEXT("Ramms.Curb.TakeOverHeldLegs"), 1,
 			TEXT("Development: 1 (the default) a crossing begins with each leg's command where the controller held it while the plan was "
 				 "made (its servo lag model); 0 where the leg measures, as before (a leg settled off its command under load moves the "
@@ -948,17 +978,47 @@ namespace RammsCurb
 		return M->LegZForWorldZ(Leg, L.XZ.X, WorldZ, BCmd, Ahead.Pitch, Ahead.Roll);
 	}
 
-	double FExecutor::SwingTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double WorldZ) const
+	double FExecutor::SwingTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double WorldZ, double ChassisRiseCm) const
 	{
 		const FExecLeg& L = Measure.Legs[Leg];
 		const double	X = L.XZ.X;
 		// In the planned attitude at the commanded height, and in the attitude
 		// and at the height measured: whichever asks more (a tilt that lowers
-		// the wheel raises it; one that raises it is not taken off).
-		const double		 Planned = M->LegZForWorldZ(Leg, X, WorldZ, BCmd, Ahead.Pitch, Ahead.Roll);
+		// the wheel raises it; one that raises it is not taken off). Each over
+		// the chassis ChassisRiseCm higher than it stands (ChassisAtWindow).
+		const double		 Rise = FMath::Max(0.0, ChassisRiseCm);
+		const double		 Planned = M->LegZForWorldZ(Leg, X, WorldZ, BCmd + Rise, Ahead.Pitch, Ahead.Roll);
 		const FChassisFrame& F = Measure.Frame;
-		const double		 Measured = F.Z.Z > 0.1 ? (WorldZ - Measure.OriginZ - F.X.Z * X - F.Y.Z * M->LegY(Leg)) / F.Z.Z : Planned;
+		const double		 Measured =
+			F.Z.Z > 0.1 ? (WorldZ - (Measure.OriginZ + Rise) - F.X.Z * X - F.Y.Z * M->LegY(Leg)) / F.Z.Z : Planned;
 		return FMath::Max(Planned, Measured);
+	}
+
+	double FExecutor::ChassisRiseToWindow(int32 Leg) const
+	{
+		if (!LiftAtWindowHeightOn())
+		{
+			return 0.0;
+		}
+		// How much higher the chassis will stand when this wheel reaches its
+		// window: the plan's height there, as far as the chassis rises at
+		// BaseHeightSpeed by then. A chassis coming down is not looked ahead to
+		// (the wheel aimed over it as it stands is the higher, the safer).
+		const FWheelPlan& P = Plan.Wheels[Leg];
+		const FExecWheel& W = Wheels[Leg];
+		const double	  Cos = FMath::Max(0.1, M->NormalShare());
+		const double	  ToWindow = FMath::Max(0.0, (P.DUp - W.PastEdgeCm) / Cos);
+		if (ToWindow <= 0.0)
+		{
+			return 0.0;
+		}
+		const double PlannedB = Between(S + ToWindow).B;
+		if (PlannedB <= BCmd)
+		{
+			return 0.0;
+		}
+		const double BH = FMath::Max(0.1, static_cast<double>(In.Tuning.BaseHeightSpeed));
+		return FMath::Min(PlannedB - BCmd, BH * SecondsTo(S + ToWindow));
 	}
 
 	double FExecutor::SwingWorldZ(int32 Leg, const FExecMeasure& Measure, double V) const
@@ -1252,7 +1312,7 @@ namespace RammsCurb
 			// Headed for the height its target asks in the world, on the chassis as
 			// the plan has it then, no higher than its leg reaches.
 			const double B = Between(S + V * Sim.Time).B + Off;
-			const double Target = ClampToReach(Leg, L.XZ.X, W.TargetZ + (Measure.OriginZ - B));
+			const double Target = ClampToReach(Leg, L.XZ.X, W.TargetZ + W.TargetRiseCm + (Measure.OriginZ - B));
 			TrackTrapezoid(Sim.C, Sim.Cv, Target, T.LegSpeed, T.LegAcceleration, StepS);
 			Sim.H += (Sim.C - Sim.H) * FMath::Min(1.0, StepS / Tau);
 		}
@@ -2477,6 +2537,7 @@ namespace RammsCurb
 			{
 				// The drive stance: hold.
 				W.TargetZ = W.CmdZ;
+				W.TargetRiseCm = 0.0;
 				continue;
 			}
 			const bool bStage1 = !bLoweredDown && !W.bLower;
@@ -2487,6 +2548,7 @@ namespace RammsCurb
 			const bool	 bStage1Corner = !bLoweredDown && W.bLower;
 			const double Pressed = FMath::Min(M->Preload(i), PlantProbeCm);
 			double		 Target = W.CmdZ;
+			double		 Rise = 0.0;
 			switch (W.State)
 			{
 				case ERammsCurbWheelState::Planted:
@@ -2526,7 +2588,8 @@ namespace RammsCurb
 				default: // Lifting, Clear, Held up
 					if (!bStage1)
 					{
-						Target = SwingTarget(i, Measure, Ahead, SwingWorldZ(i, Measure, V));
+						Rise = ChassisRiseToWindow(i);
+						Target = SwingTarget(i, Measure, Ahead, SwingWorldZ(i, Measure, V), Rise);
 					}
 					break;
 			}
@@ -2536,6 +2599,7 @@ namespace RammsCurb
 			W.ReachDeficitCm = FMath::Max(0.0, Target - Wanted);
 			W.bReachClamped = W.ReachDeficitCm > 0.05;
 			W.TargetZ = Target;
+			W.TargetRiseCm = Rise;
 			// A wheel being set down slows over its last few centimetres (its
 			// target is Pressed under the ground it meets); an eased lift rises at
 			// its planned speed, faster only where it would otherwise be late.
@@ -2990,10 +3054,19 @@ namespace RammsCurb
 		const double Braking = BrakingCap(Measure, BrakingLeg);
 		const double Over = VCmd - Braking;
 		// Down the braking cap's own curve (BrakingDecel) where it binds.
-		const float Decel = Braking < VTarget ? static_cast<float>(BrakingDecel(T)) : T.Deceleration;
-		const float DecelNow = Over > EmergencyOverCmS ? 2.0f * Decel : (By == EExecTerm::Margin ? static_cast<float>(MarginHoldDecelShare) * T.Deceleration : Decel);
-		VCmd = RampSpeed(static_cast<float>(VCmd), static_cast<float>(FMath::Max(0.0, FMath::Min(VTarget, Braking))), T.Acceleration, DecelNow,
-			static_cast<float>(Dt));
+		const float	 Decel = Braking < VTarget ? static_cast<float>(BrakingDecel(T)) : T.Deceleration;
+		const float	 DecelNow = Over > EmergencyOverCmS ? 2.0f * Decel : (By == EExecTerm::Margin ? static_cast<float>(MarginHoldDecelShare) * T.Deceleration : Decel);
+		const double Goal = FMath::Max(0.0, FMath::Min(VTarget, Braking));
+		double		 AccelUse = T.Acceleration, DecelUse = DecelNow;
+		// Closing on a speed the plan sets (not a braking cap, a deadline, a hold or
+		// a stop), its rate tapering over the last SpeedEaseSeconds.
+		const double Ease = SpeedEaseSeconds();
+		if (Ease > 0.0 && (By == EExecTerm::Plan || By == EExecTerm::Track) && Goal <= Braking && Over <= 0.0)
+		{
+			AccelUse = FMath::Clamp((Goal - VCmd) / Ease, SpeedEaseMinShare * T.Acceleration, static_cast<double>(T.Acceleration));
+			DecelUse = FMath::Clamp((VCmd - Goal) / Ease, SpeedEaseMinShare * DecelNow, static_cast<double>(DecelNow));
+		}
+		VCmd = RampSpeed(static_cast<float>(VCmd), static_cast<float>(Goal), static_cast<float>(AccelUse), static_cast<float>(DecelUse), static_cast<float>(Dt));
 		if (VCmd > Braking && VCmd - Braking <= EmergencyOverCmS)
 		{
 			VCmd = Braking;
@@ -3191,8 +3264,10 @@ namespace RammsCurb
 			// And the seat where the plan's end has it (back aft), measured
 			// there: handed back while it is still on its way, the drive mode's
 			// stance change (the front corners up) and the seat's own move met
-			// and rocked the robot.
-			if (bSettled && In.Model.Seat.Shifts())
+			// and rocked the robot. Unless the mode handed back to brings the
+			// seat back itself, first, with every wheel still down
+			// (bSeatReturnsInHandBack): then the hand-back takes the return.
+			if (bSettled && In.Model.Seat.Shifts() && !In.bSeatReturnsInHandBack)
 			{
 				// (Finishing in place, Here is the finish's pose: the seat's end.)
 				const double SeatEnd = bFinishInPlace ? Here.SeatX : (Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX);
@@ -3332,6 +3407,8 @@ namespace RammsCurb
 				FExecWheel&		W = Wheels[i];
 				const FExecLeg& L = Measure.Legs[i];
 				const double	X = M->IsCentre(i) ? W.CmdX : L.XZ.X;
+				// (Halting, every target is over the chassis as it stands.)
+				W.TargetRiseCm = 0.0;
 				// A landing is set down just to touch; one held where it met the
 				// ground presses no further.
 				W.HaltPressCm = FMath::Min(M->Preload(i), PlantProbeCm);
@@ -3615,42 +3692,48 @@ namespace RammsCurb
 		FExecutor	 E;
 		FLevelState	 Level;
 		FExecMeasure Meas;
-		auto		 MeasureNow = [&]() {
-			Meas.OriginXY = In.Origin + H * Travel;
-			Meas.OriginZ = OriginZ;
-			Meas.Forward = H;
-			Meas.Frame = FrameOf(OriginZ, Attitude);
-			// A kick: the attitude measured off from what the base does.
-			Meas.AttitudeDeg = Attitude + (Options.KickAtSeconds >= 0.0 && Time >= Options.KickAtSeconds ? Options.KickDeg : FVector2D::ZeroVector);
-			Meas.SpeedCmS = Speed;
-			Meas.bSpeedValid = true;
-			Meas.Legs.SetNum(N);
-			Meas.Probes.Reset();
-			for (int32 i = 0; i < N; ++i)
-			{
-				FExecLeg& L = Meas.Legs[i];
-				L.WheelWorld = WheelAt(Meas.Frame, i, Shown[i]);
-				L.XZ = FVector2D(M.IsCentre(i) ? Leg[i].X : M.CornerX(i, Shown[i]), Shown[i]);
-				L.LagZ = LagZ[i];
-				L.bValid = true;
-				// The terrain as it is, traced along the heading from the wheel's
-				// centre.
-				for (int32 k = 0; Options.bProbes && k < NumProbes; ++k)
-				{
-					if (!Options.bProbeAhead && FMath::Abs(ProbeAheadCm[k]) > 1e-6)
-					{
-						continue;
-					}
-					FTerrainProbe& P = Meas.Probes.AddDefaulted_GetRef();
-					P.Leg = i;
-					P.AheadCm = ProbeAheadCm[k];
-					P.XY = FVector2D(L.WheelWorld.X, L.WheelWorld.Y) + H * ProbeAheadCm[k];
-					P.Z = SurfaceTrue(P.XY);
-					P.bHit = true;
-					P.AboveZ = L.WheelWorld.Z + 40.0;
-					P.BelowZ = L.WheelWorld.Z - 60.0;
-				}
-			}
+		// A seat that shifts follows its command a servo lag behind, from where
+		// the plan starts it, and is measured there.
+		const bool bSeat = In.Model.Seat.Shifts();
+		double	   SeatSimX = bSeat && Plan.Samples.Num() > 0 ? Plan.Samples[0].SeatX : 0.0;
+		auto	   MeasureNow = [&]() {
+			  Meas.OriginXY = In.Origin + H * Travel;
+			  Meas.OriginZ = OriginZ;
+			  Meas.Forward = H;
+			  Meas.Frame = FrameOf(OriginZ, Attitude);
+			  // A kick: the attitude measured off from what the base does.
+			  Meas.AttitudeDeg = Attitude + (Options.KickAtSeconds >= 0.0 && Time >= Options.KickAtSeconds ? Options.KickDeg : FVector2D::ZeroVector);
+			  Meas.SpeedCmS = Speed;
+			  Meas.bSpeedValid = true;
+			  Meas.Seat.bValid = bSeat;
+			  Meas.Seat.Pivot = FVector2D(SeatSimX, In.Model.Seat.HeightCm);
+			  Meas.Legs.SetNum(N);
+			  Meas.Probes.Reset();
+			  for (int32 i = 0; i < N; ++i)
+			  {
+				  FExecLeg& L = Meas.Legs[i];
+				  L.WheelWorld = WheelAt(Meas.Frame, i, Shown[i]);
+				  L.XZ = FVector2D(M.IsCentre(i) ? Leg[i].X : M.CornerX(i, Shown[i]), Shown[i]);
+				  L.LagZ = LagZ[i];
+				  L.bValid = true;
+				  // The terrain as it is, traced along the heading from the wheel's
+				  // centre.
+				  for (int32 k = 0; Options.bProbes && k < NumProbes; ++k)
+				  {
+					  if (!Options.bProbeAhead && FMath::Abs(ProbeAheadCm[k]) > 1e-6)
+					  {
+						  continue;
+					  }
+					  FTerrainProbe& P = Meas.Probes.AddDefaulted_GetRef();
+					  P.Leg = i;
+					  P.AheadCm = ProbeAheadCm[k];
+					  P.XY = FVector2D(L.WheelWorld.X, L.WheelWorld.Y) + H * ProbeAheadCm[k];
+					  P.Z = SurfaceTrue(P.XY);
+					  P.bHit = true;
+					  P.AboveZ = L.WheelWorld.Z + 40.0;
+					  P.BelowZ = L.WheelWorld.Z - 60.0;
+				  }
+			  }
 		};
 		MeasureNow();
 		FString Why;
@@ -3883,6 +3966,10 @@ namespace RammsCurb
 					}
 				}
 				LagZ[i] += (Cmd.LegZ[i] - LagZ[i]) * FMath::Min(1.0, Dt / FMath::Max(1e-3, static_cast<double>(T.ServoLagSeconds)));
+			}
+			if (bSeat)
+			{
+				SeatSimX += (Cmd.SeatX - SeatSimX) * FMath::Min(1.0, Dt / FMath::Max(1e-3, static_cast<double>(T.ServoLagSeconds)));
 			}
 			Speed += (Cmd.DriveSpeed - Speed) * FMath::Min(1.0, Dt / FMath::Max(1e-3, Options.DriveLag));
 			Travel += Speed * Dt;

@@ -64,6 +64,14 @@ static TAutoConsoleVariable<int32> CVarRammsCurbSpeedTrimLevel(
 		TEXT("either way (1), or on a grade only (0, the default)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarRammsCurbSeatReturnInHandBack(
+	TEXT("Ramms.Curb.SeatReturnInHandBack"),
+	1,
+	TEXT("Curb crossing with a seat: where the drive mode the crossing hands back to brings the seat back aft first, every\n")
+		TEXT("wheel still down (its stance's LeadMotorIds name the seat's 5-bar motors), Done does not wait for the seat's\n")
+			TEXT("return and the hand-back takes it (1, the default); 0 waits for it, rolling on (development A/B runs)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarRammsCurbHoldBrakes(
 	TEXT("ramms.Curb.HoldBrakes"),
 	1,
@@ -2067,6 +2075,7 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 		W.RadiusCm = Leg.WheelRadiusCm;
 		W.RollForward = FMath::Cos(FMath::DegreesToRadians(Leg.Wheel.RollDirectionDeg));
 	}
+	In.bSeatReturnsInHandBack = SeatReturnsInHandBack();
 	In.EntrySpeedCmS = RammsCurb::EntrySpeed(Entry, Telemetry && Telemetry->Motion.IsFull(), Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f);
 	// Moving (rolling on, or back on a slope the stance does not hold).
 	const float Moving = Telemetry && Telemetry->Motion.IsFull() ? Telemetry->Motion.GetSpeed() : 0.0f;
@@ -3770,8 +3779,13 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	// Whether a start from here begins it again (no wheel has begun to cross), and whether it does so by itself: a
 	// fault, the first, not about the robot itself, on terrain it detected.
 	const bool bBegun = CrossingBegun();
+	// A plan refused at rest is not tried again: nothing has moved, and the same
+	// plan from the same place is refused again (on a hard curb, seconds more).
+	const bool bRefusal = bRefusedAtRest;
+	bRefusedAtRest = false;
 	bRetryable = EndPhase != ERammsCurbPhase::Done && !bBegun && !bFaultSafety;
-	bRetryPending = EndPhase == ERammsCurbPhase::Faulted && bRetryable && bRetryOnceAfterFault && !bFaultSafety && !bRetriedOnce && !bTerrainGiven;
+	bRetryPending = EndPhase == ERammsCurbPhase::Faulted && bRetryable && bRetryOnceAfterFault && !bFaultSafety && !bRetriedOnce && !bTerrainGiven
+		&& !bRefusal;
 	if (EndPhase == ERammsCurbPhase::Done)
 	{
 		bRetriedOnce = false;
@@ -4897,6 +4911,45 @@ IRammsDriveMode* URammsCurbNegotiationController::FindDriveMode(FName ModeId) co
 	return nullptr;
 }
 
+bool URammsCurbNegotiationController::ModeLeadsWithSeat(FName ModeId) const
+{
+	if (ModeId.IsNone() || !Seat.IsSet())
+	{
+		return false;
+	}
+	const IRammsDriveMode* Mode = FindDriveMode(ModeId);
+	FRammsDriveStance	   Stance;
+	if (!Mode || !Mode->GetRequiredStance(Stance))
+	{
+		return false;
+	}
+	// Both 5-bar motors move the seat fore and aft: both first, or the seat is
+	// not back before the corners move.
+	return Stance.LeadMotorIds.Contains(Seat.Linkage.ProximalMotorA) && Stance.LeadMotorIds.Contains(Seat.Linkage.ProximalMotorB);
+}
+
+bool URammsCurbNegotiationController::SeatReturnsInHandBack() const
+{
+	if (CVarRammsCurbSeatReturnInHandBack.GetValueOnGameThread() == 0 || !Seat.IsSet())
+	{
+		return false;
+	}
+	// Whichever the crossing hands back to at its end: the mode it came from,
+	// or, on a slope that one does not hold still on, the first one that does
+	// (HandBackModeId, decided at the end on the ground then under it).
+	FName Next = !ReturnModeId.IsNone() ? ReturnModeId : PreviousModeId;
+	if (Next.IsNone() || Next == GetDriveModeId())
+	{
+		Next = FallbackModeId();
+	}
+	if (!ModeLeadsWithSeat(Next))
+	{
+		return false;
+	}
+	const FName Holding = HoldingModeId();
+	return Holding.IsNone() || Holding == Next || ModeHoldsStill(Next) || ModeLeadsWithSeat(Holding);
+}
+
 bool URammsCurbNegotiationController::ModeHoldsStill(FName ModeId) const
 {
 	const IRammsDriveMode* Mode = FindDriveMode(ModeId);
@@ -5449,6 +5502,7 @@ void URammsCurbNegotiationController::TakeCrossingPlan()
 			// Planned at rest, nothing has moved: say why, and hand the robot back
 			// to the mode it came from, as a refusal in the call would have left it.
 			bHandBackOnFinish = true;
+			bRefusedAtRest = true;
 			Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("refused at rest: %s"), *Schedule->Summary), /*bRampDown=*/false);
 			return;
 		}
