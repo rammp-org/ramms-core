@@ -354,6 +354,7 @@ void URammsSkeletalPoseComponent::SetJointTarget(int32 JointIndex, float Value)
 	if (Joints.IsValidIndex(JointIndex))
 	{
 		Joints[JointIndex].TargetValue = Value;
+		OnJointTargetsSet.Broadcast();
 	}
 	else if (bDebugLog)
 	{
@@ -368,6 +369,7 @@ void URammsSkeletalPoseComponent::SetJointTargetByName(FName JointName, float Va
 	if (Index != INDEX_NONE)
 	{
 		Joints[Index].TargetValue = Value;
+		OnJointTargetsSet.Broadcast();
 	}
 	else if (bDebugLog)
 	{
@@ -388,6 +390,11 @@ void URammsSkeletalPoseComponent::SetAllJointTargets(const TArray<double>& Value
 	{
 		UE_LOG(LogTemp, Warning, TEXT("SetAllJointTargets: Provided %d values but have %d joints"),
 			Values.Num(), Joints.Num());
+	}
+
+	if (Count > 0)
+	{
+		OnJointTargetsSet.Broadcast();
 	}
 }
 
@@ -456,6 +463,19 @@ void URammsSkeletalPoseComponent::SnapToTargets()
 }
 
 // ── Read Joint State ────────────────────────────────────────────────────
+
+int32 URammsSkeletalPoseComponent::GetJointIndexByName(FName JointName) const
+{
+	// Searches the array rather than JointNameMap, which is only built at BeginPlay.
+	for (int32 i = 0; i < Joints.Num(); ++i)
+	{
+		if (Joints[i].GetEffectiveName() == JointName)
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
+}
 
 float URammsSkeletalPoseComponent::GetJointValue(int32 JointIndex) const
 {
