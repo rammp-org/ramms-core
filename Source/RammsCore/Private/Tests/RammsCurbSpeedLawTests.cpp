@@ -20,9 +20,12 @@ namespace
 	using RammsCurb::FStallWatch;
 
 	constexpr float DriveSpeed = 35.0f;
-	constexpr float Accel = 60.0f;
-	constexpr float Decel = 60.0f;
-	constexpr float Tau = 0.1f;
+	// Named for this file, like SpeedLawTolerance below: a unity build puts these
+	// anonymous namespaces in one translation unit, where a bare Accel/Decel/Tau
+	// shadows a parameter of that name in another file and -Wshadow fails the build.
+	constexpr float SpeedLawAccel = 60.0f;
+	constexpr float SpeedLawDecel = 60.0f;
+	constexpr float SpeedLawTau = 0.1f;
 	constexpr float SpeedLawTolerance = 1.0f;
 
 	/** Seconds for a ramp to take Speed from From to To on ticks of Dt. */
@@ -48,16 +51,16 @@ bool FRammsCurbSpeedLawRamp::RunTest(const FString& Parameters)
 	// The ramp alone, on explicit limits; DriveSpeedFromTuning checks the
 	// controller's per-tick law takes them from its tuning.
 	const float Dt = 0.001f;
-	const float Up = RampSeconds(0.0f, DriveSpeed, Accel, Decel, Dt);
-	const float Down = RampSeconds(DriveSpeed, 0.0f, Accel, Decel, Dt);
-	TestEqual(TEXT("0 to 35 cm/s at 60 cm/s^2 takes 35/60 s"), Up, DriveSpeed / Accel, 0.002f);
+	const float Up = RampSeconds(0.0f, DriveSpeed, SpeedLawAccel, SpeedLawDecel, Dt);
+	const float Down = RampSeconds(DriveSpeed, 0.0f, SpeedLawAccel, SpeedLawDecel, Dt);
+	TestEqual(TEXT("0 to 35 cm/s at 60 cm/s^2 takes 35/60 s"), Up, DriveSpeed / SpeedLawAccel, 0.002f);
 	TestEqual(TEXT("35 to 0 cm/s takes as long at a deceleration of 60: no 2x ramp-down"), Down, Up, 0.002f);
 	TestEqual(TEXT("the deceleration is its own limit, not the acceleration's"),
-		RampSeconds(DriveSpeed, 0.0f, Accel, 2.0f * Decel, Dt), 0.5f * DriveSpeed / Decel, 0.002f);
-	TestEqual(TEXT("one tick slows by Deceleration * dt"), RammsCurb::RampSpeed(30.0f, 0.0f, Accel, Decel, 0.1f), 24.0f, 1e-4f);
-	TestEqual(TEXT("one tick speeds up by Acceleration * dt"), RammsCurb::RampSpeed(10.0f, 35.0f, Accel, Decel, 0.1f), 16.0f, 1e-4f);
-	TestEqual(TEXT("a ramp stops at its target"), RammsCurb::RampSpeed(10.0f, 12.0f, Accel, Decel, 0.1f), 12.0f, 1e-4f);
-	TestEqual(TEXT("a ramp never goes below 0"), RammsCurb::RampSpeed(2.0f, -5.0f, Accel, Decel, 0.1f), 0.0f);
+		RampSeconds(DriveSpeed, 0.0f, SpeedLawAccel, 2.0f * SpeedLawDecel, Dt), 0.5f * DriveSpeed / SpeedLawDecel, 0.002f);
+	TestEqual(TEXT("one tick slows by Deceleration * dt"), RammsCurb::RampSpeed(30.0f, 0.0f, SpeedLawAccel, SpeedLawDecel, 0.1f), 24.0f, 1e-4f);
+	TestEqual(TEXT("one tick speeds up by Acceleration * dt"), RammsCurb::RampSpeed(10.0f, 35.0f, SpeedLawAccel, SpeedLawDecel, 0.1f), 16.0f, 1e-4f);
+	TestEqual(TEXT("a ramp stops at its target"), RammsCurb::RampSpeed(10.0f, 12.0f, SpeedLawAccel, SpeedLawDecel, 0.1f), 12.0f, 1e-4f);
+	TestEqual(TEXT("a ramp never goes below 0"), RammsCurb::RampSpeed(2.0f, -5.0f, SpeedLawAccel, SpeedLawDecel, 0.1f), 0.0f);
 	return true;
 }
 
@@ -223,25 +226,25 @@ bool FRammsCurbSpeedLawLegMoveSeconds::RunTest(const FString& Parameters)
 	// A command 9 cm from its goal at 18 cm/s arrives in 0.5 s, the leg a lag
 	// (1.8 cm) behind it, which a first-order servo closes to 1 cm in
 	// tau * ln(1.8).
-	TestEqual(TEXT("ramp, then the lag's tail"), RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, Tau, SpeedLawTolerance),
-		0.5f + Tau * FMath::Loge(1.8f), 1e-5f);
-	TestEqual(TEXT("the sign of the move does not matter"), RammsCurb::LegMoveSeconds(-9.0f, 18.0f, 0.0f, Tau, SpeedLawTolerance),
-		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, Tau, SpeedLawTolerance), 1e-6f);
+	TestEqual(TEXT("ramp, then the lag's tail"), RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, SpeedLawTau, SpeedLawTolerance),
+		0.5f + SpeedLawTau * FMath::Loge(1.8f), 1e-5f);
+	TestEqual(TEXT("the sign of the move does not matter"), RammsCurb::LegMoveSeconds(-9.0f, 18.0f, 0.0f, SpeedLawTau, SpeedLawTolerance),
+		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 0.0f, SpeedLawTau, SpeedLawTolerance), 1e-6f);
 	TestEqual(TEXT("a leg lagging more than the model trails by its own error"),
-		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 4.0f, Tau, SpeedLawTolerance), 0.5f + Tau * FMath::Loge(4.0f), 1e-5f);
+		RammsCurb::LegMoveSeconds(9.0f, 18.0f, 4.0f, SpeedLawTau, SpeedLawTolerance), 0.5f + SpeedLawTau * FMath::Loge(4.0f), 1e-5f);
 	TestEqual(TEXT("a command already there: only the leg's own error to close"),
-		RammsCurb::LegMoveSeconds(0.0f, 18.0f, 3.0f, Tau, SpeedLawTolerance), Tau * FMath::Loge(3.0f), 1e-5f);
-	TestEqual(TEXT("a settled leg is done"), RammsCurb::LegMoveSeconds(0.0f, 18.0f, 0.6f, Tau, SpeedLawTolerance), 0.0f);
-	TestEqual(TEXT("a slow ramp inside the tolerance has no tail"), RammsCurb::LegMoveSeconds(2.0f, 5.0f, 0.0f, Tau, SpeedLawTolerance),
+		RammsCurb::LegMoveSeconds(0.0f, 18.0f, 3.0f, SpeedLawTau, SpeedLawTolerance), SpeedLawTau * FMath::Loge(3.0f), 1e-5f);
+	TestEqual(TEXT("a settled leg is done"), RammsCurb::LegMoveSeconds(0.0f, 18.0f, 0.6f, SpeedLawTau, SpeedLawTolerance), 0.0f);
+	TestEqual(TEXT("a slow ramp inside the tolerance has no tail"), RammsCurb::LegMoveSeconds(2.0f, 5.0f, 0.0f, SpeedLawTau, SpeedLawTolerance),
 		0.4f, 1e-5f);
 
 	// A lift from 0 towards 15 cm at 30 cm/s: the command gets there in 0.5 s,
 	// the leg a lag later; with the command already past it, the leg closes on
 	// it exponentially.
-	TestEqual(TEXT("reach behind a ramping command"), RammsCurb::LegReachSeconds(0.0f, 0.0f, 30.0f, 15.0f, Tau), 0.5f + Tau, 1e-5f);
-	TestEqual(TEXT("reach behind a command past the target"), RammsCurb::LegReachSeconds(10.0f, 20.0f, 30.0f, 15.0f, Tau),
-		Tau * FMath::Loge(2.0f), 1e-5f);
-	TestEqual(TEXT("already there"), RammsCurb::LegReachSeconds(16.0f, 20.0f, 30.0f, 15.0f, Tau), 0.0f);
+	TestEqual(TEXT("reach behind a ramping command"), RammsCurb::LegReachSeconds(0.0f, 0.0f, 30.0f, 15.0f, SpeedLawTau), 0.5f + SpeedLawTau, 1e-5f);
+	TestEqual(TEXT("reach behind a command past the target"), RammsCurb::LegReachSeconds(10.0f, 20.0f, 30.0f, 15.0f, SpeedLawTau),
+		SpeedLawTau * FMath::Loge(2.0f), 1e-5f);
+	TestEqual(TEXT("already there"), RammsCurb::LegReachSeconds(16.0f, 20.0f, 30.0f, 15.0f, SpeedLawTau), 0.0f);
 	return true;
 }
 
@@ -258,14 +261,14 @@ bool FRammsCurbSpeedLawDeadlineCap::RunTest(const FString& Parameters)
 	// distance to the hard stop -- v T + v^2 / 2a = room -- and with no work
 	// left it is the stop's own braking curve.
 	{
-		const float V = RammsCurb::DeadlineSpeed(29.0f, 1.1f, Decel);
-		TestEqual(TEXT("v T + v^2 / 2a = room"), V * 1.1f + V * V / (2.0f * Decel), 29.0f, 1e-3f);
+		const float V = RammsCurb::DeadlineSpeed(29.0f, 1.1f, SpeedLawDecel);
+		TestEqual(TEXT("v T + v^2 / 2a = room"), V * 1.1f + V * V / (2.0f * SpeedLawDecel), 29.0f, 1e-3f);
 		TestEqual(TEXT("with no braking limit, room over time"), RammsCurb::DeadlineSpeed(29.0f, 1.1f, 0.0f), 29.0f / 1.1f, 1e-4f);
-		TestEqual(TEXT("with no time, the braking curve"), RammsCurb::DeadlineSpeed(29.0f, 0.0f, Decel),
-			RammsCurb::DeadlineSpeed(29.0f, RammsCurb::MinDeadlineSeconds, Decel), 1e-6f);
+		TestEqual(TEXT("with no time, the braking curve"), RammsCurb::DeadlineSpeed(29.0f, 0.0f, SpeedLawDecel),
+			RammsCurb::DeadlineSpeed(29.0f, RammsCurb::MinDeadlineSeconds, SpeedLawDecel), 1e-6f);
 		TestTrue(TEXT("at the least time, close to the braking curve"),
-			FMath::Abs(RammsCurb::DeadlineSpeed(29.0f, 0.0f, Decel) - RammsCurb::BrakingSpeed(29.0f, Decel)) < 4.0f);
-		TestEqual(TEXT("no room: stop"), RammsCurb::DeadlineSpeed(0.0f, 1.0f, Decel), 0.0f);
+			FMath::Abs(RammsCurb::DeadlineSpeed(29.0f, 0.0f, SpeedLawDecel) - RammsCurb::BrakingSpeed(29.0f, SpeedLawDecel)) < 4.0f);
+		TestEqual(TEXT("no room: stop"), RammsCurb::DeadlineSpeed(0.0f, 1.0f, SpeedLawDecel), 0.0f);
 	}
 
 	// Time only: the deadline speed of the room over all the work.
@@ -273,10 +276,10 @@ bool FRammsCurbSpeedLawDeadlineCap::RunTest(const FString& Parameters)
 		FDeadlineChain Chain;
 		Chain.AddTime(0.6f);
 		Chain.AddTime(0.4f);
-		TestEqual(TEXT("time-gated work: the room over its time"), Chain.Speed(30.0f, Decel),
-			RammsCurb::DeadlineSpeed(30.0f - M, 1.0f + S, Decel), 1e-4f);
-		TestEqual(TEXT("no work: the least time is divided by, not 0"), FDeadlineChain().Speed(30.0f, Decel),
-			RammsCurb::DeadlineSpeed(30.0f - M, FMath::Max(S, RammsCurb::MinDeadlineSeconds), Decel), 1e-3f);
+		TestEqual(TEXT("time-gated work: the room over its time"), Chain.Speed(30.0f, SpeedLawDecel),
+			RammsCurb::DeadlineSpeed(30.0f - M, 1.0f + S, SpeedLawDecel), 1e-4f);
+		TestEqual(TEXT("no work: the least time is divided by, not 0"), FDeadlineChain().Speed(30.0f, SpeedLawDecel),
+			RammsCurb::DeadlineSpeed(30.0f - M, FMath::Max(S, RammsCurb::MinDeadlineSeconds), SpeedLawDecel), 1e-3f);
 	}
 
 	// A gate: the work after it cannot start before the chassis gets there,
@@ -287,21 +290,21 @@ bool FRammsCurbSpeedLawDeadlineCap::RunTest(const FString& Parameters)
 		Chain.AddTime(0.2f);
 		Chain.AddGate(25.0f);
 		Chain.AddTime(1.0f);
-		const float After = RammsCurb::DeadlineSpeed(30.0f - M - 25.0f, 1.0f + S, Decel);
-		const float Braked = FMath::Sqrt(After * After + 2.0f * Decel * 25.0f);
-		const float Constant = RammsCurb::DeadlineSpeed(30.0f - M, 1.2f + S, Decel);
-		TestEqual(TEXT("far from the gate the bound over all the work binds"), Chain.Speed(30.0f, Decel), FMath::Min(Braked, Constant), 1e-3f);
+		const float After = RammsCurb::DeadlineSpeed(30.0f - M - 25.0f, 1.0f + S, SpeedLawDecel);
+		const float Braked = FMath::Sqrt(After * After + 2.0f * SpeedLawDecel * 25.0f);
+		const float Constant = RammsCurb::DeadlineSpeed(30.0f - M, 1.2f + S, SpeedLawDecel);
+		TestEqual(TEXT("far from the gate the bound over all the work binds"), Chain.Speed(30.0f, SpeedLawDecel), FMath::Min(Braked, Constant), 1e-3f);
 		FDeadlineChain AtGate;
 		AtGate.AddGate(0.0f);
 		AtGate.AddTime(1.0f);
-		TestEqual(TEXT("at the gate, what is left of the room over the work after it"), AtGate.Speed(5.0f + M, Decel),
-			RammsCurb::DeadlineSpeed(5.0f, 1.0f + S, Decel), 1e-4f);
+		TestEqual(TEXT("at the gate, what is left of the room over the work after it"), AtGate.Speed(5.0f + M, SpeedLawDecel),
+			RammsCurb::DeadlineSpeed(5.0f, 1.0f + S, SpeedLawDecel), 1e-4f);
 		FDeadlineChain Near;
 		Near.AddGate(20.0f);
 		Near.AddTime(1.0f);
-		const float NearAfter = RammsCurb::DeadlineSpeed(80.0f - M - 20.0f, 1.0f + S, Decel);
-		TestEqual(TEXT("ahead of a gate it may go faster, and brake to the gate's speed at Deceleration"), Near.Speed(80.0f, Decel),
-			FMath::Min(RammsCurb::DeadlineSpeed(80.0f - M, 1.0f + S, Decel), FMath::Sqrt(NearAfter * NearAfter + 2.0f * Decel * 20.0f)),
+		const float NearAfter = RammsCurb::DeadlineSpeed(80.0f - M - 20.0f, 1.0f + S, SpeedLawDecel);
+		TestEqual(TEXT("ahead of a gate it may go faster, and brake to the gate's speed at Deceleration"), Near.Speed(80.0f, SpeedLawDecel),
+			FMath::Min(RammsCurb::DeadlineSpeed(80.0f - M, 1.0f + S, SpeedLawDecel), FMath::Sqrt(NearAfter * NearAfter + 2.0f * SpeedLawDecel * 20.0f)),
 			1e-3f);
 	}
 
@@ -319,13 +322,13 @@ bool FRammsCurbSpeedLawDeadlineCap::RunTest(const FString& Parameters)
 		{
 			FDeadlineChain Chain;
 			Chain.AddTime(Work);
-			const float Cap = Chain.Speed(Room, Decel);
+			const float Cap = Chain.Speed(Room, SpeedLawDecel);
 			if (LastCap >= 0.0f)
 			{
 				LargestDrop = FMath::Max(LargestDrop, LastCap - Cap);
 			}
 			LastCap = Cap;
-			Speed = RammsCurb::RampSpeed(Speed, FMath::Min(DriveSpeed, Cap), Accel, Decel, Dt);
+			Speed = RammsCurb::RampSpeed(Speed, FMath::Min(DriveSpeed, Cap), SpeedLawAccel, SpeedLawDecel, Dt);
 			Least = FMath::Min(Least, Speed);
 			Room -= Speed * Dt;
 			Work -= Dt;
@@ -339,8 +342,8 @@ bool FRammsCurbSpeedLawDeadlineCap::RunTest(const FString& Parameters)
 	{
 		FDeadlineChain Chain;
 		Chain.AddTime(3.0f);
-		TestTrue(TEXT("a long wait with room left is slow, not a stop"), Chain.Speed(4.0f, Decel) > 0.0f);
-		TestEqual(TEXT("no room left: stop"), Chain.Speed(M, Decel), 0.0f);
+		TestTrue(TEXT("a long wait with room left is slow, not a stop"), Chain.Speed(4.0f, SpeedLawDecel) > 0.0f);
+		TestEqual(TEXT("no room left: stop"), Chain.Speed(M, SpeedLawDecel), 0.0f);
 	}
 	return true;
 }
@@ -366,9 +369,9 @@ bool FRammsCurbSpeedLawOnlyBrakingCapReachesZero::RunTest(const FString& Paramet
 	{
 		FDeadlineChain Chain;
 		Chain.AddTime(Work);
-		const float Deadline = Chain.Speed(Stop, Decel);
-		const float Ramped = RammsCurb::RampSpeed(Speed, FMath::Min(DriveSpeed, Deadline), Accel, Decel, Dt);
-		const float Braking = RammsCurb::BrakingSpeed(Stop, Decel);
+		const float Deadline = Chain.Speed(Stop, SpeedLawDecel);
+		const float Ramped = RammsCurb::RampSpeed(Speed, FMath::Min(DriveSpeed, Deadline), SpeedLawAccel, SpeedLawDecel, Dt);
+		const float Braking = RammsCurb::BrakingSpeed(Stop, SpeedLawDecel);
 		bBrakingBound |= Braking < Ramped;
 		Speed = FMath::Min(Ramped, Braking);
 		Least = FMath::Min(Least, Speed);
@@ -378,12 +381,12 @@ bool FRammsCurbSpeedLawOnlyBrakingCapReachesZero::RunTest(const FString& Paramet
 	TestFalse(TEXT("the braking cap never had to act"), bBrakingBound);
 	TestTrue(TEXT("the robot slowed for the work, but kept rolling"), Least > 20.0f && Least < 30.0f);
 	TestTrue(TEXT("and could still brake short of the hard stop as the work ended"),
-		Stop > Speed * Speed / (2.0f * Decel));
+		Stop > Speed * Speed / (2.0f * SpeedLawDecel));
 
 	// The deadline is zero only where the hard stop's own braking curve is.
-	TestEqual(TEXT("the braking cap is zero at its stop"), RammsCurb::BrakingSpeed(0.0f, Decel), 0.0f);
-	TestEqual(TEXT("and past it"), RammsCurb::BrakingSpeed(-3.0f, Decel), 0.0f);
-	TestEqual(TEXT("braking curve sqrt(2 a d)"), RammsCurb::BrakingSpeed(10.0f, Decel), FMath::Sqrt(1200.0f), 1e-4f);
+	TestEqual(TEXT("the braking cap is zero at its stop"), RammsCurb::BrakingSpeed(0.0f, SpeedLawDecel), 0.0f);
+	TestEqual(TEXT("and past it"), RammsCurb::BrakingSpeed(-3.0f, SpeedLawDecel), 0.0f);
+	TestEqual(TEXT("braking curve sqrt(2 a d)"), RammsCurb::BrakingSpeed(10.0f, SpeedLawDecel), FMath::Sqrt(1200.0f), 1e-4f);
 	for (float Room = RammsCurb::DeadlineMarginCm + 0.5f; Room < 100.0f; Room += 7.3f)
 	{
 		for (float Seconds = 0.0f; Seconds < 5.0f; Seconds += 0.7f)
@@ -391,7 +394,7 @@ bool FRammsCurbSpeedLawOnlyBrakingCapReachesZero::RunTest(const FString& Paramet
 			FDeadlineChain Chain;
 			Chain.AddTime(Seconds);
 			if (!TestTrue(FString::Printf(TEXT("room %.1f cm, %.1f s of work: slower, never stopped"), Room, Seconds),
-					Chain.Speed(Room, Decel) > 0.0f))
+					Chain.Speed(Room, SpeedLawDecel) > 0.0f))
 			{
 				return false;
 			}
@@ -414,8 +417,8 @@ bool FRammsCurbSpeedLawNoLagStepFactor::RunTest(const FString& Parameters)
 	for (float Error = 0.0f; Error <= 6.0f; Error += 0.01f)
 	{
 		FDeadlineChain Chain;
-		Chain.AddTime(RammsCurb::LegMoveSeconds(10.0f, 30.0f, Error, Tau, SpeedLawTolerance));
-		const float Cap = Chain.Speed(25.0f, Decel);
+		Chain.AddTime(RammsCurb::LegMoveSeconds(10.0f, 30.0f, Error, SpeedLawTau, SpeedLawTolerance));
+		const float Cap = Chain.Speed(25.0f, SpeedLawDecel);
 		if (Last > 0.0f)
 		{
 			LargestRatio = FMath::Max(LargestRatio, Last / Cap);
@@ -503,8 +506,8 @@ namespace
 	{
 		FRammsCurbTuning Tuning;
 		Tuning.DriveSpeed = 30.0f;
-		Tuning.Acceleration = Accel;
-		Tuning.Deceleration = Decel;
+		Tuning.Acceleration = SpeedLawAccel;
+		Tuning.Deceleration = SpeedLawDecel;
 		const float NoDeadline = TNumericLimits<float>::Max();
 		const float Stop = 50.0f;
 		double		X = 0.0;
@@ -552,13 +555,13 @@ bool FRammsCurbSpeedLawLagAwareStop::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("%s: the chassis comes to rest on the stop (%+.2f cm, %.3f cm/s)"), *At, Run.OverrunCm, Run.FinalSpeed),
 			FMath::Abs(Run.OverrunCm) <= 0.25 && Run.FinalSpeed < 0.05);
 		TestTrue(FString::Printf(TEXT("%s: slowing at about Deceleration (chassis %.0f, command %.0f cm/s^2)"), *At, Run.MaxDecel, Run.MaxCommandFall),
-			Run.MaxDecel <= 1.35 * Decel && Run.MaxCommandFall <= 1.3f * Decel);
+			Run.MaxDecel <= 1.35 * SpeedLawDecel && Run.MaxCommandFall <= 1.3f * SpeedLawDecel);
 
 		// The same stop braked on the raw distance: the reason for the lag term.
 		const FStopRun Raw = BrakeToStop(Lag, Lag, Dt, false);
 		TestTrue(FString::Printf(TEXT("%s: on the raw distance the chassis overruns (%+.2f cm) and slows about twice as hard (%.0f)"), *At,
 					 Raw.OverrunCm, Raw.MaxDecel),
-			Raw.OverrunCm > 1.5 && Raw.MaxDecel > 1.6 * Decel);
+			Raw.OverrunCm > 1.5 && Raw.MaxDecel > 1.6 * SpeedLawDecel);
 
 		// A chassis lagging more than allowed for stops a little past, by the
 		// difference times its speed as the command reaches 0; one lagging
@@ -795,7 +798,7 @@ namespace
 		double		 Speed = From, Measured = From, FollowA = From, FollowB = From, Command = FMath::Max(0.0, From), Trim = 0.0;
 		for (double T = 0.0; T < Seconds; T += Dt)
 		{
-			Command = RammsCurb::RampSpeed(static_cast<float>(Command), static_cast<float>(To), Accel, Decel, static_cast<float>(Dt));
+			Command = RammsCurb::RampSpeed(static_cast<float>(Command), static_cast<float>(To), SpeedLawAccel, SpeedLawDecel, static_cast<float>(Dt));
 			const double Followed = RammsCurb::SpeedFollowStep(FollowA, FollowB, Command, Dt);
 			if (bTrim)
 			{
@@ -897,7 +900,7 @@ bool FRammsCurbSpeedLawSpeedTrim::RunTest(const FString& Parameters)
 			for (double T = 0.0; T < 6.0; T += Dt)
 			{
 				const double To = T < 2.0 ? 35.0 : (T < 3.5 ? 13.0 : 17.0);
-				Command = RammsCurb::RampSpeed(static_cast<float>(Command), static_cast<float>(To), Accel, Decel, static_cast<float>(Dt));
+				Command = RammsCurb::RampSpeed(static_cast<float>(Command), static_cast<float>(To), SpeedLawAccel, SpeedLawDecel, static_cast<float>(Dt));
 				const double Followed = RammsCurb::SpeedFollowStep(A, B, Command, Dt);
 				if (bTrim)
 				{
