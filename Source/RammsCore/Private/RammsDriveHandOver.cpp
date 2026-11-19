@@ -296,7 +296,7 @@ namespace RammsDrive
 		bool bLeadMoves = false;
 		for (const FStanceChannel& C : Channels)
 		{
-			bLeadMoves |= C.bLead && FMath::Abs(C.To - C.From) > UE_KINDA_SMALL_NUMBER;
+			bLeadMoves |= C.bLead && FMath::Abs(C.To - C.From) > LeadMoveTolerance;
 		}
 		if (!bLeadMoves)
 		{

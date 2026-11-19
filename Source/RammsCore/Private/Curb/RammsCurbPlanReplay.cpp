@@ -33,7 +33,7 @@ namespace RammsCurb
 		constexpr uint32 PlanInputMagic = 0x49504352; // "RCPI"
 		/** 2: the robot moving as it asked (FPlannerInput::bOnTheMove); a version-1
 		 *  file reads with it false. */
-		constexpr int32 PlanInputVersion = 4; // 3: the model's seat; 4: its aft speed-up, fore slow-down and shift easing
+		constexpr int32 PlanInputVersion = 5; // 3: the model's seat; 4: its aft speed-up, fore slow-down and shift easing; 5: the finish stance
 
 		/** A reflected struct by property name (tagged), so that a file written
 		 *  before a field was added still reads, the field at its default. */
@@ -105,6 +105,11 @@ namespace RammsCurb
 			if (Version >= 2)
 			{
 				Ar << In.bOnTheMove;
+			}
+			if (Version >= 5)
+			{
+				FFinishStance& F = In.Finish;
+				Ar << F.bValid << F.Lift << F.LiftZ << F.bHasCentreX << F.CentreX << F.bHasSeatX << F.SeatX;
 			}
 			return !Ar.IsError();
 		}

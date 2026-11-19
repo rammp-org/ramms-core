@@ -1099,6 +1099,11 @@ bool FRammsDriveHandOverSwitchSeatFirst::RunTest(const FString& Parameters)
 		C[3].To = C[3].From;
 		RammsDrive::SplitLeadStage(C, First, Second);
 		TestTrue(TEXT("leads already there: one stage"), First.Num() == 4 && Second.Num() == 0);
+		// Within a hair of it (a crossing that finished in the stance): as good.
+		C[2].To = C[2].From + 0.5 * RammsDrive::LeadMoveTolerance;
+		C[3].To = C[3].From - 0.5 * RammsDrive::LeadMoveTolerance;
+		RammsDrive::SplitLeadStage(C, First, Second);
+		TestTrue(TEXT("leads within LeadMoveTolerance: one stage"), First.Num() == 4 && Second.Num() == 0);
 	}
 	for (const bool bLead : { true, false })
 	{

@@ -213,7 +213,36 @@ namespace RammsCurb
 	constexpr double CentreLogCm = 10.0;
 	/** Settle ends only once the seat is within this (cm) of the plan's end
 	 *  fore/aft, sent and measured. */
+	namespace
+	{
+		TAutoConsoleVariable<int32> CVarCurbFinishCentreLead(TEXT("Ramms.Curb.FinishCentreLead"), 0,
+			TEXT("1 (the default): finishing in the drive stance (Ramms.Curb.FinishInStance), the centre wheels are led forward of the "
+				 "stance's fore/aft while the seat is still forward -- as far as lets the stance's lifted wheels (the front corners) go up "
+				 "with the robot standing inside the centre wheels and the rear corners -- and come back to it as the seat comes back aft. "
+				 "0: they walk straight to the stance's, and the lifted wheels wait for the seat."),
+			ECVF_Default);
+		bool						FinishCentreLeadOn()
+		{
+			return CVarCurbFinishCentreLead.GetValueOnAnyThread() != 0;
+		}
+	} // namespace
+
 	constexpr double SeatSettleCm = 2.0;
+	/** Up a curb with the hand-off: a carrying centre wheel walks aft up to this
+	 *  much (cm/s) faster than MaxAftWalkPerCm of the chassis' speed (so that it
+	 *  is not stuck at rest, and its command can lead the loaded 5-bar's lag);
+	 *  and the seat this far (cm) behind the plan's
+	 *  forward move before it slows the robot. */
+	constexpr double PlantedWalkSlackCmS = 10.0;
+	/** Into the finish stance, the centre wheels walk to its fore/aft carrying
+	 *  the robot no faster than this (cm/s): walked faster, the treads under
+	 *  them (the drive) dragged the robot down from its cruise. */
+	constexpr double FinishWalkSpeedCmS = 20.0;
+	constexpr double SeatLagFreeCm = 4.0;
+	/** Settling into the finish stance: how long (s) its lift waits on the
+	 *  margin once the seat and the centre wheels are where the stance has
+	 *  them, before Done leaves it to the hand-back. */
+	constexpr double FinishLiftWaitSeconds = 1.0;
 
 	bool FExecutor::IsSupport(int32 Leg) const
 	{
@@ -362,6 +391,12 @@ namespace RammsCurb
 		SettledAt = -1.0;
 		bLoggedBaseWait = false;
 		bLoggedSeatWait = false;
+		bLoggedStanceWait = false;
+		StanceLiftWaited = 0.0;
+		bStanceLiftGivenUp = false;
+		FinishCentreGoal = 0.0;
+		bFinishCentreGoal = false;
+		bLoggedCentreLead = false;
 		Diag = FExecDiag();
 		Prepare();
 		bRunning = true;
@@ -517,6 +552,175 @@ namespace RammsCurb
 		Out.Pitch = FinishAttitude.X;
 		Out.Roll = FinishAttitude.Y;
 		return Out;
+	}
+
+	double FExecutor::EndCentreX(double PlanX) const
+	{
+		if (Phase != EExecPhase::Settle || !In.Finish.bValid || !In.Finish.bHasCentreX)
+		{
+			return PlanX;
+		}
+		return bFinishCentreGoal ? FinishCentreGoal : In.Finish.CentreX;
+	}
+
+	double FExecutor::MarginWithCentresAt(const FExecMeasure& Measure, uint32 Without, double Dx) const
+	{
+		const int32											  N = Wheels.Num();
+		TArray<FVector2D, TInlineAllocator<MaxPlanLegs>>	  XZ;
+		TArray<FMeasuredWheel, TInlineAllocator<MaxPlanLegs>> Ws;
+		for (int32 i = 0; i < N; ++i)
+		{
+			const bool bCentre = M->IsCentre(i);
+			XZ.Add(Measure.Legs[i].XZ + FVector2D(bCentre ? Dx : 0.0, 0.0));
+			FMeasuredWheel& W = Ws.AddDefaulted_GetRef();
+			W.Centre = Measure.Legs[i].WheelWorld + (bCentre ? Measure.Frame.X * Dx : FVector::ZeroVector);
+			W.bSupport = IsSupport(i) && !((Without >> i) & 1u);
+			W.Gradient = (Wheels[i].Plane == 1 ? M->GetTerrain().Far : M->GetTerrain().Near).Gradient;
+		}
+		const FPoseMargin R =
+			MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Seat, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
+		return R.Support >= 3 ? R.DynamicCm : -1e9;
+	}
+
+	void FExecutor::StepStanceLift(const FExecMeasure& Measure, double Dt)
+	{
+		const FFinishStance& F = In.Finish;
+		if (!F.bValid || bStanceLiftGivenUp)
+		{
+			return;
+		}
+		uint32 Mask = 0, Lifts = 0;
+		for (int32 i = 0; i < Wheels.Num(); ++i)
+		{
+			const FExecWheel& W = Wheels[i];
+			if (F.LiftsLeg(i) && W.Plane == 1)
+			{
+				Lifts |= 1u << i;
+				Mask |= !W.bStanceUp && W.State == ERammsCurbWheelState::Planted ? 1u << i : 0u;
+			}
+		}
+		const FRammsCurbTuning& T = In.Tuning;
+		const double			Need = FMath::Max(static_cast<double>(T.MinStabilityMargin), static_cast<double>(T.MinLiveStabilityMarginCm));
+		// The centre wheels led forward of the stance while the seat is still
+		// forward (Ramms.Curb.FinishCentreLead): the wheels the robot stands on
+		// with the lifted ones up are the centre wheels and the rear corners, and
+		// the further forward the centre wheels the further forward the mass may
+		// be over them. Each tick, the least fore/aft from the stance's on --
+		// within what both 5-bars reach where they stand -- that has the robot
+		// SeatHoldMarginCm more than it needs inside them with those wheels up:
+		// as the seat comes back aft it falls, and the centre wheels come back to
+		// the stance's with it.
+		if (F.bHasCentreX && FinishCentreLeadOn() && Lifts != 0)
+		{
+			double Hi = TNumericLimits<double>::Max(), Now = -TNumericLimits<double>::Max();
+			for (int32 Side = 0; Side < 2; ++Side)
+			{
+				const int32 C = Centre[Side];
+				if (C == INDEX_NONE)
+				{
+					continue;
+				}
+				Now = FMath::Max(Now, Measure.Legs[C].XZ.X);
+				// The most forward this 5-bar stands its wheel at its height.
+				double Most = F.CentreX;
+				for (double X = F.CentreX; X <= F.CentreX + 40.0; X += 1.0)
+				{
+					const FVector2D R = M->Reach(C, X);
+					const double	m = T.LegRangeMargin;
+					if (R.X > R.Y || Wheels[C].CmdZ < R.X + m || Wheels[C].CmdZ > R.Y - m)
+					{
+						break;
+					}
+					Most = X;
+				}
+				Hi = FMath::Min(Hi, Most);
+			}
+			double Goal = F.CentreX;
+			if (Hi < TNumericLimits<double>::Max() && Now > -TNumericLimits<double>::Max())
+			{
+				const double Want = Need + SeatHoldMarginCm;
+				Goal = Hi;
+				for (double X = F.CentreX; X <= Hi + 1e-6; X += 1.0)
+				{
+					if (MarginWithCentresAt(Measure, Lifts, X - Now) >= Want)
+					{
+						Goal = X;
+						break;
+					}
+				}
+			}
+			if (Goal > F.CentreX + 0.5 && !bLoggedCentreLead)
+			{
+				bLoggedCentreLead = true;
+				Log(FString::Printf(TEXT("into the drive stance: the centre wheels led to %+.1f cm (the stance's %+.1f) while the seat comes back, "
+										 "for the robot to stand inside them with the lifted wheels up"),
+					Goal, F.CentreX));
+			}
+			FinishCentreGoal = Goal;
+			bFinishCentreGoal = true;
+		}
+		if (Mask == 0)
+		{
+			return;
+		}
+		// The wheels the stance keeps down carrying the robot, as measured -- the
+		// seat where it is, the centre wheels where they are -- braking and
+		// speeding up: as the planner asks of a pose with wheels off the ground.
+		const double Margin = MarginWithout(Measure, Mask);
+		if (Margin < Need)
+		{
+			if (!bLoggedStanceWait)
+			{
+				bLoggedStanceWait = true;
+				Log(FString::Printf(TEXT("into the drive stance: its lifted wheels wait, the robot %.2f cm inside the wheels it keeps down "
+										 "(%.1f needed) -- the seat and the centre wheels on their way"),
+					Margin, Need));
+			}
+			// Waiting with nothing left to come (the seat and the centre wheels
+			// there): for a while, then left to the hand-back.
+			bool bThere = !F.bHasSeatX || !In.Model.Seat.Shifts() || !bSeatCmd || FMath::Abs(SeatCmdX - F.SeatX) <= SeatSettleCm;
+			for (int32 Side = 0; Side < 2 && bThere; ++Side)
+			{
+				const int32 C = Centre[Side];
+				bThere = C == INDEX_NONE || !F.bHasCentreX || FMath::Abs(Wheels[C].CmdX - F.CentreX) <= ExecCaughtUpCm;
+			}
+			StanceLiftWaited = bThere ? StanceLiftWaited + FMath::Max(0.0, Dt) : 0.0;
+			if (StanceLiftWaited >= FinishLiftWaitSeconds)
+			{
+				bStanceLiftGivenUp = true;
+				Log(FString::Printf(TEXT("into the drive stance: the robot %.2f cm inside the wheels it keeps down with the seat and the centre "
+										 "wheels there (%.1f needed): its wheels are left down, for the hand-back to lift"),
+					Margin, Need));
+			}
+			return;
+		}
+		for (int32 i = 0; i < Wheels.Num(); ++i)
+		{
+			if ((Mask >> i) & 1u)
+			{
+				Wheels[i].bStanceUp = true;
+				SetState(i, ERammsCurbWheelState::Held,
+					FString::Printf(TEXT("lifted into the drive stance, to %+.1f cm: the robot %.2f cm inside the wheels it keeps down"), F.LiftZ[i],
+						Margin));
+			}
+		}
+	}
+
+	bool FExecutor::StanceLiftsDone() const
+	{
+		const FFinishStance& F = In.Finish;
+		if (!F.bValid || bStanceLiftGivenUp)
+		{
+			return true;
+		}
+		for (int32 i = 0; i < Wheels.Num(); ++i)
+		{
+			if (F.LiftsLeg(i) && (!Wheels[i].bStanceUp || FMath::Abs(Wheels[i].CmdZ - Wheels[i].TargetZ) > In.Tuning.SettleTolerance))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	void FExecutor::Halt(const FString& Why)
@@ -1129,7 +1333,7 @@ namespace RammsCurb
 		{
 			Set |= IsSupport(j) ? 0u : (1u << j);
 		}
-		if (IsForbiddenSet(In.Model, Set))
+		if (IsForbiddenSet(In.Model, Set, In.Terrain.StepHeightCm >= 0.0f))
 		{
 			OutWhy = FString::Printf(TEXT("it would leave a set the gait never lifts together off the ground (mask %x)"), Set);
 			return false;
@@ -1414,6 +1618,10 @@ namespace RammsCurb
 			{
 				Room = FMath::Max(0.0, Phys + WalkCredit(i, Measure, Phys));
 			}
+			if (W.bStanceUp)
+			{
+				continue;
+			}
 			if (W.State == ERammsCurbWheelState::Lifting || (W.State == ERammsCurbWheelState::Held && !W.bLower))
 			{
 				// Rising (or carried up from the drive stance): clear by its window,
@@ -1585,7 +1793,7 @@ namespace RammsCurb
 		{
 			const FWheelPlan& P = Plan.Wheels[i];
 			const FExecWheel& W = Wheels[i];
-			if (W.PastEdgeCm >= P.DDown)
+			if (W.PastEdgeCm >= P.DDown || W.bStanceUp)
 			{
 				continue;
 			}
@@ -2161,6 +2369,11 @@ namespace RammsCurb
 			switch (W.State)
 			{
 				case ERammsCurbWheelState::Held:
+					if (W.bStanceUp)
+					{
+						// Up in the stance the crossing finishes in: it stays there.
+						break;
+					}
 					if (W.bLower)
 					{
 						if (bLevelInBegun)
@@ -2502,7 +2715,7 @@ namespace RammsCurb
 		int32 LateLeg = INDEX_NONE;
 		for (int32 j = 0; j < N && LateLeg == INDEX_NONE; ++j)
 		{
-			LateLeg = IsAirborne(Wheels[j].State) && (S > Plan.Wheels[j].SLoaded || bFinishInPlace) ? j : INDEX_NONE;
+			LateLeg = IsAirborne(Wheels[j].State) && !Wheels[j].bStanceUp && (S > Plan.Wheels[j].SLoaded || bFinishInPlace) ? j : INDEX_NONE;
 		}
 		if ((LateLeg != INDEX_NONE) != bCentresHeld)
 		{
@@ -2526,11 +2739,27 @@ namespace RammsCurb
 				// A 5-bar walks to the plan's fore/aft a servo lag ahead; at a planned
 				// stop, to where the robot leaves from; finishing in place, home, at
 				// CenterShiftSpeed itself (nothing to catch up with).
-				const int32	 Side = M->Side(i);
-				const double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : Ahead.X[Side];
+				const int32 Side = M->Side(i);
+				// Every wheel across, into the stance the crossing finishes in: the
+				// stance's fore/aft (EndCentreX).
+				const double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : EndCentreX(Ahead.X[Side]);
 				if (!bCentresHeld)
 				{
-					W.CmdX = StepTowards(W.CmdX, To, CSS * (bFinishInPlace ? 1.0 : 1.25) * Dt);
+					double Step = CSS * (bFinishInPlace ? 1.0 : 1.25) * Dt;
+					// Up a curb with the hand-off (Ramms.Curb.ClimbCentreHandOff): a
+					// wheel carrying the robot walks aft no faster than the chassis
+					// travels -- it may stand still on the ground, but walked faster it
+					// would push the chassis on through its 5-bar, whatever the wheels
+					// are asked (the oblique climb up a grade ran away so).
+					if (To < W.CmdX && IsSupport(i) && !bDwelling && M->IsClimb() && ClimbCentreHandOffOn())
+					{
+						Step = FMath::Min(Step, (MaxAftWalkPerCmNow(true) * FMath::Max(0.0, VHat) + PlantedWalkSlackCmS) * Dt);
+					}
+					if (Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasCentreX && IsSupport(i))
+					{
+						Step = FMath::Min(Step, FinishWalkSpeedCmS * Dt);
+					}
+					W.CmdX = StepTowards(W.CmdX, To, Step);
 				}
 			}
 			if (!bLevelInBegun)
@@ -2586,7 +2815,12 @@ namespace RammsCurb
 					Target = PlantingTarget(i, Measure, AheadCm, Bias, FMath::Min(M->Preload(i), PlantProbeCm));
 					break;
 				default: // Lifting, Clear, Held up
-					if (!bStage1)
+					if (W.bStanceUp)
+					{
+						// Up in the finish stance: its height there.
+						Target = In.Finish.LiftZ[i];
+					}
+					else if (!bStage1)
 					{
 						Rise = ChassisRiseToWindow(i);
 						Target = SwingTarget(i, Measure, Ahead, SwingWorldZ(i, Measure, V), Rise);
@@ -2648,8 +2882,30 @@ namespace RammsCurb
 				// A planned seat is one it can follow, the plan verified with it
 				// there: followed a servo lag ahead, and past the plan's last
 				// sample on to where it goes once the crossing is over.
-				const double SeatAhead = S + FMath::Max(0.0, Measure.SpeedCmS) * T.ServoLagSeconds;
+				// (Up a curb with the hand-off, a forward move looked further ahead once
+				// a wheel stands across: ClimbSeatLeadSeconds.)
+				bool bAcross = false;
+				for (const FExecWheel& Wh : Wheels)
+				{
+					bAcross |= Wh.Plane == 1 && (Wh.State == ERammsCurbWheelState::Planted || Wh.State == ERammsCurbWheelState::Loading);
+				}
+				const double Lead = bAcross && M->IsClimb() && ClimbCentreHandOffOn() ? ClimbSeatLeadSeconds() : 0.0;
+				double		 SeatAhead = S + FMath::Max(0.0, Measure.SpeedCmS) * T.ServoLagSeconds;
 				Want = SeatAhead >= Plan.Samples.Last().S ? Plan.SeatEndX : Between(SeatAhead).SeatX;
+				if (Lead > 0.0)
+				{
+					// The most forward the plan has it over that much more travel, not
+					// only at its end: a seat whose plan peaks at a rear corner's lift
+					// and comes back after it (the centre wheels held on the ground)
+					// is led there too, not sent for its way back.
+					const double Span = FMath::Max(0.0, Measure.SpeedCmS) * Lead;
+					const int32	 Steps = FMath::Clamp(FMath::CeilToInt(Span / FMath::Max(0.1, Plan.SampleCm)), 1, 64);
+					for (int32 j = 1; j <= Steps; ++j)
+					{
+						const double At = SeatAhead + Span * j / Steps;
+						Want = FMath::Max(Want, At >= Plan.Samples.Last().S ? Plan.SeatEndX : Between(At).SeatX);
+					}
+				}
 			}
 			else
 			{
@@ -2672,6 +2928,12 @@ namespace RammsCurb
 				{
 					Want = FMath::Min(Want, SeatHere);
 				}
+			}
+			// Every wheel across, into the stance the crossing finishes in: the
+			// stance's own seat (its pivot where the hand-back leaves it).
+			if (Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasSeatX)
+			{
+				Want = In.Finish.SeatX;
 			}
 			Want = FMath::Clamp(Want, Seat.XRange.X, Seat.XRange.Y);
 			// And only where the wheels now carrying the robot keep it inside the
@@ -2832,12 +3094,21 @@ namespace RammsCurb
 		bool bAllFar = true;
 		for (int32 i = 0; i < N; ++i)
 		{
-			bAllFar = bAllFar && Wheels[i].State == ERammsCurbWheelState::Planted && Wheels[i].Plane == 1;
+			bAllFar = bAllFar && (Wheels[i].State == ERammsCurbWheelState::Planted || Wheels[i].bStanceUp) && Wheels[i].Plane == 1;
 		}
 		if (bAllFar && Phase != EExecPhase::Settle && Phase != EExecPhase::Done)
 		{
 			Phase = EExecPhase::Settle;
 			Log(TEXT("every wheel on the far side: settling"));
+		}
+		// Into the drive stance the crossing finishes in (FPlannerInput::Finish):
+		// every wheel across, the wheels the stance has off the ground go up as
+		// soon as the robot stands inside the others -- the seat's return aft and
+		// the centre wheels' walk to the stance's fore/aft making it so, if it
+		// is not already -- while the robot rolls on.
+		if (Phase == EExecPhase::Settle)
+		{
+			StepStanceLift(Measure, Dt);
 		}
 		else if (!bAllFar && Level.bLevelled && Phase == EExecPhase::Prepare)
 		{
@@ -2999,16 +3270,28 @@ namespace RammsCurb
 		// The plan's speed where the robot is (no nearer its origin than its first
 		// sample past it).
 		const double PlanHereV = PlanSpeedAt(S);
-		// The centre wheels lagging the plan slow the robot, continuously.
+		// The centre wheels lagging the plan slow the robot, continuously. (Into
+		// the finish stance, every wheel across, the plan's fore/aft no longer
+		// stands: lagging their own commands as they walk to the stance's.)
 		if (bLevelInBegun && bLoweredDown)
 		{
-			double Lag = 0.0;
+			const bool bFinishWalk = Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasCentreX;
+			double	   Lag = 0.0;
 			for (int32 Side = 0; Side < 2; ++Side)
 			{
-				if (Centre[Side] != INDEX_NONE)
+				const int32 C = Centre[Side];
+				if (C != INDEX_NONE)
 				{
-					Lag = FMath::Max(Lag, FMath::Abs(Measure.Legs[Centre[Side]].XZ.X - Here.X[Side]));
+					Lag = FMath::Max(Lag, FMath::Abs(Measure.Legs[C].XZ.X - (bFinishWalk ? Wheels[C].CmdX : Here.X[Side])));
 				}
+			}
+			// Up a curb with the hand-off, the seat behind where the plan has it
+			// moving forward slows the robot the same way (half as much per cm,
+			// past SeatLagFreeCm): it goes no further forward than a pose needs.
+			if (Phase != EExecPhase::Settle && Plan.bSeatPlanned && In.Model.Seat.Shifts() && M->IsClimb() && ClimbCentreHandOffOn())
+			{
+				const double SeatAt = Measure.Seat.bValid ? Measure.Seat.Pivot.X : SeatCmdX;
+				Lag = FMath::Max(Lag, 0.5 * FMath::Max(0.0, Here.SeatX - SeatAt - SeatLagFreeCm));
 			}
 			if (Lag > LagFreeCm)
 			{
@@ -3181,7 +3464,7 @@ namespace RammsCurb
 					++Counts.WindowTicks;
 				}
 			}
-			if (IsForbiddenSet(In.Model, Air))
+			if (IsForbiddenSet(In.Model, Air, In.Terrain.StepHeightCm >= 0.0f))
 			{
 				++Counts.ForbiddenTicks;
 			}
@@ -3216,7 +3499,7 @@ namespace RammsCurb
 			for (int32 Side = 0; Side < 2; ++Side)
 			{
 				const int32 C = Centre[Side];
-				CentreOff = C == INDEX_NONE ? CentreOff : FMath::Max(CentreOff, FMath::Abs(Wheels[C].CmdX - Here.X[Side]));
+				CentreOff = C == INDEX_NONE ? CentreOff : FMath::Max(CentreOff, FMath::Abs(Wheels[C].CmdX - EndCentreX(Here.X[Side])));
 			}
 			if (!bSent)
 			{
@@ -3230,7 +3513,7 @@ namespace RammsCurb
 				double			  Left = FMath::Max(FMath::Abs(BCmd - BaseTo) / BH, CentreOff / CSS);
 				if (Seat.Shifts() && bSeatCmd)
 				{
-					const double SeatTo = FMath::Clamp(Here.SeatX, Seat.XRange.X, Seat.XRange.Y);
+					const double SeatTo = FMath::Clamp(In.Finish.bValid && In.Finish.bHasSeatX ? In.Finish.SeatX : Here.SeatX, Seat.XRange.X, Seat.XRange.Y);
 					const double SeatRate = SeatTo < SeatCmdX && Seat.AftSpeedUpCmS > 0.0 ? FMath::Min(Seat.ShiftSpeedCmS, Seat.AftSpeedUpCmS) : Seat.ShiftSpeedCmS;
 					Left = FMath::Max(Left, FMath::Abs(SeatCmdX - SeatTo) / FMath::Max(0.1, SeatRate));
 				}
@@ -3259,18 +3542,26 @@ namespace RammsCurb
 				bSettled = FMath::Abs(Measure.Legs[i].XZ.Y - Wheels[i].CmdZ) <= T.SettleTolerance + (IsSupport(i) ? M->Preload(i) : 0.0)
 					&& (!M->IsCentre(i) || FMath::Abs(Measure.Legs[i].XZ.X - Wheels[i].CmdX) <= T.SettleTolerance);
 			}
+			// Into the finish stance: the centre wheels sent to its fore/aft, and its
+			// lifted wheels up.
+			for (int32 Side = 0; Side < 2 && bSettled; ++Side)
+			{
+				const int32 C = Centre[Side];
+				bSettled = C == INDEX_NONE || FMath::Abs(Wheels[C].CmdX - EndCentreX(Wheels[C].CmdX)) <= ExecCaughtUpCm;
+			}
+			bSettled = bSettled && StanceLiftsDone();
 			const bool bLegsFollow = bSettled;
 			bool	   bSeatAway = false;
-			// And the seat where the plan's end has it (back aft), measured
-			// there: handed back while it is still on its way, the drive mode's
-			// stance change (the front corners up) and the seat's own move met
-			// and rocked the robot. Unless the mode handed back to brings the
-			// seat back itself, first, with every wheel still down
-			// (bSeatReturnsInHandBack): then the hand-back takes the return.
-			if (bSettled && In.Model.Seat.Shifts() && !In.bSeatReturnsInHandBack)
+			// And the seat where the plan's end has it (back aft) -- the finish
+			// stance's, with one --, measured there: handed back while it is still
+			// on its way, the drive mode's stance change (the front corners up) and
+			// the seat's own move met and rocked the robot.
+			if (bSettled && In.Model.Seat.Shifts())
 			{
 				// (Finishing in place, Here is the finish's pose: the seat's end.)
-				const double SeatEnd = bFinishInPlace ? Here.SeatX : (Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX);
+				const double SeatEnd = In.Finish.bValid && In.Finish.bHasSeatX
+					? FMath::Clamp(In.Finish.SeatX, In.Model.Seat.XRange.X, In.Model.Seat.XRange.Y)
+					: (bFinishInPlace ? Here.SeatX : (Plan.bSeatPlanned ? Plan.SeatEndX : Between(S).SeatX));
 				const bool	 bSeatThere = FMath::Abs(SeatCmdX - SeatEnd) <= SeatSettleCm
 					&& (!Measure.Seat.bValid || FMath::Abs(Measure.Seat.Pivot.X - SeatEnd) <= SeatSettleCm);
 				if (!bSeatThere)

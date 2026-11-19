@@ -154,10 +154,16 @@ namespace RammsDrive
 		double MaxRate = 0.0;
 	};
 
+	/** A lead moving less than this (its units: radians for a hinge) is as good
+	 *  as there -- a crossing that finished in the stance leaves its seat that
+	 *  near -- and goes with everything else rather than in a stage of its own. */
+	constexpr double LeadMoveTolerance = 0.02;
+
 	/**
 	 * A stance taken from a pose no drive mode set, in one stage -- or, when
-	 * some of its LeadMotorIds move, in two: those first, everything else
-	 * after. OutSecond is empty when no lead moves.
+	 * some of its LeadMotorIds move (more than LeadMoveTolerance), in two:
+	 * those first, everything else after. OutSecond is empty when no lead
+	 * moves.
 	 */
 	void SplitLeadStage(const TArray<FStanceChannel>& Channels, TArray<FStanceChannel>& OutFirst, TArray<FStanceChannel>& OutSecond);
 

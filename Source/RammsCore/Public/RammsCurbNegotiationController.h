@@ -33,6 +33,7 @@ namespace RammsCurb
 	struct FCurbSchedule;
 	struct FFiveBarGridCache;
 	struct FPlannerInput;
+	struct FFinishStance;
 	class FPlanTask;
 	class FExecutor;
 	class FAssistWatch;
@@ -234,6 +235,17 @@ namespace RammsCurb
  * again would pull the legs, off the plan's schedule, back to it). Held
  * forward throughout, nothing changes: the pose is finished along the moving
  * path.
+ *
+ * Finishing in the drive stance (Ramms.Curb.FinishInStance, on by default):
+ * the crossing ends in the stance of the drive mode it hands back to rather
+ * than on every wheel. Once every wheel stands on the far side, while the
+ * robot rolls on, the centre wheels walk to the stance's fore/aft and the
+ * seat comes back to the stance's pivot -- level, along the line its crossing
+ * holds, as everywhere in the crossing -- and the wheels the stance has off
+ * the ground (the outdoor stance's front corners) go up together as soon as
+ * the robot, as measured with them up, stands MinStabilityMargin inside the
+ * wheels left down. Done waits for all of it, so the hand-back's stance
+ * change has next to nothing left to move.
  *
  * At Done the stick carries on into the drive mode handed back to: held
  * forward, it drives on; held to the side, the mode turns (differential) or
@@ -1265,17 +1277,39 @@ private:
 	void StepWheelHold();
 	/** Open the brakes the hold closed (BrakedWheels). */
 	void ReleaseWheelBrakes();
+	/**
+	 * The hand-over (ramms.Curb.HandOverOmniHold): after a crossing hands the
+	 * robot back to a mode that does not drive its fallback wheels (the omni
+	 * corners under the differential mode), those wheels are kept from rolling
+	 * free until that mode has the robot -- braked while the mode asks no
+	 * motion, else driven at the speed the mode's own wheels are asked -- and
+	 * let go once the robot has settled, or its main wheels stand on the
+	 * ground with their speed loops on their commands (not soft any more), or
+	 * after HandOverHoldMaxSeconds. The legs (as FRammsCurbLeg) held, how long
+	 * the hold has run, and how long each release condition has held.
+	 */
+	TArray<int32> HandOverWheels;
+	bool		  bHandOverHold = false;
+	bool		  bHandOverBraked = false;
+	double		  HandOverElapsed = 0.0;
+	double		  HandOverSettledFor = 0.0;
+	double		  HandOverTrackedFor = 0.0;
+	/** Begin the hold for a hand-back to ModeId (when it applies). */
+	void BeginHandOverHold(FName ModeId);
+	/** One tick of it while another mode has the robot. */
+	void StepHandOverHold(float DeltaTime);
+	/** Let the held wheels go: no command, no brake. */
+	void EndHandOverHold(const TCHAR* Why);
 	/** Whether the drive mode ModeId holds the robot still with no command
 	 *  (IRammsDriveMode::HoldsRobotStill); and the first such mode, or None. */
 	bool  ModeHoldsStill(FName ModeId) const;
 	FName HoldingModeId() const;
-	/** Whether the drive mode ModeId's stance brings the seat back first
-	 *  (FRammsDriveStance::LeadMotorIds name both its 5-bar motors); and
-	 *  whether every mode the crossing may hand back to does
-	 *  (Ramms.Curb.SeatReturnInHandBack on): Done then does not wait for the
-	 *  seat's return. */
-	bool ModeLeadsWithSeat(FName ModeId) const;
-	bool SeatReturnsInHandBack() const;
+	/** The drive stance the crossing finishes in (Ramms.Curb.FinishInStance
+	 *  on): the stance of the mode it is set to hand back to, in the legs'
+	 *  terms -- which wheels it has off the ground and how high, the centre
+	 *  wheels' fore/aft, the seat's pivot. False (Out not valid) with no such
+	 *  stance. */
+	bool BuildFinishStance(RammsCurb::FFinishStance& Out) const;
 	/** The drive mode ModeId on this actor, or null. */
 	IRammsDriveMode* FindDriveMode(FName ModeId) const;
 	/** The mode a crossing that has ended hands the robot back to: the one it

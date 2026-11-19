@@ -48,6 +48,24 @@ struct FRammsVelocityGains
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
 	float MaxIntegralTorque = 0.0f;
 
+	/**
+	 * A stiff drive: a geared hub that turns only as it is told, so that a load
+	 * on the wheel (the robot's weight across a slope on an omni wheel) does
+	 * not turn it until an integral has built up. The damping (N.m per rad/s)
+	 * a backend's own solver takes for the loop where it can -- MuJoCo makes
+	 * the motor a velocity servo while it is driven, integrated implicitly,
+	 * stable at gains far over Kp's -- with StiffIntegral (N.m per rad the
+	 * wheel stands behind its command) on top, capped by MaxIntegralTorque.
+	 * 0 (the default): the loop above, as before; and a backend that cannot
+	 * runs that loop too.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
+	float StiffDamping = 0.0f;
+
+	/** With StiffDamping: the integral gain at the joint, N.m per rad behind. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Velocity Loop", meta = (ClampMin = "0.0"))
+	float StiffIntegral = 0.0f;
+
 	/** Kp is the sentinel the docs above promise: zero means "use the base's
 	 *  defaults". Treating a lone Ki as a set of gains would hand back an
 	 *  integral-only controller from a half-filled row. */

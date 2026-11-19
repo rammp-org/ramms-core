@@ -102,8 +102,17 @@ namespace RammsCurb
 	/** A leg move is taken to settle this long after its lag (s). */
 	constexpr double LegSettleSeconds = 0.05;
 	/** A planted centre wheel walks aft at most this much per cm of travel:
-	 *  its ground speed stays at least 0.3 of the chassis'. */
+	 *  its ground speed stays at least 0.3 of the chassis'. The planner uses
+	 *  MaxAftWalkPerCmNow() (Ramms.Curb.MaxAftWalkPerCm, this by default). */
 	constexpr double MaxAftWalkPerCm = 0.7;
+	double			 MaxAftWalkPerCmNow(bool bClimb);
+	/** Ramms.Curb.ClimbCentreHandOff on; and the centre wheels' walk speed (cm/s)
+	 *  it takes up a curb at the least (Ramms.Curb.ClimbCentreWalkSpeedCmS), and
+	 *  how far ahead in time (s) it sends a planned seat moving forward once a
+	 *  wheel stands across (Ramms.Curb.ClimbSeatLeadSeconds). */
+	bool   ClimbCentreHandOffOn();
+	double ClimbCentreWalkSpeedCmS();
+	double ClimbSeatLeadSeconds();
 	/** The planned tilt is searched on rings of inclination this far apart
 	 *  (deg), each ring's tilts about this far apart along it. */
 	constexpr double TiltGridDeg = 0.25;
@@ -204,8 +213,38 @@ namespace RammsCurb
 	{
 		TArray<const void*>	 Keys;
 		TArray<FFiveBarGrid> Grids;
+		/** The hip range they were built with (Ramms.Curb.DevHipMinRad/MaxRad;
+		 *  min >= max: the motors' own). */
+		FVector2D HipRange = FVector2D(1.0, 0.0);
 		/** How long building them took (ms). */
 		double BuildMs = 0.0;
+	};
+
+	/**
+	 * The drive stance the crossing finishes in: the stance of the drive mode
+	 * it hands back to, in the legs' own terms. Once every wheel stands on the
+	 * far side the executor takes the robot into it while it rolls on -- the
+	 * centre wheels walked to the stance's fore/aft and the seat to its pivot,
+	 * and each wheel the stance has off the ground (the outdoor stance's front
+	 * corners) lifted to its height as soon as the robot, as measured, stands
+	 * inside the wheels left down -- so that the hand-back has nothing left to
+	 * move. Not valid: the crossing ends on every wheel, in the plan's end pose.
+	 */
+	struct FFinishStance
+	{
+		bool bValid = false;
+		/** Per leg (as FPlannerInput::Legs): lifted off the ground in the stance,
+		 *  to its height (the leg's own z, cm, chassis frame). */
+		TArray<uint8>  Lift;
+		TArray<double> LiftZ;
+		/** The centre wheels' fore/aft in the stance (a 5-bar's x, cm). */
+		bool   bHasCentreX = false;
+		double CentreX = 0.0;
+		/** The seat's pivot fore/aft in the stance (cm, the seat's frame). */
+		bool   bHasSeatX = false;
+		double SeatX = 0.0;
+
+		bool LiftsLeg(int32 Leg) const { return bValid && Lift.IsValidIndex(Leg) && Lift[Leg] != 0 && LiftZ.IsValidIndex(Leg); }
 	};
 
 	/** Everything a plan is made from. The plan copies nothing it does not
@@ -229,11 +268,8 @@ namespace RammsCurb
 		 *  (PlanCrossing's work budget). An entry speed over StopSpeedCmS is
 		 *  taken as moving too. */
 		bool bOnTheMove = false;
-		/** The drive mode the crossing hands back to brings the seat back aft
-		 *  itself, before its corners move (its stance's LeadMotorIds name the
-		 *  seat's motors): Done does not wait for the seat's return, the hand-back
-		 *  takes it (Ramms.Curb.SeatReturnInHandBack). */
-		bool			 bSeatReturnsInHandBack = false;
+		/** The drive stance the crossing finishes in (Ramms.Curb.FinishInStance). */
+		FFinishStance	 Finish;
 		FRammsCurbTuning Tuning;
 		/** Which centre-wheel paths the level search tries (for tests): no walk,
 		 *  the walking knots, the grid search. */
@@ -447,7 +483,7 @@ namespace RammsCurb
 	/** Whether the legs off the ground (bit per leg) hold a same-side corner
 	 *  and centre, both fronts and a centre, or a centre and both rears: the
 	 *  sets the gait never lifts together, whatever the margin says. */
-	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne);
+	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne, bool bClimb);
 
 	/** One instant as the planner asks about it. */
 	/** FInstantQuery::SeatX left to the pose. */
@@ -578,11 +614,18 @@ namespace RammsCurb
 		/** A leg's reach (chassis z, cm, least and most) at fore/aft X, without
 		 *  the margin: a 4-bar's table, a 5-bar's grid column. */
 		FVector2D Reach(int32 Leg, double X) const;
+		/** The chassis heights (world, cm, least and most) at which 5-bar leg
+		 *  Leg, standing at fore/aft X on its surface (the far one when Q has it
+		 *  OnFar), reaches it inside LegRangeMargin at the instant: the band
+		 *  Evaluate takes the corridor from for a leg on the ground. Least over
+		 *  most where it does not reach at X. */
+		FVector2D PlantedBand(int32 Leg, const FInstantQuery& Q, double X) const;
 
 		/** The corridor of chassis heights at the instant, the legs' fore/aft
 		 *  taken at BGuess, and the pose at its middle (or at BGuess when
-		 *  bAtGuess). */
-		FInstantResult Evaluate(const FInstantQuery& Q, double BGuess, bool bAtGuess = false) const;
+		 *  bAtGuess). SkipLeg (a leg index): the corridor without that leg's
+		 *  part in it -- what the rest of the robot leaves it. */
+		FInstantResult Evaluate(const FInstantQuery& Q, double BGuess, bool bAtGuess = false, int32 SkipLeg = INDEX_NONE) const;
 		/** The pose at chassis height B: every leg's height and fore/aft,
 		 *  whether all reach, the margins. */
 		void PoseAt(const FInstantQuery& Q, double B, FInstantResult& InOut) const;

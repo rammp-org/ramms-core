@@ -356,7 +356,7 @@ namespace RammsCurb
 					Out.MinSwingClearanceCm = FMath::Min(Out.MinSwingClearanceCm, C.Z - Rim);
 				}
 			}
-			if (IsForbiddenSet(In.Model, Here.AirborneMask))
+			if (IsForbiddenSet(In.Model, Here.AirborneMask, In.Terrain.StepHeightCm >= 0.0f))
 			{
 				++Out.ForbiddenSets;
 				Note(FString::Printf(TEXT("%.1f cm: a forbidden set is off the ground (mask %x)"), S, Here.AirborneMask));

@@ -31,6 +31,13 @@ namespace
 		return CVarCurbPlanDebug.GetValueOnAnyThread() > 1;
 	}
 
+	/** 3 or more: also each offered plan's wheel timing and, about its first
+	 *  failing sample, its samples. */
+	bool PlanDebugOffers()
+	{
+		return CVarCurbPlanDebug.GetValueOnAnyThread() > 2;
+	}
+
 	TAutoConsoleVariable<int32> CVarCurbTiltAtSpeed(TEXT("Ramms.Curb.TiltAtSpeedSamples"), 0,
 		TEXT("Development: how the least-tilt search takes the samples where the level plan at its own speeds finds no pose standing "
 			 "(at the floor speed one stands there): 0 (the default) joined to the tilt stretches like the floor's failures, searched "
@@ -240,6 +247,85 @@ namespace
 		return CVarCurbSeatChoice.GetValueOnAnyThread() != 0;
 	}
 
+	TAutoConsoleVariable<float> CVarCurbMaxAftWalk(TEXT("Ramms.Curb.MaxAftWalkPerCm"), 0.7f,
+		TEXT("Development: a planted centre wheel walks aft at most this much per cm of travel (0.7, the default: its ground speed "
+			 "stays at least 0.3 of the chassis'; 1: it may stand still on the ground while the chassis moves on over it). "
+			 "CenterShiftSpeed bounds the walk too."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarCurbClimbCentreHandOff(TEXT("Ramms.Curb.ClimbCentreHandOff"), 0,
+		TEXT("1: up a curb, the centre wheels take over the balancing the seat does at the rear corners' lift -- each rear corner "
+			 "waits for its side's centre wheel to be down and loaded (Ramms.Curb.SeatCornerWaitsForCentre), a landed centre wheel "
+			 "may stand still on the ground while the chassis moves on over it (walking aft 1 cm per cm of travel, "
+			 "Ramms.Curb.MaxAftWalkPerCm), the choreography that walks the centre wheels aft for the rear lift is kept whenever it is "
+			 "level, the seat goes forward only as far as a pose needs (Ramms.Curb.SeatLeastTravel), and a centre wheel down on the far "
+			 "level stands still on the ground until the rear corners have landed (Ramms.Curb.CentreGroundHoldCm). 0 (the default): as "
+			 "before. Down a curb nothing changes."),
+		ECVF_Default);
+	bool						ClimbHandOffOn()
+	{
+		return CVarCurbClimbCentreHandOff.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<float> CVarCurbClimbWalkSpeed(TEXT("Ramms.Curb.ClimbCentreWalkSpeedCmS"), 45.0f,
+		TEXT("With Ramms.Curb.ClimbCentreHandOff, up a curb: the centre wheels walk at least this fast (cm/s; CenterShiftSpeed when "
+			 "that is more) -- for a landed wheel to stand still under the chassis at the crossing's speed. Down a curb, "
+			 "CenterShiftSpeed."),
+		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbClimbSeatReserve(TEXT("Ramms.Curb.ClimbSeatReserveCm"), 1.5f,
+		TEXT("With Ramms.Curb.ClimbCentreHandOff, up a curb: the seat, going forward only as far as a pose needs, is sent far enough "
+			 "for this much more margin (cm) than the planner otherwise asks of it -- for a centre wheel walked under load trailing "
+			 "its plan by a few centimetres as the rear corners lift."),
+		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbClimbSeatLead(TEXT("Ramms.Curb.ClimbSeatLeadSeconds"), 0.4f,
+		TEXT("With Ramms.Curb.ClimbCentreHandOff, up a curb: once a wheel stands on the far side, a planned seat moving forward is sent "
+			 "for where the plan has it this much later (s) on top of the servo lag -- the seat goes forward no further than a pose "
+			 "needs, so it has no time to spare, and a robot running ahead of the plan's speed would leave it behind its lifts."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarCurbCentreGroundHold(TEXT("Ramms.Curb.CentreGroundHoldCm"), 30.0f,
+		TEXT("With Ramms.Curb.ClimbCentreHandOff, up a curb: the plan kept (level or tilted) has each centre wheel, once it carries on "
+			 "the far level, stand still on the ground until the last rear corner has landed there -- the chassis moving on over it, the "
+			 "support on the level the robot climbs to growing with the travel while the rear corners are up -- walking aft as far as "
+			 "its 5-bar reaches with the chassis a corridor, no further than keeps the robot standing with the seat at home, and at most "
+			 "this far (cm) behind where it began; kept where it plans level (or verifies, tilted) and no slower. 0: off, the walk as "
+			 "its knots have it."),
+		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbCentreGroundHoldSlack(TEXT("Ramms.Curb.CentreGroundHoldSlackCm"), 1.0f,
+		TEXT("Development: with Ramms.Curb.CentreGroundHoldCm, a centre wheel standing still on the far level walks aft no further than "
+			 "leaves the chassis this much corridor (cm) over MinCorridorCm (or the corridor the rest of the robot leaves, when that "
+			 "is less)."),
+		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbCentreGroundHoldFloorShare(TEXT("Ramms.Curb.CentreGroundHoldFloorShare"), 0.9f,
+		TEXT("Development: with Ramms.Curb.CentreGroundHoldCm, the plan kept is planned again with the centre wheels held on the ground and "
+			 "kept so where it is level and its floor is at least this share of the plan's."),
+		ECVF_Default);
+	double						CentreGroundHoldCm()
+	{
+		return FMath::Max(0.0, static_cast<double>(CVarCurbCentreGroundHold.GetValueOnAnyThread()));
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbSeatCornerWaits(TEXT("Ramms.Curb.SeatCornerWaitsForCentre"), 0,
+		TEXT("Development: 1: up a curb, on a robot whose seat shifts, a rear corner wheel and the centre wheel on its side are still never "
+			 "off the ground together (the gait's own rule, kept for a robot without a seat): a rear corner's lift waits for its side's "
+			 "centre wheel to be down and loaded rather than the seat carrying the mass forward over the front corners alone. "
+			 "0 (the default): the margin decides, the seat's shift included."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarCurbSeatLeastTravel(TEXT("Ramms.Curb.SeatLeastTravel"), 0,
+		TEXT("Development: 1: up a curb, the seat's home is the aft end of its reach throughout -- it goes forward only as far as a pose needs "
+			 "(Ramms.Curb.SeatEnoughCm over MinStabilityMargin). 0 (the default): the forward end while some wheel stands across and "
+			 "others are still to come."),
+		ECVF_Default);
+	bool						SeatLeastTravelOn()
+	{
+		return CVarCurbSeatLeastTravel.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<float> CVarCurbSeatEnough(TEXT("Ramms.Curb.SeatEnoughCm"), 3.0f,
+		TEXT("Development: a pose whose margin is this much over MinStabilityMargin needs the seat no further from its home (cm)."),
+		ECVF_Default);
+
 	TAutoConsoleVariable<int32> CVarCurbRiseEarly(TEXT("Ramms.Curb.RiseEarly"), 1,
 		TEXT("1 (the default): the chassis rises to the height the crossing's lifts and landings need before the first lift, during "
 			 "the level-in on every wheel, and holds it until the last wheel has landed; 0: it rises as each lift needs it, as "
@@ -260,6 +346,18 @@ namespace
 	bool LowerEarlyOn()
 	{
 		return CVarCurbLowerEarly.GetValueOnAnyThread() != 0;
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbRiseFromStance(TEXT("Ramms.Curb.RiseFromStance"), 0,
+		TEXT("1: the chassis leaves the drive stance's own height evenly from where the level-in begins -- up a curb to the "
+			 "level-in's target, from which the rise (Ramms.Curb.RiseEarly) runs on as before; down a curb (Ramms.Curb.LowerEarly) "
+			 "on one ramp to the crossing's height, each sample kept RiseSlackCm inside its corridor where it can. 0 (the default): "
+			 "the level-in steps the chassis to its target first."),
+		ECVF_Default);
+
+	bool RiseFromStanceOn()
+	{
+		return CVarCurbRiseFromStance.GetValueOnAnyThread() != 0;
 	}
 
 	TAutoConsoleVariable<int32> CVarCurbWalkEarly(TEXT("Ramms.Curb.WalkEarly"), 1,
@@ -399,14 +497,48 @@ namespace RammsCurb
 	 *  pose whose margin is this much over the requirement needs no more:
 	 *  nearer the zero pose wins among those. */
 	constexpr double SeatStepCm = 2.0;
+	/** Ramms.Curb.ClimbCentreHandOff keeps its centre-walk plan only where it
+	 *  stands within HandOffNearMarginCm of MinStabilityMargin, wheels up, over
+	 *  no more than HandOffNearMarginExtraCm of travel beyond the plan it
+	 *  replaces. */
+	constexpr double HandOffNearMarginCm = 2.0;
+	constexpr double HandOffTripodReserveCm = 3.0;
+	constexpr double HandOffNearMarginExtraCm = 6.0;
 	constexpr double SeatEnoughCm = 3.0;
 
-	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne)
+	bool ClimbCentreHandOffOn()
+	{
+		return ClimbHandOffOn();
+	}
+
+	double ClimbCentreWalkSpeedCmS()
+	{
+		return FMath::Max(0.0, static_cast<double>(CVarCurbClimbWalkSpeed.GetValueOnAnyThread()));
+	}
+
+	double ClimbSeatLeadSeconds()
+	{
+		return FMath::Max(0.0, static_cast<double>(CVarCurbClimbSeatLead.GetValueOnAnyThread()));
+	}
+
+	double MaxAftWalkPerCmNow(bool bClimb)
+	{
+		if (bClimb && ClimbHandOffOn())
+		{
+			return 1.0;
+		}
+		return FMath::Clamp(static_cast<double>(CVarCurbMaxAftWalk.GetValueOnAnyThread()), 0.0, 1.0);
+	}
+
+	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne, bool bClimb)
 	{
 		// With a seat the crossing shifts, the margin decides what may be up
 		// together: a set the gait never lifted at once stands if the seat's
-		// shift keeps the centre of mass inside the wheels left down.
-		if (Model.Seat.Shifts())
+		// shift keeps the centre of mass inside the wheels left down --
+		// unless, up a curb, a rear corner is to wait for its side's centre
+		// wheel all the same (Ramms.Curb.SeatCornerWaitsForCentre).
+		const bool bSeat = Model.Seat.Shifts();
+		if (bSeat && (!bClimb || (CVarCurbSeatCornerWaits.GetValueOnAnyThread() == 0 && !ClimbHandOffOn())))
 		{
 			return false;
 		}
@@ -425,7 +557,7 @@ namespace RammsCurb
 				{
 					bCentre = true;
 				}
-				else
+				else if (!bSeat || L.Axle == ERammsCurbAxle::Rear)
 				{
 					bCorner = true;
 				}
@@ -434,6 +566,10 @@ namespace RammsCurb
 			{
 				return true;
 			}
+		}
+		if (bSeat)
+		{
+			return false;
 		}
 		for (int32 i = 0; i < Model.Legs.Num(); ++i)
 		{
@@ -1309,9 +1445,10 @@ namespace RammsCurb
 		const uint32 Legs6 = Legs.Num() >= 32 ? ~0u : (1u << Legs.Num()) - 1u;
 		const uint32 Across = Support & OnFar & ~Touching;
 		const bool	 bSomeAcross = Across != 0 && (Legs6 & ~Across) != 0;
-		const double Home = bSomeAcross ? R.Y : R.X;
-		const double Enough = Tuning.MinStabilityMargin + SeatEnoughCm;
-		double		 BestX = Home, BestScore = -1e18;
+		const double Home = (bSomeAcross && !((SeatLeastTravelOn() || ClimbHandOffOn()) && bClimb)) ? R.Y : R.X;
+		const double Enough = Tuning.MinStabilityMargin + FMath::Max(0.0, static_cast<double>(CVarCurbSeatEnough.GetValueOnAnyThread()))
+			+ (bClimb && ClimbHandOffOn() ? FMath::Max(0.0, static_cast<double>(CVarCurbClimbSeatReserve.GetValueOnAnyThread())) : 0.0);
+		double BestX = Home, BestScore = -1e18;
 		// Every fore/aft tried and its margin, for the band.
 		TArray<FVector2D, TInlineAllocator<64>> Tried;
 		auto									Try = [&](double X) {
@@ -1370,6 +1507,28 @@ namespace RammsCurb
 		return L.Columns.IsValidIndex(C) ? L.Columns[C] : FVector2D(1.0, 0.0);
 	}
 
+	FVector2D FPlanModel::PlantedBand(int32 Leg, const FInstantQuery& Q, double X) const
+	{
+		// As Evaluate takes a leg on the ground.
+		const FLeg&		L = Legs[Leg];
+		const FVector2D Reach2 = Reach(Leg, X);
+		const double	M = Tuning.LegRangeMargin;
+		const double	ZLo = Reach2.X + M, ZHi = Reach2.Y - M;
+		if (Reach2.X > Reach2.Y || ZLo > ZHi)
+		{
+			return FVector2D(1.0, 0.0);
+		}
+		const FAxes			   A = Axes(Q.PitchDeg, Q.RollDeg);
+		const FVector2D		   O = OriginAt(Q.S);
+		const bool			   bFar = ((Q.OnFar >> Leg) & 1u) || ((Q.Touching >> Leg) & 1u);
+		const FVector2D		   XY0 = O + XYOf(A.X * X + A.Y * L.Y);
+		const FVector&		   Off = (A.Z.Z == 1.0) ? L.LevelOffset[bFar ? 1 : 0] : ContactOffset(Leg, A, bFar);
+		const FRammsCurbPlane& P = bFar ? Terrain.Far : Terrain.Near;
+		const double		   K = P.HeightAt(XY0 + XYOf(Off)) - L.Preload - A.X.Z * X - A.Y.Z * L.Y - Off.Z;
+		const double		   Dd = A.Z.Z - (P.Gradient.X * A.Z.X + P.Gradient.Y * A.Z.Y);
+		return FVector2D(K - Dd * ZHi, K - Dd * ZLo);
+	}
+
 	double FPlanModel::Belly(const FAxes& A, const FVector2D& O) const
 	{
 		const FVector2D H = Model.BellyHalfExtent;
@@ -1406,7 +1565,7 @@ namespace RammsCurb
 		return Floor;
 	}
 
-	FInstantResult FPlanModel::Evaluate(const FInstantQuery& Q, double BGuess, bool bAtGuess) const
+	FInstantResult FPlanModel::Evaluate(const FInstantQuery& Q, double BGuess, bool bAtGuess, int32 SkipLeg) const
 	{
 		FInstantResult	R;
 		const FAxes		A = Axes(Q.PitchDeg, Q.RollDeg);
@@ -1418,6 +1577,10 @@ namespace RammsCurb
 		R.HiLeg = -2;
 		for (int32 i = 0; i < Legs.Num(); ++i)
 		{
+			if (i == SkipLeg)
+			{
+				continue;
+			}
 			const FLeg& L = Legs[i];
 			// A leg touching down stands on its far surface as a support leg does,
 			// though it carries nothing yet.
@@ -1934,6 +2097,15 @@ namespace RammsCurb
 			/** The level search planned its seat to weigh it (SeatChoice), whether
 			 *  or not the seat planned: not planned again. */
 			bool bSeatWeighed = false;
+			/** A centre wheel's walk is the ground hold's (GroundHoldPath). */
+			bool bGroundHeld = false;
+			/** Planned from a knot set (PlanKnots): the set and how, for the
+			 *  ground hold to plan it again. */
+			bool	bFromKnots = false;
+			double	Knot[4] = { 0.0, 0.0, 0.0, 0.0 };
+			bool	bKnotPerSide = false;
+			bool	bKnotDropWalk = false;
+			FString KnotLabel;
 			/** Off the ground and on the far side, as planned at the planned speed;
 			 *  and standing still. */
 			TArray<uint32> Air;
@@ -2005,6 +2177,10 @@ namespace RammsCurb
 		double LiftLead(const FLegGeom& G, double V) const;
 		double PlantTime(int32 Leg, const FLegGeom& G, double V) const;
 		double MarchBack(const FPlan& P, double S, double Seconds) const;
+		/** Where the executor begins the level-in (cm of travel): at once where
+		 *  the planner has it begin as the crossing does, else the level-in's
+		 *  time before its end at the planned speed. */
+		double LevelInStartS(const FPlan& P) const;
 		/** LiftLead with the leg rising at Speed (cm/s); not cached. */
 		double LiftLeadAt(const FLegGeom& G, double V, double Speed) const;
 		/** The slowest rise (cm/s, MinEasedLiftSpeed at least) that still
@@ -2051,6 +2227,15 @@ namespace RammsCurb
 		 *  corner begins to set down (its SLand) rather than once it has taken
 		 *  load, so that the walk to XLift begins there. */
 		bool CentrePathsKnots(FPlan& P, double XF, double XLift, double XLand, double XR, bool bSmooth, bool bPerSide = false, bool bDropWalk = false) const;
+		/** Up a curb with the hand-off and Ramms.Curb.CentreGroundHoldCm: the
+		 *  centre wheel on Side, its path just planned in P (from AtFloor's
+		 *  timing, within Bands, Up and Down, toward Wish, smoothed over
+		 *  Smooth, held still Hold either side of its landing), walked again
+		 *  standing still on the ground from where that path has it carrying
+		 *  until the last rear corner has landed, as far aft as it reaches;
+		 *  kept where its landing stays where it was. */
+		void GroundHoldPath(FPlan& P, const FPlan& AtFloor, int32 Side, TConstArrayView<FVector2D> Bands, TConstArrayView<double> Up,
+			TConstArrayView<double> Down, TConstArrayView<double> Wish, double Smooth, double Hold) const;
 		void CentrePathsDp(FPlan& P) const;
 		/** Both centre wheels' paths searched together, on a grid of their
 		 *  pairs, over samples KA to KB, from and back to the paths there. */
@@ -2089,9 +2274,25 @@ namespace RammsCurb
 		/** The reach of a centre wheel's 5-bar fore/aft (cm): the columns of its
 		 *  grid with a span of heights inside LegRangeMargin. */
 		FVector2D CentreReachX(int32 Side) const;
+		/** The most aft fore/aft (cm, chassis frame) from From down to To at
+		 *  which the centre wheel on Side, standing on the far level at sample
+		 *  K of At (its timing and the other centre wheel's path), leaves the
+		 *  chassis a corridor: as wide as the rest of the robot leaves, up to
+		 *  MinCorridorCm and Ramms.Curb.CentreGroundHoldSlackCm. NoValue where
+		 *  no fore/aft in the range does. */
+		double DeepestStandingX(const FPlan& At, int32 Side, int32 K, double From, double To) const;
 		/** How far (cm) the plan walks its centre wheels fore/aft while they
 		 *  are on the ground, from the level-in's end: both sides together. */
 		double PlantedWalkCm(const FPlan& P) const;
+		/** The margin a pose with these wheels off the ground must keep: Req, and
+		 *  up a curb with Ramms.Curb.ClimbCentreHandOff HandOffTripodReserveCm more
+		 *  where three wheels or fewer carry the robot -- the seat there goes no
+		 *  further than a pose needs, and a stance with no wheel to spare stood
+		 *  that much under its plan on a graded oblique climb. */
+		double ReqFor(uint32 Airborne) const;
+		/** How far (cm of travel) the plan stands under Below (cm) inside its
+		 *  wheels with some wheel off the ground. */
+		double LowMarginCm(const FPlan& P, double Below) const;
 		void   CentreStatus(const FPlan& P, int32 Leg, int32 K, double X, double V, bool& bAir, bool& bFar) const;
 		/** By sample: inside the slowing into, or the rise out of, a planned stop
 		 *  (a run under the floor that holds a stop); only there may the plan run
@@ -2282,6 +2483,9 @@ namespace RammsCurb
 		/** The plan's work: instants of the robot model evaluated (the same for
 		 *  the same input; FCurbSchedule::PlanWork). */
 		mutable int64 Work = 0;
+		/** The ground hold (GroundHoldPath) left out: a knot set planned again
+		 *  without it where it did not plan level. */
+		mutable bool bGroundHoldOff = false;
 		/** One line per candidate tried, for the plan lines. */
 		mutable TArray<FString> Tried;
 		/** Said in the plan's summary line when the tilt planned is more than
@@ -2569,6 +2773,33 @@ namespace RammsCurb
 		return Move + T.ServoLagSeconds + LegSettleSeconds;
 	}
 
+	double FPlanner::ReqFor(uint32 Airborne) const
+	{
+		if (!M.IsClimb() || !ClimbHandOffOn() || !In.Model.Seat.Shifts())
+		{
+			return Req;
+		}
+		int32 Down = 0;
+		for (int32 i = 0; i < N; ++i)
+		{
+			Down += ((Airborne >> i) & 1u) ? 0 : 1;
+		}
+		return Down <= 3 ? Req + HandOffTripodReserveCm : Req;
+	}
+
+	double FPlanner::LowMarginCm(const FPlan& P, double Below) const
+	{
+		double Cm = 0.0;
+		for (int32 k = 1; k < NumS && k < P.Margin.Num() && k < P.Air.Num(); ++k)
+		{
+			if (P.Air[k] != 0 && P.Margin[k] < Below)
+			{
+				Cm += SAt(k) - SAt(k - 1);
+			}
+		}
+		return Cm;
+	}
+
 	double FPlanner::PlantedWalkCm(const FPlan& P) const
 	{
 		double Walk = 0.0;
@@ -2614,6 +2845,66 @@ namespace RammsCurb
 		}
 		const double X0 = CentreX0(Side);
 		return Lo <= Hi ? FVector2D(FMath::Min(Lo, X0), FMath::Max(Hi, X0)) : FVector2D(X0, X0);
+	}
+
+	double FPlanner::DeepestStandingX(const FPlan& At, int32 Side, int32 K, double From, double To) const
+	{
+		const int32 Leg = Centre[Side];
+		if (Leg == INDEX_NONE || !At.Air.IsValidIndex(K) || !At.Far.IsValidIndex(K))
+		{
+			return NoValue;
+		}
+		// The wheel on its far surface, carrying; the rest as the plan has them
+		// at its speed, and standing still there (the robot stopped with every
+		// wheel down that need not be up).
+		const double  Slack = FMath::Max(0.0, static_cast<double>(CVarCurbCentreGroundHoldSlack.GetValueOnAnyThread()));
+		FInstantQuery Qs[2];
+		FVector2D	  Rest[2];
+		double		  Need[2];
+		int32		  NumQ = 0;
+		for (int32 Still = 0; Still < 2; ++Still)
+		{
+			const TArray<uint32>& AirOf = Still ? At.StaticAir : At.Air;
+			const TArray<uint32>& FarOf = Still ? At.StaticFar : At.Far;
+			if (!AirOf.IsValidIndex(K) || !FarOf.IsValidIndex(K))
+			{
+				continue;
+			}
+			FInstantQuery& Q = Qs[NumQ];
+			Q = Query(At, K, AirOf[K] & ~(1u << Leg), FarOf[K] | (1u << Leg));
+			Q.X[Leg] = From;
+			++Work;
+			const FInstantResult R = M.Evaluate(Q, BGuessAt(At, K), false, Leg);
+			if (R.Lo > R.Hi)
+			{
+				return NoValue;
+			}
+			Rest[NumQ] = FVector2D(R.Lo, R.Hi);
+			Need[NumQ] = FMath::Min(R.Hi - R.Lo, static_cast<double>(T.MinCorridorCm) + Slack);
+			++NumQ;
+		}
+		// From the forward end aft, a centimetre at a time: the deepest of the
+		// fore/afts joined to the first that does (its reach narrows the further
+		// it stands from where it hangs).
+		double Deepest = NoValue;
+		for (double X = From; X >= To - 1e-9; X -= 1.0)
+		{
+			bool bOk = NumQ > 0;
+			for (int32 q = 0; q < NumQ && bOk; ++q)
+			{
+				const FVector2D Band = M.PlantedBand(Leg, Qs[q], X);
+				bOk = Band.X <= Band.Y && FMath::Min(Rest[q].Y, Band.Y) - FMath::Max(Rest[q].X, Band.X) >= Need[q] - 1e-9;
+			}
+			if (bOk)
+			{
+				Deepest = X;
+			}
+			else if (Deepest < NoValue)
+			{
+				break;
+			}
+		}
+		return Deepest;
 	}
 
 	void FPlanner::InitPlan(FPlan& P, const TCHAR* Name) const
@@ -2831,6 +3122,12 @@ namespace RammsCurb
 			--k;
 		}
 		return SAt(k);
+	}
+
+	double FPlanner::LevelInStartS(const FPlan& P) const
+	{
+		const bool bEarly = bLevelInAtRest || bLevelInAtOnce || bHoldThroughLevelIn || In.Terrain.Near.SlopeDeg() > EarlyLevelInSlopeDeg;
+		return bEarly ? 0.0 : FMath::Max(0.0, MarchBack(P, LevelFromS, LevelInSeconds));
 	}
 
 	double FPlanner::MarchFwd(const FPlan& P, double S, double Seconds) const
@@ -3655,7 +3952,7 @@ namespace RammsCurb
 			for (int32 k = KStart - 1; k > K0 && SAt(k) >= SMin - 1e-9; --k)
 			{
 				const uint32 Air = P.Air[k] | (1u << i);
-				if (IsForbiddenSet(In.Model, Air) || !Stands(P, Query(P, k, Air, P.Far[k]), BGuessAt(P, k)))
+				if (IsForbiddenSet(In.Model, Air, M.IsClimb()) || !Stands(P, Query(P, k, Air, P.Far[k]), BGuessAt(P, k)))
 				{
 					break;
 				}
@@ -3812,7 +4109,7 @@ namespace RammsCurb
 		// gives sits well away from it, take them again at its middle.
 		for (int32 Again = 0; Again < 2 && R.Lo <= R.Hi && FMath::Abs(R.B - BGuess) > 0.5; ++Again)
 		{
-			const bool bOk0 = R.Hi - R.Lo >= T.MinCorridorCm - 1e-9 && R.bReach && R.Margin >= Req - 1e-9;
+			const bool bOk0 = R.Hi - R.Lo >= T.MinCorridorCm - 1e-9 && R.bReach && R.Margin >= ReqFor(Q.Airborne) - 1e-9;
 			if (bOk0)
 			{
 				break;
@@ -3828,9 +4125,9 @@ namespace RammsCurb
 		}
 		const double Width = R.Hi - R.Lo;
 		// A set the gait never lifts together does not stand, whatever its margin.
-		const bool bAllowed = !IsForbiddenSet(In.Model, Q.Airborne);
-		bool	   bOk = bAllowed && Width >= T.MinCorridorCm - 1e-9 && R.bReach && R.Margin >= Req - 1e-9;
-		if (bAllowed && !bOk && Width >= T.MinCorridorCm - 1e-9 && (!R.bReach || R.Margin > Req - HopelessMarginCm))
+		const bool bAllowed = !IsForbiddenSet(In.Model, Q.Airborne, M.IsClimb());
+		bool	   bOk = bAllowed && Width >= T.MinCorridorCm - 1e-9 && R.bReach && R.Margin >= ReqFor(Q.Airborne) - 1e-9;
+		if (bAllowed && !bOk && Width >= T.MinCorridorCm - 1e-9 && (!R.bReach || R.Margin > ReqFor(Q.Airborne) - HopelessMarginCm))
 		{
 			// Somewhere else in the corridor, perhaps: the margin moves with the
 			// corners' fore/aft and the centre of mass's height.
@@ -3842,7 +4139,7 @@ namespace RammsCurb
 				if (Rp.bReach && (!R.bReach || Rp.Margin > R.Margin))
 				{
 					R = Rp;
-					bOk = R.Margin >= Req - 1e-9;
+					bOk = R.Margin >= ReqFor(Q.Airborne) - 1e-9;
 				}
 			}
 		}
@@ -3855,7 +4152,7 @@ namespace RammsCurb
 			auto		 HoldsAt = [&](double B) {
 				FInstantResult X = R;
 				M.PoseAt(Q, B, X);
-				return X.bReach && X.Margin >= Req - 1e-9;
+				return X.bReach && X.Margin >= ReqFor(Q.Airborne) - 1e-9;
 			};
 			if (!(HoldsAt(R.B - Half) && HoldsAt(R.B + Half)))
 			{
@@ -4419,7 +4716,7 @@ namespace RammsCurb
 						// ground at any speed.
 						const bool bAir = InWindow(Leg, P, k, P.X[Side][k]) && InWindow(Leg, P, k - 1, P.X[Side][k - 1]);
 						Up[k] = Step;
-						Down[k] = bAir ? Step : FMath::Min(Step, MaxAftWalkPerCm * Ds);
+						Down[k] = bAir ? Step : FMath::Min(Step, MaxAftWalkPerCmNow(M.IsClimb()) * Ds);
 						if (IsDwell(P, k))
 						{
 							// At rest at a planned stop: any re-pose.
@@ -4435,6 +4732,7 @@ namespace RammsCurb
 					{
 						P.X[Side] = SmoothCentrePath(Path, Smooth, Ds);
 						bPath = true;
+						GroundHoldPath(P, AtFloor, Side, Bands, Up, Down, Wish, Smooth, Hold);
 						break;
 					}
 				}
@@ -4447,6 +4745,148 @@ namespace RammsCurb
 			}
 		}
 		return true;
+	}
+
+	void FPlanner::GroundHoldPath(FPlan& P, const FPlan& AtFloor, int32 Side, TConstArrayView<FVector2D> Bands, TConstArrayView<double> Up,
+		TConstArrayView<double> Down, TConstArrayView<double> Wish, double Smooth, double Hold) const
+	{
+		// From its landing taken (and held) until the last rear corner has
+		// landed, the wheel stands still on the ground as the chassis moves on
+		// over it -- walking aft at the travel's own rate (a planted wheel walks
+		// no faster) as far as its 5-bar reaches with the chassis a corridor --
+		// so that the support on the level the robot climbs to grows with the
+		// travel while the rear corners are up, and the seat carries less of the
+		// balance. Never less far aft than the walk it replaces; home after.
+		const double GroundHold = CentreGroundHoldCm();
+		const int32	 Leg = Centre[Side];
+		if (GroundHold <= 0.0 || bGroundHoldOff || !M.IsClimb() || !ClimbHandOffOn() || Leg == INDEX_NONE || Wish.Num() != NumS)
+		{
+			return;
+		}
+		// Timed with the walk just planned: where it carries from (a stretch
+		// timed with the last round's walk could begin it still in the air,
+		// where walking aft at the travel's rate it would never come down).
+		FPlan Timed = AtFloor;
+		Timed.X[0] = P.X[0];
+		Timed.X[1] = P.X[1];
+		ComputeGeometry(Timed);
+		ComputeTiming(Timed);
+		const double Loaded = Timed.Wheels[Leg].SLoaded;
+		double		 LastRear = -TNumericLimits<double>::Max();
+		for (int32 i = 0; i < N; ++i)
+		{
+			if (M.Axle(i) == ERammsCurbAxle::Rear)
+			{
+				LastRear = FMath::Max(LastRear, Timed.Wheels[i].SLoaded);
+			}
+		}
+		const int32 KA = FMath::Max(Index(Loaded + EventPadCm + Hold + Smooth), FMath::Max(1, Index(LevelFromS)));
+		const int32 KB = FMath::Min(Index(LastRear), NumS - 1);
+		if (KB <= KA)
+		{
+			return;
+		}
+		const double   X0 = CentreX0(Side);
+		const double   Deepest = FMath::Max(CentreReachX(Side).X, X0 - GroundHold);
+		TArray<double> Wish2(Wish.GetData(), Wish.Num());
+		TArray<double> Down2(Down.GetData(), Down.Num());
+		bool		   bDeeper = false;
+		// No further aft than keeps the robot standing with the seat at home --
+		// the aft end of its reach, where up a curb with the hand-off it waits
+		// -- and as much over the margin as the seat would be sent for
+		// (SeatEnoughCm and the climb's seat reserve): a wheel walked deeper
+		// buys the seat nothing and walks the further home at the end, where
+		// the front corners' lift into the drive stance waits for it.
+		const FModelSeat& Seat = In.Model.Seat;
+		const double	  SeatSpare = FMath::Max(0.0, static_cast<double>(CVarCurbSeatEnough.GetValueOnAnyThread()))
+			+ FMath::Max(0.0, static_cast<double>(CVarCurbClimbSeatReserve.GetValueOnAnyThread()));
+		auto Enough = [&](int32 k, double From, double Deep) {
+			if (!Seat.Shifts() || Deep >= From - 1e-6)
+			{
+				return Deep;
+			}
+			const uint32 Bit = 1u << Leg;
+			const double Need = ReqFor(Timed.Air[k] & ~Bit) + SeatSpare;
+			auto		 MarginAt = [&](double X) {
+				FInstantQuery Q = Query(Timed, k, Timed.Air[k] & ~Bit, Timed.Far[k] | Bit);
+				Q.X[Leg] = X;
+				Q.SeatX = Seat.XRange.X;
+				++Work;
+				return M.Evaluate(Q, BGuessAt(Timed, k)).Margin;
+			};
+			const double MF = MarginAt(From);
+			if (MF >= Need)
+			{
+				return From;
+			}
+			const double MD = MarginAt(Deep);
+			if (MD <= Need || MD <= MF + 1e-6)
+			{
+				return Deep;
+			}
+			// The margin all but linear in the wheel's fore/aft (the support's
+			// edge it stands on): there, and a centimetre deeper to be sure.
+			return FMath::Max(Deep, From + (Deep - From) * (Need - MF) / (MD - MF) - 1.0);
+		};
+		// Each sample's deepest and enough; then the enough brought earlier at
+		// the walk's own rate -- a wheel walking aft no faster than the travel
+		// must begin in time to stand where a later sample needs it.
+		TArray<double> DeepAt, NeedAt;
+		DeepAt.Init(NoValue, KB - KA + 1);
+		NeedAt.Init(NoValue, KB - KA + 1);
+		double Prev = NoValue;
+		for (int32 k = KA; k <= KB; ++k)
+		{
+			Down2[k] = FMath::Min(Down2[k], MaxAftWalkPerCmNow(true) * Ds);
+			const double From = FMath::Max(X0, P.X[Side][k]);
+			const double Deep = DeepestStandingX(Timed, Side, k, From, Deepest);
+			if (Deep < NoValue)
+			{
+				// Every other sample weighed (between, the last one weighed).
+				const double Here = ((k - KA) % 2 == 0 || Prev >= NoValue) ? Enough(k, From, Deep) : Prev;
+				Prev = Here;
+				DeepAt[k - KA] = Deep;
+				NeedAt[k - KA] = FMath::Max(Deep, Here);
+			}
+		}
+		for (int32 k = KB - 1; k >= KA; --k)
+		{
+			if (NeedAt[k + 1 - KA] < NoValue)
+			{
+				const double Ahead = NeedAt[k + 1 - KA] + Down2[k + 1];
+				NeedAt[k - KA] = NeedAt[k - KA] < NoValue ? FMath::Min(NeedAt[k - KA], Ahead) : Ahead;
+			}
+		}
+		for (int32 k = KA; k <= KB; ++k)
+		{
+			const double Want = NeedAt[k - KA] < NoValue && DeepAt[k - KA] < NoValue ? FMath::Max(DeepAt[k - KA], NeedAt[k - KA]) : NoValue;
+			if (Want < FMath::Min(Wish2[k], P.X[Side][k]) - 1e-6)
+			{
+				Wish2[k] = Want;
+				bDeeper = true;
+			}
+			else
+			{
+				Wish2[k] = FMath::Min(Wish2[k], P.X[Side][k]);
+			}
+		}
+		TArray<double> Path;
+		int32		   Stuck = INDEX_NONE;
+		if (!bDeeper || !RatePath(Bands, Up, Down2, X0, Wish2, Path, Stuck))
+		{
+			return;
+		}
+		TArray<double> Held = SmoothCentrePath(Path, Smooth, Ds);
+		// Its landing where it was: the walk aft only once it carries.
+		Timed.X[Side] = Held;
+		ComputeGeometry(Timed);
+		ComputeTiming(Timed);
+		if (FMath::Abs(Timed.Wheels[Leg].SLoaded - Loaded) > Ds + 1e-6)
+		{
+			return;
+		}
+		P.X[Side] = MoveTemp(Held);
+		P.bGroundHeld = true;
 	}
 
 	void FPlanner::CentreStatus(const FPlan& P, int32 Leg, int32 K, double X, double V, bool& bAir, bool& bFar) const
@@ -4493,7 +4933,7 @@ namespace RammsCurb
 		++Work;
 		const FInstantResult R = M.Evaluate(Q, BGuess);
 		++CountFeasible;
-		return R.Lo > R.Hi || !R.bReach || IsForbiddenSet(In.Model, Q.Airborne) ? -1e6 : FMath::Min(R.Margin - Req, R.Width() - T.MinCorridorCm);
+		return R.Lo > R.Hi || !R.bReach || IsForbiddenSet(In.Model, Q.Airborne, M.IsClimb()) ? -1e6 : FMath::Min(R.Margin - ReqFor(Q.Airborne), R.Width() - T.MinCorridorCm);
 	}
 
 	void FPlanner::CentrePathsDp(FPlan& P) const
@@ -4623,7 +5063,7 @@ namespace RammsCurb
 							}
 							continue;
 						}
-						const double Aft = InWindow(Leg, Q, k, X) || bNearRest || bDwell ? Step : FMath::Min(Step, MaxAftWalkPerCm * StageCm);
+						const double Aft = InWindow(Leg, Q, k, X) || bNearRest || bDwell ? Step : FMath::Min(Step, MaxAftWalkPerCmNow(M.IsClimb()) * StageCm);
 						for (int32 PJ = 0; PJ < NX; ++PJ)
 						{
 							const FCell& PC = Cells[(s - 1) * NX + PJ];
@@ -4838,7 +5278,7 @@ namespace RammsCurb
 					for (int32 Side = 0; Side < 2; ++Side)
 					{
 						const double X = Side == 0 ? XL : XR;
-						Aft[Side] = InWindow(Centre[Side], Q, k, X) || bNearRest || bDwell ? Step : FMath::Min(Step, MaxAftWalkPerCm * StageCm);
+						Aft[Side] = InWindow(Centre[Side], Q, k, X) || bNearRest || bDwell ? Step : FMath::Min(Step, MaxAftWalkPerCmNow(M.IsClimb()) * StageCm);
 					}
 					for (int32 PL = 0; PL < NX[0]; ++PL)
 					{
@@ -4946,7 +5386,7 @@ namespace RammsCurb
 		auto		 Holds = [&](const FInstantQuery& Q, const FInstantResult& R, double B) {
 			FInstantResult X = R;
 			M.PoseAt(Q, B, X);
-			return X.bReach && X.Margin >= Req - 1e-9;
+			return X.bReach && X.Margin >= ReqFor(Q.Airborne) - 1e-9;
 		};
 		for (int32 c = 0; c < Count; ++c)
 		{
@@ -5069,6 +5509,19 @@ namespace RammsCurb
 		// as before. Down a curb, with Ramms.Curb.LowerEarly, it lowers early
 		// instead (below).
 		const bool bLowerEarly = bOk && !M.IsClimb() && LowerEarlyOn();
+		// From the drive stance's own height (B0) where the level-in begins
+		// (Ramms.Curb.RiseFromStance), so the chassis leaves the stance evenly
+		// rather than stepping to the level-in's target in the level-in (a
+		// quick jolt of the base and the rider): down a curb the lowering ramp
+		// starts there; up a curb the level-in alone does, the rise after it as
+		// before. Off: from the level-in's target (the first sample).
+		const bool	 bFromStance = RiseFromStanceOn();
+		const double SIn = bFromStance ? FMath::Min(LevelInStartS(P), SAt(K0)) : SAt(K0);
+		auto		 RampAt = [&](int32 c, double BFrom, int32 CTo, double BTo) {
+			const double Span = SAt(K0 + CTo) - SIn;
+			const double U = Span > 1e-6 ? FMath::Clamp((SAt(K0 + c) - SIn) / Span, 0.0, 1.0) : 1.0;
+			return BFrom + (BTo - BFrom) * U;
+		};
 		if (bOk && RiseEarlyOn() && !bLowerEarly)
 		{
 			double LastLoaded = LevelFromS;
@@ -5128,8 +5581,24 @@ namespace RammsCurb
 					break;
 				}
 			}
-			for (int32 c = 1; c < CNeed; ++c)
+			// (From the stance, down a curb, the first sample too, each no lower
+			// than RiseSlackCm over its corridor's floor -- or its own wish, when
+			// that is lower -- rather than its own wish; nor higher than the
+			// crossing's height or the ramp, whichever is the more. Up a curb the
+			// ramp is left as it was from the first sample on -- a ramp from the
+			// stance would carry the chassis lower to the first lifts and landings
+			// -- and only the level-in before it is taken from the stance, below.)
+			const bool bRampFromStance = bFromStance && !M.IsClimb();
+			for (int32 c = bRampFromStance ? 0 : 1; c < CNeed; ++c)
 			{
+				if (bRampFromStance)
+				{
+					const double Ramp = RampAt(c, B0, CNeed, Wish[CNeed]);
+					const double AtLeast = FMath::Min(Own[c], Bands[c].X + RiseSlackCm);
+					const double AtMost = FMath::Max(Bands[c].X, FMath::Max(Wish[c], FMath::Min(Ramp, Bands[c].Y)));
+					Wish[c] = FMath::Clamp(FMath::Max(Ramp, AtLeast), Bands[c].X, AtMost);
+					continue;
+				}
 				const double Ramp = Own[0] + (Wish[CNeed] - Own[0]) * static_cast<double>(c) / static_cast<double>(CNeed);
 				Wish[c] = FMath::Clamp(FMath::Max(Ramp, Own[c]), Bands[c].X, FMath::Max(Bands[c].X, Wish[c]));
 			}
@@ -5176,8 +5645,17 @@ namespace RammsCurb
 					break;
 				}
 			}
-			for (int32 c = 1; c < CNeed; ++c)
+			// (From the stance, the mirror of rising's.)
+			for (int32 c = bFromStance ? 0 : 1; c < CNeed; ++c)
 			{
+				if (bFromStance)
+				{
+					const double Ramp = RampAt(c, B0, CNeed, Wish[CNeed]);
+					const double AtMost = FMath::Max(Own[c], Bands[c].Y - RiseSlackCm);
+					const double AtLeast = FMath::Min(Bands[c].Y, FMath::Min(Wish[c], FMath::Max(Ramp, Bands[c].X)));
+					Wish[c] = FMath::Clamp(FMath::Min(Ramp, AtMost), AtLeast, Bands[c].Y);
+					continue;
+				}
 				const double Ramp = Own[0] + (Wish[CNeed] - Own[0]) * static_cast<double>(c) / static_cast<double>(CNeed);
 				Wish[c] = FMath::Clamp(FMath::Min(Ramp, Own[c]), FMath::Min(Bands[c].Y, Wish[c]), Bands[c].Y);
 			}
@@ -5194,9 +5672,21 @@ namespace RammsCurb
 				{
 					P.B[K0 + c] = Path[c];
 				}
+				// Before it, the level-in: held at its target -- or from the stance
+				// (bFromStance, with a ramp running), at the stance's height until
+				// the level-in begins and then evenly on to the first sample's.
+				const bool	 bRamped = bFromStance && (RiseEarlyOn() || bLowerEarly);
+				const double Span = SAt(K0) - SIn;
 				for (int32 k = 0; k < K0; ++k)
 				{
-					P.B[k] = Path[0];
+					if (!bRamped || Span <= 1e-6)
+					{
+						P.B[k] = Path[0];
+					}
+					else
+					{
+						P.B[k] = FMath::Lerp(B0, Path[0], FMath::Clamp((SAt(k) - SIn) / Span, 0.0, 1.0));
+					}
 				}
 			}
 			else
@@ -5245,7 +5735,7 @@ namespace RammsCurb
 			for (int32 k = Index(Last) + 1; k < NumS; ++k)
 			{
 				const double V = FMath::Max(MinTimingSpeed, FMath::Max(P.V[k], P.V[k - 1]));
-				const double Step = FMath::Min(Ds * CSS / V, MaxAftWalkPerCm * Ds);
+				const double Step = FMath::Min(Ds * CSS / V, MaxAftWalkPerCmNow(M.IsClimb()) * Ds);
 				P.X[Side][k] = P.X[Side][k - 1] + FMath::Clamp(X0 - P.X[Side][k - 1], -Step, Ds * CSS / V);
 			}
 		}
@@ -5285,9 +5775,9 @@ namespace RammsCurb
 			{
 				Fail(k, FString::Printf(TEXT("%s: a leg cannot reach at %.0f cm"), What, SAt(k)));
 			}
-			else if (R.Margin < Req - 1e-6)
+			else if (R.Margin < ReqFor(Q.Airborne) - 1e-6)
 			{
-				Fail(k, FString::Printf(TEXT("%s: the margin is %.2f cm at %.0f cm (%.1f at least)"), What, R.Margin, SAt(k), Req));
+				Fail(k, FString::Printf(TEXT("%s: the margin is %.2f cm at %.0f cm (%.1f at least)"), What, R.Margin, SAt(k), ReqFor(Q.Airborne)));
 			}
 			else if (B < R.Lo - 1e-6 || B > R.Hi + 1e-6)
 			{
@@ -5322,13 +5812,13 @@ namespace RammsCurb
 			{
 				Fail(k, FString::Printf(TEXT("a leg cannot reach at %.0f cm"), SAt(k)));
 			}
-			if (IsForbiddenSet(In.Model, P.Air[k]))
+			if (IsForbiddenSet(In.Model, P.Air[k], M.IsClimb()))
 			{
 				Fail(k, FString::Printf(TEXT("a set the gait never lifts together is off the ground at %.0f cm"), SAt(k)));
 			}
-			if (R.Margin < Req - 1e-6)
+			if (R.Margin < ReqFor(P.Air[k]) - 1e-6)
 			{
-				Fail(k, FString::Printf(TEXT("the margin is %.2f cm at %.0f cm (%.1f at least)"), R.Margin, SAt(k), Req));
+				Fail(k, FString::Printf(TEXT("the margin is %.2f cm at %.0f cm (%.1f at least)"), R.Margin, SAt(k), ReqFor(P.Air[k])));
 			}
 			if (P.B[k] < R.Lo - 1e-6 || P.B[k] > R.Hi + 1e-6)
 			{
@@ -5407,7 +5897,7 @@ namespace RammsCurb
 				// MaxAftWalkPerCm of the travel, but about a planned stop, all but
 				// at rest, it may re-pose aft as fast as forward.
 				const bool	 bAtRest = AtStop[k] && AtStop[k - 1] && FMath::Min(P.V[k], P.V[k - 1]) < 0.5 * Floor;
-				const double AftMost = bAir || bAtRest ? Ds * CSS / V : FMath::Min(Ds * CSS / V, MaxAftWalkPerCm * Ds);
+				const double AftMost = bAir || bAtRest ? Ds * CSS / V : FMath::Min(Ds * CSS / V, MaxAftWalkPerCmNow(M.IsClimb()) * Ds);
 				if (Dx > Ds * CSS / V + 1e-6 || -Dx > AftMost + 1e-6)
 				{
 					Fail(k, FString::Printf(TEXT("the '%s' wheel walks faster than allowed at %.0f cm"), *LegName(Leg), SAt(k)));
@@ -6632,7 +7122,7 @@ namespace RammsCurb
 			Up = TEXT("no wheel");
 		}
 		const FString Where = FString::Printf(TEXT("%.0f cm on (%s off the ground%s)"), SAt(K), *Up, bStatic ? TEXT(", standing still") : TEXT(""));
-		if (IsForbiddenSet(In.Model, Air))
+		if (IsForbiddenSet(In.Model, Air, M.IsClimb()))
 		{
 			return FString::Printf(TEXT("%s: a set the gait never lifts together (a same-side corner and centre, both fronts and a centre, "
 										"or a centre and both rears)"),
@@ -6736,11 +7226,7 @@ namespace RammsCurb
 		Out.LevelFromS = LevelFromS;
 		Out.LevelInSeconds = LevelInSeconds;
 		Out.LevelInLatestS = LevelInLatest;
-		// Where the executor begins the level-in: at once where the planner has
-		// it begin as the crossing does, else the level-in's time before its end
-		// at the planned speed.
-		const bool bEarly = bLevelInAtRest || bLevelInAtOnce || bHoldThroughLevelIn || In.Terrain.Near.SlopeDeg() > EarlyLevelInSlopeDeg;
-		Out.LevelInFromS = bEarly ? 0.0 : FMath::Max(0.0, MarchBack(P, LevelFromS, LevelInSeconds));
+		Out.LevelInFromS = LevelInStartS(P);
 		Out.bLevelInAtRest = bLevelInAtRest;
 		Out.bLevelInAtOnce = bLevelInAtOnce;
 		Out.bHoldSpeedThroughLevelIn = bHoldThroughLevelIn;
@@ -7139,6 +7625,24 @@ namespace RammsCurb
 				*P.Name, IsOk(P) ? TEXT("level") : TEXT("not level"), P.VFloor, Kinds[1], Kinds[2], Kinds[3], Kinds[4],
 				P.FirstFail != INDEX_NONE ? TEXT("; first: ") : TEXT(""),
 				P.FirstFail != INDEX_NONE ? *DescribeFail(P, P.FirstFail) : TEXT(""), *HeightNote));
+			if (PlanDebugOffers() && P.Wheels.Num() == N && P.V.Num() == NumS)
+			{
+				FString Timing = FString::Printf(TEXT("dbgoffer (%s) timing"), *P.Name);
+				for (int32 i = 0; i < N; ++i)
+				{
+					const FWheelPlan& W = P.Wheels[i];
+					Timing += FString::Printf(TEXT(" | %s lift %.1f clear %.1f land %.1f down %.1f loaded %.1f"), *In.Legs[i].Name.ToString(), W.SLiftStart,
+						W.SClear, W.SLand, W.SDown, W.SLoaded);
+				}
+				Tried.Add(Timing);
+				const int32 KF = P.FirstFail != INDEX_NONE ? P.FirstFail : Index(LevelFromS);
+				for (int32 k = FMath::Max(0, KF - 40); k <= FMath::Min(NumS - 1, KF + 60); k += 2)
+				{
+					Tried.Add(FString::Printf(TEXT("dbgoffer (%s) %4d v %5.1f air %02x far %02x x %+5.1f/%+5.1f fail %d"), *P.Name, k, P.V[k],
+						P.Air.IsValidIndex(k) ? P.Air[k] : 0u, P.Far.IsValidIndex(k) ? P.Far[k] : 0u, P.X[0].IsValidIndex(k) ? P.X[0][k] : 0.0,
+						P.X[1].IsValidIndex(k) ? P.X[1][k] : 0.0, static_cast<int32>(P.Fail[k])));
+				}
+			}
 			bool bBetter = !bHaveBest;
 			if (!bBetter)
 			{
@@ -7163,7 +7667,7 @@ namespace RammsCurb
 		// kept unless it does not verify or plans a floor more than
 		// SmoothWalkFloorShare under the other's. Returns whether either walk
 		// had paths; OutKept is the one kept.
-		auto PlanKnots = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide = false, bool bDropWalk = false) {
+		auto PlanKnotsOnce = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide, bool bDropWalk) {
 			FPlan Walked[2];
 			bool  bWalked[2] = { false, false };
 			for (int32 Smooth = 0; Smooth < (WalkSmoothCm() > 0.0 ? 2 : 1); ++Smooth)
@@ -7191,7 +7695,8 @@ namespace RammsCurb
 				P.bHeightOk = HeightPath(P);
 				Verify(P);
 				P.FirstFail = FirstFailOf(P);
-				P.Name = FString::Printf(TEXT("%s %+.0f/%+.0f/%+.0f/%+.0f%s"), Label, K.XF, K.XLift, K.XLand, K.XR, Smooth ? TEXT(" smooth") : TEXT(""));
+				P.Name = FString::Printf(TEXT("%s %+.0f/%+.0f/%+.0f/%+.0f%s%s"), Label, K.XF, K.XLift, K.XLand, K.XR, Smooth ? TEXT(" smooth") : TEXT(""),
+					P.bGroundHeld ? TEXT(" held") : TEXT(""));
 				bWalked[Smooth] = true;
 			}
 			if (!bWalked[0] && !bWalked[1])
@@ -7209,6 +7714,179 @@ namespace RammsCurb
 			}
 			OutKept = Walked[bSmoothKept ? 1 : 0];
 			return true;
+		};
+		// The search plans without the ground hold (Ramms.Curb.CentreGroundHoldCm):
+		// the plan it keeps is planned again with it at the end (HoldKept).
+		auto PlanKnots = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide = false, bool bDropWalk = false) {
+			TGuardValue<bool> NoHold(bGroundHoldOff, true);
+			const bool		  bOk = PlanKnotsOnce(K, Label, OutKept, bPerSide, bDropWalk);
+			if (bOk)
+			{
+				OutKept.bFromKnots = true;
+				OutKept.Knot[0] = K.XF;
+				OutKept.Knot[1] = K.XLift;
+				OutKept.Knot[2] = K.XLand;
+				OutKept.Knot[3] = K.XR;
+				OutKept.bKnotPerSide = bPerSide;
+				OutKept.bKnotDropWalk = bDropWalk;
+				OutKept.KnotLabel = Label;
+			}
+			return bOk;
+		};
+		// Up a curb with the hand-off and Ramms.Curb.CentreGroundHoldCm: the level
+		// plan kept, if its centre wheels walk knots, and the choreography, if it
+		// planned level, planned again with the centre wheels standing still on
+		// the ground while the rear corners are up; the faster of those kept
+		// where its floor is at least CentreGroundHoldFloorShare of the plan's --
+		// the walk spares the seat, which the plan's floor does not weigh (and,
+		// standing the support's edge further aft, can let the choreography go
+		// faster than it did). Only these: the search is not made longer by it.
+		FPlan ChorPlan;
+		bool  bChorLevel = false;
+		auto  HoldKept = [&]() {
+			 if (!IsOk(Best) || Stopped() || CentreGroundHoldCm() <= 0.0 || !M.IsClimb() || !ClimbHandOffOn())
+			 {
+				 return;
+			 }
+			 TArray<const FPlan*, TInlineAllocator<2>> From;
+			 if (Best.bFromKnots)
+			 {
+				 From.Add(&Best);
+			 }
+			 if (bChorLevel && ChorPlan.bFromKnots && (!Best.bFromKnots || ChorPlan.KnotLabel != Best.KnotLabel || FMemory::Memcmp(ChorPlan.Knot, Best.Knot, sizeof(Best.Knot)) != 0))
+			 {
+				 From.Add(&ChorPlan);
+			 }
+			 TGuardValue<bool> Hold(bGroundHoldOff, false);
+			 FPlan			   Fastest;
+			 bool			   bAny = false;
+			 for (const FPlan* F : From)
+			 {
+				 FPlan		 Held;
+				 const FKnot K{ F->Knot[0], F->Knot[1], F->Knot[2], F->Knot[3] };
+				 if (Stopped() || !PlanKnotsOnce(K, *F->KnotLabel, Held, F->bKnotPerSide, F->bKnotDropWalk) || !Held.bGroundHeld)
+				 {
+					 Tried.Add(FString::Printf(TEXT("%s: no ground hold planned"), *F->Name));
+					 continue;
+				 }
+				 // Weighed as the plan it would replace was: with its seat planned,
+				 // or without.
+				 if (Best.bSeatWeighed)
+				 {
+					 WithSeat(Held);
+				 }
+				 Tried.Add(FString::Printf(TEXT("tried %s: %s, floor %.1f cm/s"), *Held.Name, IsOk(Held) ? TEXT("level") : TEXT("not level"), Held.VFloor));
+				 if (IsOk(Held) && (!bAny || Held.VFloor > Fastest.VFloor))
+				 {
+					 Fastest = MoveTemp(Held);
+					 bAny = true;
+				 }
+			 }
+			 const double Share = FMath::Clamp(static_cast<double>(CVarCurbCentreGroundHoldFloorShare.GetValueOnAnyThread()), 0.0, 1.0);
+			 // (Or where it crosses no slower: the floor leaves out the drive
+			 // slowed under the seat's forward shifts, which the held walk spares;
+			 // and a plan whose seat did not plan has a floor the seat will not
+			 // let the robot keep -- a held one whose seat plans goes before it.)
+			 auto Crossing = [&](const FPlan& P) {
+				 double Last = LevelFromS;
+				 for (const FWheelPlan& W : P.Wheels)
+				 {
+					 Last = FMath::Max(Last, W.SLoaded);
+				 }
+				 return SecondsBetween(P, Index(LevelFromS), FMath::Min(Index(Last), NumS - 1));
+			 };
+			 const double HeldS = bAny ? Crossing(Fastest) : 0.0, BestS = Crossing(Best);
+			 const bool	  bHonest = Best.bSeatWeighed && !Best.bSeatPlanned && bAny && Fastest.bSeatPlanned;
+			 if (bAny)
+			 {
+				 Tried.Add(FString::Printf(TEXT("%s: crossing %.2f s (%s: %.2f s)"), *Fastest.Name, HeldS, *Best.Name, BestS));
+			 }
+			 if (bAny && (Fastest.VFloor >= Share * Best.VFloor - 1e-6 || HeldS <= BestS + 1e-6 || bHonest))
+			 {
+				 Tried.Add(FString::Printf(TEXT("kept %s: level, floor %.1f cm/s, its centre wheels held on the ground (%s: %.1f cm/s%s)"), *Fastest.Name,
+					 Fastest.VFloor, *Best.Name, Best.VFloor, bHonest ? TEXT(", its seat not planned") : TEXT("")));
+				 Best = MoveTemp(Fastest);
+			 }
+			 else if (bAny)
+			 {
+				 Tried.Add(FString::Printf(TEXT("%s not kept: its floor %.1f cm/s is under %.2f of %s's %.1f"), *Fastest.Name, Fastest.VFloor, Share,
+					 *Best.Name, Best.VFloor));
+			 }
+		};
+		// The same for a tilted plan (no level one), in place: its speeds, tilt,
+		// stops and everything up to each centre wheel's landing as they are --
+		// the tilt's easings are timed on those speeds -- and from the landing
+		// on the wheel held on the ground; its heights planned again, kept where
+		// it verifies.
+		auto HoldTilted = [&](FPlan& Tilt) {
+			if (Stopped() || CentreGroundHoldCm() <= 0.0 || !M.IsClimb() || !ClimbHandOffOn())
+			{
+				return;
+			}
+			TGuardValue<bool> Hold(bGroundHoldOff, false);
+			FPlan			  Held = Tilt;
+			ComputeGeometry(Held);
+			ComputeTiming(Held);
+			const double CSS = FMath::Max(0.1, static_cast<double>(T.CenterShiftSpeed));
+			for (int32 Side = 0; Side < 2; ++Side)
+			{
+				const int32 Leg = Centre[Side];
+				if (Leg == INDEX_NONE || Held.X[Side].Num() != NumS)
+				{
+					continue;
+				}
+				const FVector2D	  Reach = CentreReachX(Side);
+				const int32		  KL = FMath::Min(Index(Held.Wheels[Leg].SLoaded) + 1, NumS - 1);
+				TArray<FVector2D> Bands;
+				TArray<double>	  Up, Down;
+				Bands.SetNum(NumS);
+				Up.Init(0.0, NumS);
+				Down.Init(0.0, NumS);
+				for (int32 k = 0; k < NumS; ++k)
+				{
+					const double X = Held.X[Side][k];
+					Bands[k] = k < KL || k == NumS - 1 ? FVector2D(X - 0.01, X + 0.01) : FVector2D(Reach.X - 0.01, Reach.Y + 0.01);
+					if (k > 0)
+					{
+						const double Step = Ds * CSS / FMath::Max(MinTimingSpeed, FMath::Max(Held.V[k], Held.V[k - 1]));
+						Up[k] = IsDwell(Held, k) ? 1e6 : Step;
+						Down[k] = IsDwell(Held, k) ? 1e6 : FMath::Min(Step, MaxAftWalkPerCmNow(true) * Ds);
+					}
+				}
+				const TArray<double> Wish = Held.X[Side];
+				GroundHoldPath(Held, Held, Side, Bands, Up, Down, Wish, 0.0, 0.0);
+			}
+			if (!Held.bGroundHeld)
+			{
+				Tried.Add(FString::Printf(TEXT("%s (tilted): no ground hold planned"), *Tilt.Name));
+				return;
+			}
+			ComputeGeometry(Held);
+			ComputeTiming(Held);
+			for (int32 k = 0; k < NumS; ++k)
+			{
+				Held.Fail[k] = Held.Fail[k] == EFail::Height || Held.Fail[k] == EFail::Verify ? EFail::None : Held.Fail[k];
+			}
+			Held.bHeightOk = HeightPath(Held);
+			Verify(Held);
+			Held.FirstFail = FirstFailOf(Held);
+			Held.Name = Tilt.Name + TEXT(" held");
+			const FString Verdict = IsOk(Held) ? FString(TEXT("verifies"))
+											   : (Held.FirstFail != INDEX_NONE ? DescribeFail(Held, Held.FirstFail) : FString(TEXT("does not verify")));
+			if (!IsOk(Held))
+			{
+				Tried.Add(FString::Printf(TEXT("%s (tilted) not kept: %s"), *Held.Name, *Verdict));
+			}
+			if (!IsOk(Held))
+			{
+				return;
+			}
+			// Verified with the seat where it was; the output plans it again for
+			// the support the hold gives (the seat as any tilted plan's).
+			Tried.Add(FString::Printf(TEXT("%s (tilted) kept: verifies"), *Held.Name));
+			Held.bSeatWeighed = false;
+			Held.bSeatPlanned = false;
+			Tilt = MoveTemp(Held);
 		};
 		// The choreography (Ramms.Curb.Choreography): the centre wheels walked
 		// through the crossing -- forward while a front corner
@@ -7240,11 +7918,34 @@ namespace RammsCurb
 			FPlan		Kept;
 			if (PlanKnots(Chor, bDown ? TEXT("choreography down") : TEXT("choreography"), Kept, /*bPerSide=*/true, /*bDropWalk=*/bDown))
 			{
+				bChorLevel = IsOk(Kept);
+				ChorPlan = Kept;
 				// Weighed with its seat, as the no-walk plan was; a level one under
 				// the share is then not kept over it on its corridor or margin
 				// either (before, Offer could keep it so).
 				WithSeat(Kept);
-				const bool bFast = !bHaveBest || !IsOk(Best) || Kept.VFloor >= PlantedWalkFloorShare() * Best.VFloor - 1e-6;
+				// (Up a curb with Ramms.Curb.ClimbCentreHandOff, kept whenever level --
+				// its walk is what spares the seat -- unless it stands near the margin's
+				// floor longer than the plan it would replace: a long stretch there
+				// with wheels up, as an oblique climb lifting both centre wheels with a
+				// front still up, left the robot nearly tipping on a grade.)
+				bool bHandOffKeeps = false;
+				if (M.IsClimb() && ClimbHandOffOn() && IsOk(Kept))
+				{
+					const double Near = T.MinStabilityMargin + HandOffNearMarginCm;
+					const double Mine = LowMarginCm(Kept, Near);
+					const double Theirs = bHaveBest && IsOk(Best) ? LowMarginCm(Best, Near) : TNumericLimits<double>::Max();
+					bHandOffKeeps = Mine <= Theirs + HandOffNearMarginExtraCm;
+					if (!bHandOffKeeps)
+					{
+						Tried.Add(FString::Printf(TEXT("%s stands within %.1f cm of the margin's floor over %.0f cm of travel against %s's %.0f: not "
+													   "kept for the hand-off"),
+							*Kept.Name, HandOffNearMarginCm, Mine, *Best.Name, Theirs));
+					}
+				}
+				const bool bFast = (M.IsClimb() && ClimbHandOffOn())
+					? (bHandOffKeeps || !bHaveBest || !IsOk(Best))
+					: (!bHaveBest || !IsOk(Best) || Kept.VFloor >= PlantedWalkFloorShare() * Best.VFloor - 1e-6);
 				Offer(Kept, bFast || !IsOk(Kept) || !bSeatChoice);
 				if (IsOk(Kept) && bFast)
 				{
@@ -7267,7 +7968,7 @@ namespace RammsCurb
 			// down -- tried as well, and kept only where it plans a faster floor
 			// than the plan kept so far: the walk is there for the speed.
 			FPlan Up;
-			if (M.IsClimb() && ChoreographyUpOn() && !Stopped()
+			if (M.IsClimb() && ChoreographyUpOn() && !ClimbHandOffOn() && !Stopped()
 				&& PlanKnots(FKnot{ X0, X0 + ChoreographyCm(CVarCurbChoreographyUpLift), X0, X0 }, TEXT("choreography up"), Up,
 					/*bPerSide=*/true, /*bDropWalk=*/true))
 			{
@@ -7384,6 +8085,7 @@ namespace RammsCurb
 		{
 			return StoppedPlan(Out);
 		}
+		HoldKept();
 		if (IsOk(Best))
 		{
 			OutputEased(Best, EPlanClass::Level, Out);
@@ -7563,6 +8265,7 @@ namespace RammsCurb
 		}
 		if (bTilted)
 		{
+			HoldTilted(Tilted);
 			OutputEased(Tilted, EPlanClass::Tilt, Out);
 			Out.Stage = EPlanStage::Tilt;
 			return Done(Out);

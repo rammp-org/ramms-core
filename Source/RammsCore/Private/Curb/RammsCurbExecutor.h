@@ -106,7 +106,11 @@
  * wheel too near the terrain -- not the plan's own speed, a planned stop or
  * the level-in), Settle (every wheel on the far side, rolling on until the
  * rear tyres are FinishClearance past the edge and the legs are where the
- * plan ends them), Done; Halted (a fault or Halt: stopping).
+ * plan ends them -- or, given the drive stance the crossing finishes in
+ * (FPlannerInput::Finish), in that stance: the centre wheels walked to its
+ * fore/aft, the seat at its pivot, the wheels it has off the ground lifted
+ * once the robot as measured stands inside the others), Done; Halted (a
+ * fault or Halt: stopping).
  *
  * Finishing in place (FinishInPlace: the rider let go once nothing left needs
  * the robot to travel -- every wheel across, or off the ground past its window
@@ -483,6 +487,9 @@ namespace RammsCurb
 		/** Off the ground in the drive stance, set down in the level-in (rather
 		 *  than held up to its window). */
 		bool bLower = false;
+		/** Lifted into the drive stance the crossing finishes in (Held, at the
+		 *  stance's height: FPlannerInput::Finish), every wheel being across. */
+		bool bStanceUp = false;
 		/** Measured this tick: its centre's distance past the edge (cm), and its
 		 *  bottom over the surface it follows (cm; RawBottomCm over its plane,
 		 *  BottomCm over the plane and its bias). */
@@ -783,6 +790,23 @@ namespace RammsCurb
 		 *  faster than TiltRateDegPerSec. OutEndAttitude: that end attitude (deg;
 		 *  pitch, roll). */
 		FPlanAt StepFinishPose(const FExecMeasure& Measure, double Dt, FVector2D& OutEndAttitude);
+		/** Settling, into the drive stance the crossing finishes in
+		 *  (FPlannerInput::Finish): the wheels the stance has off the ground
+		 *  lifted together once the robot, as measured with them up, stands at
+		 *  least MinStabilityMargin inside the wheels left down. */
+		void StepStanceLift(const FExecMeasure& Measure, double Dt);
+		/** A centre wheel's fore/aft to walk to: the finish stance's once every
+		 *  wheel is across (Settle) -- or further forward, while the seat comes
+		 *  back, where that lets the stance's lifted wheels go up or keeps them
+		 *  up (FinishCentreGoal) --, else PlanX. */
+		double EndCentreX(double PlanX) const;
+		/** MarginWithout with both centre wheels Dx (cm) further forward than
+		 *  they are measured. */
+		double MarginWithCentresAt(const FExecMeasure& Measure, uint32 Without, double Dx) const;
+		/** Every wheel the finish stance lifts is up at its height (or the lift
+		 *  has waited FinishLiftWaitSeconds on the margin with the seat and the
+		 *  centre wheels where the stance has them: left to the hand-back). */
+		bool StanceLiftsDone() const;
 		/** The plan's speed at travel SAt (cm/s), read no nearer its origin (or
 		 *  the planned stop the robot last rested at, SResume) than its first
 		 *  sample past it: a robot at or behind the origin of a plan made at rest
@@ -998,6 +1022,19 @@ namespace RammsCurb
 		double SettledAt = -1.0;
 		bool   bLoggedBaseWait = false;
 		bool   bLoggedSeatWait = false;
+		/** Settling into the finish stance: its lift waiting on the margin (logged
+		 *  once), for how long with the seat and the centre wheels already there
+		 *  (s), and given up on. */
+		bool   bLoggedStanceWait = false;
+		double StanceLiftWaited = 0.0;
+		bool   bStanceLiftGivenUp = false;
+		/** Settling into the finish stance: where the centre wheels are sent
+		 *  fore/aft (cm; with bFinishCentreGoal, else the stance's own) -- ahead of the stance while the
+		 *  seat is still forward, so that the robot stands inside them and the
+		 *  rear corners with the stance's lifted wheels up (Ramms.Curb.FinishCentreLead). */
+		double FinishCentreGoal = 0.0;
+		bool   bFinishCentreGoal = false;
+		bool   bLoggedCentreLead = false;
 		/** The next planned stop (sample), and whether the robot is resting at it
 		 *  (and since when). */
 		int32  NextStop = INDEX_NONE;
