@@ -228,7 +228,7 @@ namespace RammsCurb
 	} // namespace
 
 	constexpr double SeatSettleCm = 2.0;
-	/** Up a curb with the hand-off: a carrying centre wheel walks aft up to this
+	/** With the centre hand-off (up or down a curb): a carrying centre wheel walks aft up to this
 	 *  much (cm/s) faster than MaxAftWalkPerCm of the chassis' speed (so that it
 	 *  is not stuck at rest, and its command can lead the loaded 5-bar's lag);
 	 *  and the seat this far (cm) behind the plan's
@@ -248,6 +248,22 @@ namespace RammsCurb
 	{
 		return Wheels.IsValidIndex(Leg)
 			&& (Wheels[Leg].State == ERammsCurbWheelState::Planted || Wheels[Leg].State == ERammsCurbWheelState::Loading);
+	}
+
+	bool FExecutor::IsDownFor(int32 Leg, int32 For) const
+	{
+		if (!Wheels.IsValidIndex(Leg) || !Plan.Wheels.IsValidIndex(For))
+		{
+			return false;
+		}
+		const FExecWheel& W = Wheels[Leg];
+		if (W.State == ERammsCurbWheelState::Planted)
+		{
+			return true;
+		}
+		// Touched down on its surface (not held off it at its reach, nor only
+		// timed or pressed down): its load to come as the lift begins.
+		return ((Plan.Wheels[For].TouchSufficesMask >> Leg) & 1u) && W.State == ERammsCurbWheelState::Loading && !W.bReachClamped && W.BottomCm <= TouchCm;
 	}
 
 	bool FExecutor::HasCrossingBegun() const
@@ -844,7 +860,11 @@ namespace RammsCurb
 				Centre[M.Side(j)] = j;
 			}
 		}
-		double Least = TNumericLimits<double>::Max();
+		// A plan whose rear lifts may follow a centre wheel's touchdown
+		// (Ramms.Curb.RearLiftAtCentreTouchdown): such a wheel, down on time,
+		// carries for its rear's lift as the plan has it.
+		const bool bCarry = Plan.bTouchCarries;
+		double	   Least = TNumericLimits<double>::Max();
 		for (int32 k = K0; k <= K1; k += 2)
 		{
 			const FScheduleSample& Sm = Plan.Samples[k];
@@ -884,6 +904,16 @@ namespace RammsCurb
 				{
 					Q.X[Centre[Side]] = Sm.X[Side];
 				}
+			}
+			if (bCarry)
+			{
+				// (Not a late wheel: one still up past its touchdown.)
+				uint32 Carry = Plan.CarriedAt(Sm.S, Sm.AirborneMask);
+				for (int32 j = 0; j < NW && j < UpUntilS.Num(); ++j)
+				{
+					Carry &= Sm.S < UpUntilS[j] ? ~(1u << j) : ~0u;
+				}
+				CarryTouchingCentres(M, Q, Carry);
 			}
 			const FInstantResult R = M.Evaluate(Q, Sm.B, /*bAtGuess=*/true);
 			const double		 Margin = R.Support >= 3 ? R.Margin : -1e9;
@@ -1322,7 +1352,7 @@ namespace RammsCurb
 		}
 		for (int32 j = 0; j < Wheels.Num(); ++j)
 		{
-			if (((P.MustBeDownMask >> j) & 1u) && Wheels[j].State != ERammsCurbWheelState::Planted)
+			if (((P.MustBeDownMask >> j) & 1u) && !IsDownFor(j, Leg))
 			{
 				OutWhy = FString::Printf(TEXT("waits for '%s' to land (it is %s)"), *In.Legs[j].Name.ToString(), WheelStateName(Wheels[j].State));
 				return false;
@@ -1647,12 +1677,17 @@ namespace RammsCurb
 			const double Lift = (bClimb ? (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) : UnloadSeconds) + ExecGapMarginSeconds;
 			for (int32 j = 0; j < Wheels.Num(); ++j)
 			{
-				if (!((P.MustBeDownMask >> j) & 1u) || Wheels[j].State == ERammsCurbWheelState::Planted)
+				if (!((P.MustBeDownMask >> j) & 1u) || IsDownFor(j, i))
 				{
 					continue;
 				}
 				double Gate = 0.0, Work = 0.0;
 				LandingWork(j, Measure, Gate, Work);
+				// (Down is enough for it: its load not waited for.)
+				if ((P.TouchSufficesMask >> j) & 1u)
+				{
+					Work = FMath::Max(0.0, Work - Plan.Wheels[j].TLoad);
+				}
 				const double After = (Room - Gate) / FMath::Max(Work + Lift, static_cast<double>(MinDeadlineSeconds));
 				Offer(After <= 0.0 ? 0.0 : FMath::Sqrt(After * After + 2.0 * Dec * Gate), i);
 			}
@@ -2549,7 +2584,12 @@ namespace RammsCurb
 					// there -- (for TouchdownFaultSeconds), or pressing on it there:
 					// a fault, naming it.
 					const bool bAbove = W.BottomCm > T.LandingToleranceCm + TerrainToleranceCm;
-					const bool bHeldUp = bLegStopped && L.XZ.Y - L.LagZ >= StallCm && W.CmdZ < L.XZ.Y && bAbove;
+					// (Not a 5-bar trailing its fore/aft as well: its motors are behind
+					// both -- set down while walked aft, held still over the ground --
+					// not its wheel stopped by something under it, which leaves its
+					// fore/aft free.)
+					const bool bXBehind = L.bLagX && FMath::Abs(L.XZ.X - L.LagX) >= XBehindCm;
+					const bool bHeldUp = bLegStopped && L.XZ.Y - L.LagZ >= StallCm && W.CmdZ < L.XZ.Y && bAbove && !bXBehind;
 					if (W.LandHigh.Tick(bHeldUp, Dt, TouchdownFaultSeconds) || (bPressing && bAbove))
 					{
 						W.bLandFault = true;
@@ -2742,7 +2782,28 @@ namespace RammsCurb
 				const int32 Side = M->Side(i);
 				// Every wheel across, into the stance the crossing finishes in: the
 				// stance's fore/aft (EndCentreX).
-				const double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : EndCentreX(Ahead.X[Side]);
+				double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : EndCentreX(Ahead.X[Side]);
+				// Still in the air at its landing, not yet setting down: walked aft no
+				// further than keeps it past the end of its window (or where it is,
+				// short of that) -- the plan holds a landing wheel still over the
+				// ground from just past there (Ramms.Curb.CentreGroundHoldFrom), and
+				// that walk sent a servo lag ahead would hold it short of where its
+				// landing may begin.
+				const FWheelPlan& WP = Plan.Wheels[i];
+				if (!bDwelling && !bFinishInPlace && W.Plane == 0 && (W.State == ERammsCurbWheelState::Lifting || W.State == ERammsCurbWheelState::Clear)
+					&& S >= WP.SLand - 1.0 && To < W.CmdX && CentreHandOffOn(M->IsClimb(), In.Model))
+				{
+					// (The command runs a servo lag ahead of the wheel, which follows
+					// that far behind it: the wheel past the window's end with the
+					// command that much short of it.)
+					const double Lead = FMath::Max(0.0, VHat) * FMath::Max(0.0, static_cast<double>(T.ServoLagSeconds)) * M->NormalShare();
+					const double Need = WP.DDown + LandGateSlackCm - Lead;
+					const double D = M->DistancePast(i, S, To);
+					if (D < Need)
+					{
+						To = FMath::Max(To, FMath::Min(W.CmdX, To + (Need - D) / FMath::Max(0.1, M->NormalShare())));
+					}
+				}
 				if (!bCentresHeld)
 				{
 					double Step = CSS * (bFinishInPlace ? 1.0 : 1.25) * Dt;
@@ -2751,9 +2812,28 @@ namespace RammsCurb
 					// travels -- it may stand still on the ground, but walked faster it
 					// would push the chassis on through its 5-bar, whatever the wheels
 					// are asked (the oblique climb up a grade ran away so).
-					if (To < W.CmdX && IsSupport(i) && !bDwelling && CentreHandOffOn(M->IsClimb()))
+					if (To < W.CmdX && IsSupport(i) && !bDwelling && CentreHandOffOn(M->IsClimb(), In.Model))
 					{
-						Step = FMath::Min(Step, (MaxAftWalkPerCmNow(M->IsClimb()) * FMath::Max(0.0, VHat) + PlantedWalkSlackCmS) * Dt);
+						Step = FMath::Min(Step, (MaxAftWalkPerCmNow(M->IsClimb(), In.Model) * FMath::Max(0.0, VHat) + PlantedWalkSlackCmS) * Dt);
+					}
+					// One landing -- being set down, or in the air past where its landing
+					// begins -- no faster than the plan walks it there (at least the
+					// travel) and LandingWalkSlackCmS (the support's slack: less blocked
+					// the rear's lift): all but still over the ground as it comes
+					// down, not snapped aft after the landing gate above has held it.
+					else if (To < W.CmdX && !bDwelling && CentreHandOffOn(M->IsClimb(), In.Model)
+						&& (W.State == ERammsCurbWheelState::Planting
+							|| ((W.State == ERammsCurbWheelState::Lifting || W.State == ERammsCurbWheelState::Clear) && S >= WP.SLand - 1.0)))
+					{
+						const double PerCm = FMath::Max(1.0, Between(S).X[Side] - Between(S + 1.0).X[Side]);
+						Step = FMath::Min(Step, (PerCm * FMath::Max(0.0, VHat) + LandingWalkSlackCmS) * Dt);
+						// Its set-down begun: not walked for LandingWalkDelaySeconds -- set down
+						// and walked aft at once, its 5-bar's motors fell behind both, and
+						// the leg read as held up over its landing.
+						if (W.State == ERammsCurbWheelState::Planting && Elapsed - W.Since < LandingWalkDelaySeconds)
+						{
+							Step = 0.0;
+						}
 					}
 					if (Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasCentreX && IsSupport(i))
 					{
@@ -2882,14 +2962,14 @@ namespace RammsCurb
 				// A planned seat is one it can follow, the plan verified with it
 				// there: followed a servo lag ahead, and past the plan's last
 				// sample on to where it goes once the crossing is over.
-				// (Up a curb with the hand-off, a forward move looked further ahead once
+				// (With the centre hand-off, up or down a curb, a forward move looked further ahead once
 				// a wheel stands across: ClimbSeatLeadSeconds.)
 				bool bAcross = false;
 				for (const FExecWheel& Wh : Wheels)
 				{
 					bAcross |= Wh.Plane == 1 && (Wh.State == ERammsCurbWheelState::Planted || Wh.State == ERammsCurbWheelState::Loading);
 				}
-				const double Lead = bAcross && CentreHandOffOn(M->IsClimb()) ? ClimbSeatLeadSeconds() : 0.0;
+				const double Lead = bAcross && CentreHandOffOn(M->IsClimb(), In.Model) ? ClimbSeatLeadSeconds() : 0.0;
 				double		 SeatAhead = S + FMath::Max(0.0, Measure.SpeedCmS) * T.ServoLagSeconds;
 				Want = SeatAhead >= Plan.Samples.Last().S ? Plan.SeatEndX : Between(SeatAhead).SeatX;
 				if (Lead > 0.0)
@@ -3285,10 +3365,10 @@ namespace RammsCurb
 					Lag = FMath::Max(Lag, FMath::Abs(Measure.Legs[C].XZ.X - (bFinishWalk ? Wheels[C].CmdX : Here.X[Side])));
 				}
 			}
-			// Up a curb with the hand-off, the seat behind where the plan has it
+			// With the centre hand-off (up or down a curb), the seat behind where the plan has it
 			// moving forward slows the robot the same way (half as much per cm,
 			// past SeatLagFreeCm): it goes no further forward than a pose needs.
-			if (Phase != EExecPhase::Settle && Plan.bSeatPlanned && In.Model.Seat.Shifts() && CentreHandOffOn(M->IsClimb()))
+			if (Phase != EExecPhase::Settle && Plan.bSeatPlanned && In.Model.Seat.Shifts() && CentreHandOffOn(M->IsClimb(), In.Model))
 			{
 				const double SeatAt = Measure.Seat.bValid ? Measure.Seat.Pivot.X : SeatCmdX;
 				Lag = FMath::Max(Lag, 0.5 * FMath::Max(0.0, Here.SeatX - SeatAt - SeatLagFreeCm));
@@ -4209,7 +4289,7 @@ namespace RammsCurb
 					}
 					for (int32 j = 0; j < N; ++j)
 					{
-						if (((Plan.Wheels[i].MustBeDownMask >> j) & 1u) && E.GetWheels()[j].State != ERammsCurbWheelState::Planted)
+						if (((Plan.Wheels[i].MustBeDownMask >> j) & 1u) && !E.IsDownFor(j, i))
 						{
 							++Out.EarlyLifts;
 							Note(FString::Printf(TEXT("%.2f s: '%s' lifted with '%s' %s"), Time, *In.Legs[i].Name.ToString(), *In.Legs[j].Name.ToString(),

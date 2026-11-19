@@ -210,6 +210,22 @@ namespace RammsCurb
 	 *  the landing check faults above, so that every landing stopped short of
 	 *  its surface is either a touchdown or a fault. */
 	constexpr double TouchCm = 0.3;
+	/** A centre wheel in the air at its landing is walked aft no further than
+	 *  keeps it this far (cm) past the end of its window until it sets down. */
+	constexpr double LandGateSlackCm = 0.5;
+	/** A 5-bar this far (cm) off its fore/aft lag model is trailing its
+	 *  commands (its motors behind), well over TrackingErrorCm: a landing it
+	 *  stops short of then is not one held up by something under the wheel. */
+	constexpr double XBehindCm = 1.0;
+	/** A centre wheel landing walks aft no faster than its plan walks it and
+	 *  this (cm/s): it comes down standing all but still over the ground, and
+	 *  its command still gets the servo lag's lead on the plan (with less, a
+	 *  held wheel trailed its plan by that lag as the rear corner lifted, and
+	 *  the lift was blocked). */
+	constexpr double LandingWalkSlackCmS = 10.0;
+	/** A centre wheel's set-down begins with this long (s) unwalked: it comes
+	 *  down first, its walk aft then catching up at LandingWalkSlackCmS. */
+	constexpr double LandingWalkDelaySeconds = 0.12;
 	/** A leg stopped this much (cm) above where the servo lag model has it,
 	 *  going down, has met the ground. */
 	constexpr double StallCm = 0.4;
@@ -760,6 +776,11 @@ namespace RammsCurb
 		ERammsCurbAxle GetLatestAxle() const { return LatestAxle; }
 		/** On the ground and carrying: Planted or Loading. */
 		bool IsSupport(int32 Leg) const;
+		/** Wheel Leg down as wheel For's lift waits for it (For's
+		 *  MustBeDownMask): Planted -- or, where its touchdown is enough
+		 *  (TouchSufficesMask, Ramms.Curb.RearLiftAtCentreTouchdown), Loading on
+		 *  its surface. */
+		bool IsDownFor(int32 Leg, int32 For) const;
 		/** The lines logged since the last call (moved out). */
 		void TakeLog(TArray<FString>& Out);
 		/** The level-in has begun (Prepare or later). */
@@ -1140,7 +1161,8 @@ namespace RammsCurb
 		int32  KeepOffViolations = 0;
 		int32  IntoTerrain = 0;
 		/** Lifts begun before a wheel they wait on (MustBeDownMask) had taken
-		 *  load. */
+		 *  load -- or, where its touchdown is enough (TouchSufficesMask), had
+		 *  touched down (FExecutor::IsDownFor). */
 		int32 EarlyLifts = 0;
 		/** Paused by the stick (FExecDryRunOptions::PauseAtTravelCm): lifts and
 		 *  level-ins begun meanwhile, how far (cm) the robot went on from where it

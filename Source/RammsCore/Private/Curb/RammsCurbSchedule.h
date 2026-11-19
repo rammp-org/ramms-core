@@ -92,6 +92,10 @@ namespace RammsCurb
 		 *  have taken load would leave a set off the ground the robot does not
 		 *  stand on (bit per leg). */
 		uint32 MustBeDownMask = 0;
+		/** Of MustBeDownMask, the wheels touched down (on their surface, not yet
+		 *  loaded) is enough for: a rear corner's side's centre wheel with
+		 *  Ramms.Curb.RearLiftAtCentreTouchdown (bit per leg). */
+		uint32 TouchSufficesMask = 0;
 		/** Held off the ground from the start (the stance the robot drove up in)
 		 *  rather than lifted. */
 		bool bHeldFromStart = false;
@@ -159,6 +163,27 @@ namespace RammsCurb
 		/** The least planned speed once the robot has risen from rest (cm/s),
 		 *  planned stops left out. */
 		double VFloor = 0.0;
+		/** Its centre wheels held on the ground while the rear corners cross
+		 *  (Ramms.Curb.CentreGroundHoldCm): of two plans otherwise alike, the
+		 *  held one is kept where its floor is near the other's. */
+		bool bCentresHeld = false;
+		/** Planned with Ramms.Curb.RearLiftAtCentreTouchdown: a centre wheel
+		 *  touched down, not yet loaded (a sample from its SDown to its SLoaded
+		 *  by half a sample), counts as carrying while its side's rear corner is
+		 *  up (CarryTouchingCentres; CarriedAt). */
+		bool bTouchCarries = false;
+		/** The centre wheels of AirborneAt that count as carrying at travel S
+		 *  (bTouchCarries; bit per leg). */
+		uint32 CarriedAt(double S, uint32 AirborneAt) const
+		{
+			uint32 Carry = 0;
+			for (int32 j = 0; bTouchCarries && j < Wheels.Num(); ++j)
+			{
+				const double At = S - 0.5 * SampleCm;
+				Carry |= ((AirborneAt >> j) & 1u) && At >= Wheels[j].SDown && At < Wheels[j].SLoaded ? 1u << j : 0u;
+			}
+			return Carry;
+		}
 		/** The largest planned inclination of the base from level (deg; its total
 		 *  tilt, RammsCurb::InclinationDeg), and the largest planned pitch and
 		 *  roll (each signed as planned). */

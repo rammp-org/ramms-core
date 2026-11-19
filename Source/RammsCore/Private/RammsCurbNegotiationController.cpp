@@ -2122,7 +2122,7 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	// (Ramms.Curb.ClimbCentreHandOff up a curb, DescentCentreHandOff down one):
 	// fast enough a walk for a landed centre wheel to stand still under the
 	// chassis.
-	if (RammsCurb::CentreHandOffOn(In.Terrain.StepHeightCm >= 0.0f))
+	if (RammsCurb::CentreHandOffOn(In.Terrain.StepHeightCm >= 0.0f, In.Model))
 	{
 		In.Tuning.CenterShiftSpeed = FMath::Max(In.Tuning.CenterShiftSpeed, static_cast<float>(RammsCurb::ClimbCentreWalkSpeedCmS()));
 	}

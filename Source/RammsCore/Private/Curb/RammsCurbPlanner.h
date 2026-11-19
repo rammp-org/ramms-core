@@ -103,19 +103,25 @@ namespace RammsCurb
 	constexpr double LegSettleSeconds = 0.05;
 	/** A planted centre wheel walks aft at most this much per cm of travel:
 	 *  its ground speed stays at least 0.3 of the chassis'. The planner uses
-	 *  MaxAftWalkPerCmNow() (Ramms.Curb.MaxAftWalkPerCm, this by default). */
+	 *  MaxAftWalkPerCmNow() (Ramms.Curb.MaxAftWalkPerCm, this by default; 1
+	 *  with the centre hand-off: it may stand still on the ground). */
 	constexpr double MaxAftWalkPerCm = 0.7;
-	double			 MaxAftWalkPerCmNow(bool bClimb);
-	/** The centre hand-off on for a crossing up (bClimb) or down a curb
-	 *  (Ramms.Curb.ClimbCentreHandOff, Ramms.Curb.DescentCentreHandOff); and the
-	 *  centre wheels' walk speed (cm/s) it takes at the least
+	double			 MaxAftWalkPerCmNow(bool bClimb, const FRobotModel& Model);
+	/** The centre hand-off on for a crossing up (bClimb) or down a curb by a
+	 *  robot whose seat shifts (Ramms.Curb.ClimbCentreHandOff,
+	 *  Ramms.Curb.DescentCentreHandOff, both on by default); and the centre
+	 *  wheels' walk speed (cm/s) it takes at the least
 	 *  (Ramms.Curb.ClimbCentreWalkSpeedCmS), and how far ahead in time (s) it
 	 *  sends a planned seat moving forward once a wheel stands across
 	 *  (Ramms.Curb.ClimbSeatLeadSeconds). */
-	bool   CentreHandOffOn(bool bClimb);
-	bool   ClimbCentreHandOffOn();
+	bool   CentreHandOffOn(bool bClimb, const FRobotModel& Model);
 	double ClimbCentreWalkSpeedCmS();
 	double ClimbSeatLeadSeconds();
+	/** With the hand-off and Ramms.Curb.RearLiftAtCentreTouchdown: a rear
+	 *  corner may lift once its side's centre wheel has touched down, the
+	 *  touching wheel counted as carrying for it (CarryTouchingCentres; the
+	 *  plan's FWheelPlan::TouchSufficesMask). */
+	bool RearLiftAtCentreTouchdownOn(bool bClimb, const FRobotModel& Model);
 	/** The planned tilt is searched on rings of inclination this far apart
 	 *  (deg), each ring's tilts about this far apart along it. */
 	constexpr double TiltGridDeg = 0.25;
@@ -511,6 +517,12 @@ namespace RammsCurb
 		 *  surface (a leg at its reach touches down only once the chassis has
 		 *  come down to it), but carries nothing yet (bit per leg). */
 		uint32 Touching = 0;
+		/** Of those on the ground (not in Airborne), the centre wheels touched
+		 *  down but not yet loaded that are counted as carrying for their side's
+		 *  rear corner's lift (CarryTouchingCentres): on the far surface as a
+		 *  support, but off the ground for the margin the pose must keep (bit
+		 *  per leg). */
+		uint32 Carried = 0;
 		/** Each 5-bar's fore/aft (cm, chassis frame), by leg. */
 		double X[MaxPlanLegs] = {};
 		/** The seat's pivot fore/aft (cm, chassis frame) the instant is held
@@ -714,6 +726,12 @@ namespace RammsCurb
 		double HandOffSeatReserveCm = 0.0;
 	};
 
+	/** Q with each centre wheel in Carry (touched down, not yet loaded) whose
+	 *  side's rear corner is off the ground counted as carrying -- down on
+	 *  the far surface, its bit in Q.Carried
+	 *  (Ramms.Curb.RearLiftAtCentreTouchdown). */
+	void CarryTouchingCentres(const FPlanModel& M, FInstantQuery& Q, uint32 Carry);
+
 	/**
 	 * Plan the crossing from where the robot is: the first plan that keeps the
 	 * base level at or above the floor speed; else, stretch by stretch where
@@ -763,8 +781,11 @@ namespace RammsCurb
 	 *  planner stage (EPlanStage: level at its own speeds, level slowed, tilt,
 	 *  planned stops, refused -- the class, with a level plan that had to be
 	 *  slowed ranked under one that did not), then the less inclined, the
-	 *  fewer planned stops, the higher floor speed. A plan that does not say
-	 *  its stage is ranked by its class. */
+	 *  fewer planned stops, then the one with its centre wheels held on the
+	 *  ground (FCurbSchedule::bCentresHeld) where its floor is at least
+	 *  Ramms.Curb.CentreGroundHoldFloorShare of the other's, then the higher
+	 *  floor speed. A plan that does not say its stage is ranked by its
+	 *  class. */
 	bool IsBetterPlan(const FCurbSchedule& A, const FCurbSchedule& B);
 
 	/**
