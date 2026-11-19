@@ -350,6 +350,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FRammsCurbAssist Assist;
 
+	/** How the rider likes crossings run (FRammsCurbPreferences): speed, smoothness and tilt, the sliders curb.pref.*
+	 *  on the control surface, 0.5 each the tuning as it is set. They shape the next crossing planned (its planner and
+	 *  executor take Tuning so shaped), not one under way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbPreferences Preferences;
+
+	/** Tuning as Preferences shape it: what a crossing is planned and run with. */
+	UFUNCTION(BlueprintPure, Category = "Curb")
+	FRammsCurbTuning GetCrossingTuning() const;
+
 	/** Drive mode to hand back to when done. None returns to whichever mode
 	 *  was active when the manoeuvre began. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")

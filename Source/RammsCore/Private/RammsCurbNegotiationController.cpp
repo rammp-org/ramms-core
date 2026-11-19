@@ -3,6 +3,7 @@
 #include "RammsCurbNegotiationController.h"
 
 #include "Curb/RammsCurbAssist.h"
+#include "Curb/RammsCurbPreferences.h"
 #include "Curb/RammsCurbDebugView.h"
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
@@ -2115,11 +2116,13 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	In.OriginZ = MeasuredOriginZ;
 	In.Heading = FVector2D(Heading.X, Heading.Y).GetSafeNormal();
 	In.AttitudeDeg = FVector2D(MeasuredPitchDeg, MeasuredRollDeg);
-	In.Tuning = Tuning;
-	// Up a curb with the centre wheels taking over the balancing at the rear
-	// lift (Ramms.Curb.ClimbCentreHandOff): fast enough a walk for a landed
-	// centre wheel to stand still under the chassis.
-	if (RammsCurb::ClimbCentreHandOffOn() && In.Terrain.StepHeightCm >= 0.0f)
+	// The tuning as the rider's preferences shape it (FRammsCurbPreferences).
+	In.Tuning = GetCrossingTuning();
+	// With the centre wheels taking over the balancing at the rear corners
+	// (Ramms.Curb.ClimbCentreHandOff up a curb, DescentCentreHandOff down one):
+	// fast enough a walk for a landed centre wheel to stand still under the
+	// chassis.
+	if (RammsCurb::CentreHandOffOn(In.Terrain.StepHeightCm >= 0.0f))
 	{
 		In.Tuning.CenterShiftSpeed = FMath::Max(In.Tuning.CenterShiftSpeed, static_cast<float>(RammsCurb::ClimbCentreWalkSpeedCmS()));
 	}
@@ -2544,7 +2547,7 @@ bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArr
 	}
 	const int32 N = FMath::Max(2, FMath::CeilToInt((To - From) / SpanSampleCm) + 1);
 	const float Ds = (To - From) / (N - 1);
-	const float VPlan = FMath::Max3(Tuning.DriveSpeed, MeasuredWheelSpeed(), 1.0f);
+	const float VPlan = FMath::Max3(GetCrossingTuning().DriveSpeed, MeasuredWheelSpeed(), 1.0f);
 	const float Rate = Tuning.BaseHeightSpeed * Ds / VPlan;
 	const float Half = 0.5f * Tuning.MinCorridorCm;
 
@@ -2806,7 +2809,7 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	// the base is level before any wheel is LevelBeforeEdgeCm from its edge.
 	const float PrepareFrom = (bClimb ? -(FrontRadius + Tuning.FaceMargin) : -Tuning.EdgeMargin) - Tuning.PrepareDistance;
 	const float ApproachDeg = Profile.Terrain.bValid ? Profile.Terrain.ApproachAngleDeg : Profile.ApproachAngleDeg;
-	const float VPlan = FMath::Max(Tuning.DriveSpeed, MeasuredWheelSpeed());
+	const float VPlan = FMath::Max(GetCrossingTuning().DriveSpeed, MeasuredWheelSpeed());
 	const float EarliestLevelIn = FMath::Min(PrepareFrom, -RammsCurb::LevelInStartCm(RammsCurb::LevelInPlanSeconds, VPlan, ApproachDeg));
 	// Where each axle's legs may start to move for it: the level-in for the
 	// front, the axle before's landing for the others (moved on below when
@@ -3197,10 +3200,11 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	}
 	Steps.Add(Settle);
 
-	PlannedMinSpeed = Tuning.DriveSpeed;
+	const float Cruise = GetCrossingTuning().DriveSpeed;
+	PlannedMinSpeed = Cruise;
 	for (const FStep& S : Steps)
 	{
-		PlannedMinSpeed = FMath::Min(PlannedMinSpeed, Tuning.DriveSpeed * S.SpeedFraction);
+		PlannedMinSpeed = FMath::Min(PlannedMinSpeed, Cruise * S.SpeedFraction);
 	}
 
 	// The level-in: the approach ends, and the first Prepare brings the base
@@ -3618,7 +3622,7 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	if (Telemetry)
 	{
 		Telemetry->Stats.Begin(PlannedMinSpeedCmS, PlannedTiltDeg, PlannedSeconds,
-			bPlannedMargin ? TOptional<float>(PlannedMinMargin) : TOptional<float>(), Tuning.DriveSpeed * RammsCurb::CruiseFloorFraction);
+			bPlannedMargin ? TOptional<float>(PlannedMinMargin) : TOptional<float>(), GetCrossingTuning().DriveSpeed * RammsCurb::CruiseFloorFraction);
 		FVector2D Centre, Forward;
 		if (LocateChassis(Centre, Forward))
 		{
@@ -6197,7 +6201,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 			// its share of the drive speed -- at Deceleration either way.
 			if (bStickPaused || StickScale < 1.0)
 			{
-				const float Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * Tuning.DriveSpeed;
+				const float Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * GetCrossingTuning().DriveSpeed;
 				DriveSpeed = FMath::Min(DriveSpeed, FMath::Max(Want, DriveSpeed - Tuning.Deceleration * DeltaTime));
 			}
 			DriveSpeed = FMath::Max(0.0f, FMath::Min(DriveSpeed, Cap));
@@ -7691,6 +7695,8 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	OutSurface.Add(RammsCurb::MakeStatusControl(2));
 
 	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 4));
+	// The rider's preferences: how the next crossing runs.
+	RammsCurb::DescribePreferenceControls(OutSurface, Preferences, 5);
 
 	// The rider's stick (Stick), while a crossing has the robot: the drive
 	// controls every drive mode offers, so that the stick a rider holds reaches
@@ -7768,8 +7774,17 @@ bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 		}
 		return true;
 	}
+	if (RammsCurb::ApplyPreferenceControl(Preferences, Id, Value))
+	{
+		return true;
+	}
 	// The debug view's switches.
 	return RammsCurb::ApplyViewControl(DebugView, RammsCurb::ViewLayer::All, Id, Value);
+}
+
+FRammsCurbTuning URammsCurbNegotiationController::GetCrossingTuning() const
+{
+	return RammsCurb::ApplyPreferences(Tuning, Preferences);
 }
 
 bool URammsCurbNegotiationController::ReadControlText(FName Id, FText& OutText) const
@@ -7967,7 +7982,7 @@ bool URammsCurbNegotiationController::ReadTarget(FName Id, float& OutTarget) con
 {
 	// A switch's target is what it is set to, however it was set (the panel
 	// steps from it).
-	if (Id == RammsCurb::AssistControlId())
+	if (Id == RammsCurb::AssistControlId() || RammsCurb::ReadPreferenceControl(Preferences, Id, OutTarget))
 	{
 		return ReadControl(Id, OutTarget);
 	}
@@ -8036,6 +8051,10 @@ bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) con
 	if (Id == RammsCurb::AssistControlId())
 	{
 		OutValue = Assist.bEnabled ? 1.0f : 0.0f;
+		return true;
+	}
+	if (RammsCurb::ReadPreferenceControl(Preferences, Id, OutValue))
+	{
 		return true;
 	}
 	// The debug view's switches.

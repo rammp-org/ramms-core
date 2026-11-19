@@ -374,12 +374,11 @@ namespace RammsCurb
 		}
 	} // namespace
 
-	double HullMargin(TConstArrayView<FVector2D> Points, const FVector2D& P)
+	FSupportHull::FSupportHull(TConstArrayView<FVector2D> Points)
 	{
 		// Andrew's monotone chain, counter-clockwise, collinear points dropped.
 		TArray<FVector2D, TInlineAllocator<16>> Sorted(Points.GetData(), Points.Num());
 		Sorted.Sort([](const FVector2D& A, const FVector2D& B) { return A.X < B.X || (A.X == B.X && A.Y < B.Y); });
-		TArray<FVector2D, TInlineAllocator<16>> Unique;
 		for (const FVector2D& Q : Sorted)
 		{
 			if (Unique.Num() == 0 || (Q - Unique.Last()).SizeSquared() > 1e-12)
@@ -389,7 +388,7 @@ namespace RammsCurb
 		}
 		if (Unique.Num() == 0)
 		{
-			return TNumericLimits<double>::Lowest();
+			return;
 		}
 		TArray<FVector2D, TInlineAllocator<16>> Hull;
 		for (int32 Pass = 0; Pass < 2; ++Pass)
@@ -409,13 +408,9 @@ namespace RammsCurb
 		if (Hull.Num() < 3)
 		{
 			// A segment or a point: no area to stand inside.
-			if (Unique.Num() == 1)
-			{
-				return -(P - Unique[0]).Size();
-			}
-			return -SegmentDistance(Unique[0], Unique.Last(), P);
+			return;
 		}
-		double Margin = TNumericLimits<double>::Max();
+		bPolygon = true;
 		for (int32 k = 0; k < Hull.Num(); ++k)
 		{
 			const FVector2D& A = Hull[k];
@@ -427,10 +422,36 @@ namespace RammsCurb
 				continue;
 			}
 			// The left normal points inside a counter-clockwise hull.
-			const FVector2D N(-E.Y / Length, E.X / Length);
-			Margin = FMath::Min(Margin, FVector2D::DotProduct(P - A, N));
+			EdgeFrom.Add(A);
+			EdgeNormal.Add(FVector2D(-E.Y / Length, E.X / Length));
+		}
+	}
+
+	double FSupportHull::Margin(const FVector2D& P) const
+	{
+		if (Unique.Num() == 0)
+		{
+			return TNumericLimits<double>::Lowest();
+		}
+		if (!bPolygon)
+		{
+			if (Unique.Num() == 1)
+			{
+				return -(P - Unique[0]).Size();
+			}
+			return -SegmentDistance(Unique[0], Unique.Last(), P);
+		}
+		double Margin = TNumericLimits<double>::Max();
+		for (int32 k = 0; k < EdgeFrom.Num(); ++k)
+		{
+			Margin = FMath::Min(Margin, FVector2D::DotProduct(P - EdgeFrom[k], EdgeNormal[k]));
 		}
 		return Margin;
+	}
+
+	double HullMargin(TConstArrayView<FVector2D> Points, const FVector2D& P)
+	{
+		return FSupportHull(Points).Margin(P);
 	}
 
 	double ZmpShiftCm(double HeightCm, double AccelCmS2)
@@ -441,9 +462,15 @@ namespace RammsCurb
 	double DynamicMargin(TConstArrayView<FVector2D> Points, const FVector2D& ComXY, double HeightCm, const FVector2D& Heading,
 		double Acceleration, double Deceleration)
 	{
+		return DynamicMargin(FSupportHull(Points), ComXY, HeightCm, Heading, Acceleration, Deceleration);
+	}
+
+	double DynamicMargin(const FSupportHull& Hull, const FVector2D& ComXY, double HeightCm, const FVector2D& Heading, double Acceleration,
+		double Deceleration)
+	{
 		const FVector2D H = Heading.GetSafeNormal();
-		const double	SpeedingUp = HullMargin(Points, ComXY - H * ZmpShiftCm(HeightCm, Acceleration));
-		const double	Braking = HullMargin(Points, ComXY + H * ZmpShiftCm(HeightCm, Deceleration));
+		const double	SpeedingUp = Hull.Margin(ComXY - H * ZmpShiftCm(HeightCm, Acceleration));
+		const double	Braking = Hull.Margin(ComXY + H * ZmpShiftCm(HeightCm, Deceleration));
 		return FMath::Min(SpeedingUp, Braking);
 	}
 

@@ -2746,14 +2746,14 @@ namespace RammsCurb
 				if (!bCentresHeld)
 				{
 					double Step = CSS * (bFinishInPlace ? 1.0 : 1.25) * Dt;
-					// Up a curb with the hand-off (Ramms.Curb.ClimbCentreHandOff): a
+					// With the hand-off (Ramms.Curb.ClimbCentreHandOff / DescentCentreHandOff): a
 					// wheel carrying the robot walks aft no faster than the chassis
 					// travels -- it may stand still on the ground, but walked faster it
 					// would push the chassis on through its 5-bar, whatever the wheels
 					// are asked (the oblique climb up a grade ran away so).
-					if (To < W.CmdX && IsSupport(i) && !bDwelling && M->IsClimb() && ClimbCentreHandOffOn())
+					if (To < W.CmdX && IsSupport(i) && !bDwelling && CentreHandOffOn(M->IsClimb()))
 					{
-						Step = FMath::Min(Step, (MaxAftWalkPerCmNow(true) * FMath::Max(0.0, VHat) + PlantedWalkSlackCmS) * Dt);
+						Step = FMath::Min(Step, (MaxAftWalkPerCmNow(M->IsClimb()) * FMath::Max(0.0, VHat) + PlantedWalkSlackCmS) * Dt);
 					}
 					if (Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasCentreX && IsSupport(i))
 					{
@@ -2889,7 +2889,7 @@ namespace RammsCurb
 				{
 					bAcross |= Wh.Plane == 1 && (Wh.State == ERammsCurbWheelState::Planted || Wh.State == ERammsCurbWheelState::Loading);
 				}
-				const double Lead = bAcross && M->IsClimb() && ClimbCentreHandOffOn() ? ClimbSeatLeadSeconds() : 0.0;
+				const double Lead = bAcross && CentreHandOffOn(M->IsClimb()) ? ClimbSeatLeadSeconds() : 0.0;
 				double		 SeatAhead = S + FMath::Max(0.0, Measure.SpeedCmS) * T.ServoLagSeconds;
 				Want = SeatAhead >= Plan.Samples.Last().S ? Plan.SeatEndX : Between(SeatAhead).SeatX;
 				if (Lead > 0.0)
@@ -3288,7 +3288,7 @@ namespace RammsCurb
 			// Up a curb with the hand-off, the seat behind where the plan has it
 			// moving forward slows the robot the same way (half as much per cm,
 			// past SeatLagFreeCm): it goes no further forward than a pose needs.
-			if (Phase != EExecPhase::Settle && Plan.bSeatPlanned && In.Model.Seat.Shifts() && M->IsClimb() && ClimbCentreHandOffOn())
+			if (Phase != EExecPhase::Settle && Plan.bSeatPlanned && In.Model.Seat.Shifts() && CentreHandOffOn(M->IsClimb()))
 			{
 				const double SeatAt = Measure.Seat.bValid ? Measure.Seat.Pivot.X : SeatCmdX;
 				Lag = FMath::Max(Lag, 0.5 * FMath::Max(0.0, Here.SeatX - SeatAt - SeatLagFreeCm));

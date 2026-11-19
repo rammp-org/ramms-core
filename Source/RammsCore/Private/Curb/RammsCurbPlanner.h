@@ -106,10 +106,13 @@ namespace RammsCurb
 	 *  MaxAftWalkPerCmNow() (Ramms.Curb.MaxAftWalkPerCm, this by default). */
 	constexpr double MaxAftWalkPerCm = 0.7;
 	double			 MaxAftWalkPerCmNow(bool bClimb);
-	/** Ramms.Curb.ClimbCentreHandOff on; and the centre wheels' walk speed (cm/s)
-	 *  it takes up a curb at the least (Ramms.Curb.ClimbCentreWalkSpeedCmS), and
-	 *  how far ahead in time (s) it sends a planned seat moving forward once a
-	 *  wheel stands across (Ramms.Curb.ClimbSeatLeadSeconds). */
+	/** The centre hand-off on for a crossing up (bClimb) or down a curb
+	 *  (Ramms.Curb.ClimbCentreHandOff, Ramms.Curb.DescentCentreHandOff); and the
+	 *  centre wheels' walk speed (cm/s) it takes at the least
+	 *  (Ramms.Curb.ClimbCentreWalkSpeedCmS), and how far ahead in time (s) it
+	 *  sends a planned seat moving forward once a wheel stands across
+	 *  (Ramms.Curb.ClimbSeatLeadSeconds). */
+	bool   CentreHandOffOn(bool bClimb);
 	bool   ClimbCentreHandOffOn();
 	double ClimbCentreWalkSpeedCmS();
 	double ClimbSeatLeadSeconds();
@@ -655,6 +658,7 @@ namespace RammsCurb
 		 *  (world xy, Ground their heights' sum): the dynamic margin, or with
 		 *  fewer than three the hull's. */
 		double MarginFor(const FVector& Com, TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3) const;
+		double MarginFor(const FVector& Com, const FSupportHull& Hull, int32 NumContacts, double Ground, const FAxes& A, const FVector& O3) const;
 		/** Where the seat is for an instant: its pivot at SeatX (or, free,
 		 *  where the pose keeps its margin best, nearest the zero pose among
 		 *  equals) at the seat's crossing height, and the platform pitched
@@ -699,6 +703,15 @@ namespace RammsCurb
 		bool			   bClimb = true;
 		double			   Dilation = 3.0;
 		FAxes			   Level;
+		/** The console settings the free seat reads, taken once as the model is
+		 *  made (a plan does not change them half way, and the seat's sweep,
+		 *  hundreds of thousands of times a plan, does not read them each time):
+		 *  the hand-off for this crossing's direction, the least-travel seat, and
+		 *  how far over the requirement a pose needs no more. */
+		bool   bHandOff = false;
+		bool   bSeatLeastTravel = false;
+		double SeatEnoughOverCm = 3.0;
+		double HandOffSeatReserveCm = 0.0;
 	};
 
 	/**

@@ -345,7 +345,17 @@ bool FRammsCurbDebugViewControls::RunTest(const FString& Parameters)
 	Hidden.GetAxesInGroup(FName(TEXT("Curb view")), HiddenView);
 	Hidden.GetAxesInGroup(FName(TEXT("Curb")), Own);
 	TestEqual(TEXT("not offered when asked not to"), HiddenView.Num(), 0);
-	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, status, phase, assist)"), Own.Num(), 5);
+	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, status, phase, assist, the three preferences)"), Own.Num(), 8);
+	// The rider's preferences: sliders, set and read back through the controller.
+	const FName				 Speed(TEXT("curb.pref.speed"));
+	const FRammsControlAxis* SpeedAxis = Own.FindByPredicate([&](const FRammsControlAxis& A) { return A.Id == Speed; });
+	TestTrue(TEXT("curb.pref.speed: a slider"), SpeedAxis && SpeedAxis->Kind == ERammsControlKind::Position);
+	TestTrue(TEXT("curb.pref.speed: set"), Curb->ApplyControl(Speed, 0.25f));
+	TestTrue(TEXT("curb.pref.speed: read"), Curb->ReadControl(Speed, Value) && FMath::IsNearlyEqual(Value, 0.25f));
+	TestTrue(TEXT("curb.pref.speed: its target is its value"), Curb->ReadTarget(Speed, Value) && FMath::IsNearlyEqual(Value, 0.25f));
+	TestTrue(TEXT("the crossing's tuning slower for it"), Curb->GetCrossingTuning().DriveSpeed < Curb->Tuning.DriveSpeed);
+	Curb->Preferences = FRammsCurbPreferences();
+	TestEqual(TEXT("in the middle: the tuning's own pace"), Curb->GetCrossingTuning().DriveSpeed, Curb->Tuning.DriveSpeed);
 
 	// The status: read-only words, and how much they need the rider.
 	const FRammsControlAxis* StatusAxis = Own.FindByPredicate([](const FRammsControlAxis& A) { return A.Id == FName(TEXT("curb.status")); });

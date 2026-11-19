@@ -375,6 +375,41 @@ struct RAMMSCORE_API FRammsCurbAssist
 	float ScanIntervalSeconds = 0.1f;
 };
 
+/**
+ * How a rider likes a curb crossing to run, on a curb controller (URammsCurbNegotiationController::Preferences): three
+ * sliders on the control surface (curb.pref.speed, curb.pref.smoothness, curb.pref.tilt), each 0..1, 0.5 the robot's
+ * own tuning (FRammsCurbTuning) as it is set. They shape the next crossing planned, not one under way:
+ *  - Speed: the pace the crossing cruises at -- 0.6 times the tuning's DriveSpeed at 0, 1.3 times at 1. The planner
+ *    still slows wherever a wheel's lift, landing or the seat needs it.
+ *  - Smoothness: how gently the speed and the base's tilt change -- the crossing's acceleration and braking
+ *    (Acceleration, Deceleration) and the tilt's turn rate and its change (TiltRateDegPerSec, TiltAccelDegPerSec2),
+ *    1.5 times the tuning's at 0 (brisk), 0.6 times at 1 (gentle). Brisker changes reach the plan's speeds sooner;
+ *    the planner keeps its margins for them (the zero-moment point moves with the acceleration), so a brisk setting
+ *    can find a curb's margins tighter.
+ *  - Tilt: how far the planner may tilt the base where it cannot cross level (MaxPlannedTiltDeg) -- none at 0 (level,
+ *    or planned stops, or refused), 1.6 times the tuning's at 1 (at most 10 deg). The attitude the robot faults at
+ *    (MaxTiltDeg) is not a preference.
+ * The stability margins, the clearances and the legs' and seat's own limits are not preferences either: no setting
+ * here lets a crossing stand closer to tipping or move a motor faster than it may.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsCurbPreferences
+{
+	GENERATED_BODY()
+
+	/** 0 slowest .. 1 fastest; 0.5 the tuning's own pace. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Speed = 0.5f;
+
+	/** 0 brisk .. 1 gentle; 0.5 the tuning's own accelerations and tilt rates. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Smoothness = 0.5f;
+
+	/** 0 level only .. 1 the most planned tilt; 0.5 the tuning's own MaxPlannedTiltDeg. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Tilt = 0.5f;
+};
+
 /** The step the robot is to cross. */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbProfile
