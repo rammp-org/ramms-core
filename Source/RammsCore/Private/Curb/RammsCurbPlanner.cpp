@@ -8,6 +8,7 @@
 #include "HAL/PlatformTime.h"
 #include "Hash/CityHash.h"
 #include "Async/ParallelFor.h"
+#include "Tasks/Task.h"
 #include "Misc/ScopeExit.h"
 
 #include <atomic>
@@ -508,7 +509,8 @@ namespace
 	const TCHAR* const GridStoppedPrefix = TEXT("stopped: ");
 
 	TAutoConsoleVariable<float> CVarCurbGridBudget(TEXT("Ramms.Curb.GridBudget"), 1.5f,
-		TEXT("Development: over 0 (the default 1.5), on the move the crossing's two grids stop the one whose work (instants evaluated) "
+		TEXT("Development: over 0 (the default 1.5), on the move (and at rest, Ramms.Curb.GridBudgetAtRest) the crossing's two grids "
+			 "stop the one whose work (instants evaluated) "
 			 "is over this share of the other's finished valid plan's and GridBudgetWork more, and a plan so over is not kept (the "
 			 "robot does not wait seconds for the slower grid); 0 no budget, both grids' plans compared whatever they cost. "
 			 "Kept for comparison."),
@@ -524,6 +526,12 @@ namespace
 	TAutoConsoleVariable<int32> CVarCurbGridBudgetWork(TEXT("Ramms.Curb.GridBudgetWork"), 60000,
 		TEXT("Development: with Ramms.Curb.GridBudget, the instants a grid's work may run over that share of the other grid's finished "
 			 "plan's before it is over its budget on the move (60000, the default: a few hundred milliseconds' worth)."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarCurbGridBudgetAtRest(TEXT("Ramms.Curb.GridBudgetAtRest"), 1,
+		TEXT("1 (the default): Ramms.Curb.GridBudget at rest too -- a grid whose work runs over its budget against the other grid's "
+			 "finished plan stops, and is not kept, as on the move: the robot held still while it plans waits no longer for the slower "
+			 "grid (one that searched on for seconds after the other had its plan). 0: on the move only, as before."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarCurbPlanWorkBudget(TEXT("Ramms.Curb.PlanWorkBudget"), 600000,
@@ -558,6 +566,29 @@ namespace
 			 "edge on a sample (Ramms.Curb.AnchorPhase past it); 0 from wherever the robot stands, as before. Kept for comparison."),
 		ECVF_Default);
 
+	TAutoConsoleVariable<int32> CVarCurbPlanForks(TEXT("Ramms.Curb.PlanForks"), 8,
+		TEXT("How many candidate plans the planner makes at once, side by side (each on a fork of the planner that reads its memos): "
+			 "the level search's walks, the tilt search's least tilts over its candidates and its tilted plans ahead of the one it "
+			 "needs, the ground holds -- each taken in the order one at a time takes them, so the plan is the same, only sooner, "
+			 "wherever no work budget decides (PlanWorkBudget, the slowed tilt search's, the grid budget): the work counted -- the plans "
+			 "taken, a fork reading the memos as they were when it was made -- is not one at a time's, though it is the same from run to "
+			 "run. 1 (or 0): one at a time, as before."),
+		ECVF_Default);
+
+	int32 PlanForks()
+	{
+		return FMath::Clamp(CVarCurbPlanForks.GetValueOnAnyThread(), 1, 32);
+	}
+
+	TAutoConsoleVariable<int32> CVarCurbCentreSearchWalk(TEXT("Ramms.Curb.CentreSearchWalk"), 1,
+		TEXT("1 (the default): the search over the centre wheels' paths (the search plan, a tilted plan's paths) keeps each centre "
+			 "wheel where the drive stance has it until the level-in begins -- the executor walks none before -- and of paths equally "
+			 "good walks the gentlest (no more in one stretch than it must); and, on a plan with the search's paths, the executor "
+			 "walks the centre wheels through the level-in to where the plan has them as it is done (the search weighs none of their "
+			 "poses before there), its ramp sized for that walk. 0: walked from the start, ties to the first path found, the "
+			 "level-in's walk to the plan's fore/aft a servo lag ahead, as before."),
+		ECVF_Default);
+
 } // namespace
 
 namespace RammsCurb
@@ -583,6 +614,11 @@ namespace RammsCurb
 	constexpr int32	 GroundHoldTries = 3;
 	constexpr int32	 GroundHoldLookBackSamples = 3;
 	constexpr double SeatEnoughCm = 3.0;
+
+	bool CentreSearchWalkOn()
+	{
+		return CVarCurbCentreSearchWalk.GetValueOnAnyThread() != 0;
+	}
 
 	bool CentreHandOffOn(bool bClimb, const FRobotModel& Model)
 	{
@@ -1125,7 +1161,8 @@ namespace RammsCurb
 	}
 
 	FTiltSearchResult SearchTilts(TConstArrayView<FTiltSearchCandidate> Candidates, double MaxTilt, double Grid, TConstArrayView<double> Steps,
-		int32 MaxPlans, TFunctionRef<bool(int32, int32, const FVector2D&)> Stands, TFunctionRef<bool(const FTiltTry&, TArray<int32>&)> Plan)
+		int32 MaxPlans, TFunctionRef<bool(int32, int32, const FVector2D&)> Stands, TFunctionRef<bool(const FTiltTry&, TArray<int32>&)> Plan,
+		int32 Ahead, const TFunction<void(TConstArrayView<FTiltTry>)>& Prefetch)
 	{
 		FTiltSearchResult Result;
 		auto			  SizeOf = [](TConstArrayView<FVector2D> Tilts) {
@@ -1208,6 +1245,41 @@ namespace RammsCurb
 					++Result.LargerPlans;
 				}
 				++Result.Plans;
+				// (Once a plan has failed: the first is made alone -- it is often the
+				// one taken, and tries made beside it are waited for.)
+				if (Prefetch && Ahead > 1 && Result.Plans > 1)
+				{
+					// It and the tries queued after it that would be planned, in order:
+					// none already planned or a twin of one before it, the larger ones
+					// within MaxPlans.
+					TArray<FTiltTry> Next;
+					Next.Add(Try);
+					int32 Larger = Result.LargerPlans;
+					for (const FTiltTry& Q : Queue)
+					{
+						if (Next.Num() >= Ahead)
+						{
+							break;
+						}
+						const int32 B = Candidates[Q.Candidate].Base;
+						auto		Twin = [&](int32 OtherBase, TConstArrayView<FVector2D> Tilts) { return OtherBase == B && Same(Tilts, Q.Tilts); };
+						if (Made.ContainsByPredicate([&](const FMade& M) { return Twin(M.Base, M.Tilts); })
+							|| Next.ContainsByPredicate([&](const FTiltTry& X) { return Twin(Candidates[X.Candidate].Base, X.Tilts); }))
+						{
+							continue;
+						}
+						if (Q.More > 0.0)
+						{
+							if (Larger >= MaxPlans)
+							{
+								continue;
+							}
+							++Larger;
+						}
+						Next.Add(Q);
+					}
+					Prefetch(Next);
+				}
 				if (Plan(Try, Failing))
 				{
 					Result.bFound = true;
@@ -2190,12 +2262,13 @@ namespace RammsCurb
 	class FPlanner
 	{
 	public:
-		explicit FPlanner(const FPlannerInput& InInput, FGridRace* InRace = nullptr, int32 InSlot = 0)
+		explicit FPlanner(const FPlannerInput& InInput, FGridRace* InRace = nullptr, int32 InSlot = 0, const std::atomic<bool>* InGiveUp = nullptr)
 			: In(InInput)
 			, M(InInput)
 			, T(InInput.Tuning)
 			, Race(InRace)
 			, Slot(InSlot)
+			, GiveUp(InGiveUp)
 		{
 		}
 
@@ -2254,6 +2327,8 @@ namespace RammsCurb
 			bool bSeatWeighed = false;
 			/** A centre wheel's walk is the ground hold's (GroundHoldPath). */
 			bool bGroundHeld = false;
+			/** The centre wheels' paths are the search's (CentrePathsDp). */
+			bool bSearchedPaths = false;
 			/** Planned from a knot set (PlanKnots): the set and how, for the
 			 *  ground hold to plan it again. */
 			bool	bFromKnots = false;
@@ -2680,6 +2755,11 @@ namespace RammsCurb
 		uint32 RearMask[2] = { 0u, 0u };
 		/** For the plan lines: how long each part took (s). */
 		mutable double TimeGeometry = 0.0, TimeSpeed = 0.0, TimeDp = 0.0, TimeHeight = 0.0, TimeVerify = 0.0, TimeTilt = 0.0;
+		/** By stage (s): the level search, the tilt search's least tilts and its
+		 *  tilted plans, the ground holds, the output (its seat); and the tilted
+		 *  plans made. */
+		mutable double TimeLevelStage = 0.0, TimeLeastTilts = 0.0, TimeTiltPlans = 0.0, TimeHolds = 0.0, TimeOutput = 0.0;
+		mutable int32  CountTiltPlans = 0;
 		mutable int32  CountFeasible = 0;
 		/** The plan's work: instants of the robot model evaluated (the same for
 		 *  the same input; FCurbSchedule::PlanWork). */
@@ -2720,6 +2800,9 @@ namespace RammsCurb
 		 *  make ranks above it); and once it has stopped early, why. */
 		FGridRace*		   Race = nullptr;
 		int32			   Slot = 0;
+		/** Set once the plan this planner makes is no longer wanted (PlanCrossing's
+		 *  whole-reach plan beside the rider's seat travel): it stops. */
+		const std::atomic<bool>* GiveUp = nullptr;
 		mutable EPlanStage Stage = EPlanStage::Level;
 		mutable FString	   StoppedWhy;
 		/** Whether to stop: the other grid has finished with a plan that ranks
@@ -2746,7 +2829,77 @@ namespace RammsCurb
 		 *  MaxPlannedTiltDeg). */
 		mutable bool   bSlowTilt = false;
 		mutable double TiltCeilingDeg = -1.0;
+
+		/** A fork (Fork): the planner whose memos it reads where its own have
+		 *  nothing, and its work when forked. */
+		const FPlanner* Parent = nullptr;
+		int64			WorkAtFork = 0;
+		/** A copy of this planner to make a candidate plan on beside others
+		 *  (Ramms.Curb.PlanForks): everything but the memos, which it reads
+		 *  here and keeps its own of, and the plan lines, its own. A fork does
+		 *  not fork. */
+		TUniquePtr<FPlanner> Fork() const;
+		bool				 IsFork() const { return Parent != nullptr; }
+		/** What a fork learned joins this planner: its memos always; with
+		 *  bTaken -- its plan taken where one at a time would have made it --
+		 *  its work, its plan lines, its part of the plan times and its stop. */
+		void Join(FPlanner& F, bool bTaken) const;
+		/** How many forks to make at once here (1: none; never in a fork, nor
+		 *  in the tilt search made slower, whose attempts are counted). */
+		int32 ForksNow() const { return IsFork() || bSlowTilt ? 1 : PlanForks(); }
 	};
+
+	TUniquePtr<FPlanner> FPlanner::Fork() const
+	{
+		// (The memos, the plan lines and the tilt search's kept candidates moved
+		// aside for the copy and back.)
+		TMap<uint64, bool>		Stand = MoveTemp(StandMemo);
+		TMap<uint64, FVector2D> Band = MoveTemp(BandMemo);
+		TMap<uint64, double>	Lift = MoveTemp(LiftMemo);
+		TMap<uint64, double>	Plant = MoveTemp(PlantMemo);
+		TArray<FString>			Lines = MoveTemp(Tried);
+		TArray<FBaseTilt>		AtLimit = MoveTemp(TiltBasesAtLimit);
+		TUniquePtr<FPlanner>	F(new FPlanner(*this));
+		StandMemo = MoveTemp(Stand);
+		BandMemo = MoveTemp(Band);
+		LiftMemo = MoveTemp(Lift);
+		PlantMemo = MoveTemp(Plant);
+		Tried = MoveTemp(Lines);
+		TiltBasesAtLimit = MoveTemp(AtLimit);
+		F->Parent = this;
+		F->WorkAtFork = Work;
+		F->TimeGeometry = F->TimeSpeed = F->TimeDp = F->TimeHeight = F->TimeVerify = F->TimeTilt = 0.0;
+		F->TimeLevelStage = F->TimeLeastTilts = F->TimeTiltPlans = F->TimeHolds = F->TimeOutput = 0.0;
+		F->CountTiltPlans = 0;
+		F->CountFeasible = 0;
+		return F;
+	}
+
+	void FPlanner::Join(FPlanner& F, bool bTaken) const
+	{
+		// (The memos are exact: an instant answers the same whichever fork asked.)
+		StandMemo.Append(MoveTemp(F.StandMemo));
+		BandMemo.Append(MoveTemp(F.BandMemo));
+		LiftMemo.Append(MoveTemp(F.LiftMemo));
+		PlantMemo.Append(MoveTemp(F.PlantMemo));
+		if (!bTaken)
+		{
+			return;
+		}
+		Work += F.Work - F.WorkAtFork;
+		CountFeasible += F.CountFeasible;
+		CountTiltPlans += F.CountTiltPlans;
+		TimeGeometry += F.TimeGeometry;
+		TimeSpeed += F.TimeSpeed;
+		TimeDp += F.TimeDp;
+		TimeHeight += F.TimeHeight;
+		TimeVerify += F.TimeVerify;
+		Tried.Append(MoveTemp(F.Tried));
+		if (StoppedWhy.IsEmpty() && !F.StoppedWhy.IsEmpty())
+		{
+			StoppedWhy = F.StoppedWhy;
+		}
+	}
 
 	// --- setup -----------------------------------------------------------------------------
 
@@ -3561,6 +3714,10 @@ namespace RammsCurb
 		{
 			return *Found;
 		}
+		if (const double* Found = Parent ? Parent->LiftMemo.Find(Memo) : nullptr)
+		{
+			return *Found;
+		}
 		V = Key * TimingSpeedStep;
 		const double Lead = LiftLeadAt(G, V, G.SpeedUp > 0.0 ? G.SpeedUp : FMath::Max(1.0, static_cast<double>(T.LegSpeed)));
 		LiftMemo.Add(Memo, Lead);
@@ -3651,6 +3808,10 @@ namespace RammsCurb
 		const int32	 Key = FMath::RoundToInt(V / TimingSpeedStep);
 		const uint64 Memo = G.Key ^ (static_cast<uint64>(static_cast<uint32>(Key)) * 0x9E3779B97F4A7C15ull);
 		if (const double* Found = PlantMemo.Find(Memo))
+		{
+			return *Found;
+		}
+		if (const double* Found = Parent ? Parent->PlantMemo.Find(Memo) : nullptr)
 		{
 			return *Found;
 		}
@@ -4299,6 +4460,11 @@ namespace RammsCurb
 
 	void FPlanner::OutputEased(const FPlan& Plan, EPlanClass Class, FCurbSchedule& Out) const
 	{
+		const double Started = FPlatformTime::Seconds();
+		ON_SCOPE_EXIT
+		{
+			TimeOutput += FPlatformTime::Seconds() - Started;
+		};
 		// The seat planned at its own speed, where a path verifies; else each
 		// instant's own choice, as before. (A plan the level search weighed
 		// with its seat has it already, or has none to plan.)
@@ -4386,6 +4552,10 @@ namespace RammsCurb
 	{
 		const uint64 Hash = InstantKey(Q, BGuess);
 		if (const bool* Found = StandMemo.Find(Hash))
+		{
+			return *Found;
+		}
+		if (const bool* Found = Parent ? Parent->StandMemo.Find(Hash) : nullptr)
 		{
 			return *Found;
 		}
@@ -5432,11 +5602,18 @@ namespace RammsCurb
 		const TArray<double>& VDp = Q.V;
 		const TArray<int32>	  Stages = DpStages(Q, 0, NumS - 1);
 		const double		  CSS = FMath::Max(0.1, static_cast<double>(T.CenterShiftSpeed));
+		// (Ramms.Curb.CentreSearchWalk: no walk before the level-in begins, where
+		// the executor holds the drive stance's -- one planned there was made all
+		// at once as the level-in began -- and, of paths alike, the gentlest.)
+		const bool	bGentle = CentreSearchWalkOn();
+		const int32 KWalk = bGentle ? Index(LevelInStartS(Q)) : 0;
 		struct FCell
 		{
 			double Score = 0.0;
 			double Total = 0.0;
 			double Walk = 0.0;
+			/** The walk's squared steps over their travel (CentreSearchWalk). */
+			double Energy = 0.0;
 			int32  Prev = INDEX_NONE;
 			bool   bReached = false;
 		};
@@ -5519,7 +5696,7 @@ namespace RammsCurb
 					// wheel may re-pose aft as well.
 					const bool	 bNearRest = Q.Stops > 0 && VMin < 0.5 * Floor;
 					const double StageCm = s > 0 ? SAt(k) - SAt(Stages[s - 1]) : 0.0;
-					const double Step = bDwell ? 1e6 : StageCm * CSS / VMax;
+					const double Step = bDwell ? 1e6 : (s > 0 && Stages[s - 1] < KWalk ? 0.0 : StageCm * CSS / VMax);
 					for (int32 J = 0; J < NX; ++J)
 					{
 						const double X = XOf(J);
@@ -5548,10 +5725,14 @@ namespace RammsCurb
 							double		 Score = FMath::Min(PC.Score, Here);
 							const double Total = PC.Total + Short;
 							const double W = PC.Walk + FMath::Abs(Dx);
-							auto		 Better = [&]() {
+							const double E = bGentle ? PC.Energy + Dx * Dx / FMath::Max(StageCm, Ds) : 0.0;
+							auto		 LessWalk = [&]() {
+								return bGentle ? W < C.Walk - 1e-9 || (FMath::IsNearlyEqual(W, C.Walk, 1e-9) && E < C.Energy - 1e-9) : W < C.Walk;
+							};
+							auto Better = [&]() {
 								return !C.bReached || Score > C.Score + 1e-9
 									|| (FMath::IsNearlyEqual(Score, C.Score, 1e-9)
-										&& (Total > C.Total + 1e-9 || (FMath::IsNearlyEqual(Total, C.Total, 1e-9) && W < C.Walk)));
+										&& (Total > C.Total + 1e-9 || (FMath::IsNearlyEqual(Total, C.Total, 1e-9) && LessWalk())));
 							};
 							if (!Better())
 							{
@@ -5574,6 +5755,7 @@ namespace RammsCurb
 							C.Score = Score;
 							C.Total = Total;
 							C.Walk = W;
+							C.Energy = E;
 							C.Prev = PJ;
 							C.bReached = true;
 						}
@@ -5590,8 +5772,11 @@ namespace RammsCurb
 					}
 					const FCell* B = Best != INDEX_NONE ? &Cells[(Stages.Num() - 1) * NX + Best] : nullptr;
 					const bool	 bSame = B && FMath::IsNearlyEqual(C.Score, B->Score, 1e-9) && FMath::IsNearlyEqual(C.Total, B->Total, 1e-9);
+					const bool	 bLessWalk = B
+						&& (bGentle ? C.Walk < B->Walk - 1e-9 || (FMath::IsNearlyEqual(C.Walk, B->Walk, 1e-9) && C.Energy < B->Energy - 1e-9)
+									: C.Walk < B->Walk);
 					if (!B || C.Score > B->Score + 1e-9 || (FMath::IsNearlyEqual(C.Score, B->Score, 1e-9) && C.Total > B->Total + 1e-9)
-						|| (bSame && (J == J0 || (Best != J0 && C.Walk < B->Walk))))
+						|| (bSame && (J == J0 || (Best != J0 && bLessWalk))))
 					{
 						Best = J;
 					}
@@ -5630,6 +5815,7 @@ namespace RammsCurb
 		}
 		P.X[0] = Q.X[0];
 		P.X[1] = Q.X[1];
+		P.bSearchedPaths = true;
 		TimeDp += FPlatformTime::Seconds() - Started;
 	}
 
@@ -5662,6 +5848,10 @@ namespace RammsCurb
 		ComputeTiming(Q);
 		const TArray<int32> Stages = DpStages(Q, KA, KB);
 		const double		CSS = FMath::Max(0.1, static_cast<double>(T.CenterShiftSpeed));
+		// (As CentrePathsDp, Ramms.Curb.CentreSearchWalk: no walk before the
+		// level-in begins, and of pairs of paths alike the gentlest.)
+		const bool			bGentle = CentreSearchWalkOn();
+		const int32			KWalk = bGentle ? Index(LevelInStartS(Q)) : 0;
 		const int32			L = Centre[0], R = Centre[1];
 		double				XFrom[2], XTo[2];
 		int32				J0[2], NX[2];
@@ -5681,6 +5871,7 @@ namespace RammsCurb
 			double Score = 0.0;
 			double Total = 0.0;
 			double Walk = 0.0;
+			double Energy = 0.0;
 			int32  Prev = INDEX_NONE;
 			bool   bReached = false;
 		};
@@ -5726,7 +5917,7 @@ namespace RammsCurb
 			}
 			const bool	 bNearRest = Q.Stops > 0 && VMin < 0.5 * Floor;
 			const double StageCm = s > 0 ? SAt(k) - SAt(Stages[s - 1]) : 0.0;
-			const double Step = bDwell ? 1e6 : StageCm * CSS / VMax;
+			const double Step = bDwell ? 1e6 : (s > 0 && Stages[s - 1] < KWalk ? 0.0 : StageCm * CSS / VMax);
 			for (int32 JL = 0; JL < NX[0]; ++JL)
 			{
 				for (int32 JR = 0; JR < NX[1]; ++JR)
@@ -5773,10 +5964,14 @@ namespace RammsCurb
 							double		 Score = FMath::Min(PC.Score, Here);
 							const double Total = PC.Total + Short;
 							const double W = PC.Walk + FMath::Abs(DxL) + FMath::Abs(DxR);
-							auto		 Better = [&]() {
+							const double E = bGentle ? PC.Energy + (DxL * DxL + DxR * DxR) / FMath::Max(StageCm, Ds) : 0.0;
+							auto		 LessWalk = [&]() {
+								return bGentle ? W < C.Walk - 1e-9 || (FMath::IsNearlyEqual(W, C.Walk, 1e-9) && E < C.Energy - 1e-9) : W < C.Walk;
+							};
+							auto Better = [&]() {
 								return !C.bReached || Score > C.Score + 1e-9
 									|| (FMath::IsNearlyEqual(Score, C.Score, 1e-9)
-										&& (Total > C.Total + 1e-9 || (FMath::IsNearlyEqual(Total, C.Total, 1e-9) && W < C.Walk)));
+										&& (Total > C.Total + 1e-9 || (FMath::IsNearlyEqual(Total, C.Total, 1e-9) && LessWalk())));
 							};
 							if (!Better())
 							{
@@ -5798,6 +5993,7 @@ namespace RammsCurb
 							C.Score = Score;
 							C.Total = Total;
 							C.Walk = W;
+							C.Energy = E;
 							C.Prev = PL * NX[1] + PR;
 							C.bReached = true;
 						}
@@ -5911,7 +6107,9 @@ namespace RammsCurb
 			}
 			const uint64 Key = InstantKey(Q, BGuessAt(P, k));
 			double		 Lo = 0.0, Hi = 0.0;
-			if (const FVector2D* Found = BandMemo.Find(Key))
+			const FVector2D* Found = BandMemo.Find(Key);
+			Found = Found || !Parent ? Found : Parent->BandMemo.Find(Key);
+			if (Found)
 			{
 				Lo = Found->X;
 				Hi = Found->Y;
@@ -6861,6 +7059,7 @@ namespace RammsCurb
 		// floor speed it runs into them: centred on the gap, then into the
 		// earlier stretch only, then into the later only, then -- the smaller
 		// stretch's tilt left out -- straight on; the first that verifies.
+		++CountTiltPlans;
 		FPlan	P = Base;
 		FString Tight;
 		auto	Run = [&](TArray<FIntPoint> Hold, TConstArrayView<FVector2D> TiltsV, uint8 Mode, FPlan& Last, TArray<int32>& OutTightPairs) {
@@ -7229,19 +7428,11 @@ namespace RammsCurb
 				}
 			}
 		}
-		for (const FPlan* B : Bases)
-		{
-			if (bCached)
-			{
-				break;
-			}
-			if (Stopped())
-			{
-				return false;
-			}
-			FBaseTilt& C = Found.AddDefaulted_GetRef();
+		const double LeastStarted = FPlatformTime::Seconds();
+		// One candidate's least tilts, by the planner Pl (this one, or a fork).
+		auto LeastFor = [&](const FPlanner& Pl, const FPlan* B, FBaseTilt& C) {
 			C.Base = B;
-			C.bRing = LeastTilt(*B, C.Ranges, C.Ring, C.Has, C.Need, C.Why, &C.Floor);
+			C.bRing = Pl.LeastTilt(*B, C.Ranges, C.Ring, C.Has, C.Need, C.Why, &C.Floor);
 			if (Picks != 1 && C.bRing && C.Ranges.Num() > 0)
 			{
 				// The square's least of each stretch, on the same plan -- only
@@ -7252,7 +7443,7 @@ namespace RammsCurb
 				C.Square.SetNum(C.Ranges.Num());
 				for (int32 r = 0; r < C.Ranges.Num() && C.bSquare; ++r)
 				{
-					C.bSquare = PickLeastTilt(ETiltPick::Square, TiltGridDeg, MaxTilt, [&](const FVector2D& D) { return StandsOver(C.Floor, C.Ranges[r], D); }, C.Square[r]);
+					C.bSquare = PickLeastTilt(ETiltPick::Square, TiltGridDeg, MaxTilt, [&](const FVector2D& D) { return Pl.StandsOver(C.Floor, C.Ranges[r], D); }, C.Square[r]);
 				}
 			}
 			C.bRing = C.bRing && Picks != 2;
@@ -7269,8 +7460,38 @@ namespace RammsCurb
 			{
 				Line += TEXT("; per axis ") + Describe(C, C.Square);
 			}
-			Tried.Add(FString::Printf(TEXT("tilt for %s: %s"), *B->Name, *Line));
+			Pl.Tried.Add(FString::Printf(TEXT("tilt for %s: %s"), *B->Name, *Line));
+		};
+		// (Ramms.Curb.PlanForks: ForksNow() of them at once, each on a fork,
+		// joined in the candidates' order.)
+		const int32 Forks = ForksNow();
+		for (int32 b0 = 0; b0 < Bases.Num() && !bCached; b0 += Forks)
+		{
+			if (Stopped())
+			{
+				return false;
+			}
+			const int32 Num = FMath::Min(Forks, Bases.Num() - b0);
+			if (Num == 1)
+			{
+				LeastFor(*this, Bases[b0], Found.AddDefaulted_GetRef());
+				continue;
+			}
+			TArray<TUniquePtr<FPlanner>> Fs;
+			TArray<FBaseTilt>			 Cs;
+			Cs.SetNum(Num);
+			for (int32 i = 0; i < Num; ++i)
+			{
+				Fs.Add(Fork());
+			}
+			ParallelFor(Num, [&](int32 i) { LeastFor(*Fs[i], Bases[b0 + i], Cs[i]); });
+			for (int32 i = 0; i < Num; ++i)
+			{
+				Join(*Fs[i], true);
+				Found.Add(MoveTemp(Cs[i]));
+			}
 		}
+		TimeLeastTilts += FPlatformTime::Seconds() - LeastStarted;
 		Found.StableSort([](const FBaseTilt& A, const FBaseTilt& B) {
 			const bool	 bA = A.bRing || A.bSquare, bB = B.bRing || B.bSquare;
 			const double LA = TiltStep(A.Least, TiltOrderDeg), LB = TiltStep(B.Least, TiltOrderDeg);
@@ -7320,6 +7541,61 @@ namespace RammsCurb
 			   return Try.Way == 0 ? (Pick == ETiltPick::Square ? TEXT("the least larger axis") : TEXT("the least inclination"))
 								   : (Pick == ETiltPick::Square ? TEXT("its direction, per axis") : TEXT("its direction"));
 		};
+		// One tilted plan, by the planner Pl (this one, or a fork); and those made
+		// ahead on forks (Ramms.Curb.PlanForks), each taken as the search comes
+		// to it -- its work and lines then -- or, never come to, only its memos.
+		auto PlanOn = [&](const FPlanner& Pl, const FTiltTry& Try, FPlan& OutPlan, FString& OutPlanWhy, TArray<int32>& OutFailing) {
+			const FTiltSearchCandidate& SC = Cands[Try.Candidate];
+			const FBaseTilt&			C = Found[SC.Base];
+			// (The other placements of a tight easing on each pick's first
+			// candidate's least tilt only: each placement is a plan.)
+			const bool bPlacements = Try.More <= 0.0 && Try.Candidate == FirstOf[SC.Pick == ETiltPick::Ring ? 0 : 1];
+			return Pl.TiltPlan(*C.Base, C.Ranges, Try.Tilts, {}, OutPlan, OutPlanWhy, bPlacements, &OutFailing);
+		};
+		struct FAhead
+		{
+			FTiltTry			 Try;
+			bool				 bOk = false;
+			bool				 bTaken = false;
+			TArray<int32>		 Failing;
+			FPlan				 Plan;
+			FString				 Why;
+			TUniquePtr<FPlanner> F;
+		};
+		TArray<FAhead> Aheads;
+		auto		   SameTry = [](const FTiltTry& A, const FTiltTry& B) {
+			  return A.Candidate == B.Candidate && A.More == B.More && A.Way == B.Way && A.Tilts == B.Tilts;
+		};
+		auto Prefetch = [&](TConstArrayView<FTiltTry> Tries) {
+			TArray<int32> Todo;
+			for (int32 t = 0; t < Tries.Num(); ++t)
+			{
+				if (!Aheads.ContainsByPredicate([&](const FAhead& A) { return SameTry(A.Try, Tries[t]); }))
+				{
+					Todo.Add(t);
+				}
+			}
+			// (One alone is made here as it is asked for.)
+			if (Todo.Num() < 2 || Stopped())
+			{
+				return;
+			}
+			const int32 First = Aheads.Num();
+			for (const int32 t : Todo)
+			{
+				FAhead& A = Aheads.AddDefaulted_GetRef();
+				A.Try = Tries[t];
+				A.F = Fork();
+			}
+			ParallelFor(Todo.Num(), [&](int32 i) {
+				FAhead& A = Aheads[First + i];
+				A.bOk = PlanOn(*A.F, A.Try, A.Plan, A.Why, A.Failing);
+			});
+			for (int32 i = First; i < Aheads.Num(); ++i)
+			{
+				Join(*Aheads[i].F, false);
+			}
+		};
 		auto Larger = [&](const FTiltTry& Try, const FBaseTilt& C) {
 			FString Which, Dirs;
 			for (const int32 r : Try.Larger)
@@ -7328,6 +7604,11 @@ namespace RammsCurb
 				Dirs += FString::Printf(TEXT("%s%+.2f/%+.2f"), Dirs.IsEmpty() ? TEXT("") : TEXT(", "), Try.Tilts[r].X, Try.Tilts[r].Y);
 			}
 			return FString::Printf(TEXT("%.2f deg larger at %s (%s, %s)"), Try.More, *Which, *Dirs, HowOf(Try, Cands[Try.Candidate].Pick));
+		};
+		const double PlansStarted = FPlatformTime::Seconds();
+		ON_SCOPE_EXIT
+		{
+			TimeTiltPlans += FPlatformTime::Seconds() - PlansStarted;
 		};
 		const FTiltSearchResult R = SearchTilts(
 			Cands, MaxTilt, TiltGridDeg, MakeArrayView(TiltEscalationDeg),
@@ -7346,11 +7627,25 @@ namespace RammsCurb
 				}
 				const FTiltSearchCandidate& SC = Cands[Try.Candidate];
 				const FBaseTilt&			C = Found[SC.Base];
-				// (The other placements of a tight easing on each pick's first
-				// candidate's least tilt only: each placement is a plan.)
-				const bool bPlacements = Try.More <= 0.0 && Try.Candidate == FirstOf[SC.Pick == ETiltPick::Ring ? 0 : 1];
-				FString	   PlanWhy;
-				if (TiltPlan(*C.Base, C.Ranges, Try.Tilts, {}, Out, PlanWhy, bPlacements, &OutFailing))
+				FString						PlanWhy;
+				bool						bOk = false;
+				if (FAhead* A = Aheads.FindByPredicate([&](const FAhead& X) { return !X.bTaken && SameTry(X.Try, Try); }))
+				{
+					A->bTaken = true;
+					Join(*A->F, true);
+					bOk = A->bOk;
+					OutFailing = A->Failing;
+					PlanWhy = A->Why;
+					if (bOk)
+					{
+						Out = MoveTemp(A->Plan);
+					}
+				}
+				else
+				{
+					bOk = PlanOn(*this, Try, Out, PlanWhy, OutFailing);
+				}
+				if (bOk)
 				{
 					Tried.Add(FString::Printf(TEXT("tilt for %s%s: planned %s"), *C.Base->Name, PickName(SC),
 						Try.More > 0.0 ? *Larger(Try, C) : *Describe(C, Try.Tilts)));
@@ -7364,7 +7659,8 @@ namespace RammsCurb
 					bFirstPlan = false;
 				}
 				return false;
-			});
+			},
+			ForksNow(), Prefetch);
 		Tried.Add(FString::Printf(TEXT("tilt search: %d tilted plan%s (%d with stretches made larger)%s"), R.Plans, R.Plans == 1 ? TEXT("") : TEXT("s"), R.LargerPlans,
 			R.bCapped ? TEXT(", larger ones past Ramms.Curb.MaxTiltPlans untried") : TEXT("")));
 		if (R.bFound)
@@ -7863,6 +8159,7 @@ namespace RammsCurb
 		Out.PlannedMaxTiltDeg = MaxIncl;
 		Out.VFloor = P.VFloor;
 		Out.bCentresHeld = P.bGroundHeld;
+		Out.bCentresSearched = P.bSearchedPaths;
 		Out.bTouchCarries = TouchLift();
 		// From the first lift as late as it could have begun (an eased lift
 		// begins earlier by choice, not need: the same measure as un-eased) to
@@ -8064,6 +8361,10 @@ namespace RammsCurb
 															   "instants feasible, work %lld"),
 						 1000.0 * TimeGeometry, 1000.0 * TimeSpeed, 1000.0 * TimeDp, 1000.0 * TimeHeight, 1000.0 * TimeVerify, 1000.0 * TimeTilt,
 						 CountFeasible, static_cast<long long>(Work)));
+			 S.Lines.Add(FString::Printf(TEXT("plan time by stage: level search %.1f ms, least tilts %.1f, tilted plans %.1f (%d), ground holds %.1f, "
+											  "output %.1f"),
+				 1000.0 * (TimeLevelStage > 0.0 ? TimeLevelStage : FPlatformTime::Seconds() - Started), 1000.0 * TimeLeastTilts, 1000.0 * TimeTiltPlans,
+				 CountTiltPlans, 1000.0 * TimeHolds, 1000.0 * TimeOutput));
 			 if (S.IsValid())
 			 {
 				 S.Summary = Head + Note;
@@ -8140,22 +8441,24 @@ namespace RammsCurb
 		// gains there, one that waits on it does not. Where its seat does not
 		// plan, the plan as it is (the executor's free seat).
 		const bool bSeatChoice = SeatChoiceOn() && SeatPathOn() && In.Model.Seat.Shifts();
-		auto	   WithSeat = [&](FPlan& P) {
-			  if (!bSeatChoice || P.bSeatWeighed || !IsOk(P))
-			  {
-				  return;
-			  }
-			  FPlan Seated = P;
-			  P.bSeatWeighed = true;
-			  if (!PlanSeat(Seated))
-			  {
-				  Tried.Add(FString::Printf(TEXT("%s: its seat did not plan; weighed without"), *P.Name));
-				  return;
-			  }
-			  Tried.Add(FString::Printf(TEXT("%s weighed with its seat planned: floor %.1f cm/s (%.1f without)"), *P.Name, Seated.VFloor, P.VFloor));
-			  Seated.bSeatWeighed = true;
-			  P = MoveTemp(Seated);
+		// (By the planner Pl: this one, or a fork.)
+		auto WithSeatOn = [&](const FPlanner& Pl, FPlan& P) {
+			if (!bSeatChoice || P.bSeatWeighed || !IsOk(P))
+			{
+				return;
+			}
+			FPlan Seated = P;
+			P.bSeatWeighed = true;
+			if (!Pl.PlanSeat(Seated))
+			{
+				Pl.Tried.Add(FString::Printf(TEXT("%s: its seat did not plan; weighed without"), *P.Name));
+				return;
+			}
+			Pl.Tried.Add(FString::Printf(TEXT("%s weighed with its seat planned: floor %.1f cm/s (%.1f without)"), *P.Name, Seated.VFloor, P.VFloor));
+			Seated.bSeatWeighed = true;
+			P = MoveTemp(Seated);
 		};
+		auto WithSeat = [&](FPlan& P) { WithSeatOn(*this, P); };
 		// bMayKeep false: offered as tried, never kept over the best.
 		auto Offer = [&](FPlan& P, bool bMayKeep = true) {
 			WithSeat(P);
@@ -8230,46 +8533,46 @@ namespace RammsCurb
 			 NoWalk = P;
 			 bNoWalk = true;
 		};
-		if (In.bTryNoWalk)
-		{
-			FPlan P;
-			InitPlan(P, TEXT("no walk"));
-			Evaluate(P, false);
-			TagNoWalk(P);
-			Offer(P);
-		}
 		// A knot set planned: walked smoothly and as before; the smooth walk is
 		// kept unless it does not verify or plans a floor more than
 		// SmoothWalkFloorShare under the other's. Returns whether either walk
 		// had paths; OutKept is the one kept.
-		auto PlanKnotsOnce = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide, bool bDropWalk) {
+		// (By the planner Pl: this one, or a fork.)
+		auto PlanKnotsOnce = [&](const FPlanner& Pl, const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide, bool bDropWalk) {
 			FPlan Walked[2];
 			bool  bWalked[2] = { false, false };
 			for (int32 Smooth = 0; Smooth < (WalkSmoothCm() > 0.0 ? 2 : 1); ++Smooth)
 			{
 				FPlan& P = Walked[Smooth];
-				InitPlan(P, Label);
+				Pl.InitPlan(P, Label);
 				bool bOk = true;
-				for (int32 Round = 0; Round < 4 && bOk; ++Round)
+				// (A planner stopped -- the other grid's plan kept, or the plan no longer
+				// wanted -- leaves off: its plan is not kept.)
+				for (int32 Round = 0; Round < 4 && bOk && !Pl.Stopped(); ++Round)
 				{
-					SpeedEnvelope(P);
-					bOk = CentrePathsKnots(P, K.XF, K.XLift, K.XLand, K.XR, Smooth == 1, bPerSide, bDropWalk, K.bFromStart);
+					Pl.SpeedEnvelope(P);
+					bOk = Pl.CentrePathsKnots(P, K.XF, K.XLift, K.XLand, K.XR, Smooth == 1, bPerSide, bDropWalk, K.bFromStart);
 					if (bOk && Round > 0)
 					{
-						P.bHeightOk = HeightPath(P);
+						P.bHeightOk = Pl.HeightPath(P);
 						P.bBuilt = true;
 					}
 				}
+				if (Pl.Stopped())
+				{
+					// (Not finished: no plan of it.)
+					return false;
+				}
 				if (!bOk)
 				{
-					Tried.Add(FString::Printf(TEXT("tried %s %+.0f/%+.0f/%+.0f/%+.0f%s: no paths: %s"), Label, K.XF, K.XLift, K.XLand, K.XR,
+					Pl.Tried.Add(FString::Printf(TEXT("tried %s %+.0f/%+.0f/%+.0f/%+.0f%s: no paths: %s"), Label, K.XF, K.XLift, K.XLand, K.XR,
 						Smooth ? TEXT(" smooth") : TEXT(""), *P.FailWhy));
 					continue;
 				}
-				SpeedEnvelope(P);
-				P.bHeightOk = HeightPath(P);
-				Verify(P);
-				P.FirstFail = FirstFailOf(P);
+				Pl.SpeedEnvelope(P);
+				P.bHeightOk = Pl.HeightPath(P);
+				Pl.Verify(P);
+				P.FirstFail = Pl.FirstFailOf(P);
 				P.Name = FString::Printf(TEXT("%s %+.0f/%+.0f/%+.0f/%+.0f%s%s"), Label, K.XF, K.XLift, K.XLand, K.XR, Smooth ? TEXT(" smooth") : TEXT(""),
 					P.bGroundHeld ? TEXT(" held") : TEXT(""));
 				bWalked[Smooth] = true;
@@ -8284,7 +8587,7 @@ namespace RammsCurb
 			{
 				// The other is reported as tried.
 				const FPlan& Other = Walked[bSmoothKept ? 0 : 1];
-				Tried.Add(FString::Printf(TEXT("tried %s: %s, floor %.1f cm/s (the %s walk kept)"), *Other.Name,
+				Pl.Tried.Add(FString::Printf(TEXT("tried %s: %s, floor %.1f cm/s (the %s walk kept)"), *Other.Name,
 					IsOk(Other) ? TEXT("level") : TEXT("not level"), Other.VFloor, bSmoothKept ? TEXT("smooth") : TEXT("plain")));
 			}
 			OutKept = Walked[bSmoothKept ? 1 : 0];
@@ -8292,9 +8595,11 @@ namespace RammsCurb
 		};
 		// The search plans without the ground hold (Ramms.Curb.CentreGroundHoldCm):
 		// the plan it keeps is planned again with it at the end (HoldKept).
-		auto PlanKnots = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide = false, bool bDropWalk = false) {
-			TGuardValue<bool> NoHold(bGroundHoldOff, true);
-			const bool		  bOk = PlanKnotsOnce(K, Label, OutKept, bPerSide, bDropWalk);
+		auto PlanKnots = [&](const FKnot& K, const TCHAR* Label, FPlan& OutKept, bool bPerSide = false, bool bDropWalk = false,
+							 const FPlanner* On = nullptr) {
+			const FPlanner&	  Pl = On ? *On : *this;
+			TGuardValue<bool> NoHold(Pl.bGroundHoldOff, true);
+			const bool		  bOk = PlanKnotsOnce(Pl, K, Label, OutKept, bPerSide, bDropWalk);
 			if (bOk)
 			{
 				OutKept.bFromKnots = true;
@@ -8322,7 +8627,8 @@ namespace RammsCurb
 		// wheel's hold made shallower (GroundHoldAftMostX) to GroundHoldBackOffCm
 		// short of where it stood there, for the plan to be made again. False
 		// where no hold stood deeper there.
-		auto ShallowerHold = [&](const FPlan& Held, const FPlan& Unheld) {
+		// (On the planner Pl: this one, or a fork.)
+		auto ShallowerHoldOn = [&](const FPlanner& Pl, const FPlan& Held, const FPlan& Unheld) {
 			const int32 K = Held.FirstFail;
 			if (K == INDEX_NONE || (Held.Fail[K] != EFail::Height && Held.Fail[K] != EFail::Verify))
 			{
@@ -8342,17 +8648,23 @@ namespace RammsCurb
 				{
 					Deep = FMath::Min(Deep, Held.X[Side][k]);
 				}
-				if (Deep < Unheld.X[Side][K] - 1.0 && Deep + GroundHoldBackOffCm > GroundHoldAftMostX[Side])
+				if (Deep < Unheld.X[Side][K] - 1.0 && Deep + GroundHoldBackOffCm > Pl.GroundHoldAftMostX[Side])
 				{
-					GroundHoldAftMostX[Side] = Deep + GroundHoldBackOffCm;
+					Pl.GroundHoldAftMostX[Side] = Deep + GroundHoldBackOffCm;
 					bTighter = true;
 				}
 			}
 			return bTighter;
 		};
+		auto  ShallowerHold = [&](const FPlan& Held, const FPlan& Unheld) { return ShallowerHoldOn(*this, Held, Unheld); };
 		FPlan ChorPlan;
 		bool  bChorLevel = false;
 		auto  HoldKept = [&]() {
+			 const double HoldStarted = FPlatformTime::Seconds();
+			 ON_SCOPE_EXIT
+			 {
+				 TimeHolds += FPlatformTime::Seconds() - HoldStarted;
+			 };
 			 if (!IsOk(Best) || Stopped() || CentreGroundHoldCm() <= 0.0 || !HandOff())
 			 {
 				 return;
@@ -8422,8 +8734,9 @@ namespace RammsCurb
 			 }
 			 // (The share a held plan's floor keeps of the plan's, below.)
 			 const double ShareNow = FMath::Clamp(static_cast<double>(CVarCurbCentreGroundHoldFloorShare.GetValueOnAnyThread()), 0.0, 1.0);
-			 for (const FHoldTry& HT : Tries)
-			 {
+			 // Each by the planner Pl (this one, or a fork: Ramms.Curb.PlanForks, all
+			 // at once, joined in their order), its level held plans to OutOk.
+			 auto HoldOne = [&](const FPlanner& Pl, const FHoldTry& HT, TArray<FPlan>& OutOk) {
 				 const FPlan* F = HT.F;
 				 FKnot		  K{ F->Knot[0], F->Knot[1], HT.Land, F->Knot[3] };
 				 K.bFromStart = F->bKnotFromStart;
@@ -8438,16 +8751,16 @@ namespace RammsCurb
 				 }
 				 for (const int32 HoldStart : Froms)
 				 {
-					 TGuardValue<int32> FromNow(GroundHoldFromNow, HoldStart);
+					 TGuardValue<int32> FromNow(Pl.GroundHoldFromNow, HoldStart);
 					 FPlan				Held;
 					 bool				bHeld = false;
 					 // Where it does not plan level for a corridor its hold stood too deep
 					 // for (ShallowerHold), planned again with the wheel held shallower
 					 // there, up to GroundHoldTries times.
-					 for (int32 Try = 0; Try < GroundHoldTries && !Stopped(); ++Try)
+					 for (int32 Try = 0; Try < GroundHoldTries && !Pl.Stopped(); ++Try)
 					 {
 						 FPlan Again;
-						 if (!PlanKnotsOnce(K, *F->KnotLabel, Again, F->bKnotPerSide, F->bKnotDropWalk) || !Again.bGroundHeld)
+						 if (!PlanKnotsOnce(Pl, K, *F->KnotLabel, Again, F->bKnotPerSide, F->bKnotDropWalk) || !Again.bGroundHeld)
 						 {
 							 break;
 						 }
@@ -8455,7 +8768,7 @@ namespace RammsCurb
 						 // or without.
 						 if (Best.bSeatWeighed)
 						 {
-							 WithSeat(Again);
+							 WithSeatOn(Pl, Again);
 						 }
 						 Held = MoveTemp(Again);
 						 bHeld = true;
@@ -8467,52 +8780,75 @@ namespace RammsCurb
 						 {
 							 Held.Name += TEXT(" from its load");
 						 }
-						 Tried.Add(FString::Printf(TEXT("tried %s%s: %s, floor %.1f cm/s"), *Held.Name, Try > 0 ? *FString::Printf(TEXT(" (shallower, %d)"), Try) : TEXT(""),
+						 Pl.Tried.Add(FString::Printf(TEXT("tried %s%s: %s, floor %.1f cm/s"), *Held.Name, Try > 0 ? *FString::Printf(TEXT(" (shallower, %d)"), Try) : TEXT(""),
 							 IsOk(Held)							? TEXT("level")
-								 : Held.FirstFail != INDEX_NONE ? *FString::Printf(TEXT("not level (%s)"), *DescribeFail(Held, Held.FirstFail))
+								 : Held.FirstFail != INDEX_NONE ? *FString::Printf(TEXT("not level (%s)"), *Pl.DescribeFail(Held, Held.FirstFail))
 																: TEXT("not level"),
 							 Held.VFloor));
 						 if (PlanDebugOffers())
 						 {
-							 Tried.Add(FString::Printf(TEXT("dbghold (%s) %s"), *Held.Name, *FloorWhy(Held)));
+							 Pl.Tried.Add(FString::Printf(TEXT("dbghold (%s) %s"), *Held.Name, *Pl.FloorWhy(Held)));
 						 }
 						 if (PlanDebugOffers() && !IsOk(Held) && Held.FirstFail != INDEX_NONE)
 						 {
 							 for (int32 k = FMath::Max(0, Held.FirstFail - 30); k <= FMath::Min(NumS - 1, Held.FirstFail + 10); ++k)
 							 {
-								 Tried.Add(FString::Printf(TEXT("dbghold (%s) %4d v %5.1f air %02x x %+5.1f/%+5.1f band %+6.1f..%+6.1f b %+6.1f fail %d"), *Held.Name, k,
+								 Pl.Tried.Add(FString::Printf(TEXT("dbghold (%s) %4d v %5.1f air %02x x %+5.1f/%+5.1f band %+6.1f..%+6.1f b %+6.1f fail %d"), *Held.Name, k,
 									 Held.V[k], Held.Air[k], Held.X[0].IsValidIndex(k) ? Held.X[0][k] : 0.0, Held.X[1].IsValidIndex(k) ? Held.X[1][k] : 0.0,
 									 Held.BLo[k] - B0, Held.BHi[k] - B0, Held.B[k] - B0, static_cast<int32>(Held.Fail[k])));
 							 }
 						 }
-						 if (IsOk(Held) || !ShallowerHold(Held, *F))
+						 if (IsOk(Held) || !ShallowerHoldOn(Pl, Held, *F))
 						 {
 							 break;
 						 }
 					 }
-					 GroundHoldAftMostX[0] = GroundHoldAftMostX[1] = -NoValue;
+					 Pl.GroundHoldAftMostX[0] = Pl.GroundHoldAftMostX[1] = -NoValue;
 					 if (!bHeld)
 					 {
-						 Tried.Add(FString::Printf(TEXT("%s: no ground hold planned%s"), *F->Name, HoldStart != Froms[0] ? TEXT(" from its load") : TEXT("")));
+						 Pl.Tried.Add(FString::Printf(TEXT("%s: no ground hold planned%s"), *F->Name, HoldStart != Froms[0] ? TEXT(" from its load") : TEXT("")));
 						 continue;
 					 }
 					 if (!IsOk(Held))
 					 {
 						 continue;
 					 }
-					 const double Mine = LowMarginCm(Held, Near);
+					 const double Mine = Pl.LowMarginCm(Held, Near);
 					 if (Mine > NearBest + HandOffNearMarginExtraCm)
 					 {
-						 Tried.Add(FString::Printf(TEXT("%s stands within %.1f cm of the margin's floor over %.0f cm of travel against %s's %.0f: not kept"),
+						 Pl.Tried.Add(FString::Printf(TEXT("%s stands within %.1f cm of the margin's floor over %.0f cm of travel against %s's %.0f: not kept"),
 							 *Held.Name, HandOffNearMarginCm, Mine, *Best.Name, NearBest));
 						 continue;
 					 }
 					 const bool bKeeps = Held.VFloor >= ShareNow * Best.VFloor - 1e-6;
-					 HeldOk.Add(MoveTemp(Held));
+					 OutOk.Add(MoveTemp(Held));
 					 if (bKeeps)
 					 {
 						 break;
 					 }
+				 }
+			 };
+			 const int32 HoldForks = ForksNow();
+			 for (int32 t0 = 0; t0 < Tries.Num(); t0 += HoldForks)
+			 {
+				 const int32 Num = FMath::Min(HoldForks, Tries.Num() - t0);
+				 if (Num == 1)
+				 {
+					 HoldOne(*this, Tries[t0], HeldOk);
+					 continue;
+				 }
+				 TArray<TUniquePtr<FPlanner>> Fs;
+				 TArray<TArray<FPlan>>		  Oks;
+				 Oks.SetNum(Num);
+				 for (int32 i = 0; i < Num; ++i)
+				 {
+					 Fs.Add(Fork());
+				 }
+				 ParallelFor(Num, [&](int32 i) { HoldOne(*Fs[i], Tries[t0 + i], Oks[i]); });
+				 for (int32 i = 0; i < Num; ++i)
+				 {
+					 Join(*Fs[i], true);
+					 HeldOk.Append(MoveTemp(Oks[i]));
 				 }
 			 }
 			 const double Share = FMath::Clamp(static_cast<double>(CVarCurbCentreGroundHoldFloorShare.GetValueOnAnyThread()), 0.0, 1.0);
@@ -8585,6 +8921,11 @@ namespace RammsCurb
 		// on the wheel held on the ground; its heights planned again, kept where
 		// it verifies.
 		auto HoldTilted = [&](FPlan& Tilt) {
+			const double HoldStarted = FPlatformTime::Seconds();
+			ON_SCOPE_EXIT
+			{
+				TimeHolds += FPlatformTime::Seconds() - HoldStarted;
+			};
 			if (Stopped() || CentreGroundHoldCm() <= 0.0 || !HandOff())
 			{
 				return;
@@ -8706,29 +9047,103 @@ namespace RammsCurb
 		// level and its floor is at least PlantedWalkFloorShare of the no-walk
 		// plan's: the support's edge carried under the mass is what balances the
 		// lifts, and the walk keeps the motion continuous.
-		bool bChoreographed = false;
-		if (bWalk && In.bTryKnots && ChoreographyOn() && !Stopped())
+		double X0 = 0.0;
+		int32  Sides = 0;
+		for (int32 Side = 0; Side < 2; ++Side)
 		{
-			double X0 = 0.0;
-			int32  Sides = 0;
-			for (int32 Side = 0; Side < 2; ++Side)
+			if (Centre[Side] != INDEX_NONE)
 			{
-				if (Centre[Side] != INDEX_NONE)
+				X0 += CentreX0(Side);
+				++Sides;
+			}
+		}
+		X0 /= FMath::Max(1, Sides);
+		// Down a curb (Ramms.Curb.ChoreographyDown): where they began but for
+		// the walk aft to lift, from as their front sets down.
+		const bool	 bDown = !M.IsClimb() && ChoreographyDownOn();
+		const FKnot	 Chor = bDown ? FKnot{ X0, X0 + ChoreographyCm(CVarCurbChoreographyDownLift), X0, X0 }
+								  : FKnot{ ChoreographyCm(CVarCurbChoreographyFront) - X0, ChoreographyCm(CVarCurbChoreographyLift) - X0,
+										ChoreographyCm(CVarCurbChoreographyLand) - X0, ChoreographyCm(CVarCurbChoreographyRear) - X0 };
+		const TCHAR* ChorLabel = bDown ? TEXT("choreography down") : TEXT("choreography");
+		const FKnot	 ChorUp{ X0, X0 + ChoreographyCm(CVarCurbChoreographyUpLift), X0, X0 };
+		const bool	 bTryChor = bWalk && In.bTryKnots && ChoreographyOn();
+		const bool	 bTryChorUp = bTryChor && M.IsClimb() && ChoreographyUpOn() && !HandOff();
+		// (Ramms.Curb.PlanForks: the no-walk plan and the choreographies planned
+		// at once, on forks, each taken below where one at a time plans it --
+		// its work and lines then.)
+		struct FFirstAhead
+		{
+			bool				 bRun = false;
+			bool				 bOk = false;
+			FPlan				 P;
+			TUniquePtr<FPlanner> F;
+		};
+		FFirstAhead FirstAhead[3];
+		if (ForksNow() > 1 && (In.bTryNoWalk ? 1 : 0) + (bTryChor ? 1 : 0) + (bTryChorUp ? 1 : 0) > 1 && !Stopped())
+		{
+			FirstAhead[0].bRun = In.bTryNoWalk;
+			FirstAhead[1].bRun = bTryChor;
+			FirstAhead[2].bRun = bTryChorUp;
+			for (FFirstAhead& A : FirstAhead)
+			{
+				if (A.bRun)
 				{
-					X0 += CentreX0(Side);
-					++Sides;
+					A.F = Fork();
 				}
 			}
-			X0 /= FMath::Max(1, Sides);
-			// Down a curb (Ramms.Curb.ChoreographyDown): where they began but for
-			// the walk aft to lift, from as their front sets down.
-			const bool	bDown = !M.IsClimb() && ChoreographyDownOn();
-			const FKnot Chor = bDown
-				? FKnot{ X0, X0 + ChoreographyCm(CVarCurbChoreographyDownLift), X0, X0 }
-				: FKnot{ ChoreographyCm(CVarCurbChoreographyFront) - X0, ChoreographyCm(CVarCurbChoreographyLift) - X0,
-					  ChoreographyCm(CVarCurbChoreographyLand) - X0, ChoreographyCm(CVarCurbChoreographyRear) - X0 };
-			FPlan		Kept;
-			if (PlanKnots(Chor, bDown ? TEXT("choreography down") : TEXT("choreography"), Kept, /*bPerSide=*/true, /*bDropWalk=*/bDown))
+			ParallelFor(3, [&](int32 i) {
+				FFirstAhead& A = FirstAhead[i];
+				if (!A.bRun)
+				{
+					return;
+				}
+				if (i == 0)
+				{
+					A.F->InitPlan(A.P, TEXT("no walk"));
+					A.F->Evaluate(A.P, false);
+					A.bOk = true;
+				}
+				else
+				{
+					A.bOk = i == 1 ? PlanKnots(Chor, ChorLabel, A.P, /*bPerSide=*/true, /*bDropWalk=*/bDown, A.F.Get())
+								   : PlanKnots(ChorUp, TEXT("choreography up"), A.P, /*bPerSide=*/true, /*bDropWalk=*/true, A.F.Get());
+				}
+			});
+			for (FFirstAhead& A : FirstAhead)
+			{
+				if (A.bRun)
+				{
+					Join(*A.F, false);
+				}
+			}
+		}
+		// Taken where one at a time makes it, or made here.
+		auto TakeFirst = [&](int32 i, FPlan& Out, TFunctionRef<bool(FPlan&)> Make) {
+			FFirstAhead& A = FirstAhead[i];
+			if (!A.bRun)
+			{
+				return Make(Out);
+			}
+			Join(*A.F, true);
+			Out = MoveTemp(A.P);
+			return A.bOk;
+		};
+		if (In.bTryNoWalk)
+		{
+			FPlan P;
+			TakeFirst(0, P, [&](FPlan& Q) {
+				InitPlan(Q, TEXT("no walk"));
+				Evaluate(Q, false);
+				return true;
+			});
+			TagNoWalk(P);
+			Offer(P);
+		}
+		bool bChoreographed = false;
+		if (bTryChor && !Stopped())
+		{
+			FPlan Kept;
+			if (TakeFirst(1, Kept, [&](FPlan& Q) { return PlanKnots(Chor, ChorLabel, Q, /*bPerSide=*/true, /*bDropWalk=*/bDown); }))
 			{
 				bChorLevel = IsOk(Kept);
 				ChorPlan = Kept;
@@ -8782,9 +9197,8 @@ namespace RammsCurb
 			// down -- tried as well, and kept only where it plans a faster floor
 			// than the plan kept so far: the walk is there for the speed.
 			FPlan Up;
-			if (M.IsClimb() && ChoreographyUpOn() && !HandOff() && !Stopped()
-				&& PlanKnots(FKnot{ X0, X0 + ChoreographyCm(CVarCurbChoreographyUpLift), X0, X0 }, TEXT("choreography up"), Up,
-					/*bPerSide=*/true, /*bDropWalk=*/true))
+			if (bTryChorUp && !Stopped()
+				&& TakeFirst(2, Up, [&](FPlan& Q) { return PlanKnots(ChorUp, TEXT("choreography up"), Q, /*bPerSide=*/true, /*bDropWalk=*/true); }))
 			{
 				WithSeat(Up);
 				const bool bFaster = IsOk(Up) && (!bHaveBest || !IsOk(Best) || Up.VFloor > Best.VFloor + 0.25);
@@ -8809,8 +9223,45 @@ namespace RammsCurb
 			// enough, for PlantedWalkFloorShare to choose; of the rest, no more
 			// then.
 			TArray<int32> Level;
-			for (const FKnot& K : Knots)
+			// (Ramms.Curb.PlanForks: every knot set planned at once, on forks, and
+			// each taken here as one at a time would plan it -- its work and lines
+			// then; one this loop passes by leaves only its memos.)
+			struct FKnotAhead
 			{
+				bool				 bOk = false;
+				FPlan				 Kept;
+				TUniquePtr<FPlanner> F;
+			};
+			TArray<FKnotAhead> KnotAheads;
+			const int32		   KnotForks = ForksNow();
+			if (KnotForks > 1 && !Stopped())
+			{
+				KnotAheads.SetNum(static_cast<int32>(UE_ARRAY_COUNT(Knots)));
+				for (int32 b0 = 0; b0 < KnotAheads.Num(); b0 += KnotForks)
+				{
+					const int32 Num = FMath::Min(KnotForks, KnotAheads.Num() - b0);
+					for (int32 i = 0; i < Num; ++i)
+					{
+						KnotAheads[b0 + i].F = Fork();
+					}
+					ParallelFor(Num, [&](int32 i) {
+						FKnotAhead& A = KnotAheads[b0 + i];
+						A.bOk = PlanKnots(Knots[b0 + i], TEXT("knots"), A.Kept, false, false, A.F.Get());
+						// (Weighed with its seat there too, as Offer would here.)
+						if (A.bOk)
+						{
+							WithSeatOn(*A.F, A.Kept);
+						}
+					});
+					for (int32 i = 0; i < Num; ++i)
+					{
+						Join(*KnotAheads[b0 + i].F, false);
+					}
+				}
+			}
+			for (int32 KI = 0; KI < static_cast<int32>(UE_ARRAY_COUNT(Knots)); ++KI)
+			{
+				const FKnot& K = Knots[KI];
 				if (Stopped())
 				{
 					break;
@@ -8822,7 +9273,19 @@ namespace RammsCurb
 					continue;
 				}
 				FPlan Kept;
-				if (!PlanKnots(K, TEXT("knots"), Kept))
+				bool  bKnotOk = false;
+				if (KnotAheads.Num() > 0)
+				{
+					FKnotAhead& A = KnotAheads[KI];
+					Join(*A.F, true);
+					bKnotOk = A.bOk;
+					Kept = MoveTemp(A.Kept);
+				}
+				else
+				{
+					bKnotOk = PlanKnots(K, TEXT("knots"), Kept);
+				}
+				if (!bKnotOk)
 				{
 					continue;
 				}
@@ -8923,6 +9386,7 @@ namespace RammsCurb
 			return Done(Out);
 		}
 		const FString LevelWhy = DescribeFail(Best, Best.FirstFail);
+		TimeLevelStage = FPlatformTime::Seconds() - Started;
 		// From here on no plan is level at its own speeds: where the other grid
 		// has one, this one stops (Stopped).
 		Stage = EPlanStage::LevelSlowed;
@@ -9169,6 +9633,11 @@ namespace RammsCurb
 		{
 			return true;
 		}
+		if (GiveUp && GiveUp->load(std::memory_order_acquire))
+		{
+			StoppedWhy = TEXT("no longer wanted");
+			return true;
+		}
 		// Over the planning budget once no plan is level at its own speeds (a
 		// level plan found is never given up for it: the fallback searches are
 		// where a refusal spends its time) -- and not once every search has run
@@ -9313,7 +9782,7 @@ namespace RammsCurb
 		return A.VFloor > B.VFloor + 0.05;
 	}
 
-	static FCurbSchedule PlanCrossingOn(const FPlannerInput& In)
+	static FCurbSchedule PlanCrossingOn(const FPlannerInput& In, const std::atomic<bool>* GiveUp = nullptr)
 	{
 		// The plan's samples laid on the terrain (AnchorPlanOrigin): where the
 		// robot stands no longer decides where they fall against the edge. A
@@ -9333,16 +9802,17 @@ namespace RammsCurb
 			{
 				// Each grid stops once the other's finished plan is sure to be kept
 				// over anything it can still make (FPlanner::Stopped), and on the
-				// move once its work is over its budget against that plan: the
-				// robot does not wait seconds for the slower grid. Which grid stops
+				// move -- and at rest, Ramms.Curb.GridBudgetAtRest -- once its work is
+				// over its budget against that plan: the robot does not wait seconds
+				// for the slower grid. Which grid stops
 				// when depends on the threads; the plan kept does not -- a plan
 				// over its budget is not kept even where it finished.
 				FCurbSchedule Plans[2];
 				FGridRace	  Race;
-				Race.bBudget = GridBudgetShare() > 0.0 && (In.bOnTheMove || In.EntrySpeedCmS > StopSpeedCmS);
+				Race.bBudget = GridBudgetShare() > 0.0 && (In.bOnTheMove || In.EntrySpeedCmS > StopSpeedCmS || CVarCurbGridBudgetAtRest.GetValueOnAnyThread() != 0);
 				const double Started = FPlatformTime::Seconds();
 				ParallelFor(2, [&](int32 i) {
-					FPlanner P(Inputs[i], &Race, i);
+					FPlanner P(Inputs[i], &Race, i, GiveUp);
 					Plans[i] = P.Run();
 					Race.Publish(i, Plans[i]);
 				});
@@ -9385,11 +9855,11 @@ namespace RammsCurb
 			FPlannerInput Anchored = In;
 			if (AnchorPlanOrigin(Anchored, 1.0, CVarCurbAnchorPhase.GetValueOnAnyThread()))
 			{
-				FPlanner P(Anchored);
+				FPlanner P(Anchored, nullptr, 0, GiveUp);
 				return P.Run();
 			}
 		}
-		FPlanner P(In);
+		FPlanner P(In, nullptr, 0, GiveUp);
 		return P.Run();
 	}
 
@@ -9407,15 +9877,30 @@ namespace RammsCurb
 		}
 		FPlannerInput Short = In;
 		Short.Model.Seat.XRange.Y = Seat.XRange.X + Share * (Seat.XRange.Y - Seat.XRange.X);
+		// (Ramms.Curb.PlanForks over 1: the whole reach planned beside the share
+		// from the start -- the share's plan, where it is one, kept as before and
+		// the other given up; where it is none, the other is already under way.)
+		std::atomic<bool>				bGiveUp{ false };
+		UE::Tasks::TTask<FCurbSchedule> WholeTask;
+		if (PlanForks() > 1)
+		{
+			WholeTask = UE::Tasks::Launch(
+				UE_SOURCE_LOCATION, [&In, &bGiveUp]() { return PlanCrossingOn(In, &bGiveUp); }, UE::Tasks::ETaskPriority::BackgroundHigh);
+		}
 		FCurbSchedule Out = PlanCrossingOn(Short);
 		if (Out.IsValid())
 		{
+			if (WholeTask.IsValid())
+			{
+				bGiveUp.store(true, std::memory_order_release);
+				WholeTask.Wait();
+			}
 			Out.Lines.Add(FString::Printf(TEXT("the seat planned over %.0f%% of its forward reach (to %.1f cm; SeatTravel)"), 100.0 * Share,
 				Short.Model.Seat.XRange.Y));
 			return Out;
 		}
 		const FString Why = Out.Summary;
-		Out = PlanCrossingOn(In);
+		Out = WholeTask.IsValid() ? MoveTemp(WholeTask.GetResult()) : PlanCrossingOn(In);
 		Out.Lines.Add(FString::Printf(TEXT("the seat planned over its whole reach: over %.0f%% of it (SeatTravel) the crossing did not plan (%s)"),
 			100.0 * Share, *Why));
 		return Out;

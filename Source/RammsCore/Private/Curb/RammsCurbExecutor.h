@@ -566,6 +566,12 @@ namespace RammsCurb
 		 *  began (cm): its walk to the plan's eased along the level-in's ramp
 		 *  from there (Ramms.Curb.LevelInWalkRamp). */
 		double StanceX = 0.0;
+		/** A centre wheel in the air walked ahead of the plan's fore/aft to where
+		 *  its 5-bar reaches its swing's top (Ramms.Curb.LiftReachWalk), this
+		 *  tick; and that it has been in this crossing (logged once; until it
+		 *  lands it trails its own command, not the plan's). */
+		bool bReachWalk = false;
+		bool bReachWalked = false;
 
 		/** Its leg's measured height last tick, and its rate (cm/s, filtered). */
 		double MeasZ = 0.0;

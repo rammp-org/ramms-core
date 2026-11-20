@@ -954,8 +954,9 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 {
 	// The two grids planned side by side, each stopping early where it cannot
 	// be kept, keep the plan the rule gives on the two grids each planned to
-	// the end on its own: the better of them (IsBetterPlan) -- on the move, of
-	// those not over their work budget against the other's (OverGridBudget).
+	// the end on its own: the better of them (IsBetterPlan) -- on the move, and
+	// at rest with Ramms.Curb.GridBudgetAtRest, of those not over their work
+	// budget against the other's (OverGridBudget).
 	// Standing, rolling on and rolling back (moving, no entry speed), on
 	// every test terrain both ways, three times over (the threads' timing
 	// differs; the plan kept may not); with the
@@ -966,11 +967,14 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 	IConsoleVariable* Phase = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.AnchorPhase"));
 	IConsoleVariable* Share = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.GridBudget"));
 	IConsoleVariable* Spare = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.GridBudgetWork"));
+	IConsoleVariable* AtRest = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.GridBudgetAtRest"));
 	if (!TestNotNull(TEXT("Ramms.Curb.AnchorGrid"), Grid) || !TestNotNull(TEXT("Ramms.Curb.AnchorPhase"), Phase)
-		|| !TestNotNull(TEXT("Ramms.Curb.GridBudget"), Share) || !TestNotNull(TEXT("Ramms.Curb.GridBudgetWork"), Spare))
+		|| !TestNotNull(TEXT("Ramms.Curb.GridBudget"), Share) || !TestNotNull(TEXT("Ramms.Curb.GridBudgetWork"), Spare)
+		|| !TestNotNull(TEXT("Ramms.Curb.GridBudgetAtRest"), AtRest))
 	{
 		return true;
 	}
+	const bool	bBudgetAtRest = AtRest->GetInt() != 0;
 	const int32 GridWas = Grid->GetInt();
 	const float PhaseWas = Phase->GetFloat();
 	const float ShareWas = Share->GetFloat();
@@ -1016,7 +1020,8 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 					for (int32 i = 0; i < 2; ++i)
 					{
 						bKeepable[i] = Alone[i].IsValid()
-							&& !((bMoving || Entry > RammsCurb::StopSpeedCmS) && Alone[1 - i].IsValid() && RammsCurb::OverGridBudget(Alone[i].PlanWork, Alone[1 - i].PlanWork));
+							&& !((bMoving || Entry > RammsCurb::StopSpeedCmS || bBudgetAtRest) && Alone[1 - i].IsValid()
+								&& RammsCurb::OverGridBudget(Alone[i].PlanWork, Alone[1 - i].PlanWork));
 						OverBudget += Alone[i].IsValid() && !bKeepable[i] ? 1 : 0;
 					}
 					const int32						Keep = bKeepable[0] != bKeepable[1] ? (bKeepable[1] ? 1 : 0) : (RammsCurb::IsBetterPlan(Alone[1], Alone[0]) ? 1 : 0);
@@ -1040,8 +1045,8 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 	Grid->Set(GridWas, ECVF_SetByCode);
 	Share->Set(ShareWas, ECVF_SetByCode);
 	Spare->Set(SpareWas, ECVF_SetByCode);
-	AddInfo(FString::Printf(TEXT("%d plans compared; %d grid plans over their budget on the move"), Compared, OverBudget));
-	TestTrue(FString::Printf(TEXT("with no budget to spare, some grid plan over it on the move (%d)"), OverBudget), OverBudget > 0);
+	AddInfo(FString::Printf(TEXT("%d plans compared; %d grid plans over their budget"), Compared, OverBudget));
+	TestTrue(FString::Printf(TEXT("with no budget to spare, some grid plan over it (%d)"), OverBudget), OverBudget > 0);
 	return true;
 }
 
@@ -4933,6 +4938,114 @@ bool FRammsCurbExecutorFinishInPlace::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("finished in place short of the plan's end somewhere"), TotalShort > 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerForksPlanTheSame,
+	"Ramms.Curb.Planner.ForksPlanTheSame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerForksPlanTheSame::RunTest(const FString& Parameters)
+{
+	// Ramms.Curb.PlanForks: the candidate plans made at once, side by side, on
+	// forks of the planner, are taken in the order one at a time takes them --
+	// the plan is the same, sample for sample, level or tilted, where no work
+	// budget decides (these crossings: far inside them). The work counted
+	// differs, and is logged.
+	IConsoleVariable* Forks = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.PlanForks"));
+	if (!TestNotNull(TEXT("Ramms.Curb.PlanForks"), Forks))
+	{
+		return false;
+	}
+	const int32 Was = Forks->GetInt();
+	ON_SCOPE_EXIT
+	{
+		Forks->Set(Was, ECVF_SetByCode);
+	};
+	struct FCase
+	{
+		const TCHAR* Id;
+		bool		 bUp;
+	};
+	const FCase Cases[] = { { TEXT("Square"), true }, { TEXT("Square"), false }, { TEXT("Oblique30"), true }, { TEXT("StreetGrade"), true },
+		{ TEXT("StreetGrade"), false }, { TEXT("SidewalkTwisted"), true }, { TEXT("RoadFalls"), true } };
+	for (const FCase& C : Cases)
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(C.Id, C.bUp));
+		const FString				   What = FString::Printf(TEXT("%s %s"), C.Id, C.bUp ? TEXT("up") : TEXT("down"));
+		Forks->Set(1, ECVF_SetByCode);
+		const RammsCurb::FCurbSchedule One = RammsCurb::PlanCrossing(In);
+		Forks->Set(8, ECVF_SetByCode);
+		const RammsCurb::FCurbSchedule Side = RammsCurb::PlanCrossing(In);
+		TestEqual(What + TEXT(": the class"), FString(RammsCurb::PlanClassName(Side.Class)), FString(RammsCurb::PlanClassName(One.Class)));
+		TestEqual(What + TEXT(": the floor"), Side.VFloor, One.VFloor);
+		if (!TestEqual(What + TEXT(": the samples"), Side.Samples.Num(), One.Samples.Num()))
+		{
+			continue;
+		}
+		int32 Differ = 0;
+		for (int32 k = 0; k < One.Samples.Num(); ++k)
+		{
+			const RammsCurb::FScheduleSample& A = One.Samples[k];
+			const RammsCurb::FScheduleSample& B = Side.Samples[k];
+			Differ += A.V != B.V || A.B != B.B || A.PitchDeg != B.PitchDeg || A.RollDeg != B.RollDeg || A.X[0] != B.X[0] || A.X[1] != B.X[1]
+					|| A.SeatX != B.SeatX || A.AirborneMask != B.AirborneMask
+				? 1
+				: 0;
+		}
+		TestEqual(What + FString::Printf(TEXT(": samples that differ (%s, floor %.1f; work %lld one at a time, %lld side by side)"), RammsCurb::PlanClassName(One.Class), One.VFloor, static_cast<long long>(One.PlanWork), static_cast<long long>(Side.PlanWork)),
+			Differ, 0);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerCentreSearchWalksFromLevelIn,
+	"Ramms.Curb.Planner.CentreSearchWalksFromLevelIn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerCentreSearchWalksFromLevelIn::RunTest(const FString& Parameters)
+{
+	// Ramms.Curb.CentreSearchWalk: the search over the centre wheels' paths
+	// (here alone: no knots, no no-walk plan) walks neither centre wheel before
+	// the level-in begins -- the executor holds the drive stance's until then.
+	IConsoleVariable* Walk = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.CentreSearchWalk"));
+	if (!TestNotNull(TEXT("Ramms.Curb.CentreSearchWalk"), Walk))
+	{
+		return false;
+	}
+	const int32 Was = Walk->GetInt();
+	ON_SCOPE_EXIT
+	{
+		Walk->Set(Was, ECVF_SetByCode);
+	};
+	Walk->Set(1, ECVF_SetByCode);
+	const TCHAR* Ids[] = { TEXT("Square"), TEXT("Oblique30"), TEXT("StreetGrade") };
+	for (const TCHAR* Id : Ids)
+	{
+		for (const bool bUp : { true, false })
+		{
+			RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+			In.bTryKnots = false;
+			In.bTryNoWalk = false;
+			const FString				   What = FString::Printf(TEXT("%s %s, the search alone"), Id, bUp ? TEXT("up") : TEXT("down"));
+			const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+			if (!S.IsValid() || S.Samples.Num() == 0)
+			{
+				AddInfo(What + TEXT(": no plan to look at"));
+				continue;
+			}
+			double Most = 0.0;
+			for (const RammsCurb::FScheduleSample& Sm : S.Samples)
+			{
+				if (Sm.S < S.LevelInFromS - 1e-6)
+				{
+					Most = FMath::Max(Most, FMath::Max(FMath::Abs(Sm.X[0] - S.Samples[0].X[0]), FMath::Abs(Sm.X[1] - S.Samples[0].X[1])));
+				}
+			}
+			TestTrue(What + FString::Printf(TEXT(": the centre wheels walk %.2f cm before the level-in begins at %.1f cm"), Most, S.LevelInFromS),
+				Most < 1e-6);
+		}
+	}
 	return true;
 }
 

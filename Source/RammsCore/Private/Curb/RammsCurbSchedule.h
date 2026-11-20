@@ -167,6 +167,10 @@ namespace RammsCurb
 		 *  (Ramms.Curb.CentreGroundHoldCm): of two plans otherwise alike, the
 		 *  held one is kept where its floor is near the other's. */
 		bool bCentresHeld = false;
+		/** Its centre wheels' paths from the search over them (not a knot set):
+		 *  with Ramms.Curb.CentreSearchWalk they walk nowhere before the level-in
+		 *  begins, and the level-in walks them to where it is done. */
+		bool bCentresSearched = false;
 		/** Planned with Ramms.Curb.RearLiftAtCentreTouchdown: a centre wheel
 		 *  touched down, not yet loaded (a sample from its SDown to its SLoaded
 		 *  by half a sample), counts as carrying while its side's rear corner is

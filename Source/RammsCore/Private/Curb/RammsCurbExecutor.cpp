@@ -29,6 +29,21 @@ namespace RammsCurb
 				 "as it trails its command."),
 			ECVF_Default);
 
+		TAutoConsoleVariable<int32> CVarCurbLiftReachWalk(TEXT("Ramms.Curb.LiftReachWalk"), 1,
+			TEXT("1 (the default): a centre wheel in the air on its way over (lifting or clear) whose 5-bar cannot reach its swing's top "
+				 "(ZTop, the most its clearance profile asks over its window: it is clear only there) at the plan's fore/aft walks ahead "
+				 "to the first fore/aft the plan has it at further on in its swing that does -- in the air it carries nothing. The planner weighs each instant's own clearance, "
+				 "and may lift a centre wheel where its 5-bar reaches less, walking it on as it nears its window: held there short of its "
+				 "top, the braking cap stopped the robot at the window until the plan's walk let it rise. 0: the plan's fore/aft, as "
+				 "before."),
+			ECVF_Default);
+
+		TAutoConsoleVariable<int32> CVarCurbAttitudeSlowGentle(TEXT("Ramms.Curb.AttitudeSlowGentle"), 1,
+			TEXT("1 (the default): the base off its planned attitude slows the robot braking at MarginHoldDecelShare of Deceleration, "
+				 "as the margin hold does -- braking pitches the base onto its front wheels, and at a brisk smoothness's harder "
+				 "braking it rocked the base further off as the rear corners lifted. 0: at Deceleration, as before."),
+			ECVF_Default);
+
 		TAutoConsoleVariable<int32> CVarCurbLevelInWalkRamp(TEXT("Ramms.Curb.LevelInWalkRamp"), 1,
 			TEXT("1 (the default): the centre wheels' walk to the plan's fore/aft in the level-in eases along the level-in's own ramp, "
 				 "the ramp no quicker than walks them at CenterShiftSpeed and speeds the walk up and down no harder than the drive's "
@@ -2261,6 +2276,12 @@ namespace RammsCurb
 		const FPlanAt Ahead = bFinishInPlace ? StepFinishPose(Measure, Dt, FinishEndAttitude) : Between(S + AheadCm);
 		const FPlanAt Here = bFinishInPlace ? Ahead : Between(S);
 		PlannedAttitude = FVector2D(Here.Pitch, Here.Roll);
+		// Short of where the plan's level-in is done, a plan whose centre paths are
+		// the search's (Ramms.Curb.CentreSearchWalk): the centre wheels' fore/aft
+		// there -- the search weighs none of their poses before it, and plans no
+		// walk before the level-in begins: the level-in walks them to it.
+		const bool	  bToLevelEnd = CentreSearchWalkOn() && Plan.bCentresSearched && LevelInWalkRampOn() && !bFinishInPlace && S + AheadCm < Plan.LevelFromS;
+		const FPlanAt LevelEnd = bToLevelEnd ? Between(Plan.LevelFromS) : Ahead;
 
 		// The base against its planned attitude, once it has been levelled in:
 		// off by more than AttitudeFaultDeg for AttitudeFaultSeconds, a fault (a
@@ -2954,7 +2975,7 @@ namespace RammsCurb
 					if (C != INDEX_NONE)
 					{
 						Wheels[C].StanceX = Wheels[C].CmdX;
-						Walk = IsSupport(C) ? FMath::Max(Walk, FMath::Abs(Ahead.X[Side] - Wheels[C].CmdX)) : Walk;
+						Walk = IsSupport(C) ? FMath::Max(Walk, FMath::Abs(LevelEnd.X[Side] - Wheels[C].CmdX)) : Walk;
 					}
 				}
 				if (Walk > 0.05)
@@ -3025,7 +3046,8 @@ namespace RammsCurb
 				const int32 Side = M->Side(i);
 				// Every wheel across, into the stance the crossing finishes in: the
 				// stance's fore/aft (EndCentreX).
-				double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : EndCentreX(Ahead.X[Side]);
+				// (Short of where the level-in is done, where the plan has it there.)
+				double To = bDwelling && Plan.Samples.IsValidIndex(NextStop + 1) ? Plan.Samples[NextStop + 1].X[Side] : EndCentreX(LevelEnd.X[Side]);
 				// Still in the air at its landing, not yet setting down: walked aft no
 				// further than keeps it past the end of its window (or where it is,
 				// short of that) -- the plan holds a landing wheel still over the
@@ -3033,6 +3055,43 @@ namespace RammsCurb
 				// that walk sent a servo lag ahead would hold it short of where its
 				// landing may begin.
 				const FWheelPlan& WP = Plan.Wheels[i];
+				// In the air on its way over -- lifting or clear -- short of its
+				// swing's top for its 5-bar's reach at that fore/aft
+				// (Ramms.Curb.LiftReachWalk): the first fore/aft the plan has it at
+				// further on in its swing that reaches it.
+				W.bReachWalk = false;
+				// (Off the ground: a wheel still taking its unloading on its tread is
+				// not walked under the robot.)
+				if (!bDwelling && !bFinishInPlace && W.Plane == 0
+					&& (W.State == ERammsCurbWheelState::Clear || (W.State == ERammsCurbWheelState::Lifting && W.BottomCm > TouchCm))
+					&& CVarCurbLiftReachWalk.GetValueOnAnyThread() != 0)
+				{
+					const double Top = W.ZTop + SwingRaise;
+					auto		 Reaches = [&](double X) {
+						const FVector2D R = M->Reach(i, X);
+						return R.X <= R.Y && M->LegZForWorldZ(i, X, Top, BCmd, Ahead.Pitch, Ahead.Roll) <= R.Y - T.LegRangeMargin + 1e-6;
+					};
+					if (!Reaches(To))
+					{
+						for (double At = S + AheadCm; At <= WP.SLand + 1e-6; At += FMath::Max(0.5, Plan.SampleCm))
+						{
+							const double X = Between(At).X[Side];
+							if (Reaches(X))
+							{
+								W.bReachWalk = FMath::Abs(X - To) > 0.05;
+								if (W.bReachWalk && !W.bReachWalked)
+								{
+									W.bReachWalked = true;
+									Log(FString::Printf(TEXT("%-12s walked to %+.1f cm, where the plan has it further on in its swing (%+.1f here): its "
+															 "5-bar reaches its swing's top there"),
+										*In.Legs[i].Name.ToString(), X, To));
+								}
+								To = X;
+								break;
+							}
+						}
+					}
+				}
 				if (!bDwelling && !bFinishInPlace && W.Plane == 0 && (W.State == ERammsCurbWheelState::Lifting || W.State == ERammsCurbWheelState::Clear)
 					&& S + 0.5 * TickLeadCm() >= WP.SLand - 1.0 && To < W.CmdX && CentreHandOffOn(M->IsClimb(), In.Model))
 				{
@@ -3619,8 +3678,10 @@ namespace RammsCurb
 			const bool bLagModel = bFinishWalk && CVarCurbFinishWalkLagModel.GetValueOnAnyThread() != 0;
 			// (Walking along the level-in's ramp, Ramms.Curb.LevelInWalkRamp: their
 			// ramped commands, past the servo lag they follow them with -- the
-			// ramp itself is not a lag.)
-			const bool bRampWalk = LevelInWalkRampOn() && LevelRampFrom >= 0.0 && !bRampDone && !Level.bLevelled;
+			// ramp itself is not a lag. So too short of where the plan's level-in
+			// is done, walking to where the plan has them there:
+			// Ramms.Curb.CentreSearchWalk.)
+			const bool bRampWalk = LevelInWalkRampOn() && LevelRampFrom >= 0.0 && ((!bRampDone && !Level.bLevelled) || bToLevelEnd);
 			double	   Lag = 0.0;
 			for (int32 Side = 0; Side < 2; ++Side)
 			{
@@ -3628,9 +3689,14 @@ namespace RammsCurb
 				if (C != INDEX_NONE)
 				{
 					const FExecLeg& L = Measure.Legs[C];
-					const double	Want = bRampWalk ? (L.bLagX ? L.LagX : Wheels[C].CmdX) : !bFinishWalk ? Here.X[Side]
-						   : bLagModel && L.bLagX														  ? L.LagX
-																										  : Wheels[C].CmdX;
+					// (A wheel walked ahead for its reach, Ramms.Curb.LiftReachWalk, still
+					// in the air: against its own command -- ahead of the plan's walk, not
+					// behind it.)
+					const FExecWheel& CW = Wheels[C];
+					const bool		  bAheadInAir = CW.bReachWalked && (CW.State == ERammsCurbWheelState::Lifting || CW.State == ERammsCurbWheelState::Clear);
+					const double	  Want = bRampWalk || bAheadInAir ? (L.bLagX ? L.LagX : CW.CmdX) : !bFinishWalk ? Here.X[Side]
+							 : bLagModel && L.bLagX																	? L.LagX
+																													: Wheels[C].CmdX;
 					Lag = FMath::Max(Lag, FMath::Abs(L.XZ.X - Want));
 				}
 			}
@@ -3687,7 +3753,11 @@ namespace RammsCurb
 		const double Over = VCmd - Braking;
 		// Down the braking cap's own curve (BrakingDecel) where it binds.
 		const float	 Decel = Braking < VTarget ? static_cast<float>(BrakingDecel(T)) : T.Deceleration;
-		const float	 DecelNow = Over > EmergencyOverCmS ? 2.0f * Decel : (By == EExecTerm::Margin ? static_cast<float>(MarginHoldDecelShare) * T.Deceleration : Decel);
+		// (The margin hold, and the base off its planned attitude --
+		// Ramms.Curb.AttitudeSlowGentle -- braked gently: braking shifts the robot's
+		// weight forward.)
+		const bool	 bGentleTerm = By == EExecTerm::Margin || (By == EExecTerm::Attitude && CVarCurbAttitudeSlowGentle.GetValueOnAnyThread() != 0);
+		const float	 DecelNow = Over > EmergencyOverCmS ? 2.0f * Decel : (bGentleTerm ? static_cast<float>(MarginHoldDecelShare) * T.Deceleration : Decel);
 		const double Goal = FMath::Max(0.0, FMath::Min(VTarget, Braking));
 		double		 AccelUse = T.Acceleration, DecelUse = DecelNow;
 		// Closing on a speed the plan sets (not a braking cap, a deadline, a hold or

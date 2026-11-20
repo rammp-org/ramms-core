@@ -115,6 +115,10 @@ namespace RammsCurb
 	 *  sends a planned seat moving forward once a wheel stands across
 	 *  (Ramms.Curb.ClimbSeatLeadSeconds). */
 	bool   CentreHandOffOn(bool bClimb, const FRobotModel& Model);
+	/** Ramms.Curb.CentreSearchWalk: the centre wheels walk from the level-in --
+	 *  the centre-path search plans no walk before it begins, and the executor
+	 *  walks them through it to where the plan has them as it is done. */
+	bool   CentreSearchWalkOn();
 	double ClimbCentreWalkSpeedCmS();
 	double ClimbSeatLeadSeconds();
 	/** With the hand-off and Ramms.Curb.RearLiftAtCentreTouchdown: a rear
@@ -489,10 +493,15 @@ namespace RammsCurb
 	 * candidate's least tilts, and at most MaxPlans larger tries. Stands(c, r, Tilt): whether stretch r of candidate
 	 * c keeps a pose at Tilt (at the floor speed). Plan(Try, OutFailing):
 	 * plans it, true when it verifies; else OutFailing, the stretches its
-	 * failure is about. The first that verifies is taken.
+	 * failure is about. The first that verifies is taken. Prefetch (with
+	 * Ahead over 1): once a plan has failed, before a try is planned, it and up to Ahead - 1 of the
+	 * tries queued after it that would be planned (none already, none past
+	 * MaxPlans), in order -- to be made at once, side by side, for Plan to
+	 * take as it comes to them; the search is the same.
 	 */
 	FTiltSearchResult SearchTilts(TConstArrayView<FTiltSearchCandidate> Candidates, double MaxTilt, double Grid, TConstArrayView<double> Steps,
-		int32 MaxPlans, TFunctionRef<bool(int32, int32, const FVector2D&)> Stands, TFunctionRef<bool(const FTiltTry&, TArray<int32>&)> Plan);
+		int32 MaxPlans, TFunctionRef<bool(int32, int32, const FVector2D&)> Stands, TFunctionRef<bool(const FTiltTry&, TArray<int32>&)> Plan,
+		int32 Ahead = 1, const TFunction<void(TConstArrayView<FTiltTry>)>& Prefetch = nullptr);
 
 	/** A wheel's keep-off window from its rolling direction
 	 *  (world xy, unit) against the edge normal: climbing
