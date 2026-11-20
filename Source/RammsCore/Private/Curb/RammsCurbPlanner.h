@@ -280,6 +280,11 @@ namespace RammsCurb
 		/** The drive stance the crossing finishes in (Ramms.Curb.FinishInStance). */
 		FFinishStance	 Finish;
 		FRammsCurbTuning Tuning;
+		/** The share of the seat's forward reach (from the aft end of
+		 *  Model.Seat.XRange) the crossing may plan the seat over: the rider's
+		 *  SeatTravel (RammsCurb::SeatReachShare). PlanCrossing plans with the
+		 *  whole reach where no crossing fits the share. */
+		double SeatReachShare = 1.0;
 		/** Which centre-wheel paths the level search tries (for tests): no walk,
 		 *  the walking knots, the grid search. */
 		bool bTryNoWalk = true;
@@ -520,8 +525,8 @@ namespace RammsCurb
 		/** Of those on the ground (not in Airborne), the centre wheels touched
 		 *  down but not yet loaded that are counted as carrying for their side's
 		 *  rear corner's lift (CarryTouchingCentres): on the far surface as a
-		 *  support, but off the ground for the margin the pose must keep (bit
-		 *  per leg). */
+		 *  support, and down for the margin the pose must keep -- off the ground
+		 *  for it with Ramms.Curb.CarriedCentreCountsDown 0 (bit per leg). */
 		uint32 Carried = 0;
 		/** Each 5-bar's fore/aft (cm, chassis frame), by leg. */
 		double X[MaxPlanLegs] = {};
@@ -678,10 +683,12 @@ namespace RammsCurb
 		 *  limit. The zero pose, level, on a robot without a seat. */
 		/** Touching: of Support, the legs landing that carry nothing yet (they
 		 *  are not across for the seat's home). */
-		/** OutBand: with the seat free, FInstantResult::SeatBand. */
+		/** OutBand: with the seat free, FInstantResult::SeatBand. CountsDown:
+		 *  of Touching, the legs counted as down for the margin it asks (the
+		 *  carried centre wheels, Ramms.Curb.CarriedCentreCountsDown). */
 		void SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
 			TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad,
-			FVector2D* OutBand = nullptr) const;
+			FVector2D* OutBand = nullptr, uint32 CountsDown = 0u) const;
 
 		struct FLeg
 		{

@@ -345,7 +345,7 @@ bool FRammsCurbDebugViewControls::RunTest(const FString& Parameters)
 	Hidden.GetAxesInGroup(FName(TEXT("Curb view")), HiddenView);
 	Hidden.GetAxesInGroup(FName(TEXT("Curb")), Own);
 	TestEqual(TEXT("not offered when asked not to"), HiddenView.Num(), 0);
-	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, status, phase, assist, the three preferences)"), Own.Num(), 8);
+	TestEqual(TEXT("...the curb's own controls still are (negotiate, abort, status, phase, assist, the four preferences)"), Own.Num(), 9);
 	// The rider's preferences: sliders, set and read back through the controller.
 	const FName				 Speed(TEXT("curb.pref.speed"));
 	const FRammsControlAxis* SpeedAxis = Own.FindByPredicate([&](const FRammsControlAxis& A) { return A.Id == Speed; });

@@ -12,8 +12,10 @@ namespace RammsCurb
 		constexpr double TiltAtOne = 1.6;
 		/** MaxPlannedTiltDeg's own ceiling (its ClampMax). */
 		constexpr double MaxPlannedTiltCeilingDeg = 10.0;
+		/** The share of the seat's forward reach planned with at SeatTravel 0. */
+		constexpr double SeatReachShareAtZero = 0.25;
 
-		FRammsControlAxis MakeSlider(FName Id, const FText& Name, int32 Order)
+		FRammsControlAxis MakeSlider(FName Id, const FText& Name, int32 Order, float Default = 0.5f)
 		{
 			FRammsControlAxis Slider;
 			Slider.Id = Id;
@@ -22,7 +24,7 @@ namespace RammsCurb
 			Slider.Kind = ERammsControlKind::Position;
 			Slider.Units = ERammsControlUnits::Normalized;
 			Slider.Range = FVector2D(0.0, 1.0);
-			Slider.DefaultValue = 0.5f;
+			Slider.DefaultValue = Default;
 			Slider.Order = Order;
 			return Slider;
 		}
@@ -33,6 +35,7 @@ namespace RammsCurb
 			return Id == PreferenceSpeedControlId()		? &Prefs.Speed
 				: Id == PreferenceSmoothnessControlId() ? &Prefs.Smoothness
 				: Id == PreferenceTiltControlId()		? &Prefs.Tilt
+				: Id == PreferenceSeatControlId()		? &Prefs.SeatTravel
 														: nullptr;
 		}
 	} // namespace
@@ -74,11 +77,22 @@ namespace RammsCurb
 		return FName("curb.pref.tilt");
 	}
 
+	FName PreferenceSeatControlId()
+	{
+		return FName("curb.pref.seat");
+	}
+
+	double SeatReachShare(const FRammsCurbPreferences& Prefs)
+	{
+		return FMath::Lerp(SeatReachShareAtZero, 1.0, FMath::Clamp(static_cast<double>(Prefs.SeatTravel), 0.0, 1.0));
+	}
+
 	void DescribePreferenceControls(FRammsControlSurface& OutSurface, const FRammsCurbPreferences& Prefs, int32 Order)
 	{
 		OutSurface.Add(MakeSlider(PreferenceSpeedControlId(), NSLOCTEXT("Ramms", "CurbPrefSpeed", "Crossing speed"), Order));
 		OutSurface.Add(MakeSlider(PreferenceSmoothnessControlId(), NSLOCTEXT("Ramms", "CurbPrefSmoothness", "Crossing smoothness"), Order + 1));
 		OutSurface.Add(MakeSlider(PreferenceTiltControlId(), NSLOCTEXT("Ramms", "CurbPrefTilt", "Crossing tilt"), Order + 2));
+		OutSurface.Add(MakeSlider(PreferenceSeatControlId(), NSLOCTEXT("Ramms", "CurbPrefSeat", "Crossing seat travel"), Order + 3, 1.0f));
 	}
 
 	bool ApplyPreferenceControl(FRammsCurbPreferences& Prefs, FName Id, float Value)

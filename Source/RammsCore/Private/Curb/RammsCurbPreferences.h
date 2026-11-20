@@ -21,12 +21,18 @@ namespace RammsCurb
 	/** The factor a slider at Value (0..1) gives: AtZero at 0, 1 at 0.5, AtOne at 1, linear either side. */
 	double PreferenceFactor(double Value, double AtZero, double AtOne);
 
-	/** curb.pref.speed, curb.pref.smoothness, curb.pref.tilt. */
+	/** curb.pref.speed, curb.pref.smoothness, curb.pref.tilt, curb.pref.seat. */
 	FName PreferenceSpeedControlId();
 	FName PreferenceSmoothnessControlId();
 	FName PreferenceTiltControlId();
+	FName PreferenceSeatControlId();
 
-	/** The three sliders (group Curb, Position controls 0..1, default 0.5) showing Prefs, from Order on. */
+	/** The share of its forward reach (0..1, from the aft end) the seat may be planned to shift with Prefs'
+	 *  SeatTravel: 1 at 1, SeatReachShareAtZero at 0, linear between. */
+	double SeatReachShare(const FRammsCurbPreferences& Prefs);
+
+	/** The four sliders (group Curb, Position controls 0..1; speed, smoothness and tilt at rest 0.5, the seat's at
+	 *  1) showing Prefs, from Order on. */
 	void DescribePreferenceControls(FRammsControlSurface& OutSurface, const FRammsCurbPreferences& Prefs, int32 Order);
 
 	/** Set the slider Id names to Value (clamped to 0..1); false for an Id that is none of them. */

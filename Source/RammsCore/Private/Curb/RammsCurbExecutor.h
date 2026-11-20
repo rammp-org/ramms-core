@@ -223,9 +223,24 @@ namespace RammsCurb
 	 *  held wheel trailed its plan by that lag as the rear corner lifted, and
 	 *  the lift was blocked). */
 	constexpr double LandingWalkSlackCmS = 10.0;
-	/** A centre wheel's set-down begins with this long (s) unwalked: it comes
-	 *  down first, its walk aft then catching up at LandingWalkSlackCmS. */
-	constexpr double LandingWalkDelaySeconds = 0.12;
+	/** A set-down has begun once its leg has come down this much (cm) from the
+	 *  highest it was since the set-down was sent, or once the servos have had
+	 *  their start (FExecutor::LegStartSeconds): until then a leg not yet
+	 *  descending is not one held up by something under its wheel. */
+	constexpr double PlantBegunCm = 0.4;
+	/** How fast the executor's running tick time (FExecutor::TickDt) follows
+	 *  each tick's: the share of the difference taken per tick. */
+	constexpr double TickDtSmoothing = 0.25;
+	/** The most (cm) an action is begun ahead of the plan's position for the
+	 *  tick it falls in (FExecutor::TickLeadCm). */
+	constexpr double MaxTickLeadCm = 3.0;
+	/** Over how long (s) the attitude the level-in's ramp is sized from is
+	 *  taken (FExecutor::RampAttitudeDeg): a braking pitch of a moment is not
+	 *  the base's tilt. */
+	constexpr double RampAttitudeSeconds = 0.3;
+	/** Half the span (cm) a corner's crank slope is taken over
+	 *  (FExecutor::CrankRiseCmS). */
+	constexpr double CrankSlopeCm = 0.25;
 	/** A leg stopped this much (cm) above where the servo lag model has it,
 	 *  going down, has met the ground. */
 	constexpr double StallCm = 0.4;
@@ -552,6 +567,9 @@ namespace RammsCurb
 		double MeasZ = 0.0;
 		double MeasVz = 0.0;
 		bool   bMeasZ = false;
+		/** The highest its leg was measured (cm) since its state last changed:
+		 *  a set-down has begun once the leg is PlantBegunCm under it. */
+		double PlantTopZ = 0.0;
 		/** Its target last tick lay beyond its leg's reach (clamped to it), and by
 		 *  how much (cm): a leg at its reach neither meets its target nor presses
 		 *  its wheel down -- going down a step, it waits on the chassis to come
@@ -834,8 +852,9 @@ namespace RammsCurb
 		 *  takes the speed the plan rises from rest at, not sample 0's rest. */
 		double PlanSpeedAt(double SAt) const;
 		/** A lifting wheel still on the ground whose leg no longer rises as the
-		 *  servo lag model has it (or that has been on the ground for
-		 *  UnloadStallFactor times UnloadSeconds): stalled there, loaded. */
+		 *  servo lag model has it once it has been lifting UnloadSeconds (its
+		 *  servos' start), or that has been on the ground for UnloadStallFactor
+		 *  times UnloadSeconds: stalled there, loaded. */
 		bool IsLiftStalledOnGround(int32 Leg, const FExecMeasure& Measure) const;
 		/** Set up what each wheel's crossing needs from the plan (ZTop, SDrop). */
 		void Prepare();
@@ -913,8 +932,10 @@ namespace RammsCurb
 		 *  chassis) made the travel at which the wheel, walking as WalkAhead has
 		 *  it -- a function of the travel, so on as the robot brakes -- reaches
 		 *  its window (aft, more room, less TouchMarginCm; forward, less). The
-		 *  1:1 room while the centre wheels hold their fore/aft. */
-		double WalkedDistance(int32 Leg, const FExecMeasure& Measure, double OneToOneCm) const;
+		 *  1:1 room while the centre wheels hold their fore/aft. For a planted
+		 *  centre wheel, or a lifting one still on the ground (ToCm: the room is
+		 *  to there past the edge -- its unloading room -- not to its window). */
+		double WalkedDistance(int32 Leg, const FExecMeasure& Measure, double OneToOneCm, double ToCm = TNumericLimits<double>::Max()) const;
 		/** Centre wheel Leg's fore/aft (chassis frame, cm; + forward) AheadCm
 		 *  more travel on, less where it is now -- at most what it can be, so the
 		 *  wheel is taken to reach any point ahead no later than it can: the walk
@@ -972,6 +993,13 @@ namespace RammsCurb
 			double H = 0.0;
 		};
 		double PredictRise(int32 Leg, const FExecMeasure& Measure, double Ahead, FRise& Sim) const;
+		/** How fast (cm/s) corner Leg's crank, turning at CrankRateRadS, moves
+		 *  its leg at height Z (its 4-bar table's slope there). */
+		double CrankRiseCmS(int32 Leg, double Z, double CrankRateRadS) const;
+		/** A lifting wheel still on the ground: what is left (s) of
+		 *  UnloadSeconds since its lift began, the time its leg is taken to
+		 *  stand before it rises (0 otherwise). */
+		double UnloadLeft(int32 Leg) const;
 		/** A landing wheel's target (chassis z, cm): its contact PressCm into the
 		 *  far surface from the chassis as measured (moved on a servo lag along
 		 *  the plan's height) -- it carries nothing, so the height the chassis
@@ -1009,6 +1037,17 @@ namespace RammsCurb
 		EExecPhase		   Phase = EExecPhase::Approach;
 		FString			   Status;
 		double			   Elapsed = 0.0;
+		/** The ticks' running length (s, each counted to at most
+		 *  RammsMotion::MaxInterpolationGapSeconds; 0 before the first). */
+		double TickDt = 0.0;
+		/** How long (s) a leg's servos take to start a move sent them: the
+		 *  motors' profiles' delay behind their commands (Ramms.Motor.
+		 *  FollowDelayIntervals at TickDt) and two servo lags to get going. */
+		double LegStartSeconds() const;
+		/** How far (cm) the robot goes in a tick (TickDt at the speed it has,
+		 *  at most MaxTickLeadCm): an action due on the plan's position is begun
+		 *  on the last tick short of it rather than the first past it. */
+		double TickLeadCm() const;
 		/** Travel along the plan's heading from its origin (cm), and the speed
 		 *  the robot is taken to have (cm/s). */
 		double S = 0.0;
@@ -1034,6 +1073,17 @@ namespace RammsCurb
 		double RampRate = 1.0;
 		double RampAccel = 1.0;
 		double RampSpan = 0.0;
+		/** The chassis command (BCmd, cm) as the ramp began: the ramp blends the
+		 *  legs at that height (RampedTarget), the rise since taken at once. */
+		double BCmdRamp = 0.0;
+		/** The base's attitude (deg) low-passed over RampAttitudeSeconds from
+		 *  the run's first tick: what the level-in's ramp is sized from. */
+		FVector2D RampAttitudeDeg = FVector2D::ZeroVector;
+		bool	  bRampAttitude = false;
+		/** A support leg's target (chassis z, cm) Ramp (0..1) of the way through
+		 *  the level-in's ramp from StanceZ to Target, the chassis' rise since
+		 *  the ramp began (BCmd less BCmdRamp) not ramped. */
+		double RampedTarget(int32 Leg, double StanceZ, double Target, double Ramp, const FPlanAt& Ahead) const;
 		/** Where the crossing is done (S, cm): every wheel loaded on the far side,
 		 *  the rear tyres FinishClearance past the edge, the centre wheels home,
 		 *  the plan's base back to level. And when (s since Begin) the robot was

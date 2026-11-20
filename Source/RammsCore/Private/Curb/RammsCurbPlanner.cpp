@@ -346,6 +346,11 @@ namespace
 			 "rather than once it has taken load -- the touching wheel counted as carrying for that rear's lift, in the plan and at "
 			 "the executor once it is down on its surface. 0 (the default): it waits for the load."),
 		ECVF_Default);
+	TAutoConsoleVariable<int32> CVarCurbCarriedCentreCountsDown(TEXT("Ramms.Curb.CarriedCentreCountsDown"), 1,
+		TEXT("With Ramms.Curb.RearLiftAtCentreTouchdown: 1 (the default): a centre wheel carrying as it touches down counts as down "
+			 "for the tripod's reserve (HandOffTripodReserveCm) -- once the rear corner is up the robot stands on the same wheels as it "
+			 "would with that centre loaded. 0: it counts as off the ground there, and the rear's lift asks the reserve."),
+		ECVF_Default);
 	TAutoConsoleVariable<int32> CVarCurbSeatAftAtSpeedUp(TEXT("Ramms.Curb.SeatAftAtSpeedUp"), 1,
 		TEXT("1 (the default): the plan shifts the seat aft no faster than the executor does (FRammsCurbSeat::AftSpeedUpCmS, where "
 			 "set). 0: at ShiftSpeedCmS either way, as before."),
@@ -399,11 +404,11 @@ namespace
 		return CVarCurbLowerEarly.GetValueOnAnyThread() != 0;
 	}
 
-	TAutoConsoleVariable<int32> CVarCurbRiseFromStance(TEXT("Ramms.Curb.RiseFromStance"), 0,
-		TEXT("1: the chassis leaves the drive stance's own height evenly from where the level-in begins -- up a curb to the "
-			 "level-in's target, from which the rise (Ramms.Curb.RiseEarly) runs on as before; down a curb (Ramms.Curb.LowerEarly) "
-			 "on one ramp to the crossing's height, each sample kept RiseSlackCm inside its corridor where it can. 0 (the default): "
-			 "the level-in steps the chassis to its target first."),
+	TAutoConsoleVariable<int32> CVarCurbRiseFromStance(TEXT("Ramms.Curb.RiseFromStance"), 1,
+		TEXT("1 (the default): the chassis leaves the drive stance's own height evenly from where the level-in begins -- up a curb "
+			 "to the level-in's target, from which the rise (Ramms.Curb.RiseEarly) runs on as before; down a curb "
+			 "(Ramms.Curb.LowerEarly) on one ramp to the crossing's height, each sample kept RiseSlackCm inside its corridor where it "
+			 "can. 0: the level-in steps the chassis to its target first."),
 		ECVF_Default);
 
 	bool RiseFromStanceOn()
@@ -1493,7 +1498,7 @@ namespace RammsCurb
 
 	void FPlanModel::SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad,
-		FVector2D* OutBand) const
+		FVector2D* OutBand, uint32 CountsDown) const
 	{
 		if (OutBand)
 		{
@@ -1550,7 +1555,7 @@ namespace RammsCurb
 		int32 Down = 0;
 		for (int32 i = 0; i < Legs.Num(); ++i)
 		{
-			Down += ((Support & ~Touching) >> i) & 1u;
+			Down += ((Support & (~Touching | CountsDown)) >> i) & 1u;
 		}
 		const double Required = Tuning.MinStabilityMargin + (bHandOff && Down <= 3 ? HandOffTripodReserveCm : 0.0);
 		const double Enough = Required + SeatEnoughOverCm + HandOffSeatReserveCm;
@@ -1829,7 +1834,7 @@ namespace RammsCurb
 		FVector2D SeatPivot;
 		double	  SeatPitch = 0.0;
 		SeatAt(Q.PitchDeg, Q.SeatX, ~Q.Airborne | Q.Touching, Q.OnFar | Q.Touching, Q.Touching | Q.Carried, XZ, Contacts, Ground, A, O3, SeatPivot, SeatPitch,
-			&R.SeatBand);
+			&R.SeatBand, CVarCurbCarriedCentreCountsDown.GetValueOnAnyThread() != 0 ? Q.Carried : 0u);
 		R.SeatX = SeatPivot.X;
 		R.SeatPitchRad = SeatPitch;
 		const FVector Com = Model.Seat.bHas ? Model.CenterOfMassAt(XZ, SeatPivot, SeatPitch) : Model.CenterOfMassAt(XZ);
@@ -2439,8 +2444,12 @@ namespace RammsCurb
 		 *  that much under its plan on a graded oblique climb. */
 		double ReqFor(uint32 Airborne) const;
 		/** ReqFor an instant: its carried centre wheels (FInstantQuery::Carried)
-		 *  count as off the ground for it. */
-		double ReqFor(const FInstantQuery& Q) const { return ReqFor(Q.Airborne | Q.Carried); }
+		 *  count as down for it (Ramms.Curb.CarriedCentreCountsDown; 0: as off
+		 *  the ground). */
+		double ReqFor(const FInstantQuery& Q) const
+		{
+			return ReqFor(CVarCurbCarriedCentreCountsDown.GetValueOnAnyThread() != 0 ? Q.Airborne : (Q.Airborne | Q.Carried));
+		}
 		/** The centre hand-off for this crossing (CentreHandOffOn), and with it
 		 *  Ramms.Curb.RearLiftAtCentreTouchdown. */
 		bool   HandOff() const { return CentreHandOffOn(M.IsClimb(), In.Model); }
@@ -9275,7 +9284,7 @@ namespace RammsCurb
 		return A.VFloor > B.VFloor + 0.05;
 	}
 
-	FCurbSchedule PlanCrossing(const FPlannerInput& In)
+	static FCurbSchedule PlanCrossingOn(const FPlannerInput& In)
 	{
 		// The plan's samples laid on the terrain (AnchorPlanOrigin): where the
 		// robot stands no longer decides where they fall against the edge. A
@@ -9353,5 +9362,33 @@ namespace RammsCurb
 		}
 		FPlanner P(In);
 		return P.Run();
+	}
+
+	FCurbSchedule PlanCrossing(const FPlannerInput& In)
+	{
+		// The rider's seat travel (FPlannerInput::SeatReachShare): the seat
+		// planned over that share of its forward reach -- the crossing slower
+		// where the seat would have gone further -- and over the whole reach
+		// where nothing fits the share.
+		const FModelSeat& Seat = In.Model.Seat;
+		const double	  Share = FMath::Clamp(In.SeatReachShare, 0.0, 1.0);
+		if (Share >= 1.0 - 1e-6 || !Seat.Shifts())
+		{
+			return PlanCrossingOn(In);
+		}
+		FPlannerInput Short = In;
+		Short.Model.Seat.XRange.Y = Seat.XRange.X + Share * (Seat.XRange.Y - Seat.XRange.X);
+		FCurbSchedule Out = PlanCrossingOn(Short);
+		if (Out.IsValid())
+		{
+			Out.Lines.Add(FString::Printf(TEXT("the seat planned over %.0f%% of its forward reach (to %.1f cm; SeatTravel)"), 100.0 * Share,
+				Short.Model.Seat.XRange.Y));
+			return Out;
+		}
+		const FString Why = Out.Summary;
+		Out = PlanCrossingOn(In);
+		Out.Lines.Add(FString::Printf(TEXT("the seat planned over its whole reach: over %.0f%% of it (SeatTravel) the crossing did not plan (%s)"),
+			100.0 * Share, *Why));
+		return Out;
 	}
 } // namespace RammsCurb

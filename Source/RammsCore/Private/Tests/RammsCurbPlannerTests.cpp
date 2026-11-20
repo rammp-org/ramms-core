@@ -822,7 +822,10 @@ bool FRammsCurbPlannerStartShiftSamePlan::RunTest(const FString& Parameters)
 	// same class, and its tilt and floor within 0.05 -- its samples lie on the
 	// terrain (two grids, Ramms.Curb.AnchorGrid 2), not on wherever the robot
 	// stands. Planned from where it stands (AnchorGrid 0) the plans move with
-	// the start: the test tells the two apart.
+	// the start: the test tells the two apart. (Without the rise from the
+	// stance, Ramms.Curb.RiseFromStance: that ramps the chassis from where the
+	// robot stands, so the start's own fraction of a sample shows in it.)
+	FScopedCVarInt	  NoRise(TEXT("Ramms.Curb.RiseFromStance"), 0);
 	IConsoleVariable* Grid = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.AnchorGrid"));
 	if (!TestNotNull(TEXT("Ramms.Curb.AnchorGrid"), Grid))
 	{
@@ -1612,6 +1615,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerLowerEarly,
 
 bool FRammsCurbPlannerLowerEarly::RunTest(const FString& Parameters)
 {
+	// (Against the level-in's own step down: without Ramms.Curb.RiseFromStance,
+	// which ramps both from the stance's height.)
+	FScopedCVarInt NoRise(TEXT("Ramms.Curb.RiseFromStance"), 0);
 	// Down a curb with Ramms.Curb.LowerEarly the chassis lowers on the wheels
 	// still on the top: by the first touchdown it has come down at least as
 	// far as it would have, and further where it would have lowered under the
@@ -3365,11 +3371,18 @@ bool FRammsCurbExecutorLegStallDown::RunTest(const FString& Parameters)
 	const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Options);
 	const RammsCurb::FWheelPlan&	   W = S.Wheels[PlanFL];
 	const double					   Most = R.MaxNearCarryPastEdgeCm.IsValidIndex(PlanFL) ? R.MaxNearCarryPastEdgeCm[PlanFL] : 1e9;
-	// (Its leg rises no more than the descent's clearance asks, under
-	// LegErrorFaultCm off its servo lag model: the executor holds, and the
-	// controller's hold timeout faults it.)
+	// (The executor holds, and the controller's hold timeout faults it -- or,
+	// where its leg is sent further up than LegErrorFaultCm off its servo lag
+	// model, as with the chassis lowered early from the stance
+	// (Ramms.Curb.RiseFromStance), the executor faults it there itself.)
 	TestFalse(TEXT("not done"), R.bDone);
-	TestEqual(TEXT("held"), FString(RammsCurb::ExecPhaseName(R.EndPhase)), FString(TEXT("Hold")));
+	const FString End = RammsCurb::ExecPhaseName(R.EndPhase);
+	bool		  bOnTheLeg = false;
+	for (const FString& Line : R.Log)
+	{
+		bOnTheLeg = bOnTheLeg || (Line.Contains(TEXT("fault: 'front_left' (lifting)")) && Line.Contains(TEXT("servo lag model")));
+	}
+	TestTrue(FString::Printf(TEXT("held, or halted on the stalled leg (%s)"), *End), End == TEXT("Hold") || (End == TEXT("Halted") && bOnTheLeg));
 	TestTrue(FString::Printf(TEXT("a hold counted (%d)"), R.Counts.Holds), R.Counts.Holds >= 1);
 	TestTrue(FString::Printf(TEXT("the braking cap bound (%d ticks)"), R.Counts.BrakingTicks), R.Counts.BrakingTicks > 0);
 	TestTrue(FString::Printf(TEXT("loaded, it never reached the drop edge: at most %.2f cm past the edge (the edge at %.2f, its window from %.2f)"),

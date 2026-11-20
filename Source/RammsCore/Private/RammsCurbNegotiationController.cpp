@@ -2118,6 +2118,7 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	In.AttitudeDeg = FVector2D(MeasuredPitchDeg, MeasuredRollDeg);
 	// The tuning as the rider's preferences shape it (FRammsCurbPreferences).
 	In.Tuning = GetCrossingTuning();
+	In.SeatReachShare = RammsCurb::SeatReachShare(Preferences);
 	// With the centre wheels taking over the balancing at the rear corners
 	// (Ramms.Curb.ClimbCentreHandOff up a curb, DescentCentreHandOff down one):
 	// fast enough a walk for a landed centre wheel to stand still under the
@@ -5824,13 +5825,18 @@ float URammsCurbNegotiationController::AwaitingBrakingCap(double* OutLevelRoomCm
 	// Nor past the latest the level-in may begin: the line it must be done by,
 	// LevelBeforeEdgeCm (along the edge's normal) short of the first wheel's
 	// window, where a level-in begun standing still ends (AwaitingPlanCap).
-	if (ToFirst < TNumericLimits<double>::Max())
+	// Already past that line (asked for nearer the curb than it allows): only the
+	// windows -- braked to rest for a line behind it, the robot pitched onto its
+	// fronts and the level-in that followed began from a stop; the executor's
+	// own level-in cap has it on time for what needs the base level.
+	const bool bPastLine = ToFirst <= RammsCurb::LevelBeforeEdgeCm / Cos;
+	if (ToFirst < TNumericLimits<double>::Max() && !bPastLine)
 	{
 		Cap = FMath::Min(Cap, RammsCurb::AwaitingPlanCap(static_cast<float>(ToFirst), static_cast<float>(RammsCurb::LevelBeforeEdgeCm / Cos), Speed, Tuning.Deceleration));
 	}
 	if (OutLevelRoomCm)
 	{
-		*OutLevelRoomCm = ToFirst < TNumericLimits<double>::Max()
+		*OutLevelRoomCm = ToFirst < TNumericLimits<double>::Max() && !bPastLine
 			? ToFirst - RammsCurb::LevelBeforeEdgeCm / Cos - RammsCurb::LevelCapMarginCm
 			: TNumericLimits<double>::Max();
 	}

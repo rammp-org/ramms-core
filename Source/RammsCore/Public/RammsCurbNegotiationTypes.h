@@ -376,9 +376,10 @@ struct RAMMSCORE_API FRammsCurbAssist
 };
 
 /**
- * How a rider likes a curb crossing to run, on a curb controller (URammsCurbNegotiationController::Preferences): three
- * sliders on the control surface (curb.pref.speed, curb.pref.smoothness, curb.pref.tilt), each 0..1, 0.5 the robot's
- * own tuning (FRammsCurbTuning) as it is set. They shape the next crossing planned, not one under way:
+ * How a rider likes a curb crossing to run, on a curb controller (URammsCurbNegotiationController::Preferences): four
+ * sliders on the control surface (curb.pref.speed, curb.pref.smoothness, curb.pref.tilt, curb.pref.seat), each 0..1 --
+ * speed, smoothness and tilt at 0.5 the robot's own tuning (FRammsCurbTuning) as it is set, seat travel at rest at 1
+ * (the seat's whole reach). They shape the next crossing planned, not one under way:
  *  - Speed: the pace the crossing cruises at -- 0.6 times the tuning's DriveSpeed at 0, 1.3 times at 1. The planner
  *    still slows wherever a wheel's lift, landing or the seat needs it.
  *  - Smoothness: how gently the speed and the base's tilt change -- the crossing's acceleration and braking
@@ -389,6 +390,11 @@ struct RAMMSCORE_API FRammsCurbAssist
  *  - Tilt: how far the planner may tilt the base where it cannot cross level (MaxPlannedTiltDeg) -- none at 0 (level,
  *    or planned stops, or refused), 1.6 times the tuning's at 1 (at most 10 deg). The attitude the robot faults at
  *    (MaxTiltDeg) is not a preference.
+ *  - SeatTravel: how far forward the planner may shift the seat to keep the robot stable and moving -- as far as its
+ *    reach at 1 (the default: the seat shifts whenever that lets a lift begin sooner or the robot keep its speed),
+ *    down to a quarter of the way at 0, where the crossing is slower instead (the rear corners lift later, the centre
+ *    wheels further aft; or tilted, or with planned stops). Where no crossing fits the shorter shift, the seat's whole
+ *    reach is planned with.
  * The stability margins, the clearances and the legs' and seat's own limits are not preferences either: no setting
  * here lets a crossing stand closer to tipping or move a motor faster than it may.
  */
@@ -408,6 +414,10 @@ struct RAMMSCORE_API FRammsCurbPreferences
 	/** 0 level only .. 1 the most planned tilt; 0.5 the tuning's own MaxPlannedTiltDeg. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Tilt = 0.5f;
+
+	/** 0 the least seat shift (slower crossings) .. 1 the seat's whole reach (the default). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SeatTravel = 1.0f;
 };
 
 /** The step the robot is to cross. */

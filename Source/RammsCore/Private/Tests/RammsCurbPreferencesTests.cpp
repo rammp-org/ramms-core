@@ -65,14 +65,21 @@ bool FRammsCurbPreferencesControlsTest::RunTest(const FString& Parameters)
 	FRammsCurbPreferences Prefs;
 	FRammsControlSurface  Surface;
 	RammsCurb::DescribePreferenceControls(Surface, Prefs, 5);
-	const FName Ids[3] = { RammsCurb::PreferenceSpeedControlId(), RammsCurb::PreferenceSmoothnessControlId(), RammsCurb::PreferenceTiltControlId() };
-	for (const FName Id : Ids)
+	const FName Ids[4] = { RammsCurb::PreferenceSpeedControlId(), RammsCurb::PreferenceSmoothnessControlId(), RammsCurb::PreferenceTiltControlId(),
+		RammsCurb::PreferenceSeatControlId() };
+	for (int32 i = 0; i < 4; ++i)
 	{
+		const FName				 Id = Ids[i];
+		const float				 Rest = i == 3 ? 1.0f : 0.5f;
 		const FRammsControlAxis* A = Surface.Find(Id);
-		TestTrue(FString::Printf(TEXT("%s: a 0..1 slider in Curb, at rest 0.5"), *Id.ToString()),
-			A && A->Kind == ERammsControlKind::Position && A->Group == FName("Curb") && A->Range == FVector2D(0.0, 1.0) && A->DefaultValue == 0.5f
+		TestTrue(FString::Printf(TEXT("%s: a 0..1 slider in Curb, at rest %.1f"), *Id.ToString(), Rest),
+			A && A->Kind == ERammsControlKind::Position && A->Group == FName("Curb") && A->Range == FVector2D(0.0, 1.0) && A->DefaultValue == Rest
 				&& !A->bReadOnly);
 	}
+	TestTrue(TEXT("seat travel at rest: the whole reach"), FMath::IsNearlyEqual(RammsCurb::SeatReachShare(Prefs), 1.0));
+	TestTrue(TEXT("set seat travel"), RammsCurb::ApplyPreferenceControl(Prefs, Ids[3], 0.0f));
+	TestTrue(TEXT("seat travel 0: a quarter of its reach"), FMath::IsNearlyEqual(RammsCurb::SeatReachShare(Prefs), 0.25));
+	Prefs.SeatTravel = 1.0f;
 	TestTrue(TEXT("set speed"), RammsCurb::ApplyPreferenceControl(Prefs, Ids[0], 0.8f));
 	TestEqual(TEXT("speed set"), Prefs.Speed, 0.8f);
 	TestTrue(TEXT("set smoothness past the end: clamped"), RammsCurb::ApplyPreferenceControl(Prefs, Ids[1], 3.0f));
