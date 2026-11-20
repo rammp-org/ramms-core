@@ -2119,6 +2119,13 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	// The tuning as the rider's preferences shape it (FRammsCurbPreferences).
 	In.Tuning = GetCrossingTuning();
 	In.SeatReachShare = RammsCurb::SeatReachShare(Preferences);
+	// Every stability margin at no less than the authored speeding up and
+	// braking: a gentler smoothness slows the robot's moves, not its reserve
+	// (the drive's catch-up ran past the gentler rates, and the poses planned
+	// at them stood closer to tipping).
+	const FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, In.Tuning);
+	In.MarginAcceleration = MarginDyn.X;
+	In.MarginDeceleration = MarginDyn.Y;
 	// With the centre wheels taking over the balancing at the rear corners
 	// (Ramms.Curb.ClimbCentreHandOff up a curb, DescentCentreHandOff down one):
 	// fast enough a walk for a landed centre wheel to stand still under the
@@ -7095,8 +7102,17 @@ bool URammsCurbNegotiationController::MeasureStabilityMargin(float& OutCm) const
 	}
 	RammsCurb::FMeasuredSeat SeatNow;
 	MeasuredSeat(SeatNow);
+	// (The running crossing's, as its plan and executor take them -- the
+	// slider moved since shapes the next crossing.)
+	FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, GetCrossingTuning());
+	if (bPerWheelCrossing && Executor && Executor->IsRunning())
+	{
+		const RammsCurb::FPlannerInput& EIn = Executor->GetInput();
+		MarginDyn = FVector2D(FMath::Max(static_cast<double>(EIn.Tuning.Acceleration), EIn.MarginAcceleration),
+			FMath::Max(static_cast<double>(EIn.Tuning.Deceleration), EIn.MarginDeceleration));
+	}
 	const RammsCurb::FPoseMargin M = RammsCurb::MeasuredMargin(*Model, Frame, XZ, Wheels, SeatNow, FVector2D(ChassisForward.X, ChassisForward.Y),
-		Tuning.Acceleration, Tuning.Deceleration);
+		MarginDyn.X, MarginDyn.Y);
 	if (M.Support == 0)
 	{
 		return false;

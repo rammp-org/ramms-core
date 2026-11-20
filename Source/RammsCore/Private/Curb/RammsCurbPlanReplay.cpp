@@ -33,7 +33,7 @@ namespace RammsCurb
 		constexpr uint32 PlanInputMagic = 0x49504352; // "RCPI"
 		/** 2: the robot moving as it asked (FPlannerInput::bOnTheMove); a version-1
 		 *  file reads with it false. */
-		constexpr int32 PlanInputVersion = 6; // 3: the model's seat; 4: its aft speed-up, fore slow-down and shift easing; 5: the finish stance; 6: the seat reach share
+		constexpr int32 PlanInputVersion = 7; // 3: the model's seat; 4: its aft speed-up, fore slow-down and shift easing; 5: the finish stance; 6: the seat reach share; 7: the margin dynamics
 
 		/** A reflected struct by property name (tagged), so that a file written
 		 *  before a field was added still reads, the field at its default. */
@@ -114,6 +114,10 @@ namespace RammsCurb
 			if (Version >= 6)
 			{
 				Ar << In.SeatReachShare;
+			}
+			if (Version >= 7)
+			{
+				Ar << In.MarginAcceleration << In.MarginDeceleration;
 			}
 			return !Ar.IsError();
 		}
@@ -294,6 +298,8 @@ namespace RammsCurb
 					Start->SetNumberField(TEXT("roll"), In.AttitudeDeg.Y);
 					Start->SetNumberField(TEXT("entry_speed"), In.EntrySpeedCmS);
 					Start->SetNumberField(TEXT("seat_reach_share"), In.SeatReachShare);
+					Start->SetNumberField(TEXT("margin_acceleration"), In.MarginAcceleration);
+					Start->SetNumberField(TEXT("margin_deceleration"), In.MarginDeceleration);
 					Start->SetNumberField(TEXT("heading_deg"), FMath::RadiansToDegrees(FMath::Atan2(In.Heading.Y, In.Heading.X)));
 					Start->SetNumberField(TEXT("step_cm"), In.Terrain.StepHeightCm);
 					Start->SetNumberField(TEXT("approach_deg"), In.Terrain.ApproachAngleDeg);

@@ -562,6 +562,10 @@ namespace RammsCurb
 		 *  where it was sent at its last touchdown (cm). */
 		double StanceZ = 0.0;
 		double TouchZ = 0.0;
+		/** A centre wheel's fore/aft command when the level-in's second stage
+		 *  began (cm): its walk to the plan's eased along the level-in's ramp
+		 *  from there (Ramms.Curb.LevelInWalkRamp). */
+		double StanceX = 0.0;
 
 		/** Its leg's measured height last tick, and its rate (cm/s, filtered). */
 		double MeasZ = 0.0;

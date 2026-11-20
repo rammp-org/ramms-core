@@ -280,6 +280,13 @@ namespace RammsCurb
 		/** The drive stance the crossing finishes in (Ramms.Curb.FinishInStance). */
 		FFinishStance	 Finish;
 		FRammsCurbTuning Tuning;
+		/** The speeding up and braking (cm/s^2) every stability margin is taken
+		 *  at, where more than Tuning's: the crossing's authored Acceleration and
+		 *  Deceleration under a gentler rider smoothness -- which shapes how the
+		 *  robot moves (Tuning, scaled down), never the reserve it keeps (the
+		 *  drive's catch-up ran past the gentler rates). 0: Tuning's. */
+		double MarginAcceleration = 0.0;
+		double MarginDeceleration = 0.0;
 		/** The share of the seat's forward reach (from the aft end of
 		 *  Model.Seat.XRange) the crossing may plan the seat over: the rider's
 		 *  SeatTravel (RammsCurb::SeatReachShare). PlanCrossing plans with the
@@ -714,6 +721,11 @@ namespace RammsCurb
 		const FRobotModel& Model;
 		FRammsCurbTerrain  Terrain;
 		FRammsCurbTuning   Tuning;
+		/** The speeding up and braking its margins are taken at (cm/s^2):
+		 *  Tuning's, or FPlannerInput::MarginAcceleration / MarginDeceleration
+		 *  where more. */
+		double			   MarginAccel = 0.0;
+		double			   MarginDecel = 0.0;
 		TArray<FLeg>	   Legs;
 		FVector2D		   Origin = FVector2D::ZeroVector;
 		FVector2D		   Heading = FVector2D(1.0, 0.0);

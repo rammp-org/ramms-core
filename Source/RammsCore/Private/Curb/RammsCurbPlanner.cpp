@@ -1303,6 +1303,8 @@ namespace RammsCurb
 		: Model(In.Model)
 		, Terrain(In.Terrain)
 		, Tuning(In.Tuning)
+		, MarginAccel(FMath::Max(static_cast<double>(In.Tuning.Acceleration), In.MarginAcceleration))
+		, MarginDecel(FMath::Max(static_cast<double>(In.Tuning.Deceleration), In.MarginDeceleration))
 	{
 		Heading = In.Heading.GetSafeNormal();
 		if (Heading.IsNearlyZero())
@@ -1493,7 +1495,7 @@ namespace RammsCurb
 		{
 			return HullMargin(Contacts, XYOf(W));
 		}
-		return DynamicMargin(Contacts, XYOf(W), W.Z - Ground / Contacts.Num(), Heading, Tuning.Acceleration, Tuning.Deceleration);
+		return DynamicMargin(Contacts, XYOf(W), W.Z - Ground / Contacts.Num(), Heading, MarginAccel, MarginDecel);
 	}
 
 	double FPlanModel::MarginFor(const FVector& Com, TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3) const
@@ -1508,7 +1510,7 @@ namespace RammsCurb
 		{
 			return NumContacts == 0 ? -1e9 : Hull.Margin(XYOf(W));
 		}
-		return DynamicMargin(Hull, XYOf(W), W.Z - Ground / NumContacts, Heading, Tuning.Acceleration, Tuning.Deceleration);
+		return DynamicMargin(Hull, XYOf(W), W.Z - Ground / NumContacts, Heading, MarginAccel, MarginDecel);
 	}
 
 	void FPlanModel::SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
@@ -1862,7 +1864,7 @@ namespace RammsCurb
 		const double	   H = W.Z - Ground / Contacts.Num();
 		const FSupportHull Hull(Contacts);
 		R.StaticMargin = Hull.Margin(XYOf(W));
-		R.Margin = DynamicMargin(Hull, XYOf(W), H, Heading, Tuning.Acceleration, Tuning.Deceleration);
+		R.Margin = DynamicMargin(Hull, XYOf(W), H, Heading, MarginAccel, MarginDecel);
 	}
 
 	// --- the planner -------------------------------------------------------------------------

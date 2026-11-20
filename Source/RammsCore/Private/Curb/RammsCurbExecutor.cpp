@@ -29,6 +29,19 @@ namespace RammsCurb
 				 "as it trails its command."),
 			ECVF_Default);
 
+		TAutoConsoleVariable<int32> CVarCurbLevelInWalkRamp(TEXT("Ramms.Curb.LevelInWalkRamp"), 1,
+			TEXT("1 (the default): the centre wheels' walk to the plan's fore/aft in the level-in eases along the level-in's own ramp, "
+				 "the ramp no quicker than walks them at CenterShiftSpeed and speeds the walk up and down no harder than the drive's "
+				 "Acceleration / Deceleration (a wheel carrying the robot, walked, pushes and then brakes the chassis through its "
+				 "5-bar); slowing the robot only as far as they trail their servo lag model. 0: they walk at CenterShiftSpeed from the "
+				 "ramp's start (a long loaded walk made in a few ticks at speed tipped the robot over its centre wheels)."),
+			ECVF_Default);
+
+		bool LevelInWalkRampOn()
+		{
+			return CVarCurbLevelInWalkRamp.GetValueOnAnyThread() != 0;
+		}
+
 		TAutoConsoleVariable<int32> CVarCurbBrakeWalk(TEXT("Ramms.Curb.BrakeWalk"), 1,
 			TEXT("Development: 1 (the default) a planted centre wheel's hard braking cap -- or a lifting one's still on the ground, to "
 				 "its unloading room -- takes the walk the plan has it make with the travel (WalkedDistance), only the walk it is sure to "
@@ -137,6 +150,19 @@ namespace RammsCurb
 		{
 			return State == ERammsCurbWheelState::Lifting || State == ERammsCurbWheelState::Clear || State == ERammsCurbWheelState::Planting
 				|| State == ERammsCurbWheelState::Held;
+		}
+
+		/** The speeding up and braking (cm/s^2) a measured margin is taken at:
+		 *  the crossing's, or FPlannerInput::MarginAcceleration / Deceleration
+		 *  where more (the plan's margins are taken so too). */
+		double MarginAccelOf(const FPlannerInput& In)
+		{
+			return FMath::Max(static_cast<double>(In.Tuning.Acceleration), In.MarginAcceleration);
+		}
+
+		double MarginDecelOf(const FPlannerInput& In)
+		{
+			return FMath::Max(static_cast<double>(In.Tuning.Deceleration), In.MarginDeceleration);
 		}
 	} // namespace
 
@@ -637,7 +663,7 @@ namespace RammsCurb
 			W.Gradient = (Wheels[i].Plane == 1 ? M->GetTerrain().Far : M->GetTerrain().Near).Gradient;
 		}
 		const FPoseMargin R =
-			MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Seat, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
+			MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Seat, Measure.Forward, MarginAccelOf(In), MarginDecelOf(In));
 		return R.Support >= 3 ? R.DynamicCm : -1e9;
 	}
 
@@ -1377,7 +1403,7 @@ namespace RammsCurb
 			W.Gradient = (bFar ? M->GetTerrain().Far : M->GetTerrain().Near).Gradient;
 		}
 		const FPoseMargin R =
-			MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Seat, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
+			MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Measure.Seat, Measure.Forward, MarginAccelOf(In), MarginDecelOf(In));
 		return R.Support >= 3 ? R.DynamicCm : -1e9;
 	}
 
@@ -1398,7 +1424,7 @@ namespace RammsCurb
 		Seat.bValid = true;
 		Seat.Pivot = FVector2D(SeatX, In.Model.Seat.HeightCm);
 		Seat.PitchRad = Measure.Seat.bValid ? Measure.Seat.PitchRad : 0.0;
-		const FPoseMargin R = MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Seat, Measure.Forward, In.Tuning.Acceleration, In.Tuning.Deceleration);
+		const FPoseMargin R = MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Seat, Measure.Forward, MarginAccelOf(In), MarginDecelOf(In));
 		return R.Support >= 3 ? R.DynamicCm : -1e9;
 	}
 
@@ -2913,12 +2939,36 @@ namespace RammsCurb
 			const double	Turn = Off.Size();
 			RampRate = FMath::Min(T.TiltRateDegPerSec / FMath::Max(Turn, 1e-3), LegSpeed / FMath::Max(Move, 1e-3));
 			RampAccel = FMath::Min(T.TiltAccelDegPerSec2 / FMath::Max(Turn, 1e-3), LegAccel / FMath::Max(Move, 1e-3));
+			// (The centre wheels carrying the robot walk to the plan's fore/aft
+			// along the same ramp, Ramms.Curb.LevelInWalkRamp: no quicker than
+			// CenterShiftSpeed walks the longest walk, and that walk sped up and
+			// slowed no harder than the drive's Acceleration / Deceleration -- a
+			// wheel carrying the robot, walked, pushes the chassis on and then
+			// brakes it.)
+			double Walk = 0.0;
+			if (LevelInWalkRampOn())
+			{
+				for (int32 Side = 0; Side < 2; ++Side)
+				{
+					const int32 C = Centre[Side];
+					if (C != INDEX_NONE)
+					{
+						Wheels[C].StanceX = Wheels[C].CmdX;
+						Walk = IsSupport(C) ? FMath::Max(Walk, FMath::Abs(Ahead.X[Side] - Wheels[C].CmdX)) : Walk;
+					}
+				}
+				if (Walk > 0.05)
+				{
+					RampRate = FMath::Min(RampRate, FMath::Max(0.1, static_cast<double>(T.CenterShiftSpeed)) / Walk);
+					RampAccel = FMath::Min(RampAccel, FMath::Max(1.0, static_cast<double>(FMath::Min(T.Acceleration, T.Deceleration))) / Walk);
+				}
+			}
 			RampRate = FMath::Max(RampRate, 1e-3);
 			RampAccel = FMath::Max(RampAccel, 1e-3);
 			RampSpan = SCurveSeconds(1.0, RampRate, RampAccel);
 			Log(FString::Printf(TEXT("levelling in: the legs to the terrain over %.2f s (the base %.2f deg off the plan's attitude, the legs "
-									 "%.2f cm at most off their targets)"),
-				RampSpan, Turn, Move));
+									 "%.2f cm at most off their targets, the centre wheels %.1f cm from their fore/aft)"),
+				RampSpan, Turn, Move, Walk));
 		}
 		// The level-in's ramp: the share of the move done (0 to 1); done once
 		// the ramp is complete and the base is level.
@@ -3025,7 +3075,13 @@ namespace RammsCurb
 					{
 						Step = FMath::Min(Step, FinishWalkSpeedCmS * Dt);
 					}
-					W.CmdX = StepTowards(W.CmdX, To, Step);
+					// In the level-in's ramp, a wheel carrying the robot walks along it
+					// from where the stance had it (Ramms.Curb.LevelInWalkRamp).
+					const bool bRampWalk = LevelInWalkRampOn() && LevelRampFrom >= 0.0 && !bRampDone && !Level.bLevelled && IsSupport(i) && !bDwelling
+						&& !bFinishInPlace;
+					// (Towards it no faster than Step: a re-plan adopted in the ramp, or
+					// the hand-off's aft-walk cap, still bound each tick.)
+					W.CmdX = StepTowards(W.CmdX, bRampWalk ? FMath::Lerp(W.StanceX, To, Ramp) : To, Step);
 				}
 			}
 			if (!bLevelInBegun)
@@ -3561,6 +3617,10 @@ namespace RammsCurb
 		{
 			const bool bFinishWalk = Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasCentreX;
 			const bool bLagModel = bFinishWalk && CVarCurbFinishWalkLagModel.GetValueOnAnyThread() != 0;
+			// (Walking along the level-in's ramp, Ramms.Curb.LevelInWalkRamp: their
+			// ramped commands, past the servo lag they follow them with -- the
+			// ramp itself is not a lag.)
+			const bool bRampWalk = LevelInWalkRampOn() && LevelRampFrom >= 0.0 && !bRampDone && !Level.bLevelled;
 			double	   Lag = 0.0;
 			for (int32 Side = 0; Side < 2; ++Side)
 			{
@@ -3568,8 +3628,9 @@ namespace RammsCurb
 				if (C != INDEX_NONE)
 				{
 					const FExecLeg& L = Measure.Legs[C];
-					const double	Want = !bFinishWalk ? Here.X[Side] : bLagModel && L.bLagX ? L.LagX
-																							  : Wheels[C].CmdX;
+					const double	Want = bRampWalk ? (L.bLagX ? L.LagX : Wheels[C].CmdX) : !bFinishWalk ? Here.X[Side]
+						   : bLagModel && L.bLagX														  ? L.LagX
+																										  : Wheels[C].CmdX;
 					Lag = FMath::Max(Lag, FMath::Abs(L.XZ.X - Want));
 				}
 			}
@@ -4712,7 +4773,7 @@ namespace RammsCurb
 					W.bSupport = E.IsSupport(i);
 					W.Gradient = (E.GetWheels()[i].Plane == 1 ? TrueT.Far : TrueT.Near).Gradient;
 				}
-				const FPoseMargin R = MeasuredMargin(In.Model, Meas.Frame, XZ, Ws, Meas.Seat, H, T.Acceleration, T.Deceleration);
+				const FPoseMargin R = MeasuredMargin(In.Model, Meas.Frame, XZ, Ws, Meas.Seat, H, MarginAccelOf(In), MarginDecelOf(In));
 				if (R.Support >= 3)
 				{
 					Out.MinMarginCm = FMath::Min(Out.MinMarginCm, R.DynamicCm);

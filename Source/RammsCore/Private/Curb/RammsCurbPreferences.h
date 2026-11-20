@@ -31,6 +31,10 @@ namespace RammsCurb
 	 *  SeatTravel: 1 at 1, SeatReachShareAtZero at 0, linear between. */
 	double SeatReachShare(const FRammsCurbPreferences& Prefs);
 
+	/** The speeding up and braking (cm/s^2, X and Y) every stability margin is taken at: the more of the authored
+	 *  tuning's and the crossing's (the rider's smoothness shapes how the robot moves, never the reserve it keeps). */
+	FVector2D MarginDynamics(const FRammsCurbTuning& Authored, const FRammsCurbTuning& Crossing);
+
 	/** The four sliders (group Curb, Position controls 0..1; speed, smoothness and tilt at rest 0.5, the seat's at
 	 *  1) showing Prefs, from Order on. */
 	void DescribePreferenceControls(FRammsControlSurface& OutSurface, const FRammsCurbPreferences& Prefs, int32 Order);

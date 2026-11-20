@@ -13,6 +13,7 @@
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
 #include "Curb/RammsCurbPlanner.h"
+#include "Curb/RammsCurbPreferences.h"
 #include "Curb/RammsCurbRobotModel.h"
 #include "Curb/RammsCurbRunStats.h"
 #include "Curb/RammsCurbSafety.h"
@@ -779,8 +780,17 @@ void URammsCurbNegotiationController::DrawDebugRobot(const UWorld* World) const
 					RammsCurb::ContactWidth(Legs[i].TyreWidthCm, Legs[i].ContactWidthCm)));
 			}
 		}
+		// (The running crossing's, as its plan and executor take them -- the
+		// slider moved since shapes the next crossing.)
+		FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, GetCrossingTuning());
+		if (bPerWheelCrossing && Executor && Executor->IsRunning())
+		{
+			const RammsCurb::FPlannerInput& EIn = Executor->GetInput();
+			MarginDyn = FVector2D(FMath::Max(static_cast<double>(EIn.Tuning.Acceleration), EIn.MarginAcceleration),
+				FMath::Max(static_cast<double>(EIn.Tuning.Deceleration), EIn.MarginDeceleration));
+		}
 		const RammsCurb::FPoseMargin M = RammsCurb::MeasuredMargin(*Model, Frame, XZ, Measured,
-			FVector2D(ChassisForward.X, ChassisForward.Y), Tuning.Acceleration, Tuning.Deceleration);
+			FVector2D(ChassisForward.X, ChassisForward.Y), MarginDyn.X, MarginDyn.Y);
 		if (Contacts.Num() > 0)
 		{
 			TArray<FVector2D> Flat;

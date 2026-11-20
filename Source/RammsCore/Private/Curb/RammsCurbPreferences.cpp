@@ -87,6 +87,11 @@ namespace RammsCurb
 		return FMath::Lerp(SeatReachShareAtZero, 1.0, FMath::Clamp(static_cast<double>(Prefs.SeatTravel), 0.0, 1.0));
 	}
 
+	FVector2D MarginDynamics(const FRammsCurbTuning& Authored, const FRammsCurbTuning& Crossing)
+	{
+		return FVector2D(FMath::Max(Authored.Acceleration, Crossing.Acceleration), FMath::Max(Authored.Deceleration, Crossing.Deceleration));
+	}
+
 	void DescribePreferenceControls(FRammsControlSurface& OutSurface, const FRammsCurbPreferences& Prefs, int32 Order)
 	{
 		OutSurface.Add(MakeSlider(PreferenceSpeedControlId(), NSLOCTEXT("Ramms", "CurbPrefSpeed", "Crossing speed"), Order));
