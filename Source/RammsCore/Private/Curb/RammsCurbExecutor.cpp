@@ -38,6 +38,20 @@ namespace RammsCurb
 				 "before."),
 			ECVF_Default);
 
+		TAutoConsoleVariable<int32> CVarCurbLiftMarginGuard(TEXT("Ramms.Curb.LiftMarginGuard"), 1,
+			TEXT("1 (the default): a lift is let go only where the robot, measured with the wheel up, stands MarginReleaseCm more than "
+				 "MinLiveStabilityMarginCm inside the wheels it keeps -- the margin at which a margin hold lets the robot go on -- so "
+				 "that no lift leaves the robot in the band a hold would not yet release (a lift begun a tick short of its position "
+				 "landed a run's measured margin on the live floor itself). 0: MinLiveStabilityMarginCm, as before."),
+			ECVF_Default);
+
+		TAutoConsoleVariable<float> CVarCurbAttitudeIntegralGapCm(TEXT("Ramms.Curb.AttitudeIntegralGapCm"), 0.5f,
+			TEXT("The attitude loop's integral is held while a wheel counted as carrying (planted or loading) stands more than this "
+				 "(cm) off its surface: the stance is not the one the loop trims, and the integral wound up on a wheel lifted by a "
+				 "rocking stance added its own swing to the base's as the stance came back. 0: held on the wheels' states alone, as "
+				 "before."),
+			ECVF_Default);
+
 		TAutoConsoleVariable<int32> CVarCurbAttitudeSlowGentle(TEXT("Ramms.Curb.AttitudeSlowGentle"), 1,
 			TEXT("1 (the default): the base off its planned attitude slows the robot braking at MarginHoldDecelShare of Deceleration, "
 				 "as the margin hold does -- braking pitches the base onto its front wheels, and at a brisk smoothness's harder "
@@ -1514,10 +1528,13 @@ namespace RammsCurb
 				return false;
 			}
 		}
-		if (Margin < T.MinLiveStabilityMarginCm)
+		// (With Ramms.Curb.LiftMarginGuard, MarginReleaseCm over it: where a margin
+		// hold would let the robot go on.)
+		const double LiveFloor = T.MinLiveStabilityMarginCm + (CVarCurbLiftMarginGuard.GetValueOnAnyThread() != 0 ? MarginReleaseCm : 0.0);
+		if (Margin < LiveFloor)
 		{
-			OutWhy = FString::Printf(TEXT("with it up the robot would stand %.2f cm inside its wheels (MinLiveStabilityMarginCm %.1f)"), Margin,
-				T.MinLiveStabilityMarginCm);
+			OutWhy = FString::Printf(TEXT("with it up the robot would stand %.2f cm inside its wheels (MinLiveStabilityMarginCm %.1f, %.2f to lift)"), Margin,
+				T.MinLiveStabilityMarginCm, LiveFloor);
 			return false;
 		}
 		// The chassis where it is sent (its steady offset, the preloads' and the
@@ -2538,15 +2555,20 @@ namespace RammsCurb
 
 		// The attitude loop (once the level-in has the legs on the terrain), its
 		// integral held with fewer than three wheels carrying or one loading.
-		int32 NumPlanted = 0;
-		bool  bAnyLoading = false;
+		// (Held too while a carrying wheel stands off its surface,
+		// Ramms.Curb.AttitudeIntegralGapCm: a rocking stance is not one to trim.)
+		int32		 NumPlanted = 0;
+		bool		 bAnyLoading = false;
+		bool		 bCarrierOff = false;
+		const double IntegralGap = static_cast<double>(CVarCurbAttitudeIntegralGapCm.GetValueOnAnyThread());
 		for (int32 i = 0; i < N; ++i)
 		{
 			NumPlanted += Wheels[i].State == ERammsCurbWheelState::Planted ? 1 : 0;
 			bAnyLoading = bAnyLoading || Wheels[i].State == ERammsCurbWheelState::Loading;
+			bCarrierOff = bCarrierOff || (IntegralGap > 0.0 && IsSupport(i) && Wheels[i].BottomCm > IntegralGap);
 		}
 		const FVector2D Correction = Level.TickAttitude(Measure.AttitudeDeg, PlannedAttitude, static_cast<float>(Dt),
-			NumPlanted >= MinPlantedForIntegral && !bAnyLoading, T);
+			NumPlanted >= MinPlantedForIntegral && !bAnyLoading && !bCarrierOff, T);
 		{
 			TArray<FVector2D, TInlineAllocator<8>> XY;
 			TArray<bool, TInlineAllocator<8>>	   Support;
