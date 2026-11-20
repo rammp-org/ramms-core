@@ -344,7 +344,8 @@ namespace
 	TAutoConsoleVariable<int32> CVarCurbRearLiftAtCentreTouchdown(TEXT("Ramms.Curb.RearLiftAtCentreTouchdown"), 0,
 		TEXT("Development: with the centre hand-off, 1: a rear corner may begin its lift once its side's centre wheel has touched down "
 			 "rather than once it has taken load -- the touching wheel counted as carrying for that rear's lift, in the plan and at "
-			 "the executor once it is down on its surface. 0 (the default): it waits for the load."),
+			 "the executor once it is down on its surface. 0 (the default): it waits for the load. (On, up a tall curb the centre "
+			 "legs took the load all at once as the rears came up, and the base pitched past AttitudeFaultDeg.)"),
 		ECVF_Default);
 	TAutoConsoleVariable<int32> CVarCurbCarriedCentreCountsDown(TEXT("Ramms.Curb.CarriedCentreCountsDown"), 1,
 		TEXT("With Ramms.Curb.RearLiftAtCentreTouchdown: 1 (the default): a centre wheel carrying as it touches down counts as down "
@@ -355,6 +356,20 @@ namespace
 		TEXT("1 (the default): the plan shifts the seat aft no faster than the executor does (FRammsCurbSeat::AftSpeedUpCmS, where "
 			 "set). 0: at ShiftSpeedCmS either way, as before."),
 		ECVF_Default);
+	TAutoConsoleVariable<float> CVarCurbHeldCornerLeadSeconds(TEXT("Ramms.Curb.HeldCornerLeadSeconds"), 0.9f,
+		TEXT("A corner the drive stance holds off the ground also stays up when its own lift would begin within this long (s, 0.9 "
+			 "the default) of the level-in's end at the speed the robot comes in at -- rolling in fast, a corner set down for the "
+			 "level-in and lifted again soon after had the robot brake for it. 0: within HeldCornerLeadCm of travel only (an eased "
+			 "lift, EaseLevelInPadCm). A re-plan that would hold a corner the other way from what the level-in did with it is not "
+			 "adopted (FExecutor::Adopt)."),
+		ECVF_Default);
+	/** How far past the level-in's end (cm) a corner's lift may begin and the
+	 *  corner be held up from the start for it, at the speed the robot comes
+	 *  in at (Ramms.Curb.HeldCornerLeadSeconds). */
+	double HeldCornerSpeedLeadCm(double EntrySpeedCmS)
+	{
+		return FMath::Max(0.0, EntrySpeedCmS) * FMath::Max(0.0, static_cast<double>(CVarCurbHeldCornerLeadSeconds.GetValueOnAnyThread()));
+	}
 	double						CentreGroundHoldCm()
 	{
 		return FMath::Max(0.0, static_cast<double>(CVarCurbCentreGroundHold.GetValueOnAnyThread()));
@@ -3712,8 +3727,10 @@ namespace RammsCurb
 			W.SDown = MarchFwd(P, W.SLand, W.TPlant);
 			W.SLoaded = MarchFwd(P, W.SDown, LoadSeconds);
 			// A corner the drive stance holds up stays up when its lift would come
-			// soon after the level-in anyway.
-			W.bHeldFromStart = In.Legs[i].bOffGround && !M.IsCentre(i) && W.SLiftStart <= LevelFromS + HeldCornerLeadCm;
+			// soon after the level-in anyway (Ramms.Curb.HeldCornerLeadSeconds:
+			// soon at the speed it comes in at, too).
+			W.bHeldFromStart = In.Legs[i].bOffGround && !M.IsCentre(i)
+				&& W.SLiftStart <= LevelFromS + FMath::Max(HeldCornerLeadCm, HeldCornerSpeedLeadCm(In.EntrySpeedCmS));
 			if (W.bHeldFromStart)
 			{
 				W.SLiftStart = 0.0;
@@ -4251,8 +4268,18 @@ namespace RammsCurb
 			W.LiftSpeed = Speed;
 			// A corner carried up in the drive stance whose eased lift begins at the
 			// level-in's end stays up through it rather than being set down there and
-			// lifted again.
-			if (In.Legs[i].bOffGround && !M.IsCentre(i) && SE <= LevelFromS + EaseLevelInPadCm + Ds)
+			// lifted again (Ramms.Curb.HeldCornerLeadSeconds: or soon after it at the
+			// speed it comes in at, as ComputeTiming holds one -- where the robot
+			// stands with it up all the way from the level-in's end: the walk back
+			// above may have stopped at SMin, short of there).
+			const bool bNear = SE <= LevelFromS + EaseLevelInPadCm + Ds;
+			bool	   bSoon = !bNear && SE <= LevelFromS + HeldCornerSpeedLeadCm(In.EntrySpeedCmS);
+			for (int32 k = Index(LevelFromS); bSoon && k < KE; ++k)
+			{
+				const FInstantQuery Qk = Query(P, k, P.Air[k] | (1u << i), P.Far[k]);
+				bSoon = !IsForbiddenSet(In.Model, Qk.Airborne, M.IsClimb()) && Stands(P, Qk, BGuessAt(P, k));
+			}
+			if (In.Legs[i].bOffGround && !M.IsCentre(i) && (bNear || bSoon))
 			{
 				W.bHeldFromStart = true;
 				W.SLiftStart = 0.0;

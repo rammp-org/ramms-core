@@ -22,6 +22,13 @@ namespace RammsCurb
 			return CVarCurbLiftWalk.GetValueOnAnyThread() != 0;
 		}
 
+		TAutoConsoleVariable<int32> CVarCurbFinishWalkLagModel(TEXT("Ramms.Curb.FinishWalkLagModel"), 1,
+			TEXT("1 (the default): into the finish stance, a centre wheel walking to the stance's fore/aft slows the robot only as far "
+				 "as it trails its servo lag model -- a 5-bar dragged, not one following its command a servo lag behind (at the walk's "
+				 "speed, more than LagFreeCm: the robot braked hard from its speed at every finish, rocking it on a grade). 0: as far "
+				 "as it trails its command."),
+			ECVF_Default);
+
 		TAutoConsoleVariable<int32> CVarCurbBrakeWalk(TEXT("Ramms.Curb.BrakeWalk"), 1,
 			TEXT("Development: 1 (the default) a planted centre wheel's hard braking cap -- or a lifting one's still on the ground, to "
 				 "its unloading room -- takes the walk the plan has it make with the travel (WalkedDistance), only the walk it is sure to "
@@ -454,6 +461,29 @@ namespace RammsCurb
 		if (!PlannedAttitudeWithinLimit(InPlan, InInput.Tuning, OutWhy))
 		{
 			return false;
+		}
+		// A new plan holding up from the start a wheel that is not up -- one
+		// standing since the crossing began, or one the level-in has set down --
+		// would never lift it (a planted wheel the plan holds from the start waits
+		// for nothing); and once the level-in has begun, one setting down a corner
+		// it keeps up was verified with that corner on the ground. Either way the
+		// plan in force is kept. (A re-plan made at another speed may hold a
+		// corner the other way, Ramms.Curb.HeldCornerLeadSeconds; one whose input
+		// read a standing wheel off the ground may hold it.)
+		for (int32 i = 0; i < Wheels.Num(); ++i)
+		{
+			const FExecWheel& W = Wheels[i];
+			const bool		  bHeld = InPlan.Wheels[i].bHeldFromStart;
+			const bool		  bUp = W.State == ERammsCurbWheelState::Held && !(bLevelInBegun && W.bLower);
+			if (bLevelInBegun ? bHeld != bUp : bHeld && W.State != ERammsCurbWheelState::Held)
+			{
+				OutWhy = FString::Printf(TEXT("the new plan %s '%s', which %s: the plan in force is kept"), bHeld ? TEXT("holds up") : TEXT("sets down"),
+					*In.Legs[i].Name.ToString(),
+					bUp														? TEXT("the level-in keeps up")
+						: W.State == ERammsCurbWheelState::Held || W.bLower ? TEXT("the level-in has set down")
+																			: TEXT("stands on the ground"));
+				return false;
+			}
 		}
 		// Where the robot is along the new plan: from where it was along the old
 		// one (until the next tick measures it).
@@ -3525,17 +3555,22 @@ namespace RammsCurb
 		const double PlanHereV = PlanSpeedAt(S);
 		// The centre wheels lagging the plan slow the robot, continuously. (Into
 		// the finish stance, every wheel across, the plan's fore/aft no longer
-		// stands: lagging their own commands as they walk to the stance's.)
+		// stands: lagging their own commands as they walk to the stance's --
+		// past the servo lag they follow them with, Ramms.Curb.FinishWalkLagModel.)
 		if (bLevelInBegun && bLoweredDown)
 		{
 			const bool bFinishWalk = Phase == EExecPhase::Settle && In.Finish.bValid && In.Finish.bHasCentreX;
+			const bool bLagModel = bFinishWalk && CVarCurbFinishWalkLagModel.GetValueOnAnyThread() != 0;
 			double	   Lag = 0.0;
 			for (int32 Side = 0; Side < 2; ++Side)
 			{
 				const int32 C = Centre[Side];
 				if (C != INDEX_NONE)
 				{
-					Lag = FMath::Max(Lag, FMath::Abs(Measure.Legs[C].XZ.X - (bFinishWalk ? Wheels[C].CmdX : Here.X[Side])));
+					const FExecLeg& L = Measure.Legs[C];
+					const double	Want = !bFinishWalk ? Here.X[Side] : bLagModel && L.bLagX ? L.LagX
+																							  : Wheels[C].CmdX;
+					Lag = FMath::Max(Lag, FMath::Abs(L.XZ.X - Want));
 				}
 			}
 			// With the centre hand-off (up or down a curb), the seat behind where the plan has it
