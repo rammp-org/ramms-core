@@ -3037,6 +3037,14 @@ namespace RammsCurb
 					break;
 				}
 				case ERammsCurbWheelState::Lifting:
+					// Up at the height it is aimed at (aimed over the rise to come,
+					// waiting on the chassis to rise to its window): lifted, as far as
+					// the lift watchdog is concerned, which times it from the last
+					// tick it stood there.
+					if (L.WheelWorld.Z >= W.ZTop + SwingRaise - W.TargetRiseCm - ClearToleranceCm)
+					{
+						W.AtAimAt = Elapsed;
+					}
 					if (L.WheelWorld.Z >= W.ZTop + SwingRaise - ClearToleranceCm)
 					{
 						// Up and clear: a climb's lift that took LateActionSeconds longer
@@ -3068,13 +3076,9 @@ namespace RammsCurb
 						}
 					}
 					else if (M->IsClimb()
-						&& Elapsed - FMath::Max(W.Since, W.AimRaisedAt) > ActionTimeoutFactor * (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) + P.TEase + ActionTimeoutExtraSeconds
-						// ...and is short of the height it is aimed at: one up there,
-						// waiting on the chassis to rise to its window (aimed over the
-						// rise to come; the robot slowed), has lifted. (Timed from its
-						// aim's last rise too: aimed higher at once, it has its time to
-						// get there.)
-						&& L.WheelWorld.Z < W.ZTop + SwingRaise - W.TargetRiseCm - ClearToleranceCm)
+						// (From the lift's start, or the last tick it stood at its aim:
+						// aimed higher at once, it has its time to get up there.)
+						&& Elapsed - FMath::Max(W.Since, W.AtAimAt) > ActionTimeoutFactor * (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) + P.TEase + ActionTimeoutExtraSeconds)
 					{
 						// A climb's lift is the leg's rise to clear the curb top: it
 						// never got there.
@@ -3583,12 +3587,6 @@ namespace RammsCurb
 			W.ReachDeficitCm = FMath::Max(0.0, Target - Wanted);
 			W.bReachClamped = W.ReachDeficitCm > 0.05;
 			W.TargetZ = Target;
-			if (W.State == ERammsCurbWheelState::Lifting && Rise < W.TargetRiseCm - ClearToleranceCm)
-			{
-				// Its aim rose at once (the rise to its window dropped: the stick
-				// let go): the lift watchdog times its climb up there from now.
-				W.AimRaisedAt = Elapsed;
-			}
 			W.TargetRiseCm = Rise;
 			// A wheel being set down slows over its last few centimetres (its
 			// target is Pressed under the ground it meets); an eased lift rises at
