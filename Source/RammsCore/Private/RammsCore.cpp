@@ -5,6 +5,7 @@
 #include "Misc/Paths.h"
 #include "RammsChaosImuProvider.h"
 #include "RammsImuProvider.h"
+#include "RammsRobotSelection.h"
 #include "ShaderCore.h"
 
 #define LOCTEXT_NAMESPACE "FRammsCoreModule"
@@ -37,6 +38,9 @@ void FRammsCoreModule::StartupModule()
 
 	// Physics-rate IMU data from Chaos (URammsPhysicsImuSubsystem); RammsMujocoSupport registers MuJoCo's.
 	RammsImuProviders::Register(ERammsImuSource::Chaos, FRammsImuProviderFactory::CreateStatic(&MakeRammsChaosImuProvider));
+
+	// -RammsRobot=<id> into ramms.Robot: the robot a level started through ARammsRobotGameMode spawns.
+	URammsRobotCatalog::SeedConsoleRobotFromCommandLine();
 }
 
 void FRammsCoreModule::ShutdownModule()

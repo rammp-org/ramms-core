@@ -44,6 +44,8 @@ public class RammsCore : ModuleRules
 				// The control-surface model (its own plugin): contributor /
 				// provider / sink types appear in public headers here.
 				"RammsControl",
+				// URammsRobotSettings (a UDeveloperSettings) is in a public header.
+				"DeveloperSettings",
 			}
 			);
 			
@@ -53,6 +55,8 @@ public class RammsCore : ModuleRules
 			{
 				"Slate",
 				"SlateCore",
+				// URammsRobotCatalog finds robot definitions through it.
+				"AssetRegistry",
 				"PhysicsCore",
 				// The Chaos IMU provider: a physics-rate callback on the world's solver reading
 				// the tracked bodies' particles (RammsChaosImuProvider).
