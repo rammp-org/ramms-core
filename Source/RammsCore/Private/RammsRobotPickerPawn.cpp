@@ -11,6 +11,10 @@ ARammsRobotPickerPawn::ARammsRobotPickerPawn()
 {
 	PrimaryActorTick.bCanEverTick = false;
 	AutoPossessPlayer = EAutoReceiveInput::Disabled; // the game mode hands it to the player
+	// And no AI either: a pawn spawned while the level starts counts as placed in
+	// the world, and one placed in the world with no player to receive gets an AI
+	// controller -- the game mode would then spawn a second picker for the player.
+	AutoPossessAI = EAutoPossessAI::Disabled;
 
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
@@ -21,9 +25,10 @@ ARammsRobotPickerPawn::ARammsRobotPickerPawn()
 	Camera->SetRelativeRotation(FRotator(-20.0, 0.0, 0.0));
 
 	ControlSurface = CreateDefaultSubobject<URammsRobotControlSurfaceComponent>(TEXT("ControlSurface"));
-	ControlSurface->RobotDisplayName = NSLOCTEXT("Ramms", "RobotPicker", "Choose a robot (D-pad or arrows, then A or Enter)");
+	ControlSurface->RobotDisplayName = NSLOCTEXT("Ramms", "RobotPicker", "Choose a robot");
 
 	RobotSelect = CreateDefaultSubobject<URammsRobotSelectComponent>(TEXT("RobotSelect"));
+	RobotSelect->NoRobotHint = NSLOCTEXT("Ramms", "RobotPickerKeys", "Choose one with the D-pad or the arrow keys, then start it with A or Enter.");
 }
 
 void ARammsRobotPickerPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)

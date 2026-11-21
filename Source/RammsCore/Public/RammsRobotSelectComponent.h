@@ -39,6 +39,11 @@ public:
 	static FName ActiveControlId() { return FName(TEXT("sim.robot.active")); }
 	static FName GroupName() { return FName(TEXT("Simulation")); }
 
+	/** Shown after sim.robot.active's status while no robot is running: how to
+	 *  choose one (the picker pawn's keys). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Robot")
+	FText NoRobotHint;
+
 	/** The robot staged for the next load (an id or class path). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Robots")
 	FString GetStagedRobot() const;
@@ -70,6 +75,7 @@ private:
 	/** The robots offered, in picker order (refreshed at BeginPlay). */
 	void  Refresh();
 	int32 IndexOf(const FString& IdOrAlias) const;
+	bool  HasRobotRunning() const;
 
 	/** The robots offered; null stands for RunningClassPath. */
 	UPROPERTY(Transient)

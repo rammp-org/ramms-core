@@ -125,7 +125,8 @@ void URammsRobotSelectComponent::DescribeControls(FRammsControlSurface& OutSurfa
 	FRammsControlAxis Load;
 	Load.Id = LoadControlId();
 	Load.Group = GroupName();
-	Load.DisplayName = NSLOCTEXT("Ramms", "RobotLoad", "Restart with this robot");
+	Load.DisplayName = HasRobotRunning() ? NSLOCTEXT("Ramms", "RobotLoad", "Restart with this robot")
+										 : NSLOCTEXT("Ramms", "RobotStart", "Start with this robot");
 	Load.Kind = ERammsControlKind::Action;
 	Load.Units = ERammsControlUnits::None;
 	Load.bReadback = false;
@@ -183,6 +184,27 @@ bool URammsRobotSelectComponent::ReadControlText(FName Id, FText& OutText) const
 		return false;
 	}
 	const URammsRobotSelectionSubsystem* Selection = GetWorld() ? GetWorld()->GetSubsystem<URammsRobotSelectionSubsystem>() : nullptr;
-	OutText = FText::FromString(Selection ? Selection->GetActiveChoice().Describe() : FString(TEXT("not started through a robot game mode")));
+	if (!Selection)
+	{
+		OutText = NSLOCTEXT("Ramms", "RobotNoGameMode", "Not started through a robot game mode");
+		return true;
+	}
+	const FRammsRobotChoice Active = Selection->GetActiveChoice();
+	if (Active.HasRobot())
+	{
+		OutText = FText::FromString(Active.Describe());
+		return true;
+	}
+	// No robot: why (a choice that matched nothing), then how to choose one.
+	FString Why = Active.Error.IsEmpty() ? FString(TEXT("No robot yet")) : Active.Error;
+	Why[0] = FChar::ToUpper(Why[0]);
+	OutText = NoRobotHint.IsEmpty() ? FText::FromString(Why + TEXT("."))
+									: FText::Format(NSLOCTEXT("Ramms", "RobotNoneHint", "{0}. {1}"), FText::FromString(Why), NoRobotHint);
 	return true;
+}
+
+bool URammsRobotSelectComponent::HasRobotRunning() const
+{
+	const URammsRobotSelectionSubsystem* Selection = GetWorld() ? GetWorld()->GetSubsystem<URammsRobotSelectionSubsystem>() : nullptr;
+	return Selection && Selection->GetActiveChoice().HasRobot();
 }
