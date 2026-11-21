@@ -8,6 +8,7 @@
 #include "RammsCurbNegotiationTypes.h"
 #include "RammsDriveMode.h"
 #include "RammsHUDPanelProvider.h"
+#include "RammsMotionProfile.h"
 #include "Templates/PimplPtr.h"
 
 #include "RammsCurbNegotiationController.generated.h"
@@ -33,10 +34,12 @@ namespace RammsCurb
 	struct FCurbSchedule;
 	struct FFiveBarGridCache;
 	struct FPlannerInput;
+	struct FFinishStance;
 	class FPlanTask;
 	class FExecutor;
 	class FAssistWatch;
 	struct FExecMeasure;
+	struct FExecCommand;
 	struct FDebugViewState;
 	struct FDebugPainter;
 } // namespace RammsCurb
@@ -235,6 +238,17 @@ namespace RammsCurb
  * forward throughout, nothing changes: the pose is finished along the moving
  * path.
  *
+ * Finishing in the drive stance (Ramms.Curb.FinishInStance, on by default):
+ * the crossing ends in the stance of the drive mode it hands back to rather
+ * than on every wheel. Once every wheel stands on the far side, while the
+ * robot rolls on, the centre wheels walk to the stance's fore/aft and the
+ * seat comes back to the stance's pivot -- level, along the line its crossing
+ * holds, as everywhere in the crossing -- and the wheels the stance has off
+ * the ground (the outdoor stance's front corners) go up together as soon as
+ * the robot, as measured with them up, stands MinStabilityMargin inside the
+ * wheels left down. Done waits for all of it, so the hand-back's stance
+ * change has next to nothing left to move.
+ *
  * At Done the stick carries on into the drive mode handed back to: held
  * forward, it drives on; held to the side, the mode turns (differential) or
  * strafes (holonomic) as its own stick mapping has it -- the crossing pairs
@@ -337,6 +351,17 @@ public:
 	 *  Assist.TriggerDistanceCm) begins the crossing, on the move. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
 	FRammsCurbAssist Assist;
+
+	/** How the rider likes crossings run (FRammsCurbPreferences): speed, smoothness, tilt and seat travel, the sliders
+	 *  curb.pref.* on the control surface -- the first three 0.5 each the tuning as it is set, seat travel at rest at 1.
+	 *  They shape the next crossing planned (its planner and executor take Tuning so shaped, its planner the seat's
+	 *  reach), not one under way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
+	FRammsCurbPreferences Preferences;
+
+	/** Tuning as Preferences shape it: what a crossing is planned and run with. */
+	UFUNCTION(BlueprintPure, Category = "Curb")
+	FRammsCurbTuning GetCrossingTuning() const;
 
 	/** Drive mode to hand back to when done. None returns to whichever mode
 	 *  was active when the manoeuvre began. */
@@ -467,11 +492,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Curb")
 	FString GetStatusLine(ERammsControlTextSeverity& OutSeverity) const;
 
-	/** A fault before any wheel has begun to cross -- the far side not yet confirmed, a plan refused, a hold that
-	 *  lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to rest, once
-	 *  it has stood measured at rest for half a second. Not one about the robot itself (a tilt, near tipping, the
-	 *  base off its planned attitude, a runaway, a robot it cannot measure), and not on a terrain given rather than
-	 *  detected (BeginNegotiationOnTerrain). A stop that does not end at rest, another drive mode selected, Stop, or
+	/** A fault before any wheel has begun to cross -- the far side not yet confirmed, a plan refused on the move, a
+	 *  hold that lasted, the terrain not as detected -- is tried again once by itself, from where the robot came to
+	 *  rest, once it has stood measured at rest for half a second. Not a plan refused at rest (nothing has moved: the
+	 *  same plan again would be refused again), not one about the robot itself (a tilt, near tipping, the base off
+	 *  its planned attitude, a runaway, a robot it cannot measure), and not on a terrain given rather than detected
+	 *  (BeginNegotiationOnTerrain). A stop that does not end at rest, another drive mode selected, Stop, or
 	 *  a reset cancels it. A second fault stays a fault; Cross curb ahead, or curb assist and the stick pushed
 	 *  forward again, tries again by hand. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb")
@@ -751,6 +777,8 @@ private:
 		float WheelBottom = 0.0f;
 		/** The height the leg's command ramps towards this tick. */
 		float GoalZ = 0.0f;
+		/** A 5-bar's hip motors' MaxVelocity (rad/s; A, B; 0 where unbounded). */
+		FVector2D HipMaxRate = FVector2D::ZeroVector;
 		/** The surface the wheel follows: the far one (or, lifted, headed
 		 *  for it); else the near one. */
 		bool bOnFar = false;
@@ -783,6 +811,58 @@ private:
 		float	  LagZ = 0.0f;
 		FVector2D LagRate = FVector2D::ZeroVector;
 		bool	  bHasWorld = false;
+
+		/** The motors that carry the wheel: a 4-bar's crank (one), a 5-bar's
+		 *  hips A and B (two). */
+		FName LoadMotors[2];
+		int32 NumLoadMotors = 0;
+		/** A 4-bar's crank as last read (rad, the motor's sense), and that it
+		 *  read past an end of its range (pressed against its stop, which then
+		 *  carries some of the load). */
+		float CrankAngle = 0.0f;
+		bool  bCrankClamped = false;
+		/** The leg's Jacobian at its measured pose (ReadLegEfforts): how far
+		 *  its wheel moves (cm, chassis x and z) per radian of each load motor
+		 *  (A, B; a 4-bar's in X only); a 5-bar's hips per cm of fore/aft and
+		 *  of height (rad/cm, A and B), the inverse. */
+		bool	  bJacobian = false;
+		FVector2D JxCmPerRad = FVector2D::ZeroVector;
+		FVector2D JzCmPerRad = FVector2D::ZeroVector;
+		FVector2D TurnPerCmX = FVector2D::ZeroVector;
+		FVector2D TurnPerCmZ = FVector2D::ZeroVector;
+		/** What its load motors put out over the last frame (N*m, the robot's
+		 *  sense; A, B): the mean and the peak; the most of the frame either sat
+		 *  at the load cap sent it; the load its wheel carries, from the mean
+		 *  through the Jacobian (N; the leg's own weight below its motors not
+		 *  counted), and that it could be read. */
+		FVector2D TauMeanNm = FVector2D::ZeroVector;
+		FVector2D TauPeakNm = FVector2D::ZeroVector;
+		float	  CapBoundShare = 0.0f;
+		float	  LoadN = 0.0f;
+		bool	  bLoad = false;
+		/** Each load motor's press-side torque cap (ApplyLoadCaps; N*m, signed:
+		 *  + bounds its push from above, - from below, 0 none) as worked out
+		 *  this tick, and as last sent to it. */
+		FVector2D TorqueCapNm = FVector2D::ZeroVector;
+		FVector2D SentCapNm = FVector2D::ZeroVector;
+	};
+
+	/** One motor's effort over a crossing, for the Finish line "motors:"
+	 *  (what the motors actually needed). */
+	struct FMotorEffortStats
+	{
+		FName	Motor;
+		FString Role;
+		/** The line it is reported on: its leg's index; -1 the seat, -2 the
+		 *  wheels. */
+		int32 Group = 0;
+		/** Its own rating (N*m; the larger end), as its readings report it. */
+		double		  RatedNm = 0.0;
+		double		  PeakAbsNm = 0.0;
+		TArray<float> FrameMeanAbs;
+		double		  RatedSeconds = 0.0;
+		double		  CapSeconds = 0.0;
+		double		  Seconds = 0.0;
 	};
 
 	URammsRobotBaseComponent* EnsureBase() const;
@@ -802,6 +882,79 @@ private:
 
 	/** PlanPerWheel's checks and the planner's input, without planning. */
 	bool PreparePerWheel(const FRammsCurbProfile& Profile, RammsCurb::FPlannerInput& OutInput, FString& OutReason);
+
+	/** How far (s) behind the frame it is sent in a position command reaches
+	 *  its servo: the robot base's physics-rate follower runs its delay behind
+	 *  its commands (RammsMotion::FFollower: FCommandInterval::Delay of the
+	 *  frames, CommandCadence here); without it (Ramms.Motor.
+	 *  PhysicsRateProfiles 0) one step a frame, half a frame late. */
+	float CommandDelaySeconds() const;
+
+	/** The legs' position commands go through the robot base's physics-rate
+	 *  follower: physics-rate profiles on (Ramms.Motor.PhysicsRateProfiles)
+	 *  and a backend that keeps its own clock (MuJoCo; Chaos runs none). */
+	bool RunsFollower() const;
+
+	/** The legs' lag behind their commands (s): Tuning.ServoLagSeconds, the
+	 *  servos' own, and CommandDelaySeconds on top. */
+	float EffectiveServoLagSeconds() const;
+
+	/** A 5-bar's hips at its commanded pose (RammsCurb::FExecLeg::
+	 *  HipTurnPerCmX / HipTurnPerCmZ): how far each turns per cm of fore/aft
+	 *  and of height. False for any other leg, or where the hips are
+	 *  unbounded, the pose unreachable, or no probe about it reaches. */
+	bool FiveBarHipTurns(const FLegState& State, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const;
+	/** FiveBarHipTurns' probes at any pose At (chassis x-z, cm), ungated. */
+	bool FiveBarTurnsAt(const FLegState& State, const FVector2D& At, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const;
+
+	// --- what the legs' motors put out, and their load caps ----------------------
+
+	/** Every motor the crossing's report covers (the legs', the seat's, the
+	 *  wheels'), each read once so its backend starts recording it. */
+	void PrimeMotorEfforts();
+	/** This tick's readings of the legs' motors (FLegState::TauMeanNm and
+	 *  on), over the frame just gone (DeltaTime), and the crossing's stats. */
+	void ReadLegEfforts(float DeltaTime);
+	/** The executor's load caps (FExecCommand::LegLoadCapN) as each load
+	 *  motor's press-side torque cap (Ramms.Curb.LoadCap: 1 sent to the
+	 *  motors, 2 worked out and counted only). */
+	void ApplyLoadCaps(const RammsCurb::FExecCommand& Cmd);
+	/** Every load cap sent taken off. */
+	void ClearLoadCaps();
+	/** The executor ended, and its load caps taken off with it. */
+	void EndExecutor();
+	/** The crossing's "motors:", "load caps:" and "physics readings:" lines. */
+	void LogMotorEfforts();
+
+	TArray<FMotorEffortStats> EffortStats;
+	/** How far behind the physics the measurements were (ms; per tick). */
+	TArray<float> SnapshotAgeMs;
+	/** This backend cannot take the load caps (refused once this crossing). */
+	bool bLoadCapsRefused = false;
+	/** Ticks the shadow caps would have bound (a load motor's frame peak past
+	 *  its cap), ticks the caps were sent, and how many times one was sent. */
+	int32 LoadCapWouldBindTicks = 0;
+	int32 LoadCapTicks = 0;
+	int32 LoadCapSends = 0;
+	/** The most one wheel carried (share of the weight, estimated) this
+	 *  crossing: which, and when (s). */
+	float MaxLoadShareOfW = 0.0f;
+	int32 MaxLoadLeg = INDEX_NONE;
+	float MaxLoadAt = 0.0f;
+
+	/** The frames' interval and jitter, smoothed as the follower smooths its
+	 *  commands': how often position commands go out, and how evenly -- on the
+	 *  simulation's clock, as the follower stamps them, where the backend has
+	 *  one (CadenceSimTime: the last frame's), else the game's. */
+	RammsMotion::FCommandInterval CommandCadence;
+	double						  CadenceSimTime = -1.0;
+
+	/** The rider's preferences the crossing under way was planned with (taken
+	 *  as its first plan is prepared): its re-plans keep them, the sliders
+	 *  moved since shape the next crossing. */
+	FRammsCurbPreferences CrossingPreferences;
+	/** Tuning as CrossingPreferences shape it. */
+	FRammsCurbTuning CrossingTuning() const;
 
 	/** A per-wheel re-plan: the same input, planned off the game thread
 	 *  (RammsCurb::FPlanTask), the schedule swapped in by PollReplan when it is
@@ -1264,10 +1417,44 @@ private:
 	void StepWheelHold();
 	/** Open the brakes the hold closed (BrakedWheels). */
 	void ReleaseWheelBrakes();
+	/**
+	 * The hand-over (ramms.Curb.HandOverOmniHold): after a crossing hands the
+	 * robot back to a mode that does not drive its fallback wheels (the omni
+	 * corners under the differential mode), those wheels are kept from rolling
+	 * free until that mode has the robot -- braked while the mode asks no
+	 * motion, else driven at the speed the mode's own wheels are asked -- and
+	 * let go once the robot has settled, or its main wheels stand on the
+	 * ground with their speed loops on their commands (not soft any more), or
+	 * after HandOverHoldMaxSeconds. The legs (as FRammsCurbLeg) held, how long
+	 * the hold has run, and how long each release condition has held.
+	 */
+	TArray<int32> HandOverWheels;
+	bool		  bHandOverHold = false;
+	/** The mode the robot was handed back to: the hold ends once another has it. */
+	FName  HandOverModeId;
+	bool   bHandOverBraked = false;
+	double HandOverElapsed = 0.0;
+	double HandOverSettledFor = 0.0;
+	double HandOverTrackedFor = 0.0;
+	/** Begin the hold for a hand-back to ModeId (when it applies). */
+	void BeginHandOverHold(FName ModeId);
+	/** ModeId drives the fallback (omni) wheels itself: the holonomic mode. */
+	bool DrivesFallbackWheels(FName ModeId) const;
+	/** One tick of it while another mode has the robot. */
+	void StepHandOverHold(float DeltaTime);
+	/** Let the held wheels go: no command, no brake -- or (bLeaveCommands: another
+	 *  mode has the robot now, and its commands) only the brakes the hold set. */
+	void EndHandOverHold(const TCHAR* Why, bool bLeaveCommands = false);
 	/** Whether the drive mode ModeId holds the robot still with no command
 	 *  (IRammsDriveMode::HoldsRobotStill); and the first such mode, or None. */
 	bool  ModeHoldsStill(FName ModeId) const;
 	FName HoldingModeId() const;
+	/** The drive stance the crossing finishes in (Ramms.Curb.FinishInStance
+	 *  on): the stance of the mode it is set to hand back to, in the legs'
+	 *  terms -- which wheels it has off the ground and how high, the centre
+	 *  wheels' fore/aft, the seat's pivot. False (Out not valid) with no such
+	 *  stance. */
+	bool BuildFinishStance(RammsCurb::FFinishStance& Out) const;
 	/** The drive mode ModeId on this actor, or null. */
 	IRammsDriveMode* FindDriveMode(FName ModeId) const;
 	/** The mode a crossing that has ended hands the robot back to: the one it
@@ -1396,6 +1583,7 @@ private:
 	bool	  bRetryable = false;
 	bool	  bRetryPending = false;
 	bool	  bRetriedOnce = false;		 // the retry was made: a second fault stays one
+	bool	  bRefusedAtRest = false;	 // the end Finish is told is a plan refused at rest: never tried again
 	bool	  bTerrainGiven = false;	 // BeginNegotiationOnTerrain: development fault injection, never retried
 	double	  RetryWaitSeconds = 0.0;	 // measured at rest for so long
 	double	  RetryElapsedSeconds = 0.0; // since it became pending: one not at rest in time is not made

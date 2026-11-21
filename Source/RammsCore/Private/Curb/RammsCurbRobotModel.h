@@ -259,6 +259,22 @@ namespace RammsCurb
 	 */
 	double HullMargin(TConstArrayView<FVector2D> Points, const FVector2D& P);
 
+	/** HullMargin's hull of Points, built once to measure many points
+	 *  against (Margin(P) is HullMargin(Points, P)). */
+	struct FSupportHull
+	{
+		explicit FSupportHull(TConstArrayView<FVector2D> Points);
+		double Margin(const FVector2D& P) const;
+
+	private:
+		/** The points, sorted, closer than 1e-6 cm counted once. */
+		TArray<FVector2D, TInlineAllocator<16>> Unique;
+		/** Three or more off one line: each edge's start and inward normal. */
+		bool									bPolygon = false;
+		TArray<FVector2D, TInlineAllocator<16>> EdgeFrom;
+		TArray<FVector2D, TInlineAllocator<16>> EdgeNormal;
+	};
+
 	/** How far (cm) the zero-moment point moves from under the centre of mass
 	 *  of a robot accelerating at AccelCmS2 with its centre of mass HeightCm
 	 *  over the ground: h a / g, against the acceleration. */
@@ -272,6 +288,9 @@ namespace RammsCurb
 	 */
 	double DynamicMargin(TConstArrayView<FVector2D> Points, const FVector2D& ComXY, double HeightCm, const FVector2D& Heading,
 		double Acceleration, double Deceleration);
+	/** The same over a hull built once. */
+	double DynamicMargin(const FSupportHull& Hull, const FVector2D& ComXY, double HeightCm, const FVector2D& Heading, double Acceleration,
+		double Deceleration);
 
 	/**
 	 * Where a wheel touches a plane: the point of a cylinder of RadiusCm,
@@ -389,4 +408,10 @@ namespace RammsCurb
 	 *  seat, or an invalid measure, is the plain one). */
 	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, const FVector2D& Heading, double Acceleration, double Deceleration);
+
+	/** What MeasuredMargin measures against: the centre of mass (world) and
+	 *  each wheel's contact (world; one per model leg, meaningful where it
+	 *  supports). */
+	void MeasuredContacts(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
+		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, FVector& OutCom, TArray<FVector, TInlineAllocator<8>>& OutContacts);
 } // namespace RammsCurb

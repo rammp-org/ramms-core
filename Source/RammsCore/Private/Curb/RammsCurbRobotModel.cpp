@@ -374,12 +374,11 @@ namespace RammsCurb
 		}
 	} // namespace
 
-	double HullMargin(TConstArrayView<FVector2D> Points, const FVector2D& P)
+	FSupportHull::FSupportHull(TConstArrayView<FVector2D> Points)
 	{
 		// Andrew's monotone chain, counter-clockwise, collinear points dropped.
 		TArray<FVector2D, TInlineAllocator<16>> Sorted(Points.GetData(), Points.Num());
 		Sorted.Sort([](const FVector2D& A, const FVector2D& B) { return A.X < B.X || (A.X == B.X && A.Y < B.Y); });
-		TArray<FVector2D, TInlineAllocator<16>> Unique;
 		for (const FVector2D& Q : Sorted)
 		{
 			if (Unique.Num() == 0 || (Q - Unique.Last()).SizeSquared() > 1e-12)
@@ -389,7 +388,7 @@ namespace RammsCurb
 		}
 		if (Unique.Num() == 0)
 		{
-			return TNumericLimits<double>::Lowest();
+			return;
 		}
 		TArray<FVector2D, TInlineAllocator<16>> Hull;
 		for (int32 Pass = 0; Pass < 2; ++Pass)
@@ -409,13 +408,9 @@ namespace RammsCurb
 		if (Hull.Num() < 3)
 		{
 			// A segment or a point: no area to stand inside.
-			if (Unique.Num() == 1)
-			{
-				return -(P - Unique[0]).Size();
-			}
-			return -SegmentDistance(Unique[0], Unique.Last(), P);
+			return;
 		}
-		double Margin = TNumericLimits<double>::Max();
+		bPolygon = true;
 		for (int32 k = 0; k < Hull.Num(); ++k)
 		{
 			const FVector2D& A = Hull[k];
@@ -427,10 +422,36 @@ namespace RammsCurb
 				continue;
 			}
 			// The left normal points inside a counter-clockwise hull.
-			const FVector2D N(-E.Y / Length, E.X / Length);
-			Margin = FMath::Min(Margin, FVector2D::DotProduct(P - A, N));
+			EdgeFrom.Add(A);
+			EdgeNormal.Add(FVector2D(-E.Y / Length, E.X / Length));
+		}
+	}
+
+	double FSupportHull::Margin(const FVector2D& P) const
+	{
+		if (Unique.Num() == 0)
+		{
+			return TNumericLimits<double>::Lowest();
+		}
+		if (!bPolygon)
+		{
+			if (Unique.Num() == 1)
+			{
+				return -(P - Unique[0]).Size();
+			}
+			return -SegmentDistance(Unique[0], Unique.Last(), P);
+		}
+		double Margin = TNumericLimits<double>::Max();
+		for (int32 k = 0; k < EdgeFrom.Num(); ++k)
+		{
+			Margin = FMath::Min(Margin, FVector2D::DotProduct(P - EdgeFrom[k], EdgeNormal[k]));
 		}
 		return Margin;
+	}
+
+	double HullMargin(TConstArrayView<FVector2D> Points, const FVector2D& P)
+	{
+		return FSupportHull(Points).Margin(P);
 	}
 
 	double ZmpShiftCm(double HeightCm, double AccelCmS2)
@@ -441,9 +462,15 @@ namespace RammsCurb
 	double DynamicMargin(TConstArrayView<FVector2D> Points, const FVector2D& ComXY, double HeightCm, const FVector2D& Heading,
 		double Acceleration, double Deceleration)
 	{
+		return DynamicMargin(FSupportHull(Points), ComXY, HeightCm, Heading, Acceleration, Deceleration);
+	}
+
+	double DynamicMargin(const FSupportHull& Hull, const FVector2D& ComXY, double HeightCm, const FVector2D& Heading, double Acceleration,
+		double Deceleration)
+	{
 		const FVector2D H = Heading.GetSafeNormal();
-		const double	SpeedingUp = HullMargin(Points, ComXY - H * ZmpShiftCm(HeightCm, Acceleration));
-		const double	Braking = HullMargin(Points, ComXY + H * ZmpShiftCm(HeightCm, Deceleration));
+		const double	SpeedingUp = Hull.Margin(ComXY - H * ZmpShiftCm(HeightCm, Acceleration));
+		const double	Braking = Hull.Margin(ComXY + H * ZmpShiftCm(HeightCm, Deceleration));
 		return FMath::Min(SpeedingUp, Braking);
 	}
 
@@ -533,24 +560,18 @@ namespace RammsCurb
 	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, const FVector2D& Heading, double Acceleration, double Deceleration)
 	{
-		FPoseMargin Out;
-		Out.CenterOfMass = Frame.ToWorld(Seat.bValid && Model.Seat.bHas ? Model.CenterOfMassAt(LegXZ, Seat.Pivot, Seat.PitchRad) : Model.CenterOfMassAt(LegXZ));
+		FPoseMargin							 Out;
+		TArray<FVector, TInlineAllocator<8>> All;
+		MeasuredContacts(Model, Frame, LegXZ, Wheels, Seat, Out.CenterOfMass, All);
 		TArray<FVector2D, TInlineAllocator<8>> Contacts;
 		double								   Ground = 0.0;
-		for (int32 i = 0; i < Wheels.Num() && i < Model.Legs.Num(); ++i)
+		for (int32 i = 0; i < All.Num(); ++i)
 		{
-			const FMeasuredWheel& W = Wheels[i];
-			if (!W.bSupport)
+			if (Wheels[i].bSupport)
 			{
-				continue;
+				Contacts.Add(FVector2D(All[i].X, All[i].Y));
+				Ground += All[i].Z;
 			}
-			// The axle as the chassis carries it: tilted with it.
-			const FModelLeg& M = Model.Legs[i];
-			const FVector	 Local = LevelAxle(M);
-			const FVector	 Axle = Frame.X * Local.X + Frame.Y * Local.Y;
-			const FVector	 C = WheelContact(W.Centre, Axle, W.Gradient, M.RadiusCm, M.ContactWidthCm);
-			Contacts.Add(FVector2D(C.X, C.Y));
-			Ground += C.Z;
 		}
 		Out.Support = Contacts.Num();
 		if (Contacts.Num() == 0)
@@ -563,5 +584,26 @@ namespace RammsCurb
 		Out.StaticCm = HullMargin(Contacts, C);
 		Out.DynamicCm = DynamicMargin(Contacts, C, Out.HeightCm, Heading, Acceleration, Deceleration);
 		return Out;
+	}
+
+	void MeasuredContacts(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
+		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, FVector& OutCom, TArray<FVector, TInlineAllocator<8>>& OutContacts)
+	{
+		OutCom = Frame.ToWorld(Seat.bValid && Model.Seat.bHas ? Model.CenterOfMassAt(LegXZ, Seat.Pivot, Seat.PitchRad) : Model.CenterOfMassAt(LegXZ));
+		OutContacts.Reset();
+		for (int32 i = 0; i < Wheels.Num() && i < Model.Legs.Num(); ++i)
+		{
+			const FMeasuredWheel& W = Wheels[i];
+			if (!W.bSupport)
+			{
+				OutContacts.Add(W.Centre);
+				continue;
+			}
+			// The axle as the chassis carries it: tilted with it.
+			const FModelLeg& M = Model.Legs[i];
+			const FVector	 Local = LevelAxle(M);
+			const FVector	 Axle = Frame.X * Local.X + Frame.Y * Local.Y;
+			OutContacts.Add(WheelContact(W.Centre, Axle, W.Gradient, M.RadiusCm, M.ContactWidthCm));
+		}
 	}
 } // namespace RammsCurb

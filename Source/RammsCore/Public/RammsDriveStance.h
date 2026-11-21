@@ -75,6 +75,31 @@ struct RAMMSCORE_API FRammsDriveStance
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance")
 	TArray<FRammsStanceMotorTarget> MotorTargets;
 
+	/**
+	 * Motors of MotorTargets moved first, on their own, when the robot is taken
+	 * into this stance from a pose no drive mode set -- where a curb crossing
+	 * left the legs, the low-level mode -- before the rest of the stance moves.
+	 * A seat that carries the rider's mass is the case: brought back to where
+	 * this stance carries it while every wheel is still down, before the
+	 * corners go up (with the mass still forward, lifting the front corners
+	 * tips the robot onto them). Empty (the default): everything together, as
+	 * before. A change from one drive mode's stance to another's keeps its two
+	 * stages (wheels down before wheels up) and moves these with the rest.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance")
+	TArray<FName> LeadMotorIds;
+
+	/**
+	 * The fastest the lead motors turn in their own stage (rad/s, at the
+	 * stage's S-curve peak), slower than the selector moves stance motors
+	 * otherwise. A seat brought back aft under a rider who is driving on: its
+	 * shift subtracts from the rider's speed over the ground, and at the
+	 * selector's own rate it carried the rider backward for a moment. 0 (the
+	 * default): the selector's rate.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stance", meta = (ClampMin = "0.0", Units = "rad/s"))
+	float LeadMaxMotorRate = 0.0f;
+
 	bool IsEmpty() const
 	{
 		return !bHasLinkageHeight && !bHasLinkageTranslation && MotorTargets.Num() == 0;

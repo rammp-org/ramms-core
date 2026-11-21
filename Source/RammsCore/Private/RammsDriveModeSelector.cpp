@@ -195,6 +195,8 @@ namespace RammsDrive
 				const float* Commanded = Selector.State ? Selector.State->MotorCommands.Find(Target.MotorId) : nullptr;
 				C.From = (Commanded && FMath::Abs(*Commanded - At) <= MotorAtCommandTolerance) ? *Commanded : At;
 				C.To = Target.Target;
+				C.bLead = Stance.LeadMotorIds.Contains(Target.MotorId);
+				C.MaxRate = C.bLead ? FMath::Max(0.0, static_cast<double>(Stance.LeadMaxMotorRate)) : 0.0;
 				OutChannels.Add(C);
 			}
 		}
@@ -405,6 +407,15 @@ int32 URammsDriveModeSelector::ActiveIndex() const
 FName URammsDriveModeSelector::GetActiveModeId() const
 {
 	if (const IRammsDriveMode* Mode = ModeAt(ActiveIndex()))
+	{
+		return Mode->GetDriveModeId();
+	}
+	return NAME_None;
+}
+
+FName URammsDriveModeSelector::GetActivatingModeId() const
+{
+	if (const IRammsDriveMode* Mode = ModeAt(ActivatingIndex))
 	{
 		return Mode->GetDriveModeId();
 	}
@@ -798,14 +809,18 @@ FString URammsDriveModeSelector::ActivateMode(int32 Index, const FRammsDriveMoti
 	}
 
 	// Stand the others down first: two modes live at once would write the same
-	// motors in one frame and offer duplicate control Ids.
-	for (int32 i = 0; i < Modes.Num(); ++i)
+	// motors in one frame and offer duplicate control Ids. (Each told which
+	// mode is coming in: GetActivatingModeId.)
 	{
-		if (i != Index)
+		TGuardValue<int32> Activating(ActivatingIndex, Index);
+		for (int32 i = 0; i < Modes.Num(); ++i)
 		{
-			if (IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Modes[i]))
+			if (i != Index)
 			{
-				Mode->SetDriveModeActive(false);
+				if (IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Modes[i]))
+				{
+					Mode->SetDriveModeActive(false);
+				}
 			}
 		}
 	}

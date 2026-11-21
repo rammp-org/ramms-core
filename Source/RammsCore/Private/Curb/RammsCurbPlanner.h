@@ -102,8 +102,30 @@ namespace RammsCurb
 	/** A leg move is taken to settle this long after its lag (s). */
 	constexpr double LegSettleSeconds = 0.05;
 	/** A planted centre wheel walks aft at most this much per cm of travel:
-	 *  its ground speed stays at least 0.3 of the chassis'. */
+	 *  its ground speed stays at least 0.3 of the chassis'. The planner uses
+	 *  MaxAftWalkPerCmNow() (Ramms.Curb.MaxAftWalkPerCm, this by default; 1
+	 *  with the centre hand-off: it may stand still on the ground). */
 	constexpr double MaxAftWalkPerCm = 0.7;
+	double			 MaxAftWalkPerCmNow(bool bClimb, const FRobotModel& Model);
+	/** The centre hand-off on for a crossing up (bClimb) or down a curb by a
+	 *  robot whose seat shifts (Ramms.Curb.ClimbCentreHandOff,
+	 *  Ramms.Curb.DescentCentreHandOff, both on by default); and the centre
+	 *  wheels' walk speed (cm/s) it takes at the least
+	 *  (Ramms.Curb.ClimbCentreWalkSpeedCmS), and how far ahead in time (s) it
+	 *  sends a planned seat moving forward once a wheel stands across
+	 *  (Ramms.Curb.ClimbSeatLeadSeconds). */
+	bool CentreHandOffOn(bool bClimb, const FRobotModel& Model);
+	/** Ramms.Curb.CentreSearchWalk: the centre wheels walk from the level-in --
+	 *  the centre-path search plans no walk before it begins, and the executor
+	 *  walks them through it to where the plan has them as it is done. */
+	bool   CentreSearchWalkOn();
+	double ClimbCentreWalkSpeedCmS();
+	double ClimbSeatLeadSeconds();
+	/** With the hand-off and Ramms.Curb.RearLiftAtCentreTouchdown: a rear
+	 *  corner may lift once its side's centre wheel has touched down, the
+	 *  touching wheel counted as carrying for it (CarryTouchingCentres; the
+	 *  plan's FWheelPlan::TouchSufficesMask). */
+	bool RearLiftAtCentreTouchdownOn(bool bClimb, const FRobotModel& Model);
 	/** The planned tilt is searched on rings of inclination this far apart
 	 *  (deg), each ring's tilts about this far apart along it. */
 	constexpr double TiltGridDeg = 0.25;
@@ -126,9 +148,19 @@ namespace RammsCurb
 	/** The least servo lag (s) a touchdown's approach is shaped by. */
 	constexpr double MinTouchdownLagSeconds = 0.02;
 
+	/** The band (cm) over the ground a wheel being set down comes through at
+	 *  TouchdownSpeed itself (Ramms.Curb.TouchdownBandCm; 0 by default): the
+	 *  leg's measured height is a frame old by the time its command goes out
+	 *  and the command runs a servo lag ahead of the wheel, so a command still
+	 *  closing on the ground at speed when the wheel meets it presses it in
+	 *  by that much at once -- one leg then carries the robot until the
+	 *  touchdown is seen. */
+	double TouchdownBandCm();
+
 	/** How fast a wheel being set down may be sent down with its command
-	 *  HeightCm over where it meets the ground (cm/s): TouchdownSpeed plus
-	 *  that height over a servo lag, so it slows over its last few
+	 *  HeightCm over where it meets the ground (cm/s): TouchdownSpeed within
+	 *  TouchdownBandCm of it, and above the band TouchdownSpeed plus the height
+	 *  over the band over a servo lag, so it slows over its last few
 	 *  centimetres; no limit with TouchdownSpeed 0. The executor's landings
 	 *  and the planner's timing of them both use it. */
 	inline double TouchdownSpeedCap(double HeightCm, const FRammsCurbTuning& T)
@@ -137,7 +169,8 @@ namespace RammsCurb
 		{
 			return TNumericLimits<double>::Max();
 		}
-		return T.TouchdownSpeed + FMath::Max(0.0, HeightCm) / FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
+		return T.TouchdownSpeed
+			+ FMath::Max(0.0, HeightCm - TouchdownBandCm()) / FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
 	}
 
 	/** The hard braking caps' deceleration (cm/s^2): BrakingDeceleration, else
@@ -167,13 +200,16 @@ namespace RammsCurb
 		{
 			return DownCm / Speed;
 		}
-		// Within Zone of the ground the cap is under Speed; there the command
-		// closes on the ground exponentially, at TouchdownSpeed at the last.
+		// Within Zone of the touchdown band the cap is under Speed; there the
+		// command closes on the band exponentially, and through the band at
+		// TouchdownSpeed itself.
 		const double Tau = FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
 		const double Vt = T.TouchdownSpeed;
+		const double Band = FMath::Min(TouchdownBandCm(), DownCm);
+		const double Over = DownCm - Band;
 		const double Zone = (Speed - Vt) * Tau;
-		const double Above = FMath::Max(0.0, DownCm - Zone);
-		return Above / Speed + Tau * FMath::Loge((Vt + FMath::Min(DownCm, Zone) / Tau) / Vt);
+		const double Above = FMath::Max(0.0, Over - Zone);
+		return Above / Speed + Tau * FMath::Loge((Vt + FMath::Min(Over, Zone) / Tau) / Vt) + Band / Vt;
 	}
 
 	/** What the planner knows of one leg beyond the robot model. */
@@ -204,8 +240,38 @@ namespace RammsCurb
 	{
 		TArray<const void*>	 Keys;
 		TArray<FFiveBarGrid> Grids;
+		/** The hip range they were built with (Ramms.Curb.DevHipMinRad/MaxRad;
+		 *  min >= max: the motors' own). */
+		FVector2D HipRange = FVector2D(1.0, 0.0);
 		/** How long building them took (ms). */
 		double BuildMs = 0.0;
+	};
+
+	/**
+	 * The drive stance the crossing finishes in: the stance of the drive mode
+	 * it hands back to, in the legs' own terms. Once every wheel stands on the
+	 * far side the executor takes the robot into it while it rolls on -- the
+	 * centre wheels walked to the stance's fore/aft and the seat to its pivot,
+	 * and each wheel the stance has off the ground (the outdoor stance's front
+	 * corners) lifted to its height as soon as the robot, as measured, stands
+	 * inside the wheels left down -- so that the hand-back has nothing left to
+	 * move. Not valid: the crossing ends on every wheel, in the plan's end pose.
+	 */
+	struct FFinishStance
+	{
+		bool bValid = false;
+		/** Per leg (as FPlannerInput::Legs): lifted off the ground in the stance,
+		 *  to its height (the leg's own z, cm, chassis frame). */
+		TArray<uint8>  Lift;
+		TArray<double> LiftZ;
+		/** The centre wheels' fore/aft in the stance (a 5-bar's x, cm). */
+		bool   bHasCentreX = false;
+		double CentreX = 0.0;
+		/** The seat's pivot fore/aft in the stance (cm, the seat's frame). */
+		bool   bHasSeatX = false;
+		double SeatX = 0.0;
+
+		bool LiftsLeg(int32 Leg) const { return bValid && Lift.IsValidIndex(Leg) && Lift[Leg] != 0 && LiftZ.IsValidIndex(Leg); }
 	};
 
 	/** Everything a plan is made from. The plan copies nothing it does not
@@ -224,12 +290,37 @@ namespace RammsCurb
 		FVector2D AttitudeDeg = FVector2D::ZeroVector;
 		/** The chassis' speed now (cm/s): where the plan's speed starts. */
 		double EntrySpeedCmS = 0.0;
+		/** The share of Tuning.ServoLagSeconds (s) that is the robot base's
+		 *  command delay -- its motor follower's, at the controller's frame rate
+		 *  -- rather than the servos' own: the controller adds it to the tuning's
+		 *  lag (URammsCurbNegotiationController::CommandDelaySeconds). 0 for an
+		 *  input that leaves it out (a test's, or one recorded before). */
+		double CommandDelaySeconds = 0.0;
+		/** The legs' position commands reach their servos through the robot
+		 *  base's physics-rate follower (else stepped once a tick: half a tick
+		 *  late on average, which the executor's lift start then counts). Not
+		 *  recorded in plan inputs (a replay takes the follower). */
+		bool bFollower = true;
 		/** The robot moving as it asks (rolling on, or back: EntrySpeedCmS is
 		 *  never under 0): the robot does not wait at rest for the plan
 		 *  (PlanCrossing's work budget). An entry speed over StopSpeedCmS is
 		 *  taken as moving too. */
-		bool			 bOnTheMove = false;
+		bool bOnTheMove = false;
+		/** The drive stance the crossing finishes in (Ramms.Curb.FinishInStance). */
+		FFinishStance	 Finish;
 		FRammsCurbTuning Tuning;
+		/** The speeding up and braking (cm/s^2) every stability margin is taken
+		 *  at, where more than Tuning's: the crossing's authored Acceleration and
+		 *  Deceleration under a gentler rider smoothness -- which shapes how the
+		 *  robot moves (Tuning, scaled down), never the reserve it keeps (the
+		 *  drive's catch-up ran past the gentler rates). 0: Tuning's. */
+		double MarginAcceleration = 0.0;
+		double MarginDeceleration = 0.0;
+		/** The share of the seat's forward reach (from the aft end of
+		 *  Model.Seat.XRange) the crossing may plan the seat over: the rider's
+		 *  SeatTravel (RammsCurb::SeatReachShare). PlanCrossing plans with the
+		 *  whole reach where no crossing fits the share. */
+		double SeatReachShare = 1.0;
 		/** Which centre-wheel paths the level search tries (for tests): no walk,
 		 *  the walking knots, the grid search. */
 		bool bTryNoWalk = true;
@@ -427,10 +518,15 @@ namespace RammsCurb
 	 * candidate's least tilts, and at most MaxPlans larger tries. Stands(c, r, Tilt): whether stretch r of candidate
 	 * c keeps a pose at Tilt (at the floor speed). Plan(Try, OutFailing):
 	 * plans it, true when it verifies; else OutFailing, the stretches its
-	 * failure is about. The first that verifies is taken.
+	 * failure is about. The first that verifies is taken. Prefetch (with
+	 * Ahead over 1): once a plan has failed, before a try is planned, it and up to Ahead - 1 of the
+	 * tries queued after it that would be planned (none already, none past
+	 * MaxPlans), in order -- to be made at once, side by side, for Plan to
+	 * take as it comes to them; the search is the same.
 	 */
 	FTiltSearchResult SearchTilts(TConstArrayView<FTiltSearchCandidate> Candidates, double MaxTilt, double Grid, TConstArrayView<double> Steps,
-		int32 MaxPlans, TFunctionRef<bool(int32, int32, const FVector2D&)> Stands, TFunctionRef<bool(const FTiltTry&, TArray<int32>&)> Plan);
+		int32 MaxPlans, TFunctionRef<bool(int32, int32, const FVector2D&)> Stands, TFunctionRef<bool(const FTiltTry&, TArray<int32>&)> Plan,
+		int32 Ahead = 1, const TFunction<void(TConstArrayView<FTiltTry>)>& Prefetch = nullptr);
 
 	/** A wheel's keep-off window from its rolling direction
 	 *  (world xy, unit) against the edge normal: climbing
@@ -442,7 +538,7 @@ namespace RammsCurb
 	/** Whether the legs off the ground (bit per leg) hold a same-side corner
 	 *  and centre, both fronts and a centre, or a centre and both rears: the
 	 *  sets the gait never lifts together, whatever the margin says. */
-	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne);
+	bool IsForbiddenSet(const FRobotModel& Model, uint32 Airborne, bool bClimb);
 
 	/** One instant as the planner asks about it. */
 	/** FInstantQuery::SeatX left to the pose. */
@@ -467,6 +563,12 @@ namespace RammsCurb
 		 *  surface (a leg at its reach touches down only once the chassis has
 		 *  come down to it), but carries nothing yet (bit per leg). */
 		uint32 Touching = 0;
+		/** Of those on the ground (not in Airborne), the centre wheels touched
+		 *  down but not yet loaded that are counted as carrying for their side's
+		 *  rear corner's lift (CarryTouchingCentres): on the far surface as a
+		 *  support, and down for the margin the pose must keep -- off the ground
+		 *  for it with Ramms.Curb.CarriedCentreCountsDown 0 (bit per leg). */
+		uint32 Carried = 0;
 		/** Each 5-bar's fore/aft (cm, chassis frame), by leg. */
 		double X[MaxPlanLegs] = {};
 		/** The seat's pivot fore/aft (cm, chassis frame) the instant is held
@@ -573,11 +675,18 @@ namespace RammsCurb
 		/** A leg's reach (chassis z, cm, least and most) at fore/aft X, without
 		 *  the margin: a 4-bar's table, a 5-bar's grid column. */
 		FVector2D Reach(int32 Leg, double X) const;
+		/** The chassis heights (world, cm, least and most) at which 5-bar leg
+		 *  Leg, standing at fore/aft X on its surface (the far one when Q has it
+		 *  OnFar), reaches it inside LegRangeMargin at the instant: the band
+		 *  Evaluate takes the corridor from for a leg on the ground. Least over
+		 *  most where it does not reach at X. */
+		FVector2D PlantedBand(int32 Leg, const FInstantQuery& Q, double X) const;
 
 		/** The corridor of chassis heights at the instant, the legs' fore/aft
 		 *  taken at BGuess, and the pose at its middle (or at BGuess when
-		 *  bAtGuess). */
-		FInstantResult Evaluate(const FInstantQuery& Q, double BGuess, bool bAtGuess = false) const;
+		 *  bAtGuess). SkipLeg (a leg index): the corridor without that leg's
+		 *  part in it -- what the rest of the robot leaves it. */
+		FInstantResult Evaluate(const FInstantQuery& Q, double BGuess, bool bAtGuess = false, int32 SkipLeg = INDEX_NONE) const;
 		/** The pose at chassis height B: every leg's height and fore/aft,
 		 *  whether all reach, the margins. */
 		void PoseAt(const FInstantQuery& Q, double B, FInstantResult& InOut) const;
@@ -607,6 +716,7 @@ namespace RammsCurb
 		 *  (world xy, Ground their heights' sum): the dynamic margin, or with
 		 *  fewer than three the hull's. */
 		double MarginFor(const FVector& Com, TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3) const;
+		double MarginFor(const FVector& Com, const FSupportHull& Hull, int32 NumContacts, double Ground, const FAxes& A, const FVector& O3) const;
 		/** Where the seat is for an instant: its pivot at SeatX (or, free,
 		 *  where the pose keeps its margin best, nearest the zero pose among
 		 *  equals) at the seat's crossing height, and the platform pitched
@@ -614,10 +724,12 @@ namespace RammsCurb
 		 *  limit. The zero pose, level, on a robot without a seat. */
 		/** Touching: of Support, the legs landing that carry nothing yet (they
 		 *  are not across for the seat's home). */
-		/** OutBand: with the seat free, FInstantResult::SeatBand. */
+		/** OutBand: with the seat free, FInstantResult::SeatBand. CountsDown:
+		 *  of Touching, the legs counted as down for the margin it asks (the
+		 *  carried centre wheels, Ramms.Curb.CarriedCentreCountsDown). */
 		void SeatAt(double PitchDeg, double SeatX, uint32 Support, uint32 OnFar, uint32 Touching, TConstArrayView<FVector2D> LegXZ,
 			TConstArrayView<FVector2D> Contacts, double Ground, const FAxes& A, const FVector& O3, FVector2D& OutPivot, double& OutPitchRad,
-			FVector2D* OutBand = nullptr) const;
+			FVector2D* OutBand = nullptr, uint32 CountsDown = 0u) const;
 
 		struct FLeg
 		{
@@ -643,6 +755,11 @@ namespace RammsCurb
 		const FRobotModel& Model;
 		FRammsCurbTerrain  Terrain;
 		FRammsCurbTuning   Tuning;
+		/** The speeding up and braking its margins are taken at (cm/s^2):
+		 *  Tuning's, or FPlannerInput::MarginAcceleration / MarginDeceleration
+		 *  where more. */
+		double			   MarginAccel = 0.0;
+		double			   MarginDecel = 0.0;
 		TArray<FLeg>	   Legs;
 		FVector2D		   Origin = FVector2D::ZeroVector;
 		FVector2D		   Heading = FVector2D(1.0, 0.0);
@@ -651,7 +768,22 @@ namespace RammsCurb
 		bool			   bClimb = true;
 		double			   Dilation = 3.0;
 		FAxes			   Level;
+		/** The console settings the free seat reads, taken once as the model is
+		 *  made (a plan does not change them half way, and the seat's sweep,
+		 *  hundreds of thousands of times a plan, does not read them each time):
+		 *  the hand-off for this crossing's direction, the least-travel seat, and
+		 *  how far over the requirement a pose needs no more. */
+		bool   bHandOff = false;
+		bool   bSeatLeastTravel = false;
+		double SeatEnoughOverCm = 3.0;
+		double HandOffSeatReserveCm = 0.0;
 	};
+
+	/** Q with each centre wheel in Carry (touched down, not yet loaded) whose
+	 *  side's rear corner is off the ground counted as carrying -- down on
+	 *  the far surface, its bit in Q.Carried
+	 *  (Ramms.Curb.RearLiftAtCentreTouchdown). */
+	void CarryTouchingCentres(const FPlanModel& M, FInstantQuery& Q, uint32 Carry);
 
 	/**
 	 * Plan the crossing from where the robot is: the first plan that keeps the
@@ -702,8 +834,11 @@ namespace RammsCurb
 	 *  planner stage (EPlanStage: level at its own speeds, level slowed, tilt,
 	 *  planned stops, refused -- the class, with a level plan that had to be
 	 *  slowed ranked under one that did not), then the less inclined, the
-	 *  fewer planned stops, the higher floor speed. A plan that does not say
-	 *  its stage is ranked by its class. */
+	 *  fewer planned stops, then the one with its centre wheels held on the
+	 *  ground (FCurbSchedule::bCentresHeld) where its floor is at least
+	 *  Ramms.Curb.CentreGroundHoldFloorShare of the other's, then the higher
+	 *  floor speed. A plan that does not say its stage is ranked by its
+	 *  class. */
 	bool IsBetterPlan(const FCurbSchedule& A, const FCurbSchedule& B);
 
 	/**

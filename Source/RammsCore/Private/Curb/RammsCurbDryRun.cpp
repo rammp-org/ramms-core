@@ -306,6 +306,12 @@ namespace RammsCurb
 			double											 Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0, Sr = 0, Sxr = 0, Syr = 0;
 			FString											 Residuals;
 			int32											 NumSupport = 0;
+			// (A centre wheel down, not yet loaded, carries for its rear's lift
+			// where the plan has it so: Ramms.Curb.RearLiftAtCentreTouchdown --
+			// at this sample's travel, as its sets are taken.)
+			FInstantQuery Sets;
+			Sets.Airborne = Here.AirborneMask;
+			CarryTouchingCentres(M, Sets, Plan.CarriedAt(Here.S, Here.AirborneMask));
 			for (int32 i = 0; i < N; ++i)
 			{
 				const FWheelPlan& W = Plan.Wheels[i];
@@ -314,7 +320,7 @@ namespace RammsCurb
 				const double	  D = M.DistancePast(i, S, X);
 				// Carrying the robot: on the ground and loaded, as the plan has it
 				// (a wheel just set down takes LoadSeconds to take its share).
-				const bool bOnGround = ((Planted >> i) & 1u) && !((Here.AirborneMask >> i) & 1u);
+				const bool bOnGround = ((Planted >> i) & 1u) && !((Sets.Airborne >> i) & 1u);
 				const bool bFar = S >= W.SDown;
 				XZ.Add(FVector2D(X, L.H));
 				if (bOnGround)
@@ -356,7 +362,7 @@ namespace RammsCurb
 					Out.MinSwingClearanceCm = FMath::Min(Out.MinSwingClearanceCm, C.Z - Rim);
 				}
 			}
-			if (IsForbiddenSet(In.Model, Here.AirborneMask))
+			if (IsForbiddenSet(In.Model, Sets.Airborne, In.Terrain.StepHeightCm >= 0.0f))
 			{
 				++Out.ForbiddenSets;
 				Note(FString::Printf(TEXT("%.1f cm: a forbidden set is off the ground (mask %x)"), S, Here.AirborneMask));

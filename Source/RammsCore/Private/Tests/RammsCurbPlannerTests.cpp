@@ -38,6 +38,23 @@ namespace
 	/** The chassis origin's height over flat ground the robot stands at. */
 	constexpr double PlanStandCm = 14.0;
 
+	/** Set a console variable for a test, at its own priority where that is
+	 *  above code's -- a variable last set at the console (as the PIE runner's
+	 *  --cvar leaves one) ignores a lower-priority set -- and say whether it
+	 *  took. */
+	template <typename ValueType>
+	bool SetTestCVar(IConsoleVariable* Var, ValueType Value)
+	{
+		if (!Var)
+		{
+			return false;
+		}
+		const uint32 Was = static_cast<uint32>(Var->GetFlags()) & ECVF_SetByMask;
+		const uint32 By = FMath::Max(Was, static_cast<uint32>(ECVF_SetByCode));
+		Var->Set(Value, static_cast<EConsoleVariableFlags>(By));
+		return FMath::IsNearlyEqual(Var->GetFloat(), static_cast<float>(Value));
+	}
+
 	/** The chassis rising under each lift (Ramms.Curb.RiseEarly 0) for the
 	 *  tests of what the executor does when a landing is late or a lift
 	 *  stalls under a rising chassis; restored after. */
@@ -50,14 +67,57 @@ namespace
 			if (Var)
 			{
 				Was = Var->GetInt();
-				Var->Set(0, ECVF_SetByCode);
+				SetTestCVar(Var, 0);
 			}
 		}
 		~FScopedRiseEarlyOff()
 		{
 			if (Var)
 			{
-				Var->Set(Was, ECVF_SetByCode);
+				SetTestCVar(Var, Was);
+			}
+		}
+	};
+	/** A float console variable set for a scope (by code), restored after. */
+	struct FScopedCVarFloat
+	{
+		IConsoleVariable* Var = nullptr;
+		float			  Was = 0.0f;
+		bool			  bSet = false;
+		FScopedCVarFloat(const TCHAR* Name, float Value)
+			: Var(IConsoleManager::Get().FindConsoleVariable(Name))
+		{
+			if (Var)
+			{
+				Was = Var->GetFloat();
+				bSet = SetTestCVar(Var, Value);
+			}
+		}
+		~FScopedCVarFloat()
+		{
+			SetTestCVar(Var, Was);
+		}
+	};
+	/** An int console variable set for a scope (by code), restored after. */
+	struct FScopedCVarInt
+	{
+		IConsoleVariable* Var = nullptr;
+		int32			  Was = 0;
+		bool			  bSet = false;
+		FScopedCVarInt(const TCHAR* Name, int32 Value)
+			: Var(IConsoleManager::Get().FindConsoleVariable(Name))
+		{
+			if (Var)
+			{
+				Was = Var->GetInt();
+				bSet = SetTestCVar(Var, Value);
+			}
+		}
+		~FScopedCVarInt()
+		{
+			if (Var)
+			{
+				SetTestCVar(Var, Was);
 			}
 		}
 	};
@@ -262,6 +322,17 @@ namespace
 		return Q;
 	}
 
+	/** A sample's wheels off the ground for the gait: its airborne set less
+	 *  the centre wheels down, not yet loaded, its plan has carry for their
+	 *  rear's lift (FWheelPlan::TouchSufficesMask). */
+	uint32 GaitAirborne(const RammsCurb::FPlanModel& M, const RammsCurb::FCurbSchedule& S, const RammsCurb::FScheduleSample& Sm)
+	{
+		RammsCurb::FInstantQuery Q;
+		Q.Airborne = Sm.AirborneMask;
+		RammsCurb::CarryTouchingCentres(M, Q, S.CarriedAt(Sm.S, Sm.AirborneMask));
+		return Q.Airborne;
+	}
+
 	/** Every sample from the level-in on, as the planner says it verified it:
 	 *  re-evaluated with the per-instant model at the planned height. */
 	void PlanCheckSamples(FAutomationTestBase& Test, const RammsCurb::FPlannerInput& In, const RammsCurb::FCurbSchedule& S,
@@ -278,7 +349,9 @@ namespace
 			{
 				continue;
 			}
-			const RammsCurb::FInstantResult R = M.Evaluate(PlanQueryAt(S, Sm), Sm.B, true);
+			RammsCurb::FInstantQuery Q = PlanQueryAt(S, Sm);
+			RammsCurb::CarryTouchingCentres(M, Q, S.CarriedAt(Sm.S, Q.Airborne));
+			const RammsCurb::FInstantResult R = M.Evaluate(Q, Sm.B, true);
 			FString							Why;
 			if (!R.bReach)
 			{
@@ -309,7 +382,7 @@ namespace
 					Why += FString::Printf(TEXT(" %s on the ground in its window (%.1f);"), PlanLegName[i], D);
 				}
 			}
-			if (RammsCurb::IsForbiddenSet(In.Model, Sm.AirborneMask))
+			if (RammsCurb::IsForbiddenSet(In.Model, GaitAirborne(M, S, Sm), In.Terrain.StepHeightCm >= 0.0f))
 			{
 				Why += FString::Printf(TEXT(" forbidden set %x;"), Sm.AirborneMask);
 			}
@@ -374,7 +447,11 @@ namespace
 					const int32	 Leg = Side == 0 ? PlanCL : PlanCR;
 					const double Dx = B.X[Side] - A.X[Side];
 					const bool	 bAir = ((A.AirborneMask >> Leg) & 1u) && ((B.AirborneMask >> Leg) & 1u);
-					const double AftMost = bAir || bNearRest ? T.CenterShiftSpeed * Dt : FMath::Min(T.CenterShiftSpeed * Dt, RammsCurb::MaxAftWalkPerCm * S.SampleCm);
+					// (A planted wheel's aft walk within the planner's own rule: up a
+					// curb with the hand-off it may stand still on the ground.)
+					const double AftMost = bAir || bNearRest
+						? T.CenterShiftSpeed * Dt
+						: FMath::Min(T.CenterShiftSpeed * Dt, RammsCurb::MaxAftWalkPerCmNow(In.Terrain.StepHeightCm >= 0.0f, In.Model) * S.SampleCm);
 					if (Dx > T.CenterShiftSpeed * Dt + 1e-6 || -Dx > AftMost + 1e-6)
 					{
 						Why += FString::Printf(TEXT(" %s walks %.2f cm in %.3f s;"), PlanLegName[Leg], Dx, Dt);
@@ -570,7 +647,7 @@ bool FRammsCurbPlannerNoForbiddenSets::RunTest(const FString& Parameters)
 	for (const uint32 Up : Forbidden)
 	{
 		TestTrue(FString::Printf(TEXT("set %x: the model forbids it (%.2f cm)"), Up, Margin(Up)), Margin(Up) < In.Tuning.MinStabilityMargin);
-		TestTrue(FString::Printf(TEXT("set %x: so does IsForbiddenSet"), Up), RammsCurb::IsForbiddenSet(In.Model, Up));
+		TestTrue(FString::Printf(TEXT("set %x: so does IsForbiddenSet"), Up), RammsCurb::IsForbiddenSet(In.Model, Up, true));
 	}
 	for (int32 i = 0; i < 6; ++i)
 	{
@@ -587,7 +664,7 @@ bool FRammsCurbPlannerNoForbiddenSets::RunTest(const FString& Parameters)
 			int32						   Count = 0;
 			for (const RammsCurb::FScheduleSample& Sm : S.Samples)
 			{
-				Count += !Sm.bApproach && RammsCurb::IsForbiddenSet(In.Model, Sm.AirborneMask);
+				Count += !Sm.bApproach && RammsCurb::IsForbiddenSet(In.Model, Sm.AirborneMask, bUp);
 			}
 			TestEqual(FString::Printf(TEXT("%s %s: samples with a forbidden set up"), Id, bUp ? TEXT("up") : TEXT("down")), Count, 0);
 		}
@@ -686,9 +763,9 @@ bool FRammsCurbPlannerFloorHeadroom::RunTest(const FString& Parameters)
 		{
 			const FString				   What = FString::Printf(TEXT("%s %s"), Id, bUp ? TEXT("up") : TEXT("down"));
 			const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
-			Prefer->Set(0.0f, ECVF_SetByCode);
+			SetTestCVar(Prefer, 0.0f);
 			const RammsCurb::FCurbSchedule Before = RammsCurb::PlanCrossing(In);
-			Prefer->Set(PreferWas > 0.0f ? PreferWas : 1.3f, ECVF_SetByCode);
+			SetTestCVar(Prefer, PreferWas > 0.0f ? PreferWas : 1.3f);
 			const RammsCurb::FCurbSchedule After = RammsCurb::PlanCrossing(In);
 			TestTrue(FString::Printf(TEXT("%s: %s floor %.2f, then %s floor %.2f: no class worse"), *What, RammsCurb::PlanClassName(Before.Class),
 						 Before.VFloor, RammsCurb::PlanClassName(After.Class), After.VFloor),
@@ -702,7 +779,7 @@ bool FRammsCurbPlannerFloorHeadroom::RunTest(const FString& Parameters)
 			}
 		}
 	}
-	Prefer->Set(PreferWas, ECVF_SetByCode);
+	SetTestCVar(Prefer, PreferWas);
 	AddInfo(FString::Printf(TEXT("a higher floor on %d of the level crossings"), Higher));
 	return true;
 }
@@ -761,7 +838,10 @@ bool FRammsCurbPlannerStartShiftSamePlan::RunTest(const FString& Parameters)
 	// same class, and its tilt and floor within 0.05 -- its samples lie on the
 	// terrain (two grids, Ramms.Curb.AnchorGrid 2), not on wherever the robot
 	// stands. Planned from where it stands (AnchorGrid 0) the plans move with
-	// the start: the test tells the two apart.
+	// the start: the test tells the two apart. (Without the rise from the
+	// stance, Ramms.Curb.RiseFromStance: that ramps the chassis from where the
+	// robot stands, so the start's own fraction of a sample shows in it.)
+	FScopedCVarInt	  NoRise(TEXT("Ramms.Curb.RiseFromStance"), 0);
 	IConsoleVariable* Grid = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.AnchorGrid"));
 	if (!TestNotNull(TEXT("Ramms.Curb.AnchorGrid"), Grid))
 	{
@@ -771,7 +851,7 @@ bool FRammsCurbPlannerStartShiftSamePlan::RunTest(const FString& Parameters)
 	int32		Moved[2] = { 0, 0 };
 	for (const int32 Mode : { 2, 0 })
 	{
-		Grid->Set(Mode, ECVF_SetByCode);
+		SetTestCVar(Grid, Mode);
 		for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadFalls"), TEXT("SidewalkRises") })
 		{
 			for (const bool bUp : { true, false })
@@ -799,7 +879,7 @@ bool FRammsCurbPlannerStartShiftSamePlan::RunTest(const FString& Parameters)
 			}
 		}
 	}
-	Grid->Set(GridWas, ECVF_SetByCode);
+	SetTestCVar(Grid, GridWas);
 	AddInfo(FString::Printf(TEXT("plans that moved with a start a fraction of a sample back: %d on the grids, %d from where the robot stands"), Moved[0],
 		Moved[1]));
 	TestTrue(TEXT("planned from where the robot stands, some plan moves with the start (the test tells the grids from that)"), Moved[1] > 0);
@@ -814,9 +894,11 @@ bool FRammsCurbPlannerIsBetterPlan::RunTest(const FString& Parameters)
 {
 	// Of two plans of one crossing the planner's later stage ranks first --
 	// level at its own speeds, level slowed, tilt, planned stops, refused --
-	// then the less inclined (by over 0.05 deg), the fewer stops, the higher
-	// floor (by over 0.05 cm/s); a plan that does not say its stage ranks by
-	// its class. Never both better than each other.
+	// then the less inclined (by over 0.05 deg), the fewer stops, the one
+	// with its centre wheels held where its floor is at least
+	// Ramms.Curb.CentreGroundHoldFloorShare of the other's, the higher floor
+	// (by over 0.05 cm/s); a plan that does not say its stage ranks by its
+	// class. Never both better than each other.
 	using RammsCurb::EPlanClass;
 	using RammsCurb::EPlanStage;
 	auto Plan = [](EPlanClass Class, EPlanStage Stage, double Tilt, int32 Stops, double Floor) {
@@ -840,6 +922,13 @@ bool FRammsCurbPlannerIsBetterPlan::RunTest(const FString& Parameters)
 	const RammsCurb::FCurbSchedule Refused = Plan(EPlanClass::Refused, EPlanStage::Refused, 0.0, 0, 0.0);
 	const RammsCurb::FCurbSchedule TiltNoStage = Plan(EPlanClass::Tilt, EPlanStage::Refused, 0.5, 0, 9.0);
 	const RammsCurb::FCurbSchedule LevelNoStage = Plan(EPlanClass::Level, EPlanStage::Refused, 0.0, 0, 9.0);
+	// Held: its centre wheels standing on the ground (at the default share,
+	// 0.9 of the other's floor kept).
+	RammsCurb::FCurbSchedule HeldNear = Plan(EPlanClass::Level, EPlanStage::Level, 0.0, 0, 11.0);
+	HeldNear.bCentresHeld = true;
+	RammsCurb::FCurbSchedule HeldSlow = Plan(EPlanClass::Level, EPlanStage::Level, 0.0, 0, 10.0);
+	HeldSlow.bCentresHeld = true;
+	FScopedCVarFloat Share(TEXT("Ramms.Curb.CentreGroundHoldFloorShare"), 0.9f);
 	struct FCase
 	{
 		const TCHAR*					What;
@@ -861,6 +950,9 @@ bool FRammsCurbPlannerIsBetterPlan::RunTest(const FString& Parameters)
 		{ TEXT("two refusals: neither"), Refused, Refused, false, false },
 		{ TEXT("no stage said: by class, level over tilted"), LevelNoStage, TiltNoStage, true, false },
 		{ TEXT("no stage said: tilted under level slowed"), TiltNoStage, Slowed, false, true },
+		{ TEXT("held over a faster unheld plan within the share"), HeldNear, LevelFaster, true, false },
+		{ TEXT("held but under the share: the higher floor"), HeldSlow, LevelFaster, false, true },
+		{ TEXT("a held level plan over one slowed: the stage first"), HeldNear, Slowed, true, false },
 	};
 	for (const FCase& C : Cases)
 	{
@@ -878,8 +970,9 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 {
 	// The two grids planned side by side, each stopping early where it cannot
 	// be kept, keep the plan the rule gives on the two grids each planned to
-	// the end on its own: the better of them (IsBetterPlan) -- on the move, of
-	// those not over their work budget against the other's (OverGridBudget).
+	// the end on its own: the better of them (IsBetterPlan) -- on the move, and
+	// at rest with Ramms.Curb.GridBudgetAtRest, of those not over their work
+	// budget against the other's (OverGridBudget).
 	// Standing, rolling on and rolling back (moving, no entry speed), on
 	// every test terrain both ways, three times over (the threads' timing
 	// differs; the plan kept may not); with the
@@ -890,11 +983,14 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 	IConsoleVariable* Phase = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.AnchorPhase"));
 	IConsoleVariable* Share = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.GridBudget"));
 	IConsoleVariable* Spare = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.GridBudgetWork"));
+	IConsoleVariable* AtRest = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.GridBudgetAtRest"));
 	if (!TestNotNull(TEXT("Ramms.Curb.AnchorGrid"), Grid) || !TestNotNull(TEXT("Ramms.Curb.AnchorPhase"), Phase)
-		|| !TestNotNull(TEXT("Ramms.Curb.GridBudget"), Share) || !TestNotNull(TEXT("Ramms.Curb.GridBudgetWork"), Spare))
+		|| !TestNotNull(TEXT("Ramms.Curb.GridBudget"), Share) || !TestNotNull(TEXT("Ramms.Curb.GridBudgetWork"), Spare)
+		|| !TestNotNull(TEXT("Ramms.Curb.GridBudgetAtRest"), AtRest))
 	{
 		return true;
 	}
+	const bool	bBudgetAtRest = AtRest->GetInt() != 0;
 	const int32 GridWas = Grid->GetInt();
 	const float PhaseWas = Phase->GetFloat();
 	const float ShareWas = Share->GetFloat();
@@ -912,8 +1008,8 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 	int32 Compared = 0, OverBudget = 0;
 	for (const bool bTight : { false, true })
 	{
-		Share->Set(bTight ? 1.0f : ShareWas, ECVF_SetByCode);
-		Spare->Set(bTight ? 0 : SpareWas, ECVF_SetByCode);
+		SetTestCVar(Share, bTight ? 1.0f : ShareWas);
+		SetTestCVar(Spare, bTight ? 0 : SpareWas);
 		for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadFalls"), TEXT("RoadRises"), TEXT("SidewalkTwisted") })
 		{
 			for (const bool bUp : { true, false })
@@ -928,24 +1024,25 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 					In.bOnTheMove = bMoving;
 					In.Tuning.MaxPlannedTiltDeg = 6.0f;
 					// Each grid alone, to the end.
-					Grid->Set(1, ECVF_SetByCode);
+					SetTestCVar(Grid, 1);
 					RammsCurb::FCurbSchedule Alone[2];
 					for (int32 i = 0; i < 2; ++i)
 					{
-						Phase->Set(i == 0 ? 0.0f : 0.5f, ECVF_SetByCode);
+						SetTestCVar(Phase, i == 0 ? 0.0f : 0.5f);
 						Alone[i] = RammsCurb::PlanCrossing(In);
 					}
-					Phase->Set(PhaseWas, ECVF_SetByCode);
+					SetTestCVar(Phase, PhaseWas);
 					bool bKeepable[2];
 					for (int32 i = 0; i < 2; ++i)
 					{
 						bKeepable[i] = Alone[i].IsValid()
-							&& !((bMoving || Entry > RammsCurb::StopSpeedCmS) && Alone[1 - i].IsValid() && RammsCurb::OverGridBudget(Alone[i].PlanWork, Alone[1 - i].PlanWork));
+							&& !((bMoving || Entry > RammsCurb::StopSpeedCmS || bBudgetAtRest) && Alone[1 - i].IsValid()
+								&& RammsCurb::OverGridBudget(Alone[i].PlanWork, Alone[1 - i].PlanWork));
 						OverBudget += Alone[i].IsValid() && !bKeepable[i] ? 1 : 0;
 					}
 					const int32						Keep = bKeepable[0] != bKeepable[1] ? (bKeepable[1] ? 1 : 0) : (RammsCurb::IsBetterPlan(Alone[1], Alone[0]) ? 1 : 0);
 					const RammsCurb::FCurbSchedule& Want = Alone[Keep];
-					Grid->Set(2, ECVF_SetByCode);
+					SetTestCVar(Grid, 2);
 					for (int32 Again = 0; Again < 3; ++Again)
 					{
 						const RammsCurb::FCurbSchedule Got = RammsCurb::PlanCrossing(In);
@@ -961,11 +1058,11 @@ bool FRammsCurbPlannerGridsKeepTheRule::RunTest(const FString& Parameters)
 			}
 		}
 	}
-	Grid->Set(GridWas, ECVF_SetByCode);
-	Share->Set(ShareWas, ECVF_SetByCode);
-	Spare->Set(SpareWas, ECVF_SetByCode);
-	AddInfo(FString::Printf(TEXT("%d plans compared; %d grid plans over their budget on the move"), Compared, OverBudget));
-	TestTrue(FString::Printf(TEXT("with no budget to spare, some grid plan over it on the move (%d)"), OverBudget), OverBudget > 0);
+	SetTestCVar(Grid, GridWas);
+	SetTestCVar(Share, ShareWas);
+	SetTestCVar(Spare, SpareWas);
+	AddInfo(FString::Printf(TEXT("%d plans compared; %d grid plans over their budget"), Compared, OverBudget));
+	TestTrue(FString::Printf(TEXT("with no budget to spare, some grid plan over it (%d)"), OverBudget), OverBudget > 0);
 	return true;
 }
 
@@ -1489,7 +1586,7 @@ bool FRammsCurbPlannerEarlyWalks::RunTest(const FString& Parameters)
 	const int32 Was = Early->GetInt();
 	ON_SCOPE_EXIT
 	{
-		Early->Set(Was, ECVF_SetByCode);
+		SetTestCVar(Early, Was);
 	};
 	auto Measure = [&](const RammsCurb::FCurbSchedule& S, int32& OutSamples, double& OutMaxStep) {
 		OutSamples = 0;
@@ -1507,9 +1604,9 @@ bool FRammsCurbPlannerEarlyWalks::RunTest(const FString& Parameters)
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
 	{
 		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
-		Early->Set(0, ECVF_SetByCode);
+		SetTestCVar(Early, 0);
 		const RammsCurb::FCurbSchedule Late = RammsCurb::PlanCrossing(In);
-		Early->Set(1, ECVF_SetByCode);
+		SetTestCVar(Early, 1);
 		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, Id);
 		if (!TestTrue(FString::Printf(TEXT("%s: planned early (%s)"), Id, *S.Summary), S.IsValid()) || !Late.IsValid())
 		{
@@ -1539,6 +1636,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerLowerEarly,
 
 bool FRammsCurbPlannerLowerEarly::RunTest(const FString& Parameters)
 {
+	// (Against the level-in's own step down: without Ramms.Curb.RiseFromStance,
+	// which ramps both from the stance's height.)
+	FScopedCVarInt NoRise(TEXT("Ramms.Curb.RiseFromStance"), 0);
 	// Down a curb with Ramms.Curb.LowerEarly the chassis lowers on the wheels
 	// still on the top: by the first touchdown it has come down at least as
 	// far as it would have, and further where it would have lowered under the
@@ -1551,7 +1651,7 @@ bool FRammsCurbPlannerLowerEarly::RunTest(const FString& Parameters)
 	const int32 Was = Early->GetInt();
 	ON_SCOPE_EXIT
 	{
-		Early->Set(Was, ECVF_SetByCode);
+		SetTestCVar(Early, Was);
 	};
 	auto At = [](const RammsCurb::FCurbSchedule& S, double Travel) {
 		for (const RammsCurb::FScheduleSample& X : S.Samples)
@@ -1566,9 +1666,9 @@ bool FRammsCurbPlannerLowerEarly::RunTest(const FString& Parameters)
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadFalls") })
 	{
 		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, false));
-		Early->Set(0, ECVF_SetByCode);
+		SetTestCVar(Early, 0);
 		const RammsCurb::FCurbSchedule Late = RammsCurb::PlanCrossing(In);
-		Early->Set(1, ECVF_SetByCode);
+		SetTestCVar(Early, 1);
 		const FString				   What = FString::Printf(TEXT("%s down"), Id);
 		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
 		if (!TestTrue(FString::Printf(TEXT("%s: planned early (%s)"), *What, *S.Summary), S.IsValid()) || !Late.IsValid() || S.Wheels.Num() == 0)
@@ -1610,6 +1710,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerTouchdownSpeed,
 
 bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 {
+	// No touchdown band (Ramms.Curb.TouchdownBandCm) but where one is set below.
+	const FScopedCVarFloat NoBand(TEXT("Ramms.Curb.TouchdownBandCm"), 0.0f);
+	if (!TestTrue(TEXT("the touchdown band set to 0 for the test"), NoBand.bSet))
+	{
+		return true;
+	}
 	FRammsCurbTuning T;
 	T.ServoLagSeconds = 0.05f;
 	TestTrue(TEXT("off: no limit"), RammsCurb::TouchdownSpeedCap(1.0, T) > 1e6);
@@ -1637,6 +1743,31 @@ bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 	}
 	FRammsCurbTuning Off;
 	TestNearlyEqual(TEXT("off: down at Speed"), RammsCurb::DescentSeconds(15.0, 60.0, Off), 0.25, 1e-9);
+
+	// A touchdown band (Ramms.Curb.TouchdownBandCm): through it at TouchdownSpeed,
+	// above it slowing onto it; the time to come down still the cap integrated.
+	const double Before15 = RammsCurb::DescentSeconds(15.0, 60.0, T);
+	{
+		const FScopedCVarFloat Band(TEXT("Ramms.Curb.TouchdownBandCm"), 1.0f);
+		TestTrue(TEXT("band: set to 1 cm"), Band.bSet);
+		TestNearlyEqual(TEXT("band: in it, TouchdownSpeed"), RammsCurb::TouchdownSpeedCap(0.6, T), 15.0, 1e-4);
+		TestNearlyEqual(TEXT("band: 2 cm up, plus 1 cm over the lag"), RammsCurb::TouchdownSpeedCap(2.0, T), 15.0 + 1.0 / 0.05, 1e-4);
+		for (const double Down : { 0.5, 2.0, 15.0 })
+		{
+			double			 H = Down, Time = 0.0;
+			constexpr double Dt = 1e-5;
+			while (H > 0.0)
+			{
+				H -= FMath::Min(60.0, RammsCurb::TouchdownSpeedCap(H, T)) * Dt;
+				Time += Dt;
+			}
+			const double Said = RammsCurb::DescentSeconds(Down, 60.0, T);
+			TestTrue(FString::Printf(TEXT("band: %.1f cm down: %.4f s, integrated %.4f s"), Down, Said, Time), FMath::Abs(Said - Time) <= 0.002 + 0.01 * Time);
+		}
+		TestNearlyEqual(TEXT("band: 0.5 cm down, all of it at TouchdownSpeed"), RammsCurb::DescentSeconds(0.5, 60.0, T), 0.5 / 15.0, 1e-9);
+		TestTrue(TEXT("band: a landing takes longer than without"), RammsCurb::DescentSeconds(15.0, 60.0, T) > Before15);
+	}
+	TestNearlyEqual(TEXT("no band: as before"), RammsCurb::DescentSeconds(15.0, 60.0, T), Before15, 1e-12);
 
 	// The planner times each landing with it: never sooner than without.
 	for (const bool bUp : { true, false })
@@ -2449,10 +2580,10 @@ bool FRammsCurbPlannerLevelInAtRestWhenSlow::RunTest(const FString& Parameters)
 		const FVector2D Was = In.Origin;
 		In.Origin -= In.Heading * Back;
 		In.OriginZ += In.Terrain.Near.HeightAt(In.Origin) - In.Terrain.Near.HeightAt(Was);
-		Share->Set(0.0f, ECVF_SetByCode);
+		SetTestCVar(Share, 0.0f);
 		const RammsCurb::FCurbSchedule Off = RammsCurb::PlanCrossing(In);
 		const float					   ShareOn = ShareWas > 0.0f ? ShareWas : 1.3f;
-		Share->Set(ShareOn, ECVF_SetByCode);
+		SetTestCVar(Share, ShareOn);
 		const RammsCurb::FCurbSchedule On = RammsCurb::PlanCrossing(In);
 		const FString				   What = FString::Printf(TEXT("%.0f cm back"), Back);
 		AddInfo(FString::Printf(TEXT("%s: switch off: %s, level-in by %.1f cm over %.2f s%s; on: %s%s"), *What, RammsCurb::PlanClassName(Off.Class),
@@ -2482,7 +2613,7 @@ bool FRammsCurbPlannerLevelInAtRestWhenSlow::RunTest(const FString& Parameters)
 		const RammsCurb::FCurbSchedule Rolling = RammsCurb::PlanCrossing(In);
 		TestFalse(FString::Printf(TEXT("%s, rolling: never standing still"), *What), Rolling.bLevelInAtRest);
 	}
-	Share->Set(ShareWas, ECVF_SetByCode);
+	SetTestCVar(Share, ShareWas);
 	TestTrue(FString::Printf(TEXT("close: standing still (%d starts)"), AtRest), AtRest > 0);
 	TestTrue(FString::Printf(TEXT("further back: on the way (%d starts)"), OnTheWay), OnTheWay > 0);
 	return true;
@@ -2695,16 +2826,16 @@ bool FRammsCurbExecutorDeadlineKeepsPlan::RunTest(const FString& Parameters)
 		{
 			continue;
 		}
-		Walk->Set(1, ECVF_SetByCode);
+		SetTestCVar(Walk, 1);
 		const RammsCurb::FExecDryRunResult On = ExecRunOf(*this, What, In, S, RammsCurb::FExecDryRunOptions(), /*bExpectFluid=*/false);
-		Walk->Set(0, ECVF_SetByCode);
+		SetTestCVar(Walk, 0);
 		const RammsCurb::FExecDryRunResult Off = RammsCurb::ExecDryRun(In, S);
 		TestTrue(FString::Printf(TEXT("%s: a deadline under the plan by at most %.2f cm/s with the walk, %.2f taken 1:1; the least command %.2f / %.2f"),
 					 *What, On.MaxDeadlineUnderPlanCmS, Off.MaxDeadlineUnderPlanCmS, On.MinSpeedCmS, Off.MinSpeedCmS),
 			On.bDone && On.MaxDeadlineUnderPlanCmS <= Off.MaxDeadlineUnderPlanCmS + 0.05 && On.MinSpeedCmS >= Off.MinSpeedCmS - 0.05);
 		Less += On.MaxDeadlineUnderPlanCmS < Off.MaxDeadlineUnderPlanCmS - 0.5 ? 1 : 0;
 	}
-	Walk->Set(WalkWas, ECVF_SetByCode);
+	SetTestCVar(Walk, WalkWas);
 	TestTrue(FString::Printf(TEXT("held less under the plan where a lift walks (%d terrains)"), Less), Less > 0);
 	return true;
 }
@@ -2825,7 +2956,7 @@ bool FRammsCurbExecutorTakesOverHeldLegs::RunTest(const FString& Parameters)
 			Options.MaxSeconds = 30.0;
 			for (const int32 Mode : { 1, 0 })
 			{
-				TakeOver->Set(Mode, ECVF_SetByCode);
+				SetTestCVar(TakeOver, Mode);
 				const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Options);
 				const FString					   What = FString::Printf(TEXT("%s %s, every leg settled 0.5 cm off its held command (TakeOverHeldLegs %d): the commands moved %.3f cm as "
 																									"the crossing began; %s"),
@@ -2842,7 +2973,7 @@ bool FRammsCurbExecutorTakesOverHeldLegs::RunTest(const FString& Parameters)
 			}
 		}
 	}
-	TakeOver->Set(Was, ECVF_SetByCode);
+	SetTestCVar(TakeOver, Was);
 	return true;
 }
 
@@ -3292,11 +3423,18 @@ bool FRammsCurbExecutorLegStallDown::RunTest(const FString& Parameters)
 	const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Options);
 	const RammsCurb::FWheelPlan&	   W = S.Wheels[PlanFL];
 	const double					   Most = R.MaxNearCarryPastEdgeCm.IsValidIndex(PlanFL) ? R.MaxNearCarryPastEdgeCm[PlanFL] : 1e9;
-	// (Its leg rises no more than the descent's clearance asks, under
-	// LegErrorFaultCm off its servo lag model: the executor holds, and the
-	// controller's hold timeout faults it.)
+	// (The executor holds, and the controller's hold timeout faults it -- or,
+	// where its leg is sent further up than LegErrorFaultCm off its servo lag
+	// model, as with the chassis lowered early from the stance
+	// (Ramms.Curb.RiseFromStance), the executor faults it there itself.)
 	TestFalse(TEXT("not done"), R.bDone);
-	TestEqual(TEXT("held"), FString(RammsCurb::ExecPhaseName(R.EndPhase)), FString(TEXT("Hold")));
+	const FString End = RammsCurb::ExecPhaseName(R.EndPhase);
+	bool		  bOnTheLeg = false;
+	for (const FString& Line : R.Log)
+	{
+		bOnTheLeg = bOnTheLeg || (Line.Contains(TEXT("fault: 'front_left' (lifting)")) && Line.Contains(TEXT("servo lag model")));
+	}
+	TestTrue(FString::Printf(TEXT("held, or halted on the stalled leg (%s)"), *End), End == TEXT("Hold") || (End == TEXT("Halted") && bOnTheLeg));
 	TestTrue(FString::Printf(TEXT("a hold counted (%d)"), R.Counts.Holds), R.Counts.Holds >= 1);
 	TestTrue(FString::Printf(TEXT("the braking cap bound (%d ticks)"), R.Counts.BrakingTicks), R.Counts.BrakingTicks > 0);
 	TestTrue(FString::Printf(TEXT("loaded, it never reached the drop edge: at most %.2f cm past the edge (the edge at %.2f, its window from %.2f)"),
@@ -3436,29 +3574,29 @@ bool FRammsCurbExecutorTerrainOff2cm::RunTest(const FString& Parameters)
 	const int32		  RearLiftWas = RearLift ? RearLift->GetInt() : 1;
 	if (Share)
 	{
-		Share->Set(1.0f, ECVF_SetByCode);
+		SetTestCVar(Share, 1.0f);
 	}
 	if (Early)
 	{
-		Early->Set(0, ECVF_SetByCode);
+		SetTestCVar(Early, 0);
 	}
 	if (RearLift)
 	{
-		RearLift->Set(0, ECVF_SetByCode);
+		SetTestCVar(RearLift, 0);
 	}
 	ON_SCOPE_EXIT
 	{
 		if (Share)
 		{
-			Share->Set(ShareWas, ECVF_SetByCode);
+			SetTestCVar(Share, ShareWas);
 		}
 		if (Early)
 		{
-			Early->Set(EarlyWas, ECVF_SetByCode);
+			SetTestCVar(Early, EarlyWas);
 		}
 		if (RearLift)
 		{
-			RearLift->Set(RearLiftWas, ECVF_SetByCode);
+			SetTestCVar(RearLift, RearLiftWas);
 		}
 	};
 	for (const bool bUp : { true, false })
@@ -3973,6 +4111,11 @@ bool FRammsCurbPlannerSeatHome::RunTest(const FString& Parameters)
 	// end while some do and others are still to come, the aft end again once
 	// every wheel is across (the outdoor stance's seat). On level ground with
 	// a light seat every fore/aft keeps the pose, so the seat sits at home.
+	// That is without the centre hand-off (Ramms.Curb.ClimbCentreHandOff 0);
+	// with it (the default), home is the aft end throughout -- the seat goes
+	// forward only as far as a pose needs.
+	TOptional<FScopedCVarInt> NoHandOff;
+	NoHandOff.Emplace(TEXT("Ramms.Curb.ClimbCentreHandOff"), 0);
 	RammsCurb::FPlannerInput In = PlanOn(PlanTerrain(0.0, 0.0));
 	RammsCurb::FModelSeat&	 Seat = In.Model.Seat;
 	Seat.bHas = true;
@@ -4011,6 +4154,20 @@ bool FRammsCurbPlannerSeatHome::RunTest(const FString& Parameters)
 	Q.S = 0.0;
 	Q.SeatX = 5.0;
 	TestEqual(TEXT("held at 5: at 5"), M.Evaluate(Q, PlanStandCm).SeatX, 5.0, 1e-6);
+	// With the hand-off: the aft end in every phase (every fore/aft keeps the
+	// pose here).
+	NoHandOff.Reset();
+	FScopedCVarInt				HandOff(TEXT("Ramms.Curb.ClimbCentreHandOff"), 1);
+	const RammsCurb::FPlanModel MH(In);
+	auto						SeatAtH = [&](uint32 OnFar) {
+		   RammsCurb::FInstantQuery QH;
+		   QH.S = 0.0;
+		   QH.OnFar = OnFar;
+		   return MH.Evaluate(QH, PlanStandCm).SeatX;
+	};
+	TestEqual(TEXT("hand-off: no wheel across, the aft end"), SeatAtH(0u), -20.0, 1e-6);
+	TestEqual(TEXT("hand-off: the fronts across, still the aft end"), SeatAtH(Fronts), -20.0, 1e-6);
+	TestEqual(TEXT("hand-off: every wheel across, the aft end"), SeatAtH(All), -20.0, 1e-6);
 	return true;
 }
 
@@ -4026,8 +4183,10 @@ bool FRammsCurbPlannerEasedLiftsWaitForTheSeat::RunTest(const FString& Parameter
 	// the seat's speed, so square on (every lift waiting on the landing before
 	// it) a slow seat's lifts begin no earlier than an instant one's; at an
 	// angle the lifts ease into one another's room, and only the plans are
-	// checked. (The dry run's robot does not move its seat, so its Settle
-	// would wait on it: not run here.)
+	// checked. (A seated crossing's dry run: Ramms.Curb.Planner.
+	// SeatReturnInHandBack.) Without the centre hand-off: with it the plan
+	// kept -- which walk, held or not -- weighs the seat's speed.
+	FScopedCVarInt NoHandOff(TEXT("Ramms.Curb.ClimbCentreHandOff"), 0);
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
 	{
 		RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
@@ -4081,6 +4240,133 @@ bool FRammsCurbPlannerEasedLiftsWaitForTheSeat::RunTest(const FString& Parameter
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerWorkBudget,
+	"Ramms.Curb.Planner.WorkBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerWorkBudget::RunTest(const FString& Parameters)
+{
+	// Ramms.Curb.PlanWorkBudget: once no plan is level at its own speeds, a grid
+	// whose work passes the budget gives up and the crossing is refused, saying
+	// so; a level plan is never given up for it.
+	IConsoleVariable* Budget = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.PlanWorkBudget"));
+	if (!TestNotNull(TEXT("Ramms.Curb.PlanWorkBudget"), Budget))
+	{
+		return false;
+	}
+	const int32 Was = Budget->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(Budget, Was);
+	};
+	RammsCurb::FPlannerInput Level = PlanOn(PlanScenario(TEXT("Square"), true));
+	// A floor the crossing cannot keep, no tilt and no stop (Ramms.Curb.Planner.
+	// FloorRespected): every fallback search runs, and none plans.
+	RammsCurb::FPlannerInput Fallback = Level;
+	Fallback.Tuning.MinSpeedFraction = 0.95f;
+	Fallback.Tuning.MaxPlannedTiltDeg = 0.0f;
+	Fallback.Tuning.bAllowPlannedStop = false;
+
+	SetTestCVar(Budget, 1);
+	const RammsCurb::FCurbSchedule Kept = PlanAndLog(*this, Level, TEXT("Square up, budget 1"));
+	TestEqual(TEXT("a level plan is never given up for the budget"), FString(RammsCurb::PlanClassName(Kept.Class)), FString(TEXT("level")));
+	const RammsCurb::FCurbSchedule Over = PlanAndLog(*this, Fallback, TEXT("Square up, floor 95 %, budget 1"));
+	TestEqual(TEXT("past the budget in the fallback searches: refused"), FString(RammsCurb::PlanClassName(Over.Class)), FString(TEXT("refused")));
+	TestTrue(FString::Printf(TEXT("...saying so (%s)"), *Over.Summary), Over.Summary.Contains(TEXT("planning budget")));
+
+	SetTestCVar(Budget, 0);
+	const RammsCurb::FCurbSchedule Unbounded = PlanAndLog(*this, Fallback, TEXT("Square up, floor 95 %, no budget"));
+	TestEqual(TEXT("no budget: refused all the same"), FString(RammsCurb::PlanClassName(Unbounded.Class)), FString(TEXT("refused")));
+	TestFalse(FString::Printf(TEXT("...for its own reason (%s)"), *Unbounded.Summary), Unbounded.Summary.Contains(TEXT("planning budget")));
+	TestTrue(FString::Printf(TEXT("...after more work (%lld against %lld)"), static_cast<long long>(Unbounded.PlanWork), static_cast<long long>(Over.PlanWork)),
+		Unbounded.PlanWork > Over.PlanWork);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerFinishInStance,
+	"Ramms.Curb.Planner.FinishInStance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerFinishInStance::RunTest(const FString& Parameters)
+{
+	// A seated crossing finishing in a drive stance that has the front corners
+	// off the ground (FPlannerInput::Finish): once every wheel is across, the
+	// seat comes to the stance's pivot and the centre wheels to its fore/aft
+	// while the robot rolls on, the fronts go up once the robot stands inside
+	// the wheels left down, and Done waits for all of it.
+	RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	In.Tuning.LegSpeed = 60.0f;
+	In.Tuning.LegAcceleration = 800.0f;
+	RammsCurb::FModelSeat& Seat = In.Model.Seat;
+	Seat.bHas = true;
+	Seat.ZeroPivot = FVector2D(0.0, 30.0);
+	Seat.MechanismMassKg = 5.0;
+	Seat.PayloadMassKg = 40.0;
+	Seat.PayloadOffset = FVector2D(0.0, 40.0);
+	Seat.HeightCm = 40.0;
+	Seat.XRange = FVector2D(-20.0, 27.0);
+	Seat.ShiftSpeedCmS = 30.0;
+	const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, TEXT("Square up, seated"));
+	if (!TestTrue(FString::Printf(TEXT("planned (%s)"), *S.Summary), S.IsValid()))
+	{
+		return false;
+	}
+	const RammsCurb::FExecDryRunResult Plain = RammsCurb::ExecDryRun(In, S);
+	TestTrue(FString::Printf(TEXT("with no finish stance: done (ended %s: %s)"), RammsCurb::ExecPhaseName(Plain.EndPhase), *Plain.FaultWhy), Plain.bDone);
+
+	// The stance: the fronts 5 cm up, the centre wheels 3 cm forward of where
+	// they start, the seat at the aft end of its reach.
+	const int32				  N = In.Legs.Num();
+	RammsCurb::FFinishStance& F = In.Finish;
+	F.bValid = true;
+	F.Lift.Init(0, N);
+	F.LiftZ.Init(0.0, N);
+	int32 Fronts = 0;
+	for (int32 i = 0; i < N; ++i)
+	{
+		const RammsCurb::FModelLeg& L = In.Model.Legs[i];
+		if (L.Axle == ERammsCurbAxle::Front)
+		{
+			F.Lift[i] = 1;
+			F.LiftZ[i] = FMath::Min(L.FourBar.HeightRange().Y - 0.5, In.Legs[i].Measured.Y + 5.0);
+			++Fronts;
+		}
+		else if (L.Kind == ERammsCurbLegKind::FiveBar)
+		{
+			F.bHasCentreX = true;
+			F.CentreX = In.Legs[i].Measured.X + 3.0;
+		}
+	}
+	F.bHasSeatX = true;
+	F.SeatX = -20.0;
+	const RammsCurb::FExecDryRunResult Finished = RammsCurb::ExecDryRun(In, S);
+	TestTrue(FString::Printf(TEXT("finishing in the stance: done (ended %s: %s)"), RammsCurb::ExecPhaseName(Finished.EndPhase), *Finished.FaultWhy),
+		Finished.bDone);
+	int32 Lifted = 0, Across = INDEX_NONE, FirstLift = INDEX_NONE, GivenUp = 0;
+	for (int32 k = 0; k < Finished.Log.Num(); ++k)
+	{
+		const FString& Line = Finished.Log[k];
+		if (Across == INDEX_NONE && Line.Contains(TEXT("every wheel on the far side")))
+		{
+			Across = k;
+		}
+		if (Line.Contains(TEXT("lifted into the drive stance")))
+		{
+			++Lifted;
+			FirstLift = FirstLift == INDEX_NONE ? k : FirstLift;
+		}
+		GivenUp += Line.Contains(TEXT("left down, for the hand-back")) ? 1 : 0;
+	}
+	TestEqual(TEXT("...each front lifted into the stance"), Lifted, Fronts);
+	TestTrue(TEXT("...once every wheel was across"), Across != INDEX_NONE && FirstLift > Across);
+	TestEqual(TEXT("...none left to the hand-back"), GivenUp, 0);
+	TestTrue(FString::Printf(TEXT("...and no wheel was set down again (%d keep-off ticks, %d into the terrain)"), Finished.KeepOffViolations,
+				 Finished.IntoTerrain),
+		Finished.KeepOffViolations == 0 && Finished.IntoTerrain == 0);
+	AddInfo(FString::Printf(TEXT("done in %.2f s finishing in the stance, %.2f s on every wheel"), Finished.Seconds, Plain.Seconds));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerChoreographyRearDuringLift,
 	"Ramms.Curb.Planner.ChoreographyRearDuringLift",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -4099,11 +4385,11 @@ bool FRammsCurbPlannerChoreographyRearDuringLift::RunTest(const FString& Paramet
 	const int32 Was = Var->GetInt();
 	ON_SCOPE_EXIT
 	{
-		Var->Set(Was, ECVF_SetByCode);
+		SetTestCVar(Var, Was);
 	};
 	for (const int32 On : { 0, 1 })
 	{
-		Var->Set(On, ECVF_SetByCode);
+		SetTestCVar(Var, On);
 		for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
 		{
 			RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
@@ -4147,14 +4433,14 @@ bool FRammsCurbPlannerChoreographyDown::RunTest(const FString& Parameters)
 	const int32 Was = Var->GetInt();
 	ON_SCOPE_EXIT
 	{
-		Var->Set(Was, ECVF_SetByCode);
+		SetTestCVar(Var, Was);
 	};
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadFalls") })
 	{
 		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, false));
-		Var->Set(0, ECVF_SetByCode);
+		SetTestCVar(Var, 0);
 		const RammsCurb::FCurbSchedule Off = RammsCurb::PlanCrossing(In);
-		Var->Set(1, ECVF_SetByCode);
+		SetTestCVar(Var, 1);
 		const FString				   What = FString::Printf(TEXT("%s down"), Id);
 		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
 		if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()) || !Off.IsValid() || S.Wheels.Num() != 6
@@ -4221,14 +4507,14 @@ bool FRammsCurbPlannerChoreographyUp::RunTest(const FString& Parameters)
 	const int32 Was = Var->GetInt();
 	ON_SCOPE_EXIT
 	{
-		Var->Set(Was, ECVF_SetByCode);
+		SetTestCVar(Var, Was);
 	};
 	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30"), TEXT("RoadRises") })
 	{
 		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
-		Var->Set(0, ECVF_SetByCode);
+		SetTestCVar(Var, 0);
 		const RammsCurb::FCurbSchedule Off = RammsCurb::PlanCrossing(In);
-		Var->Set(1, ECVF_SetByCode);
+		SetTestCVar(Var, 1);
 		const FString				   What = FString::Printf(TEXT("%s up"), Id);
 		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
 		if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()) || !Off.IsValid() || S.Wheels.Num() != 6
@@ -4263,6 +4549,196 @@ bool FRammsCurbPlannerChoreographyUp::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("%s: the dry run crosses (ended %s: %s)"), *What, RammsCurb::ExecPhaseName(R.EndPhase), *R.FaultWhy), R.bDone);
 		TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *What), R.KeepOffViolations, 0);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerCentreGroundHold,
+	"Ramms.Curb.Planner.CentreGroundHold",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerCentreGroundHold::RunTest(const FString& Parameters)
+{
+	// Up a curb with the hand-off and Ramms.Curb.CentreGroundHoldCm, a seated
+	// robot's centre wheel, once it carries on the far level, stands still on
+	// the ground until the last rear corner has landed there: it never walks
+	// aft faster than the travel, stands at least as far aft as without the
+	// hold, and the plan verifies and crosses in the dry run. Off (0), no
+	// plan is held.
+	IConsoleVariable* HandOff = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.ClimbCentreHandOff"));
+	IConsoleVariable* Hold = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.CentreGroundHoldCm"));
+	if (!TestNotNull(TEXT("Ramms.Curb.ClimbCentreHandOff"), HandOff) || !TestNotNull(TEXT("Ramms.Curb.CentreGroundHoldCm"), Hold))
+	{
+		return true;
+	}
+	const int32 HandOffWas = HandOff->GetInt();
+	const float HoldWas = Hold->GetFloat();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(HandOff, HandOffWas);
+		SetTestCVar(Hold, HoldWas);
+	};
+	SetTestCVar(HandOff, 1);
+	auto IsHeld = [](const RammsCurb::FCurbSchedule& S) {
+		return S.Lines.ContainsByPredicate([](const FString& L) { return L.StartsWith(TEXT("centre wheels:")) && L.Contains(TEXT(" held")); });
+	};
+	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+	{
+		RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, true));
+		In.Tuning.LegSpeed = 60.0f;
+		In.Tuning.LegAcceleration = 800.0f;
+		In.Tuning.CenterShiftSpeed = 45.0f;
+		RammsCurb::FModelSeat& Seat = In.Model.Seat;
+		Seat.bHas = true;
+		Seat.ZeroPivot = FVector2D(0.0, 30.0);
+		Seat.MechanismMassKg = 5.0;
+		Seat.PayloadMassKg = 40.0;
+		Seat.PayloadOffset = FVector2D(0.0, 40.0);
+		Seat.HeightCm = 40.0;
+		Seat.XRange = FVector2D(-20.0, 27.0);
+		Seat.ShiftSpeedCmS = 30.0;
+		SetTestCVar(Hold, 0.0f);
+		const RammsCurb::FCurbSchedule Off = RammsCurb::PlanCrossing(In);
+		SetTestCVar(Hold, 30.0f);
+		const FString				   What = FString::Printf(TEXT("%s up, seated, the centre wheels held"), Id);
+		const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+		if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()) || !Off.IsValid() || S.Wheels.Num() != 6)
+		{
+			continue;
+		}
+		TestFalse(FString::Printf(TEXT("%s: off, no plan held"), Id), IsHeld(Off));
+		const bool bHeld = IsHeld(S);
+		AddInfo(FString::Printf(TEXT("%s: %s; floor %.1f cm/s (%.1f without)"), *What, bHeld ? TEXT("the hold kept") : TEXT("the hold not kept"), S.VFloor,
+			Off.VFloor));
+		if (bHeld)
+		{
+			const double LastRear = FMath::Max(S.Wheels[PlanRL].SLoaded, S.Wheels[PlanRR].SLoaded);
+			const int32	 Centres[2] = { PlanCL, PlanCR };
+			for (int32 Side = 0; Side < 2; ++Side)
+			{
+				const double From = S.Wheels[Centres[Side]].SLoaded + 1.0;
+				bool		 bNoFaster = true;
+				double		 Least = TNumericLimits<double>::Max(), LeastOff = TNumericLimits<double>::Max();
+				for (int32 k = 1; k < S.Samples.Num(); ++k)
+				{
+					const RammsCurb::FScheduleSample& A = S.Samples[k - 1];
+					const RammsCurb::FScheduleSample& B = S.Samples[k];
+					if (A.S >= From && B.S <= LastRear)
+					{
+						bNoFaster = bNoFaster && B.X[Side] - A.X[Side] >= -(B.S - A.S) - 0.05;
+						Least = FMath::Min(Least, B.X[Side]);
+					}
+				}
+				for (const RammsCurb::FScheduleSample& Sm : Off.Samples)
+				{
+					if (Sm.S >= From && Sm.S <= LastRear)
+					{
+						LeastOff = FMath::Min(LeastOff, Sm.X[Side]);
+					}
+				}
+				TestTrue(FString::Printf(TEXT("%s: centre %d walks aft no faster than the travel while it carries"), *What, Side), bNoFaster);
+				TestTrue(FString::Printf(TEXT("%s: centre %d as far aft as without the hold (%.1f, %.1f without)"), *What, Side, Least, LeastOff),
+					Least <= LeastOff + 0.05);
+			}
+		}
+		PlanCheckWheels(*this, S, *What);
+		PlanCheckSamples(*this, In, S, *What);
+		PlanCheckRates(*this, In, S, *What);
+		const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, RammsCurb::FExecDryRunOptions());
+		TestTrue(FString::Printf(TEXT("%s: the dry run crosses (ended %s: %s)"), *What, RammsCurb::ExecPhaseName(R.EndPhase), *R.FaultWhy), R.bDone);
+		TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *What), R.KeepOffViolations, 0);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerRearLiftAtCentreTouchdown,
+	"Ramms.Curb.Planner.RearLiftAtCentreTouchdown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerRearLiftAtCentreTouchdown::RunTest(const FString& Parameters)
+{
+	// With the centre hand-off and Ramms.Curb.RearLiftAtCentreTouchdown, a
+	// seated robot's rear corner may lift once its side's centre wheel has
+	// touched down: a rear that lifts before that wheel's load marks it
+	// (TouchSufficesMask) and lifts no sooner than its touchdown; every plan
+	// verifies and crosses in the dry run with no early lift, and some rear
+	// lifts before its centre's load where it may. Off, no plan marks a
+	// touchdown enough.
+	for (const TCHAR* Name : { TEXT("Ramms.Curb.ClimbCentreHandOff"), TEXT("Ramms.Curb.DescentCentreHandOff"), TEXT("Ramms.Curb.RearLiftAtCentreTouchdown") })
+	{
+		if (!TestNotNull(Name, IConsoleManager::Get().FindConsoleVariable(Name)))
+		{
+			return true;
+		}
+	}
+	FScopedCVarInt Up(TEXT("Ramms.Curb.ClimbCentreHandOff"), 1);
+	FScopedCVarInt Down(TEXT("Ramms.Curb.DescentCentreHandOff"), 1);
+	int32		   BeforeLoad = 0;
+	for (const bool bUp : { true, false })
+	{
+		for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+		{
+			RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+			In.Tuning.LegSpeed = 60.0f;
+			In.Tuning.LegAcceleration = 800.0f;
+			In.Tuning.CenterShiftSpeed = 45.0f;
+			RammsCurb::FModelSeat& Seat = In.Model.Seat;
+			Seat.bHas = true;
+			Seat.ZeroPivot = FVector2D(0.0, 30.0);
+			Seat.MechanismMassKg = 5.0;
+			Seat.PayloadMassKg = 40.0;
+			Seat.PayloadOffset = FVector2D(0.0, 40.0);
+			Seat.HeightCm = 40.0;
+			Seat.XRange = FVector2D(-20.0, 27.0);
+			Seat.ShiftSpeedCmS = 30.0;
+			const FString			 What = FString::Printf(TEXT("%s %s, seated, rear lifts at the centres' touchdown"), Id, bUp ? TEXT("up") : TEXT("down"));
+			RammsCurb::FCurbSchedule Off, S;
+			{
+				FScopedCVarInt Touch(TEXT("Ramms.Curb.RearLiftAtCentreTouchdown"), 0);
+				Off = RammsCurb::PlanCrossing(In);
+			}
+			{
+				FScopedCVarInt Touch(TEXT("Ramms.Curb.RearLiftAtCentreTouchdown"), 1);
+				S = PlanAndLog(*this, In, *What);
+			}
+			bool bOffMarks = false;
+			for (const RammsCurb::FWheelPlan& W : Off.Wheels)
+			{
+				bOffMarks |= W.TouchSufficesMask != 0;
+			}
+			TestFalse(FString::Printf(TEXT("%s: off, no touchdown marked enough"), *What), bOffMarks);
+			if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()) || S.Wheels.Num() != 6)
+			{
+				continue;
+			}
+			int32 Marked = 0;
+			for (int32 j = 0; j < S.Wheels.Num(); ++j)
+			{
+				for (int32 c = 0; c < S.Wheels.Num(); ++c)
+				{
+					if ((S.Wheels[j].TouchSufficesMask >> c) & 1u)
+					{
+						++Marked;
+						TestTrue(FString::Printf(TEXT("%s: %s lifts no sooner than %s touches down (%.1f, %.1f)"), *What, PlanLegName[j], PlanLegName[c],
+									 S.Wheels[j].SLiftStart, S.Wheels[c].SDown),
+							S.Wheels[j].SLiftStart >= S.Wheels[c].SDown - S.SampleCm - 1e-6);
+						TestTrue(FString::Printf(TEXT("%s: %s marked only for a rear"), *What, PlanLegName[j]), j == PlanRL || j == PlanRR);
+						BeforeLoad += S.Wheels[j].SLiftStart < S.Wheels[c].SLoaded - S.SampleCm ? 1 : 0;
+					}
+				}
+			}
+			AddInfo(FString::Printf(TEXT("%s: %d rear lift(s) at a touchdown; floor %.1f cm/s (%.1f off)"), *What, Marked, S.VFloor, Off.IsValid() ? Off.VFloor : 0.0));
+			PlanCheckWheels(*this, S, *What);
+			PlanCheckSamples(*this, In, S, *What);
+			PlanCheckRates(*this, In, S, *What);
+			const RammsCurb::FDryRunResult D = RammsCurb::DryRun(In, S, RammsCurb::FDryRunOptions());
+			TestEqual(FString::Printf(TEXT("%s: the kinematic dry run finds no forbidden set"), *What), D.ForbiddenSets, 0);
+			const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, RammsCurb::FExecDryRunOptions());
+			TestTrue(FString::Printf(TEXT("%s: the dry run crosses (ended %s: %s)"), *What, RammsCurb::ExecPhaseName(R.EndPhase), *R.FaultWhy), R.bDone);
+			TestEqual(FString::Printf(TEXT("%s: no lift before a wheel it waits for"), *What), R.EarlyLifts, 0);
+			TestEqual(FString::Printf(TEXT("%s: wheels on the ground inside their windows"), *What), R.KeepOffViolations, 0);
+		}
+	}
+	TestTrue(FString::Printf(TEXT("some rear lifts before its centre wheel's load (%d)"), BeforeLoad), BeforeLoad > 0);
 	return true;
 }
 
@@ -4345,6 +4821,26 @@ bool FRammsCurbExecutorStickPause::RunTest(const FString& Parameters)
 			const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Half);
 			Check(R, What + TEXT(", held half way"));
 			TestTrue(FString::Printf(TEXT("%s, held half way: slower (%.1f s against %.1f)"), *What, R.Seconds, Free.Seconds), R.Seconds > Free.Seconds + 1.0);
+			// Held low, a lift aimed over the rise to come reaches its height long
+			// before the chassis rises to its window, and waits up there past its
+			// own timing: lifted, which the lift watchdog must not fault.
+			RammsCurb::FExecDryRunOptions Low;
+			Low.StickScale = 0.15;
+			Low.MaxSeconds = 300.0;
+			const RammsCurb::FExecDryRunResult RL = RammsCurb::ExecDryRun(In, S, Low);
+			Check(RL, What + TEXT(", held low"));
+			// ...and let go along the climb, such a lift is aimed over the robot as
+			// it stands at once: it has its time to get up there from then.
+			if (bUp)
+			{
+				for (double At = 0.0; At < RL.DoneAtCm; At += 10.0)
+				{
+					RammsCurb::FExecDryRunOptions O = Low;
+					O.PauseAtTravelCm = At;
+					O.PauseSeconds = 2.0;
+					Check(RammsCurb::ExecDryRun(In, S, O), FString::Printf(TEXT("%s, held low, let go at %.0f cm"), *What, At));
+				}
+			}
 		}
 	}
 	return true;
@@ -4509,6 +5005,186 @@ bool FRammsCurbExecutorFinishInPlace::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("finished in place short of the plan's end somewhere"), TotalShort > 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerForksPlanTheSame,
+	"Ramms.Curb.Planner.ForksPlanTheSame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerForksPlanTheSame::RunTest(const FString& Parameters)
+{
+	// Ramms.Curb.PlanForks: the candidate plans made at once, side by side, on
+	// forks of the planner, are taken in the order one at a time takes them --
+	// the plan is the same, sample for sample, level or tilted, where no work
+	// budget decides (these crossings: far inside them). The work counted
+	// differs, and is logged.
+	IConsoleVariable* Forks = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.PlanForks"));
+	if (!TestNotNull(TEXT("Ramms.Curb.PlanForks"), Forks))
+	{
+		return false;
+	}
+	const int32 Was = Forks->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(Forks, Was);
+	};
+	struct FCase
+	{
+		const TCHAR* Id;
+		bool		 bUp;
+	};
+	const FCase Cases[] = { { TEXT("Square"), true }, { TEXT("Square"), false }, { TEXT("Oblique30"), true }, { TEXT("StreetGrade"), true },
+		{ TEXT("StreetGrade"), false }, { TEXT("SidewalkTwisted"), true }, { TEXT("RoadFalls"), true } };
+	for (const FCase& C : Cases)
+	{
+		const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(C.Id, C.bUp));
+		const FString				   What = FString::Printf(TEXT("%s %s"), C.Id, C.bUp ? TEXT("up") : TEXT("down"));
+		SetTestCVar(Forks, 1);
+		const RammsCurb::FCurbSchedule One = RammsCurb::PlanCrossing(In);
+		SetTestCVar(Forks, 8);
+		const RammsCurb::FCurbSchedule Side = RammsCurb::PlanCrossing(In);
+		TestEqual(What + TEXT(": the class"), FString(RammsCurb::PlanClassName(Side.Class)), FString(RammsCurb::PlanClassName(One.Class)));
+		TestEqual(What + TEXT(": the floor"), Side.VFloor, One.VFloor);
+		if (!TestEqual(What + TEXT(": the samples"), Side.Samples.Num(), One.Samples.Num()))
+		{
+			continue;
+		}
+		int32 Differ = 0;
+		for (int32 k = 0; k < One.Samples.Num(); ++k)
+		{
+			const RammsCurb::FScheduleSample& A = One.Samples[k];
+			const RammsCurb::FScheduleSample& B = Side.Samples[k];
+			Differ += A.V != B.V || A.B != B.B || A.PitchDeg != B.PitchDeg || A.RollDeg != B.RollDeg || A.X[0] != B.X[0] || A.X[1] != B.X[1]
+					|| A.SeatX != B.SeatX || A.AirborneMask != B.AirborneMask
+				? 1
+				: 0;
+		}
+		TestEqual(What + FString::Printf(TEXT(": samples that differ (%s, floor %.1f; work %lld one at a time, %lld side by side)"), RammsCurb::PlanClassName(One.Class), One.VFloor, static_cast<long long>(One.PlanWork), static_cast<long long>(Side.PlanWork)),
+			Differ, 0);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerCentreSearchWalksFromLevelIn,
+	"Ramms.Curb.Planner.CentreSearchWalksFromLevelIn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerCentreSearchWalksFromLevelIn::RunTest(const FString& Parameters)
+{
+	// Ramms.Curb.CentreSearchWalk: the search over the centre wheels' paths
+	// (here alone: no knots, no no-walk plan) walks neither centre wheel before
+	// the level-in begins -- the executor holds the drive stance's until then.
+	IConsoleVariable* Walk = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.CentreSearchWalk"));
+	if (!TestNotNull(TEXT("Ramms.Curb.CentreSearchWalk"), Walk))
+	{
+		return false;
+	}
+	const int32 Was = Walk->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(Walk, Was);
+	};
+	if (!TestTrue(TEXT("Ramms.Curb.CentreSearchWalk set to 1"), SetTestCVar(Walk, 1)))
+	{
+		return true;
+	}
+	int32		 Searched = 0;
+	const TCHAR* Ids[] = { TEXT("Square"), TEXT("Oblique30"), TEXT("StreetGrade") };
+	for (const TCHAR* Id : Ids)
+	{
+		for (const bool bUp : { true, false })
+		{
+			RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+			In.bTryKnots = false;
+			In.bTryNoWalk = false;
+			const FString				   What = FString::Printf(TEXT("%s %s, the search alone"), Id, bUp ? TEXT("up") : TEXT("down"));
+			const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+			if (!S.IsValid() || S.Samples.Num() == 0)
+			{
+				AddInfo(What + TEXT(": no plan to look at"));
+				continue;
+			}
+			// (A plan made by the centre-path search, not by a fallback.)
+			if (!S.bCentresSearched)
+			{
+				AddInfo(What + TEXT(": planned without the centre-path search"));
+				continue;
+			}
+			++Searched;
+			double Most = 0.0;
+			for (const RammsCurb::FScheduleSample& Sm : S.Samples)
+			{
+				if (Sm.S < S.LevelInFromS - 1e-6)
+				{
+					Most = FMath::Max(Most, FMath::Max(FMath::Abs(Sm.X[0] - S.Samples[0].X[0]), FMath::Abs(Sm.X[1] - S.Samples[0].X[1])));
+				}
+			}
+			TestTrue(What + FString::Printf(TEXT(": the centre wheels walk %.2f cm before the level-in begins at %.1f cm"), Most, S.LevelInFromS),
+				Most < 1e-6);
+		}
+	}
+	// Something looked at: a broken search planning nothing would pass otherwise.
+	TestTrue(FString::Printf(TEXT("the centre-path search planned %d of the 6 crossings"), Searched), Searched > 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorLoadCaps,
+	"Ramms.Curb.Executor.LoadCaps",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorLoadCaps::RunTest(const FString& Parameters)
+{
+	// The load caps worked out every tick (the kinematic robot takes no notice
+	// of them) change no target: the run with them is the run without, tick
+	// for tick, but for their own lines. Each wheel's cap follows its state --
+	// none in the air, at least the floor carrying or landing -- and the
+	// carrying wheels' shares carry the robot's weight. On the landing legs only
+	// (Ramms.Curb.LoadCapLegs 0, the default) and on every carrying leg (1).
+	IConsoleVariable* const LegsVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.LoadCapLegs"));
+	if (!TestNotNull(TEXT("Ramms.Curb.LoadCapLegs"), LegsVar))
+	{
+		return true;
+	}
+	const int32 LegsWas = LegsVar->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(LegsVar, static_cast<float>(LegsWas));
+	};
+	for (const int32 AllLegs : { 0, 1 })
+		for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+		{
+			if (!TestTrue(FString::Printf(TEXT("Ramms.Curb.LoadCapLegs set to %d"), AllLegs), SetTestCVar(LegsVar, static_cast<float>(AllLegs))))
+			{
+				continue;
+			}
+			for (const bool bUp : { true, false })
+			{
+				const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+				const FString				   What = FString::Printf(TEXT("%s %s, %s"), Id, bUp ? TEXT("up") : TEXT("down"), AllLegs ? TEXT("every carrying leg") : TEXT("landing legs"));
+								 const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+				if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()))
+				{
+					continue;
+				}
+				RammsCurb::FExecDryRunOptions Off;
+				Off.TraceEvery = 1;
+				RammsCurb::FExecDryRunOptions On = Off;
+				On.bLoadCaps = true;
+				const RammsCurb::FExecDryRunResult A = RammsCurb::ExecDryRun(In, S, Off);
+				const RammsCurb::FExecDryRunResult B = RammsCurb::ExecDryRun(In, S, On);
+				TestTrue(FString::Printf(TEXT("%s: both cross"), *What), A.bDone && B.bDone);
+				TestEqual(FString::Printf(TEXT("%s: as long"), *What), B.Seconds, A.Seconds);
+				TestTrue(FString::Printf(TEXT("%s: tick for tick the same (%d / %d trace lines)"), *What, A.Trace.Num(), B.Trace.Num()), A.Trace == B.Trace);
+				TArray<FString> BLog = B.Log;
+				BLog.RemoveAll([](const FString& Line) { return Line.Contains(TEXT("load cap")); });
+				TestTrue(FString::Printf(TEXT("%s: the same log, but for the caps' lines"), *What), BLog == A.Log);
+				TestEqual(FString::Printf(TEXT("%s: no caps without them"), *What), A.LoadCapTicks, 0);
+				TestTrue(FString::Printf(TEXT("%s: caps worked out (%d ticks)"), *What, B.LoadCapTicks), B.LoadCapTicks > 0);
+				TestEqual(FString::Printf(TEXT("%s: every cap by its wheel's state"), *What), B.LoadCapRuleBreaks, 0);
+				TestTrue(FString::Printf(TEXT("%s: the shares carry the weight (at most %.3f N off)"), *What, B.MaxShareSumErrN), B.MaxShareSumErrN < 1.0);
+			}
+		}
 	return true;
 }
 

@@ -10,6 +10,7 @@
 #include "Curb/RammsCurbSchedule.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "RammsCurbNegotiationTypes.h"
+#include "RammsMotionProfile.h"
 #include "Templates/UniquePtr.h"
 
 /**
@@ -106,7 +107,11 @@
  * wheel too near the terrain -- not the plan's own speed, a planned stop or
  * the level-in), Settle (every wheel on the far side, rolling on until the
  * rear tyres are FinishClearance past the edge and the legs are where the
- * plan ends them), Done; Halted (a fault or Halt: stopping).
+ * plan ends them -- or, given the drive stance the crossing finishes in
+ * (FPlannerInput::Finish), in that stance: the centre wheels walked to its
+ * fore/aft, the seat at its pivot, the wheels it has off the ground lifted
+ * once the robot as measured stands inside the others), Done; Halted (a
+ * fault or Halt: stopping).
  *
  * Finishing in place (FinishInPlace: the rider let go once nothing left needs
  * the robot to travel -- every wheel across, or off the ground past its window
@@ -206,6 +211,40 @@ namespace RammsCurb
 	 *  the landing check faults above, so that every landing stopped short of
 	 *  its surface is either a touchdown or a fault. */
 	constexpr double TouchCm = 0.3;
+	/** A centre wheel in the air at its landing is walked aft no further than
+	 *  keeps it this far (cm) past the end of its window until it sets down. */
+	constexpr double LandGateSlackCm = 0.5;
+	/** A 5-bar this far (cm) off its fore/aft lag model is trailing its
+	 *  commands (its motors behind), well over TrackingErrorCm: a landing it
+	 *  stops short of then is not one held up by something under the wheel. */
+	constexpr double XBehindCm = 1.0;
+	/** A centre wheel landing walks aft no faster than its plan walks it and
+	 *  this (cm/s): it comes down standing all but still over the ground, and
+	 *  its command still gets the servo lag's lead on the plan (with less, a
+	 *  held wheel trailed its plan by that lag as the rear corner lifted, and
+	 *  the lift was blocked). */
+	constexpr double LandingWalkSlackCmS = 10.0;
+	/** A set-down has begun once its leg has come down this much (cm) from the
+	 *  highest it was since the set-down was sent, or once the servos have had
+	 *  their start (FExecutor::LegStartSeconds): until then a leg not yet
+	 *  descending is not one held up by something under its wheel. */
+	constexpr double PlantBegunCm = 0.4;
+	/** How fast the executor's running tick time (FExecutor::TickDt) follows
+	 *  each tick's: the share of the difference taken per tick. */
+	constexpr double TickDtSmoothing = 0.25;
+	/** The most (cm) an action is begun ahead of the plan's position for the
+	 *  tick it falls in (FExecutor::TickLeadCm). */
+	constexpr double MaxTickLeadCm = 3.0;
+	/** The share of a 5-bar's hip motors' speed its commands may ask of them
+	 *  (FExecLeg::HipMaxRate): the rest is the model's slack. */
+	constexpr double HipRateShare = 0.9;
+	/** Over how long (s) the attitude the level-in's ramp is sized from is
+	 *  taken (FExecutor::RampAttitudeDeg): a braking pitch of a moment is not
+	 *  the base's tilt. */
+	constexpr double RampAttitudeSeconds = 0.3;
+	/** Half the span (cm) a corner's crank slope is taken over
+	 *  (FExecutor::CrankRiseCmS). */
+	constexpr double CrankSlopeCm = 0.25;
 	/** A leg stopped this much (cm) above where the servo lag model has it,
 	 *  going down, has met the ground. */
 	constexpr double StallCm = 0.4;
@@ -431,6 +470,21 @@ namespace RammsCurb
 		double LagX = 0.0;
 		bool   bLagX = false;
 		bool   bValid = false;
+		/** A 5-bar's hips at its commanded pose: how far each turns (rad, A and
+		 *  B) per cm of the wheel's fore/aft and per cm of its height there, and
+		 *  each motor's MaxVelocity (rad/s; 0 where unbounded, or for any other
+		 *  leg). The walk takes what speed the height's own move leaves them
+		 *  (FExecutor's centre walk). */
+		FVector2D HipTurnPerCmX = FVector2D::ZeroVector;
+		FVector2D HipTurnPerCmZ = FVector2D::ZeroVector;
+		FVector2D HipMaxRate = FVector2D::ZeroVector;
+		/** What its motors put out over the last frame (ReadLegEfforts):
+		 *  the load its wheel carries, through its leg (N; bLoad: read), and
+		 *  the most of the frame a motor of it sat at the load cap sent it. */
+		double	  LoadN = 0.0;
+		bool	  bLoad = false;
+		double	  CapBoundShare = 0.0;
+		FVector2D TauMeanNm = FVector2D::ZeroVector;
 	};
 
 	/** The robot, as measured this tick. */
@@ -472,6 +526,11 @@ namespace RammsCurb
 		/** The seat's pivot fore/aft (cm, chassis frame) to hold it at, toward
 		 *  the plan's; meaningful on a robot whose seat shifts. */
 		double SeatX = 0.0;
+		/** The most each leg may press its wheel onto the ground (N; 0: no
+		 *  cap), and the share of the robot's weight it was worked out from
+		 *  (N): FExecutor::SetLoadCaps. */
+		TArray<double> LegLoadCapN;
+		TArray<double> LegLoadShareN;
 	};
 
 	/** One wheel's crossing, live. */
@@ -483,6 +542,9 @@ namespace RammsCurb
 		/** Off the ground in the drive stance, set down in the level-in (rather
 		 *  than held up to its window). */
 		bool bLower = false;
+		/** Lifted into the drive stance the crossing finishes in (Held, at the
+		 *  stance's height: FPlannerInput::Finish), every wheel being across. */
+		bool bStanceUp = false;
 		/** Measured this tick: its centre's distance past the edge (cm), and its
 		 *  bottom over the surface it follows (cm; RawBottomCm over its plane,
 		 *  BottomCm over the plane and its bias). */
@@ -500,6 +562,14 @@ namespace RammsCurb
 		double CmdX = 0.0;
 		/** Where the leg's command is headed this tick (cm, chassis frame). */
 		double TargetZ = 0.0;
+		/** How much higher than it stands the chassis TargetZ was taken over
+		 *  (a lifted wheel aimed for its window: ChassisRiseToWindow); 0 for any
+		 *  other target. */
+		double TargetRiseCm = 0.0;
+		/** The last tick a lift stood at the height it was aimed at (Elapsed):
+		 *  the lift watchdog times it from then, so one aimed higher at once
+		 *  (the stick let go) has its time to get up there. */
+		double AtAimAt = 0.0;
 		/** The attitude loop's share (cm), while it supports; and the tilt of the
 		 *  plane that best fits the support legs' preloads, taken out (cm): the
 		 *  preloads share the load out among the legs, but do not tilt the base. */
@@ -520,11 +590,27 @@ namespace RammsCurb
 		 *  where it was sent at its last touchdown (cm). */
 		double StanceZ = 0.0;
 		double TouchZ = 0.0;
+		/** A centre wheel's fore/aft command when the level-in's second stage
+		 *  began (cm): its walk to the plan's eased along the level-in's ramp
+		 *  from there (Ramms.Curb.LevelInWalkRamp). */
+		double StanceX = 0.0;
+		/** A centre wheel in the air walked ahead of the plan's fore/aft to where
+		 *  its 5-bar reaches its swing's top (Ramms.Curb.LiftReachWalk), this
+		 *  tick; and that it has been in this crossing (logged once; until it
+		 *  lands it trails its own command, not the plan's). */
+		bool bReachWalk = false;
+		bool bReachWalked = false;
+		/** A centre wheel's fore/aft target this tick, before its walk's per-tick
+		 *  caps (cm; the run log's "to"). */
+		double WalkTo = 0.0;
 
 		/** Its leg's measured height last tick, and its rate (cm/s, filtered). */
 		double MeasZ = 0.0;
 		double MeasVz = 0.0;
 		bool   bMeasZ = false;
+		/** The highest its leg was measured (cm) since its state last changed:
+		 *  a set-down has begun once the leg is PlantBegunCm under it. */
+		double PlantTopZ = 0.0;
 		/** Its target last tick lay beyond its leg's reach (clamped to it), and by
 		 *  how much (cm): a leg at its reach neither meets its target nor presses
 		 *  its wheel down -- going down a step, it waits on the chassis to come
@@ -556,6 +642,21 @@ namespace RammsCurb
 		bool   bHaltHeld = false;
 		double HaltPressCm = 0.0;
 		double HaltHeldAtZ = 0.0;
+
+		/** Its load cap (SetLoadCaps): the share of the weight it carries -- or,
+		 *  landing, will -- with the others as stiff as it (N), the most its leg
+		 *  may press with (N; 0 none), how long its leg has sagged over its
+		 *  command against the cap (s), and that the cap was taken off for it
+		 *  (until it next lifts or lands). Standing off its surface (by
+		 *  Ramms.Curb.LoadCapOffSurfaceCm): left out of the shares. */
+		double LoadShareN = 0.0;
+		double LoadCapN = 0.0;
+		double CapSagFor = 0.0;
+		bool   bCapReleased = false;
+		bool   bOffSurface = false;
+		/** Its walk aft held for its load (Ramms.Curb.LoadCapWalkHold), logged
+		 *  (once a state). */
+		bool bWalkHoldLogged = false;
 	};
 
 	/** Why the speed is what it is, as of the last tick (cm/s; the largest
@@ -623,6 +724,12 @@ namespace RammsCurb
 		int32  TerrainOffPlane = INDEX_NONE;
 		double TerrainOffAheadCm = 0.0;
 		double AttitudeOffDeg = 0.0;
+		/** The load caps (SetLoadCaps): ticks a support leg sat at its cap for a
+		 *  fifth of the frame or more; caps taken off a sagging leg; ticks with
+		 *  no caps, the centre of mass outside the wheels carrying. */
+		int32 LoadCapBoundTicks = 0;
+		int32 LoadCapReleases = 0;
+		int32 LoadCapOffTicks = 0;
 	};
 
 	class FExecutor
@@ -649,6 +756,13 @@ namespace RammsCurb
 		/** The crossing is over (done, faulted or aborted): IsRunning is false
 		 *  until the next Begin. What it counted stays readable. */
 		void End() { bRunning = false; }
+
+		/** Work out each leg's load cap every tick (FExecCommand::LegLoadCapN):
+		 *  how hard it may press its wheel onto the ground, from the share of
+		 *  the weight it carries. Off by default -- dry runs never cap; the
+		 *  controller turns it on for a crossing (Ramms.Curb.LoadCap). Caps
+		 *  change no target. */
+		void SetLoadCaps(bool bOn) { bLoadCaps = bOn; }
 
 		/** One tick: the wheels' states, the legs' commands, the speed. The
 		 *  level state's attitude loop and plane biases are run here. */
@@ -749,6 +863,11 @@ namespace RammsCurb
 		ERammsCurbAxle GetLatestAxle() const { return LatestAxle; }
 		/** On the ground and carrying: Planted or Loading. */
 		bool IsSupport(int32 Leg) const;
+		/** Wheel Leg down as wheel For's lift waits for it (For's
+		 *  MustBeDownMask): Planted -- or, where its touchdown is enough
+		 *  (TouchSufficesMask, Ramms.Curb.RearLiftAtCentreTouchdown), Loading on
+		 *  its surface. */
+		bool IsDownFor(int32 Leg, int32 For) const;
 		/** The lines logged since the last call (moved out). */
 		void TakeLog(TArray<FString>& Out);
 		/** The level-in has begun (Prepare or later). */
@@ -779,14 +898,32 @@ namespace RammsCurb
 		 *  faster than TiltRateDegPerSec. OutEndAttitude: that end attitude (deg;
 		 *  pitch, roll). */
 		FPlanAt StepFinishPose(const FExecMeasure& Measure, double Dt, FVector2D& OutEndAttitude);
+		/** Settling, into the drive stance the crossing finishes in
+		 *  (FPlannerInput::Finish): the wheels the stance has off the ground
+		 *  lifted together once the robot, as measured with them up, stands at
+		 *  least MinStabilityMargin inside the wheels left down. */
+		void StepStanceLift(const FExecMeasure& Measure, double Dt);
+		/** A centre wheel's fore/aft to walk to: the finish stance's once every
+		 *  wheel is across (Settle) -- or further forward, while the seat comes
+		 *  back, where that lets the stance's lifted wheels go up or keeps them
+		 *  up (FinishCentreGoal) --, else PlanX. */
+		double EndCentreX(double PlanX) const;
+		/** MarginWithout with both centre wheels Dx (cm) further forward than
+		 *  they are measured. */
+		double MarginWithCentresAt(const FExecMeasure& Measure, uint32 Without, double Dx) const;
+		/** Every wheel the finish stance lifts is up at its height (or the lift
+		 *  has waited FinishLiftWaitSeconds on the margin with the seat and the
+		 *  centre wheels where the stance has them: left to the hand-back). */
+		bool StanceLiftsDone() const;
 		/** The plan's speed at travel SAt (cm/s), read no nearer its origin (or
 		 *  the planned stop the robot last rested at, SResume) than its first
 		 *  sample past it: a robot at or behind the origin of a plan made at rest
 		 *  takes the speed the plan rises from rest at, not sample 0's rest. */
 		double PlanSpeedAt(double SAt) const;
 		/** A lifting wheel still on the ground whose leg no longer rises as the
-		 *  servo lag model has it (or that has been on the ground for
-		 *  UnloadStallFactor times UnloadSeconds): stalled there, loaded. */
+		 *  servo lag model has it once it has been lifting UnloadSeconds (its
+		 *  servos' start), or that has been on the ground for UnloadStallFactor
+		 *  times UnloadSeconds: stalled there, loaded. */
 		bool IsLiftStalledOnGround(int32 Leg, const FExecMeasure& Measure) const;
 		/** Set up what each wheel's crossing needs from the plan (ZTop, SDrop). */
 		void Prepare();
@@ -797,8 +934,14 @@ namespace RammsCurb
 		double SupportTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double Ahead_m, double Preload,
 			const FVector2D& Bias) const;
 		/** The leg's swing target (chassis z, cm): at least WorldZ in the planned
-		 *  attitude and in the measured one. */
-		double SwingTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double WorldZ) const;
+		 *  attitude and in the measured one, over the chassis ChassisRiseCm
+		 *  higher than it stands now (ChassisRiseToWindow). */
+		double SwingTarget(int32 Leg, const FExecMeasure& Measure, const FPlanAt& Ahead, double WorldZ, double ChassisRiseCm = 0.0) const;
+		/** How much higher (cm) the chassis will stand when the lifted wheel
+		 *  Leg reaches its window -- the plan's height there, as far as it rises
+		 *  by then (Ramms.Curb.LiftAtWindowHeight); 0 within its window, for a
+		 *  chassis coming down, or off. */
+		double ChassisRiseToWindow(int32 Leg) const;
 		/** The highest a lifted wheel must be carried (world, cm) now: ZTop until
 		 *  its drop, then the profile 0.3 s ahead and the far surface's support. */
 		double SwingWorldZ(int32 Leg, const FExecMeasure& Measure, double V) const;
@@ -817,6 +960,26 @@ namespace RammsCurb
 		/** The measured margin with Without (bit per leg) off the ground too, and
 		 *  With (bit per leg) on it. */
 		double MarginWithout(const FExecMeasure& Measure, uint32 Without, uint32 With = 0) const;
+		/** The legs as MarginWithout measures them: each wheel's centre and
+		 *  chassis x-z, its surface, and whether it supports -- the supports
+		 *  but those in Without, and those in With (on the far surface once past
+		 *  the edge). */
+		void MeasuredWheels(const FExecMeasure& Measure, uint32 Without, uint32 With, TArray<FVector2D, TInlineAllocator<MaxPlanLegs>>& OutXZ,
+			TArray<FMeasuredWheel, TInlineAllocator<MaxPlanLegs>>& OutWheels) const;
+		/** The share of the weight (N) each wheel carries (MinNormLoadShares) on
+		 *  the supports but those in Without, and those in With; false where the
+		 *  centre of mass is outside them. */
+		bool LoadShares(const FExecMeasure& Measure, uint32 Without, uint32 With, TArray<double, TInlineAllocator<MaxPlanLegs>>& OutShares) const;
+		/** This tick's load caps (SetLoadCaps) into Out. Changes no target. */
+		void UpdateLoadCaps(const FExecMeasure& Measure, FExecCommand& Out, double Dt);
+		/** Last tick's load caps into Out (an early return keeps them in force). */
+		void HoldLoadCaps(FExecCommand& Out) const;
+		/** A centre wheel overloaded, by its motors' efforts
+		 *  (Ramms.Curb.LoadCapWalkHold; false with it off): carrying more than
+		 *  0.7 of the weight, or (bCountCap) at its load cap for half the frame
+		 *  -- left out for its loading timer: a loading wheel sits at its own
+		 *  landing cap by design, and would never finish loading. */
+		bool Overloaded(int32 Leg, const FExecMeasure& Measure, bool bCountCap) const;
 		/** The measured dynamic margin (cm) on the wheels now carrying the
 		 *  robot with the seat's pivot held at SeatX (its crossing height, the
 		 *  platform's measured pitch); -1e9 with fewer than three. */
@@ -858,8 +1021,10 @@ namespace RammsCurb
 		 *  chassis) made the travel at which the wheel, walking as WalkAhead has
 		 *  it -- a function of the travel, so on as the robot brakes -- reaches
 		 *  its window (aft, more room, less TouchMarginCm; forward, less). The
-		 *  1:1 room while the centre wheels hold their fore/aft. */
-		double WalkedDistance(int32 Leg, const FExecMeasure& Measure, double OneToOneCm) const;
+		 *  1:1 room while the centre wheels hold their fore/aft. For a planted
+		 *  centre wheel, or a lifting one still on the ground (ToCm: the room is
+		 *  to there past the edge -- its unloading room -- not to its window). */
+		double WalkedDistance(int32 Leg, const FExecMeasure& Measure, double OneToOneCm, double ToCm = TNumericLimits<double>::Max()) const;
 		/** Centre wheel Leg's fore/aft (chassis frame, cm; + forward) AheadCm
 		 *  more travel on, less where it is now -- at most what it can be, so the
 		 *  wheel is taken to reach any point ahead no later than it can: the walk
@@ -917,6 +1082,13 @@ namespace RammsCurb
 			double H = 0.0;
 		};
 		double PredictRise(int32 Leg, const FExecMeasure& Measure, double Ahead, FRise& Sim) const;
+		/** How fast (cm/s) corner Leg's crank, turning at CrankRateRadS, moves
+		 *  its leg at height Z (its 4-bar table's slope there). */
+		double CrankRiseCmS(int32 Leg, double Z, double CrankRateRadS) const;
+		/** A lifting wheel still on the ground: what is left (s) of
+		 *  UnloadSeconds since its lift began, the time its leg is taken to
+		 *  stand before it rises (0 otherwise). */
+		double UnloadLeft(int32 Leg) const;
 		/** A landing wheel's target (chassis z, cm): its contact PressCm into the
 		 *  far surface from the chassis as measured (moved on a servo lag along
 		 *  the plan's height) -- it carries nothing, so the height the chassis
@@ -951,9 +1123,37 @@ namespace RammsCurb
 		FExecDiag		   Diag;
 		TArray<FString>	   Pending;
 		bool			   bRunning = false;
-		EExecPhase		   Phase = EExecPhase::Approach;
-		FString			   Status;
-		double			   Elapsed = 0.0;
+		/** SetLoadCaps; and the centre of mass outside the wheels carrying was
+		 *  logged (once an episode). */
+		bool	   bLoadCaps = false;
+		bool	   bLoadCapsOffLogged = false;
+		EExecPhase Phase = EExecPhase::Approach;
+		FString	   Status;
+		double	   Elapsed = 0.0;
+		/** The ticks' running length (s, each counted to at most
+		 *  RammsMotion::MaxInterpolationGapSeconds; 0 before the first). */
+		double TickDt = 0.0;
+		/** The ticks' interval and jitter, as the motors' follower measures its
+		 *  commands' (FollowDelaySeconds). */
+		RammsMotion::FCommandInterval TickCadence;
+		/** How long (s) a leg's servos take to start a move sent them: the
+		 *  motors' profiles' delay behind their commands (FollowDelaySeconds)
+		 *  and two of the servos' own lags to get going (the tuning's less the
+		 *  command delay the controller put into it, FPlannerInput::
+		 *  CommandDelaySeconds). */
+		double LegStartSeconds() const;
+		/** The fastest fore/aft walk (cm/s) leg L's hips allow with its height
+		 *  moving at HeightRateCmS: each hip's HipRateShare of its MaxVelocity,
+		 *  less what the height turns it, over what a cm of walk does; the
+		 *  largest double where nothing bounds it. */
+		static double HipWalkCmS(const FExecLeg& L, double HeightRateCmS);
+		/** The motors' profiles' delay behind their commands (s): the follower's
+		 *  at the ticks' interval and jitter (TickCadence). */
+		double FollowDelaySeconds() const;
+		/** How far (cm) the robot goes in a tick (TickDt at the speed it has,
+		 *  at most MaxTickLeadCm): an action due on the plan's position is begun
+		 *  on the last tick short of it rather than the first past it. */
+		double TickLeadCm() const;
 		/** Travel along the plan's heading from its origin (cm), and the speed
 		 *  the robot is taken to have (cm/s). */
 		double S = 0.0;
@@ -979,6 +1179,17 @@ namespace RammsCurb
 		double RampRate = 1.0;
 		double RampAccel = 1.0;
 		double RampSpan = 0.0;
+		/** The chassis command (BCmd, cm) as the ramp began: the ramp blends the
+		 *  legs at that height (RampedTarget), the rise since taken at once. */
+		double BCmdRamp = 0.0;
+		/** The base's attitude (deg) low-passed over RampAttitudeSeconds from
+		 *  the run's first tick: what the level-in's ramp is sized from. */
+		FVector2D RampAttitudeDeg = FVector2D::ZeroVector;
+		bool	  bRampAttitude = false;
+		/** A support leg's target (chassis z, cm) Ramp (0..1) of the way through
+		 *  the level-in's ramp from StanceZ to Target, the chassis' rise since
+		 *  the ramp began (BCmd less BCmdRamp) not ramped. */
+		double RampedTarget(int32 Leg, double StanceZ, double Target, double Ramp, const FPlanAt& Ahead) const;
 		/** Where the crossing is done (S, cm): every wheel loaded on the far side,
 		 *  the rear tyres FinishClearance past the edge, the centre wheels home,
 		 *  the plan's base back to level. And when (s since Begin) the robot was
@@ -988,6 +1199,19 @@ namespace RammsCurb
 		double SettledAt = -1.0;
 		bool   bLoggedBaseWait = false;
 		bool   bLoggedSeatWait = false;
+		/** Settling into the finish stance: its lift waiting on the margin (logged
+		 *  once), for how long with the seat and the centre wheels already there
+		 *  (s), and given up on. */
+		bool   bLoggedStanceWait = false;
+		double StanceLiftWaited = 0.0;
+		bool   bStanceLiftGivenUp = false;
+		/** Settling into the finish stance: where the centre wheels are sent
+		 *  fore/aft (cm; with bFinishCentreGoal, else the stance's own) -- ahead of the stance while the
+		 *  seat is still forward, so that the robot stands inside them and the
+		 *  rear corners with the stance's lifted wheels up (Ramms.Curb.FinishCentreLead). */
+		double FinishCentreGoal = 0.0;
+		bool   bFinishCentreGoal = false;
+		bool   bLoggedCentreLead = false;
 		/** The next planned stop (sample), and whether the robot is resting at it
 		 *  (and since when). */
 		int32  NextStop = INDEX_NONE;
@@ -1093,8 +1317,16 @@ namespace RammsCurb
 		int32  KeepOffViolations = 0;
 		int32  IntoTerrain = 0;
 		/** Lifts begun before a wheel they wait on (MustBeDownMask) had taken
-		 *  load. */
+		 *  load -- or, where its touchdown is enough (TouchSufficesMask), had
+		 *  touched down (FExecutor::IsDownFor). */
 		int32 EarlyLifts = 0;
+		/** With the load caps on (FExecDryRunOptions::bLoadCaps): ticks some leg
+		 *  had one; ticks a wheel's cap broke its rule (a wheel in the air capped;
+		 *  a carrying or landing one, the shares solved, under the floor); the
+		 *  most the carrying wheels' shares summed off the weight (N). */
+		int32  LoadCapTicks = 0;
+		int32  LoadCapRuleBreaks = 0;
+		double MaxShareSumErrN = 0.0;
 		/** Paused by the stick (FExecDryRunOptions::PauseAtTravelCm): lifts and
 		 *  level-ins begun meanwhile, how far (cm) the robot went on from where it
 		 *  was let go, and how long (s) it then stood at rest (under 0.5 cm/s). */
@@ -1268,6 +1500,9 @@ namespace RammsCurb
 		 *  begun to cross by then. */
 		bool   bReplan = true;
 		double ReplanDelaySeconds = 0.0;
+		/** The executor works out the load caps (FExecutor::SetLoadCaps); the
+		 *  kinematic robot takes no notice of them. */
+		bool bLoadCaps = false;
 	};
 
 	/**

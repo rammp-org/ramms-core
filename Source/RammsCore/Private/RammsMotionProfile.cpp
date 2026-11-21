@@ -112,17 +112,68 @@ namespace RammsMotion
 		Setpoint = Value;
 		Rate = 0.0;
 		Points.Reset();
-		Interval = 0.0;
+		Cadence = FCommandInterval();
 	}
 
 	static TAutoConsoleVariable<float> CVarFollowDelayIntervals(TEXT("Ramms.Motor.FollowDelayIntervals"), static_cast<float>(FollowDelayIntervals),
-		TEXT("How far (in command intervals) a physics-rate position profile runs behind its commands (RammsMotion::FFollower). "
-			 "More: smoother through uneven frames, slower to react. 0: eased toward the latest command at once."),
+		TEXT("How far (in command intervals) a physics-rate position profile runs behind its commands (RammsMotion::FFollower), "
+			 "on top of its jitter margin (Ramms.Motor.FollowJitterMargin). More: smoother through uneven frames, slower to "
+			 "react. 0: eased toward the latest command at once."),
 		ECVF_Default);
+	static TAutoConsoleVariable<float> CVarFollowJitterMargin(TEXT("Ramms.Motor.FollowJitterMargin"), static_cast<float>(FollowJitterMargin),
+		TEXT("How many of the commands' measured jitters (their gaps' mean distance from the interval) a physics-rate position "
+			 "profile runs behind its commands on top of Ramms.Motor.FollowDelayIntervals: even frames add next to nothing, "
+			 "uneven ones as much as the late ones need."),
+		ECVF_Default);
+
+	void FCommandInterval::Add(double Gap)
+	{
+		if (!(Gap > 0.0) || Gap > MaxInterpolationGapSeconds)
+		{
+			return;
+		}
+		if (Interval <= 0.0)
+		{
+			Interval = Gap;
+			Jitter = FirstJitterShare * Gap;
+			return;
+		}
+		const double Off = FMath::Abs(Gap - Interval);
+		Jitter += (Off > Jitter ? JitterRiseSmoothing : JitterFallSmoothing) * (Off - Jitter);
+		Interval += IntervalSmoothing * (Gap - Interval);
+	}
+
+	double FCommandInterval::Delay() const
+	{
+		if (Interval <= 0.0)
+		{
+			return 0.0;
+		}
+		const double Intervals = FMath::Max(0.0f, CVarFollowDelayIntervals.GetValueOnAnyThread());
+		const double Margin = FMath::Max(0.0f, CVarFollowJitterMargin.GetValueOnAnyThread());
+		return FMath::Min(Intervals * Interval + Margin * Jitter, MaxInterpolationGapSeconds);
+	}
+
+	void FCommandInterval::Advance(double Dt)
+	{
+		const double Want = Delay();
+		if (!bSlewed)
+		{
+			if (Want > 0.0)
+			{
+				Slewed = Want;
+				bSlewed = true;
+			}
+		}
+		else if (Dt > 0.0)
+		{
+			Slewed += FMath::Clamp(Want - Slewed, -DelayFallRate * Dt, DelayRiseRate * Dt);
+		}
+	}
 
 	double FFollower::Delay() const
 	{
-		return FMath::Min(FMath::Max(0.0f, CVarFollowDelayIntervals.GetValueOnAnyThread()) * Interval, MaxInterpolationGapSeconds);
+		return Cadence.SlewedDelay();
 	}
 
 	double FFollower::TargetAt(double Now, double* OutRate) const
@@ -177,7 +228,7 @@ namespace RammsMotion
 			}
 			else
 			{
-				Interval = Interval > 0.0 ? Interval + IntervalSmoothing * (Gap - Interval) : Gap;
+				Cadence.Add(Gap);
 			}
 		}
 		// The points the target has passed go, but for the one it is leaving
@@ -201,6 +252,8 @@ namespace RammsMotion
 		{
 			return Setpoint;
 		}
+		// The delay slewed toward the commands' (the first one taken outright).
+		Cadence.Advance(Dt);
 		double		 TargetRate = 0.0;
 		const double Target = TargetAt(Now, &TargetRate);
 		return StepTowardMoving(Setpoint, Rate, Target, TargetRate, MaxRate, MaxAccel, Dt);

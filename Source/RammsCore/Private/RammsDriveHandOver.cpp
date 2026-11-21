@@ -246,7 +246,12 @@ namespace RammsDrive
 				continue;
 			}
 			bMoves = true;
-			const double Limit = C.bMotor ? MaxMotorRate : MaxLinkageSpeed;
+			double Limit = C.bMotor ? MaxMotorRate : MaxLinkageSpeed;
+			// A channel's own limit, where it is slower (or the switch has none).
+			if (C.MaxRate > 0.0)
+			{
+				Limit = Limit > 0.0 ? FMath::Min(Limit, C.MaxRate) : C.MaxRate;
+			}
 			if (Limit > 0.0)
 			{
 				Seconds = FMath::Max(Seconds, PeakOverMean * Delta / Limit);
@@ -281,6 +286,28 @@ namespace RammsDrive
 		for (const FStanceChannel& C : Channels)
 		{
 			(C.bMotor != bLinkageFirst ? OutFirst : OutSecond).Add(C);
+		}
+	}
+
+	void SplitLeadStage(const TArray<FStanceChannel>& Channels, TArray<FStanceChannel>& OutFirst, TArray<FStanceChannel>& OutSecond)
+	{
+		OutFirst.Reset();
+		OutSecond.Reset();
+		bool bLeadMoves = false;
+		for (const FStanceChannel& C : Channels)
+		{
+			bLeadMoves |= C.bLead && FMath::Abs(C.To - C.From) > LeadMoveTolerance;
+		}
+		if (!bLeadMoves)
+		{
+			OutFirst = Channels;
+			return;
+		}
+		// The leads first, alone (everything else held where it is meanwhile:
+		// a stage commands only its own channels), then the rest.
+		for (const FStanceChannel& C : Channels)
+		{
+			(C.bLead ? OutFirst : OutSecond).Add(C);
 		}
 	}
 
@@ -1095,7 +1122,9 @@ namespace RammsDrive
 		}
 		else
 		{
-			Stages[0] = MoveTemp(Channels);
+			// From a pose no drive mode set: every actuator together, but the
+			// stance's leads (a seat carrying the rider) first when they move.
+			SplitLeadStage(Channels, Stages[0], Stages[1]);
 		}
 		for (int32 S = 0; S < 2; ++S)
 		{

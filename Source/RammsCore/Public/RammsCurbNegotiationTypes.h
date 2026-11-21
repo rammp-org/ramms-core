@@ -375,6 +375,51 @@ struct RAMMSCORE_API FRammsCurbAssist
 	float ScanIntervalSeconds = 0.1f;
 };
 
+/**
+ * How a rider likes a curb crossing to run, on a curb controller (URammsCurbNegotiationController::Preferences): four
+ * sliders on the control surface (curb.pref.speed, curb.pref.smoothness, curb.pref.tilt, curb.pref.seat), each 0..1 --
+ * speed, smoothness and tilt at 0.5 the robot's own tuning (FRammsCurbTuning) as it is set, seat travel at rest at 1
+ * (the seat's whole reach). They shape the next crossing planned, not one under way:
+ *  - Speed: the pace the crossing cruises at -- 0.6 times the tuning's DriveSpeed at 0, 1.3 times at 1. The planner
+ *    still slows wherever a wheel's lift, landing or the seat needs it.
+ *  - Smoothness: how gently the speed and the base's tilt change -- the crossing's acceleration and braking
+ *    (Acceleration, Deceleration) and the tilt's turn rate and its change (TiltRateDegPerSec, TiltAccelDegPerSec2),
+ *    1.5 times the tuning's at 0 (brisk), 0.6 times at 1 (gentle). Brisker changes reach the plan's speeds sooner;
+ *    the planner keeps its margins for them (the zero-moment point moves with the acceleration), so a brisk setting
+ *    can find a curb's margins tighter.
+ *  - Tilt: how far the planner may tilt the base where it cannot cross level (MaxPlannedTiltDeg) -- none at 0 (level,
+ *    or planned stops, or refused), 1.6 times the tuning's at 1 (at most 10 deg). The attitude the robot faults at
+ *    (MaxTiltDeg) is not a preference.
+ *  - SeatTravel: how far forward the planner may shift the seat to keep the robot stable and moving -- as far as its
+ *    reach at 1 (the default: the seat shifts whenever that lets a lift begin sooner or the robot keep its speed),
+ *    down to a quarter of the way at 0, where the crossing is slower instead (the rear corners lift later, the centre
+ *    wheels further aft; or tilted, or with planned stops). Where no crossing fits the shorter shift, the seat's whole
+ *    reach is planned with.
+ * The stability margins, the clearances and the legs' and seat's own limits are not preferences either: no setting
+ * here lets a crossing stand closer to tipping or move a motor faster than it may.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCORE_API FRammsCurbPreferences
+{
+	GENERATED_BODY()
+
+	/** 0 slowest .. 1 fastest; 0.5 the tuning's own pace. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Speed = 0.5f;
+
+	/** 0 brisk .. 1 gentle; 0.5 the tuning's own accelerations and tilt rates. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Smoothness = 0.5f;
+
+	/** 0 level only .. 1 the most planned tilt; 0.5 the tuning's own MaxPlannedTiltDeg. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Tilt = 0.5f;
+
+	/** 0 the least seat shift (slower crossings) .. 1 the seat's whole reach (the default). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Preferences", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SeatTravel = 1.0f;
+};
+
 /** The step the robot is to cross. */
 USTRUCT(BlueprintType)
 struct RAMMSCORE_API FRammsCurbProfile
@@ -579,6 +624,35 @@ struct RAMMSCORE_API FRammsCurbWheelStatus
 	/** The wheel bottom is on (or pressed into) the surface under it. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
 	bool bContact = false;
+
+	/** The per-wheel gait's load sharing (Ramms.Curb.LoadCap): the share of
+	 *  the robot's weight this wheel carries -- landing, will carry -- with
+	 *  the others' legs as stiff as its own (N), and the most its leg may
+	 *  press it onto the ground with (N; 0: no cap). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float LoadShareN = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float LoadCapN = 0.0f;
+
+	/** What its leg's motors put out over the last frame (N*m, the robot's
+	 *  sense; X a 4-bar's crank or a 5-bar's hip A, Y hip B): the mean and
+	 *  the peak. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	FVector2D LegTorqueNm = FVector2D::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	FVector2D LegTorquePeakNm = FVector2D::ZeroVector;
+
+	/** The most of the last frame a motor of its leg sat at its load cap (0..1). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float CapBoundShare = 0.0f;
+
+	/** The load its wheel carries, from its motors' efforts through its leg
+	 *  (N; the leg's own weight below its motors not counted; 0 where it
+	 *  cannot be read). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float LoadEstimateN = 0.0f;
 };
 
 /**
@@ -938,9 +1012,12 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.0"))
 	float MainWheelPreload = 1.0f;
 
-	/** The leg servos' lag (s), modelled as first order: how far behind its
-	 *  command a leg is expected to run. Leg error in the run stats is taken
-	 *  against this model rather than the raw command. */
+	/** The leg servos' own lag (s), modelled as first order: how far behind
+	 *  the command its servo is given a leg is expected to run. The controller
+	 *  adds the robot base's command delay at its frame rate on top (the
+	 *  physics-rate follower's, URammsCurbNegotiationController::
+	 *  CommandDelaySeconds) for everything it plans and runs. Leg error in the
+	 *  run stats is taken against this model rather than the raw command. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.0"))
 	float ServoLagSeconds = 0.1f;
 

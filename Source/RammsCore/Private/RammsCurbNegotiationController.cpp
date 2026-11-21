@@ -3,9 +3,11 @@
 #include "RammsCurbNegotiationController.h"
 
 #include "Curb/RammsCurbAssist.h"
+#include "Curb/RammsCurbPreferences.h"
 #include "Curb/RammsCurbDebugView.h"
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
+#include "Curb/RammsCurbLoadShare.h"
 #include "Curb/RammsCurbPlanTask.h"
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
@@ -22,14 +24,49 @@
 #include "HAL/PlatformTime.h"
 #include "Misc/ScopeExit.h"
 #include "Ramms4BarKinematics.h"
+#include "Ramms5BarKinematics.h"
 #include "Ramms5BarLinkageController.h"
+#include "Engine/DataTable.h"
 #include "RammsDriveHandOver.h"
 #include "RammsControlIds.h"
 #include "RammsDriveModeSelector.h"
+#include "RammsHolonomicDriveController.h"
+#include "RammsMotionProfile.h"
+#include "RammsActuationBackend.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogRammsCurb, Log, All);
+
+// A diagnostic switch, for comparing runs with and without the command delay in
+// the legs' lag.
+static TAutoConsoleVariable<int32> CVarRammsCurbCommandDelayLag(TEXT("Ramms.Curb.CommandDelayLag"), 1,
+	TEXT("Curb crossing: the legs' lag the plans and their runs take is Tuning.ServoLagSeconds and the robot base's command "
+		 "delay at the controller's frame rate on top (1, the default; CommandDelaySeconds), or ServoLagSeconds alone (0)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRammsCurbLoadCap(TEXT("Ramms.Curb.LoadCap"), 1,
+	TEXT("Load-aware pressing: a leg landing its wheel (and, with Ramms.Curb.LoadCapLegs 1, each carrying the robot) may press "
+		 "it onto the ground with no more than (1 + Ramms.Curb.LoadCapMargin) times its share of the weight -- a press-side "
+		 "torque cap on its motors, applied every physics step (Ramms.Motor.TorqueLimit's limits): stiff legs with strong motors "
+		 "otherwise let one landing wheel take nearly the whole robot within a frame. 1 (the default): sent to the motors. 2: "
+		 "worked out, logged and counted only (shadow). 0: off."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarRammsCurbLoadCapTractionRatio(TEXT("Ramms.Curb.LoadCapTractionRatio"), 0.8f,
+	TEXT("A load cap's allowance for driving the wheel along (N of fore/aft force per N of the cap) on top of carrying it."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarRammsCurbLoadCapMinJz(TEXT("Ramms.Curb.LoadCapMinJzCmPerRad"), 0.5f,
+	TEXT("A leg motor with less vertical lever than this (cm of wheel height per radian) does not carry its wheel: no load cap."),
+	ECVF_Default);
+
+// A diagnostic switch, for comparing runs with and without the hips' bound on
+// the centre walks.
+static TAutoConsoleVariable<int32> CVarRammsCurbHipRateWalk(TEXT("Ramms.Curb.HipRateWalk"), 1,
+	TEXT("Curb crossing (per-wheel gait): a centre 5-bar walks fore/aft no faster than its hips' motors turn at their MaxVelocity "
+		 "(RammsCurb::HipRateShare of it) with what its height's own move leaves them (1, the default), or at its walk's own caps "
+		 "alone (0). Walked past it, the faster hip falls behind the other, the leg bends off its pose and the wheel pushes the "
+		 "chassis up."),
+	ECVF_Default);
 
 // A diagnostic switch, for comparing runs with and without the carrier term.
 static TAutoConsoleVariable<int32> CVarRammsCurbCarrierSpin(
@@ -62,6 +99,24 @@ static TAutoConsoleVariable<int32> CVarRammsCurbSpeedTrimLevel(
 	0,
 	TEXT("Curb crossing (per-wheel gait): the speed trim on level ground too, at most RammsCurb::SpeedTrimLevelMaxCmS\n")
 		TEXT("either way (1), or on a grade only (0, the default)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarRammsCurbDevHipMin(TEXT("Ramms.Curb.DevHipMinRad"), 0.0f,
+	TEXT("Development (with Ramms.Curb.DevHipMaxRad over it): the 5-bar legs' reach grids from their geometry with both hips within\n")
+		TEXT("[DevHipMinRad, DevHipMaxRad] rather than their motors' authored ranges -- a planner-only study of a wider hip travel: the\n")
+			TEXT("plan (and a plan input written for ramms.Curb.PlanReplay) uses it, the robot's actuators keep their own ranges."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarRammsCurbDevHipMax(TEXT("Ramms.Curb.DevHipMaxRad"), 0.0f,
+	TEXT("Development: see Ramms.Curb.DevHipMinRad."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRammsCurbFinishInStance(
+	TEXT("Ramms.Curb.FinishInStance"),
+	1,
+	TEXT("Curb crossing: 1 (the default) finishes in the stance of the drive mode it hands back to -- once every wheel is\n")
+		TEXT("across, the centre wheels walk to the stance's fore/aft and the seat comes back to its pivot while the robot rolls\n")
+			TEXT("on, and the wheels the stance has off the ground (the outdoor stance's front corners) lift as soon as the robot\n")
+				TEXT("stands inside the others -- so the hand-back has next to nothing to move. 0: the crossing ends on every wheel in\n")
+					TEXT("the plan's end pose, and the hand-back's stance change takes the robot into the stance (development A/B runs)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarRammsCurbHoldBrakes(
@@ -106,6 +161,33 @@ static TAutoConsoleVariable<int32> CVarRammsCurbSlopeFallbackDrive(
 	TEXT("Curb crossing (per-wheel gait): on a slope, drive the fallback wheels whenever they carry, not only while\n")
 		TEXT("their side's main wheel is off the ground (1, the default), or keep the per-side drive roles (0)."),
 	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRammsCurbDriveAllWheels(
+	TEXT("ramms.Curb.DriveAllWheels"),
+	1,
+	TEXT("Curb crossing (per-wheel gait): drive every wheel that has a motor whenever it carries, on any ground -- the\n")
+		TEXT("fallback wheels alongside the main ones, so the robot keeps every wheel's authority through the crossing (1, the\n")
+			TEXT("default); or only on a slope (ramms.Curb.SlopeFallbackDrive) and while their side's main wheel is off the ground (0)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRammsCurbHandOverOmniHold(
+	TEXT("ramms.Curb.HandOverOmniHold"),
+	1,
+	TEXT("Curb crossing (per-wheel gait), handing back to a mode that does not drive the fallback wheels (the omni corners under\n")
+		TEXT("the differential mode): keep those wheels from rolling free until the mode has the robot -- braked while its own\n")
+			TEXT("wheels are asked no motion, else driven at the speed they are -- and let them go once the robot has settled, or its\n")
+				TEXT("main wheels carry with their speed loops on their commands (1, the default); or let them go at the hand-back (0)."),
+	ECVF_Default);
+
+/** The hand-over hold (ramms.Curb.HandOverOmniHold): let go after this long
+ *  at the most (s); once the robot has stood still (under StopSpeedCmS) for
+ *  HandOverSettleSeconds; or once both main wheels have run within
+ *  HandOverTrackRadS of their commands for HandOverTrackSeconds, the mode's
+ *  stance change done. */
+static constexpr double HandOverHoldMaxSeconds = 4.0;
+static constexpr double HandOverSettleSeconds = 0.5;
+static constexpr double HandOverTrackSeconds = 0.3;
+static constexpr double HandOverTrackRadS = 0.3;
 
 namespace
 {
@@ -391,6 +473,7 @@ void URammsCurbNegotiationController::BeginPlay()
 
 void URammsCurbNegotiationController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	ClearLoadCaps();
 	if (DebugDrawHandle.IsValid())
 	{
 		UDebugDrawService::Unregister(DebugDrawHandle);
@@ -496,11 +579,17 @@ TArray<FRammsCurbWheelStatus> URammsCurbNegotiationController::GetWheelStatus() 
 				W.SurfaceZ = static_cast<float>(State.WheelWorld.Z - R - State.WheelBottom);
 				W.ClearanceCm = State.WheelBottom;
 			}
+			W.LegTorqueNm = State.TauMeanNm;
+			W.LegTorquePeakNm = State.TauPeakNm;
+			W.CapBoundShare = State.CapBoundShare;
+			W.LoadEstimateN = State.bLoad ? State.LoadN : 0.0f;
 			if (bRunning)
 			{
 				const RammsCurb::FExecWheel& E = Executor->GetWheels()[i];
 				W.State = E.State;
 				W.Plane = E.Plane;
+				W.LoadShareN = static_cast<float>(E.LoadShareN);
+				W.LoadCapN = static_cast<float>(E.LoadCapN);
 				W.WindowLo = static_cast<float>(Executor->GetPlan().Wheels[i].DUp);
 				W.WindowHi = static_cast<float>(Executor->GetPlan().Wheels[i].DDown);
 			}
@@ -599,6 +688,8 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 		return false;
 	}
 
+	// The legs are about to be resolved afresh: no load cap of before stays on.
+	ClearLoadCaps();
 	FiveBarReachCache.Reset();
 	int32 PerAxle[3] = { 0, 0, 0 };
 	int32 CornerPivots[3] = { 0, 0, 0 };
@@ -622,6 +713,8 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 				OutReason = FString::Printf(TEXT("leg '%s' names no crank motor"), *Leg.Name.ToString());
 				return false;
 			}
+			State.LoadMotors[0] = Leg.FourBar.CrankMotor;
+			State.NumLoadMotors = 1;
 			State.HeightRange = URamms4BarKinematics::GetHeightRange(Leg.FourBar);
 			if (State.HeightRange.X >= State.HeightRange.Y)
 			{
@@ -686,6 +779,27 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 			}
 			bool bValid = false;
 			State.HeightRange = State.FiveBar->GetReachableExtent(true, bValid);
+			// Its hips' speed (the base's motor specs), for the walks
+			// (FExecLeg::HipMaxRate): the spec the 5-bar resolves, its table's row
+			// over its inline one.
+			State.HipMaxRate = FVector2D::ZeroVector;
+			const FRamms5BarLinkageSpec* Spec = &State.FiveBar->Linkage;
+			if (State.FiveBar->KinematicTable && !State.FiveBar->LinkageRow.IsNone())
+			{
+				if (const FRamms5BarLinkageSpec* Row = State.FiveBar->KinematicTable->FindRow<FRamms5BarLinkageSpec>(State.FiveBar->LinkageRow, TEXT("curb hips")))
+				{
+					Spec = Row;
+				}
+			}
+			FRammsMotorSpec Motor;
+			if (const URammsRobotBaseComponent* Base = EnsureBase())
+			{
+				State.HipMaxRate.X = Base->GetMotorSpec(Spec->ProximalMotorA, Motor) ? FMath::Max(0.0f, Motor.MaxVelocity) : 0.0f;
+				State.HipMaxRate.Y = Base->GetMotorSpec(Spec->ProximalMotorB, Motor) ? FMath::Max(0.0f, Motor.MaxVelocity) : 0.0f;
+			}
+			State.LoadMotors[0] = Spec->ProximalMotorA;
+			State.LoadMotors[1] = Spec->ProximalMotorB;
+			State.NumLoadMotors = !Spec->ProximalMotorA.IsNone() && !Spec->ProximalMotorB.IsNone() ? 2 : 0;
 		}
 	}
 	for (int32 Axle = 0; Axle < 3; ++Axle)
@@ -730,7 +844,12 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 	{
 		return false;
 	}
-	return ResolveSeat(OutReason);
+	if (!ResolveSeat(OutReason))
+	{
+		return false;
+	}
+	PrimeMotorEfforts();
+	return true;
 }
 
 bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
@@ -1024,6 +1143,8 @@ bool URammsCurbNegotiationController::Measure(FString& OutReason)
 			}
 			State.MeasuredX = static_cast<float>(WheelCenter.X);
 			State.MeasuredZ = static_cast<float>(WheelCenter.Y);
+			State.CrankAngle = Reading;
+			State.bCrankClamped = bClamped;
 		}
 		else if (State.FiveBar)
 		{
@@ -1810,7 +1931,10 @@ void URammsCurbNegotiationController::EnsureFiveBarGrids()
 	{
 		return;
 	}
-	bool bSame = FiveBarGrids->Keys.Num() == Legs.Num() && FiveBarGrids->Grids.Num() == Legs.Num();
+	const FVector2D HipRange(CVarRammsCurbDevHipMin.GetValueOnGameThread(), CVarRammsCurbDevHipMax.GetValueOnGameThread());
+	const bool		bDevHips = HipRange.X < HipRange.Y;
+	bool			bSame = FiveBarGrids->Keys.Num() == Legs.Num() && FiveBarGrids->Grids.Num() == Legs.Num()
+		&& (bDevHips ? FiveBarGrids->HipRange == HipRange : FiveBarGrids->HipRange.X >= FiveBarGrids->HipRange.Y);
 	for (int32 i = 0; bSame && i < Legs.Num(); ++i)
 	{
 		bSame = FiveBarGrids->Keys[i] == static_cast<const void*>(LegState[i].FiveBar);
@@ -1822,6 +1946,7 @@ void URammsCurbNegotiationController::EnsureFiveBarGrids()
 	const double Started = FPlatformTime::Seconds();
 	FiveBarGrids->Keys.SetNum(Legs.Num());
 	FiveBarGrids->Grids.SetNum(Legs.Num());
+	FiveBarGrids->HipRange = bDevHips ? HipRange : FVector2D(1.0, 0.0);
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
 		const URamms5BarLinkageController* FiveBar = LegState[i].FiveBar;
@@ -1834,6 +1959,29 @@ void URammsCurbNegotiationController::EnsureFiveBarGrids()
 		// The leg's own reachability -- its knees and hips -- on cells over
 		// its height extent and 40 cm either side of the chassis' middle.
 		const FVector2D Extent = LegState[i].HeightRange;
+		if (bDevHips)
+		{
+			// The study's: the linkage's own geometry, both hips in the range asked.
+			FRamms5BarLinkageSpec Spec = FiveBar->Linkage;
+			if (FiveBar->KinematicTable && !FiveBar->LinkageRow.IsNone())
+			{
+				if (const FRamms5BarLinkageSpec* Row = FiveBar->KinematicTable->FindRow<FRamms5BarLinkageSpec>(FiveBar->LinkageRow, TEXT("DevHipRange")))
+				{
+					Spec = *Row;
+				}
+			}
+			const double Hand = Spec.TranslationSign < 0.0f ? -1.0 : 1.0;
+			FiveBarGrids->Grids[i].Build(
+				[Spec, Hand, HipRange](double X, double Z) {
+					bool			bReachable = false;
+					const FVector2D A = URamms5BarKinematics::SolveIK(Spec, FVector2D(X * Hand, Z), bReachable);
+					return bReachable && A.X >= HipRange.X && A.X <= HipRange.Y && A.Y >= HipRange.X && A.Y <= HipRange.Y;
+				},
+				FVector2D(-40.0, 40.0), FVector2D(Extent.X - 0.5, Extent.Y + 0.5));
+			UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s': leg '%s' reach grid from its geometry with the hips in [%.2f, %.2f] rad (Ramms.Curb.DevHipMinRad/MaxRad, a study)"),
+				*GetNameSafe(GetOwner()), *Legs[i].Name.ToString(), HipRange.X, HipRange.Y);
+			continue;
+		}
 		FiveBarGrids->Grids[i].Build(
 			[FiveBar](double X, double Z) {
 				bool bReachable = false;
@@ -1919,6 +2067,84 @@ void URammsCurbNegotiationController::AdoptSchedule()
 	PlannedMinSpeed = static_cast<float>(Schedule->VFloor);
 	PlannedMinMargin = static_cast<float>(Schedule->MinMargin);
 	bPlannedMargin = Schedule->IsValid();
+}
+
+float URammsCurbNegotiationController::CommandDelaySeconds() const
+{
+	if (CVarRammsCurbCommandDelayLag.GetValueOnGameThread() == 0)
+	{
+		return 0.0f;
+	}
+	// Without the physics-rate follower -- profiles stepped once a frame
+	// (Ramms.Motor.PhysicsRateProfiles 0), or a backend that runs none (one with
+	// no clock of its own, Chaos) -- each command reaches its servo half a frame
+	// late on average.
+	if (!RunsFollower())
+	{
+		return static_cast<float>(0.5 * CommandCadence.Interval);
+	}
+	return static_cast<float>(CommandCadence.SlewedDelay());
+}
+
+bool URammsCurbNegotiationController::RunsFollower() const
+{
+	static IConsoleVariable* const	Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
+	const URammsRobotBaseComponent* Base = EnsureBase();
+	return !(Profiles && Profiles->GetInt() == 0) && Base && Base->GetSimulationTime() >= 0.0;
+}
+
+float URammsCurbNegotiationController::EffectiveServoLagSeconds() const
+{
+	return Tuning.ServoLagSeconds + CommandDelaySeconds();
+}
+
+bool URammsCurbNegotiationController::FiveBarHipTurns(const FLegState& State, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const
+{
+	OutPerCmX = OutPerCmZ = FVector2D::ZeroVector;
+	if (!State.FiveBar || CVarRammsCurbHipRateWalk.GetValueOnGameThread() == 0 || (State.HipMaxRate.X <= 0.0f && State.HipMaxRate.Y <= 0.0f))
+	{
+		return false;
+	}
+	return FiveBarTurnsAt(State, FVector2D(State.CmdX, State.CmdZ), OutPerCmX, OutPerCmZ);
+}
+
+bool URammsCurbNegotiationController::FiveBarTurnsAt(const FLegState& State, const FVector2D& At, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const
+{
+	OutPerCmX = OutPerCmZ = FVector2D::ZeroVector;
+	if (!State.FiveBar)
+	{
+		return false;
+	}
+	bool			bHere = false;
+	const FVector2D Here = State.FiveBar->SolveTarget(At, bHere);
+	if (!bHere)
+	{
+		return false;
+	}
+	// How far each hip turns per cm along Axis at the commanded pose: a probe
+	// either side, the step halved where one side leaves the reach (near the
+	// top of its travel a 5-bar's fore/aft band narrows to well under 2 cm),
+	// one side alone at the edge.
+	auto Turns = [&](const FVector2D& Axis, FVector2D& Out) {
+		for (double HalfStepCm = 1.0; HalfStepCm >= 0.25 - 1e-9; HalfStepCm *= 0.5)
+		{
+			bool			bBack = false, bOn = false;
+			const FVector2D Back = State.FiveBar->SolveTarget(At - Axis * HalfStepCm, bBack);
+			const FVector2D On = State.FiveBar->SolveTarget(At + Axis * HalfStepCm, bOn);
+			if (bBack && bOn)
+			{
+				Out = (On - Back) / (2.0 * HalfStepCm);
+				return true;
+			}
+			if (HalfStepCm < 0.5 && (bBack || bOn))
+			{
+				Out = bOn ? (On - Here) / HalfStepCm : (Here - Back) / HalfStepCm;
+				return true;
+			}
+		}
+		return false;
+	};
+	return Turns(FVector2D(1.0, 0.0), OutPerCmX) && Turns(FVector2D(0.0, 1.0), OutPerCmZ);
 }
 
 bool URammsCurbNegotiationController::PreparePerWheel(const FRammsCurbProfile& Profile, RammsCurb::FPlannerInput& In, FString& OutReason)
@@ -2024,6 +2250,9 @@ bool URammsCurbNegotiationController::PreparePerWheel(const FRammsCurbProfile& P
 		}
 	}
 
+	// A crossing (or a look at one) planned afresh: the rider's preferences as
+	// they are now (its re-plans keep these).
+	CrossingPreferences = Preferences;
 	FillPlannerInput(In);
 	return true;
 }
@@ -2040,7 +2269,32 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	In.OriginZ = MeasuredOriginZ;
 	In.Heading = FVector2D(Heading.X, Heading.Y).GetSafeNormal();
 	In.AttitudeDeg = FVector2D(MeasuredPitchDeg, MeasuredRollDeg);
-	In.Tuning = Tuning;
+	// The tuning as the rider's preferences shape it (FRammsCurbPreferences):
+	// those the crossing was planned with (a re-plan keeps them).
+	In.Tuning = CrossingTuning();
+	// The legs' lag the plan and its run take: the servos' own and the robot
+	// base's command delay at this frame rate on top -- every position
+	// command reaches its servo that much after it is sent (the follower's
+	// delay, which the walks' leads once left out).
+	In.CommandDelaySeconds = CommandDelaySeconds();
+	In.bFollower = RunsFollower();
+	In.Tuning.ServoLagSeconds += static_cast<float>(In.CommandDelaySeconds);
+	In.SeatReachShare = RammsCurb::SeatReachShare(CrossingPreferences);
+	// Every stability margin at no less than the authored speeding up and
+	// braking: a gentler smoothness slows the robot's moves, not its reserve
+	// (the drive's catch-up ran past the gentler rates, and the poses planned
+	// at them stood closer to tipping).
+	const FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, In.Tuning);
+	In.MarginAcceleration = MarginDyn.X;
+	In.MarginDeceleration = MarginDyn.Y;
+	// With the centre wheels taking over the balancing at the rear corners
+	// (Ramms.Curb.ClimbCentreHandOff up a curb, DescentCentreHandOff down one):
+	// fast enough a walk for a landed centre wheel to stand still under the
+	// chassis.
+	if (RammsCurb::CentreHandOffOn(In.Terrain.StepHeightCm >= 0.0f, In.Model))
+	{
+		In.Tuning.CenterShiftSpeed = FMath::Max(In.Tuning.CenterShiftSpeed, static_cast<float>(RammsCurb::ClimbCentreWalkSpeedCmS()));
+	}
 	TArray<RammsCurb::FEntryWheel, TInlineAllocator<8>> Entry;
 	const URammsRobotBaseComponent*						Base = EnsureBase();
 	for (int32 i = 0; i < Legs.Num(); ++i)
@@ -2067,6 +2321,7 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 		W.RadiusCm = Leg.WheelRadiusCm;
 		W.RollForward = FMath::Cos(FMath::DegreesToRadians(Leg.Wheel.RollDirectionDeg));
 	}
+	BuildFinishStance(In.Finish);
 	In.EntrySpeedCmS = RammsCurb::EntrySpeed(Entry, Telemetry && Telemetry->Motion.IsFull(), Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f);
 	// Moving (rolling on, or back on a slope the stance does not hold).
 	const float Moving = Telemetry && Telemetry->Motion.IsFull() ? Telemetry->Motion.GetSpeed() : 0.0f;
@@ -2461,6 +2716,8 @@ bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArr
 	}
 	const int32 N = FMath::Max(2, FMath::CeilToInt((To - From) / SpanSampleCm) + 1);
 	const float Ds = (To - From) / (N - 1);
+	// (The per-axle gait runs at the authored speed -- the rider's preferences
+	// shape the per-wheel gait only -- and plans at it.)
 	const float VPlan = FMath::Max3(Tuning.DriveSpeed, MeasuredWheelSpeed(), 1.0f);
 	const float Rate = Tuning.BaseHeightSpeed * Ds / VPlan;
 	const float Half = 0.5f * Tuning.MinCorridorCm;
@@ -3114,10 +3371,11 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	}
 	Steps.Add(Settle);
 
-	PlannedMinSpeed = Tuning.DriveSpeed;
+	const float Cruise = Tuning.DriveSpeed;
+	PlannedMinSpeed = Cruise;
 	for (const FStep& S : Steps)
 	{
-		PlannedMinSpeed = FMath::Min(PlannedMinSpeed, Tuning.DriveSpeed * S.SpeedFraction);
+		PlannedMinSpeed = FMath::Min(PlannedMinSpeed, Cruise * S.SpeedFraction);
 	}
 
 	// The level-in: the approach ends, and the first Prepare brings the base
@@ -3407,10 +3665,7 @@ void URammsCurbNegotiationController::StartPerAxleCrossing(const FRammsCurbProfi
 	bPerWheelCrossing = false;
 	bAwaitingPlan = false;
 	bReplanning = false;
-	if (Executor)
-	{
-		Executor->End();
-	}
+	EndExecutor();
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': crossing per axle"), *GetNameSafe(GetOwner()));
 	for (const FString& Line : PlanLines)
 	{
@@ -3495,6 +3750,9 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 			}
 		}
 	}
+	// A hand-over hold still running from the crossing before lets go first:
+	// this crossing takes the wheels (and the brakes the hold set itself).
+	EndHandOverHold(TEXT("a crossing takes the wheels"));
 	SetActiveModeThroughSelector(GetDriveModeId());
 	bDriveModeActive = true;
 	bHandBackPending = false;
@@ -3535,7 +3793,7 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	if (Telemetry)
 	{
 		Telemetry->Stats.Begin(PlannedMinSpeedCmS, PlannedTiltDeg, PlannedSeconds,
-			bPlannedMargin ? TOptional<float>(PlannedMinMargin) : TOptional<float>(), Tuning.DriveSpeed * RammsCurb::CruiseFloorFraction);
+			bPlannedMargin ? TOptional<float>(PlannedMinMargin) : TOptional<float>(), (bPerWheelCrossing ? CrossingTuning() : Tuning).DriveSpeed * RammsCurb::CruiseFloorFraction);
 		FVector2D Centre, Forward;
 		if (LocateChassis(Centre, Forward))
 		{
@@ -3575,6 +3833,13 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 	{
 		OutReason = TEXT("the terrain given is not valid");
 		Status = OutReason;
+		return false;
+	}
+	// Refused before measuring: measuring resolves the legs afresh, which would
+	// reset the crossing under way (its legs' state, its load caps, its report).
+	if (IsNegotiating())
+	{
+		OutReason = TEXT("a manoeuvre is already running");
 		return false;
 	}
 	// The profile a detection of this terrain would give, from where the robot
@@ -3770,8 +4035,13 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	// Whether a start from here begins it again (no wheel has begun to cross), and whether it does so by itself: a
 	// fault, the first, not about the robot itself, on terrain it detected.
 	const bool bBegun = CrossingBegun();
+	// A plan refused at rest is not tried again: nothing has moved, and the same
+	// plan from the same place is refused again (on a hard curb, seconds more).
+	const bool bRefusal = bRefusedAtRest;
+	bRefusedAtRest = false;
 	bRetryable = EndPhase != ERammsCurbPhase::Done && !bBegun && !bFaultSafety;
-	bRetryPending = EndPhase == ERammsCurbPhase::Faulted && bRetryable && bRetryOnceAfterFault && !bFaultSafety && !bRetriedOnce && !bTerrainGiven;
+	bRetryPending = EndPhase == ERammsCurbPhase::Faulted && bRetryable && bRetryOnceAfterFault && !bFaultSafety && !bRetriedOnce && !bTerrainGiven
+		&& !bRefusal;
 	if (EndPhase == ERammsCurbPhase::Done)
 	{
 		bRetriedOnce = false;
@@ -3852,6 +4122,8 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			C.AttitudeOffDeg, C.LateActions, C.MarginHolds, C.AttitudeSlowTicks, C.ReplanAsks);
 		StepLog.Add(Checked);
 		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Checked);
+		// What the motors put out, and the load caps.
+		LogMotorEfforts();
 	}
 	if (bPerWheelCrossing)
 	{
@@ -3872,9 +4144,9 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	{
 		Executor->Halt(Why);
 	}
-	else if (Executor)
+	else
 	{
-		Executor->End();
+		EndExecutor();
 	}
 	bAwaitingPlan = false;
 	bPlanningAtRest = false;
@@ -3929,6 +4201,9 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 				TGuardValue<bool> Own(bOwnHandBack, true); // a refusal at rest hands back and may still be tried again
 				SetActiveModeThroughSelector(Next);
 			}
+			// The fallback wheels kept from rolling free until that mode has the
+			// robot (ramms.Curb.HandOverOmniHold).
+			BeginHandOverHold(Next);
 			if (bRecentre)
 			{
 				if (URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
@@ -4015,11 +4290,13 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 		// The halted executor: the speed braked to rest, never over the hard
 		// braking caps; every leg to its target.
 		RammsCurb::FExecMeasure M;
+		ReadLegEfforts(DeltaTime);
 		GatherExecMeasure(DeltaTime, M);
 		M.Probes.Reset(); // nothing left to check
 		RammsCurb::FExecCommand Cmd;
 		Executor->Tick(M, *Level, Cmd);
 		CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+		ApplyLoadCaps(Cmd);
 		CommandSeat(Cmd.SeatX);
 		DriveSpeed = static_cast<float>(Cmd.DriveSpeed);
 		TArray<FString> Lines;
@@ -4087,10 +4364,7 @@ void URammsCurbNegotiationController::EndStopping(const FString& Why, EStopEnd H
 	bStopping = false;
 	DriveSpeed = 0.0f;
 	StopWheels(/*bRelease=*/false);
-	if (Executor)
-	{
-		Executor->End();
-	}
+	EndExecutor();
 	const FString Line = FString::Printf(TEXT("t=%5.2fs stopped: %s; the wheels braked, the legs held"), Elapsed + StopElapsed, *Why);
 	StepLog.Add(Line);
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -4104,6 +4378,20 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		// mode but the one chosen, so choosing another after a refusal at rest handed the robot back comes here too,
 		// with this mode already inactive.
 		CancelRetry(TEXT("another drive mode was selected"));
+		// The rider leaving the mode the crossing handed back to: the hand-over
+		// hold lets go of its brakes and its own commands now, before the
+		// incoming mode takes the wheels and writes (or brakes) its own (the
+		// selector stands every other mode down first). With a selector, the
+		// mode it brings up decides, whichever mode had the robot (this one, picked
+		// by hand meanwhile, too): the hold goes on when it is the mode handed
+		// back to again (its stance put back). Without one, the mode left active.
+		// (Not the hand-back's own switch: bOwnHandBack.)
+		const URammsDriveModeSelector* Selector = GetOwner() ? GetOwner()->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
+		const bool					   bLeaving = Selector ? Selector->GetActivatingModeId() != HandOverModeId : OtherActiveModeId() == HandOverModeId;
+		if (bHandOverHold && !HandOverModeId.IsNone() && bLeaving)
+		{
+			EndHandOverHold(TEXT("another drive mode was selected"));
+		}
 	}
 	if (bDriveModeActive == bActive)
 	{
@@ -4137,10 +4425,7 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		if (bStopping)
 		{
 			bStopping = false;
-			if (Executor)
-			{
-				Executor->End();
-			}
+			EndExecutor();
 		}
 		if (bWheelsDriven)
 		{
@@ -4292,7 +4577,7 @@ float URammsCurbNegotiationController::StepSeconds(int32 Index, bool bPlanned) c
 	const FStep& S = Steps[Index];
 	const bool	 bLive = !bPlanned && Index == StepIndex;
 	const FStep* Before = Index > 0 ? &Steps[Index - 1] : nullptr;
-	const float	 Tau = Tuning.ServoLagSeconds;
+	const float	 Tau = EffectiveServoLagSeconds();
 	const float	 Tol = Tuning.SettleTolerance;
 	const float	 FromBase = bLive ? BaseHeightCmd : (Before ? Before->BaseHeight : InitialBaseHeight);
 	// A corridor's shift off the plan height comes back to 0 alongside (and
@@ -4342,12 +4627,12 @@ float URammsCurbNegotiationController::LiftClearSeconds(int32 Index) const
 		{
 			// From where the wheel is measured over the terrain.
 			const float Need = static_cast<float>(ClearBottomZ(i) - (State.WheelWorld.Z - Legs[i].WheelRadiusCm));
-			Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(State.MeasuredZ, State.CmdZ, Tuning.LegSpeed, State.MeasuredZ + Need, Tuning.ServoLagSeconds));
+			Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(State.MeasuredZ, State.CmdZ, Tuning.LegSpeed, State.MeasuredZ + Need, EffectiveServoLagSeconds()));
 			continue;
 		}
 		const float ClearZ = PlannedGoalHeight(Index, i) - 0.5f * Tuning.SwingClearance;
 		const float FromZ = Index > 0 ? PlannedGoalHeight(Index - 1, i) : State.InitialZ;
-		Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(FromZ, FromZ, Tuning.LegSpeed, ClearZ, Tuning.ServoLagSeconds));
+		Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(FromZ, FromZ, Tuning.LegSpeed, ClearZ, EffectiveServoLagSeconds()));
 	}
 	return Seconds;
 }
@@ -4557,7 +4842,7 @@ void URammsCurbNegotiationController::PredictLegRates(float DeltaTime)
 		return;
 	}
 	Drive->Feeds.SetNum(Legs.Num());
-	const float Tau = Tuning.ServoLagSeconds;
+	const float Tau = EffectiveServoLagSeconds();
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
 		const FLegState& State = LegState[i];
@@ -4626,10 +4911,13 @@ void URammsCurbNegotiationController::CommandWheels(float Speed, float YawRate, 
 	}
 	Driven.Init(false, Legs.Num());
 	RammsCurb::DriveRoles(Roles, Driven);
-	// On a slope the per-wheel gait drives its fallback wheels as well whenever
-	// they carry: the main wheels alone may not carry enough of the robot's
-	// weight to hold it there, and free-rolling wheels would let it roll away.
-	if (bPerWheelCrossing && bSlopedDrive)
+	// The per-wheel gait drives its fallback wheels as well whenever they carry
+	// (ramms.Curb.DriveAllWheels; or on a slope only): every wheel on the ground
+	// keeps its authority, and none is left to roll free -- on a slope the main
+	// wheels alone may not carry enough of the robot's weight to hold it there,
+	// and a wheel already driven takes the load at once when a main wheel
+	// lifts.
+	if (bPerWheelCrossing && (bSlopedDrive || CVarRammsCurbDriveAllWheels.GetValueOnGameThread() != 0))
 	{
 		for (int32 i = 0; i < Legs.Num(); ++i)
 		{
@@ -4779,6 +5067,224 @@ float URammsCurbNegotiationController::PerWheelSteering(float DeltaTime, double 
 	return static_cast<float>(Tuning.HeadingGain * (HeadingErrorRad + CrossTrackSteerRad));
 }
 
+bool URammsCurbNegotiationController::DrivesFallbackWheels(FName ModeId) const
+{
+	const AActor* Owner = GetOwner();
+	if (!Owner || ModeId.IsNone())
+	{
+		return false;
+	}
+	for (UActorComponent* Component : Owner->GetComponents())
+	{
+		const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component);
+		if (Mode && Mode->GetDriveModeId() == ModeId && Component->IsA<URammsHolonomicDriveController>())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void URammsCurbNegotiationController::BeginHandOverHold(FName ModeId)
+{
+	HandOverWheels.Reset();
+	bHandOverHold = false;
+	HandOverModeId = ModeId;
+	if (CVarRammsCurbHandOverOmniHold.GetValueOnGameThread() == 0 || !bPerWheelCrossing || ModeId.IsNone())
+	{
+		return;
+	}
+	// A mode that drives the omni wheels itself (the holonomic one) holds them;
+	// the others leave them to roll.
+	if (DrivesFallbackWheels(ModeId))
+	{
+		return;
+	}
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		if (Legs[i].Drive == ERammsCurbWheelDrive::Fallback && !Legs[i].Wheel.MotorId.IsNone())
+		{
+			HandOverWheels.Add(i);
+		}
+	}
+	if (HandOverWheels.Num() == 0)
+	{
+		return;
+	}
+	bHandOverHold = true;
+	bHandOverBraked = false;
+	HandOverElapsed = HandOverSettledFor = HandOverTrackedFor = 0.0;
+	const FString Line = FString::Printf(TEXT("t=%5.2fs the hand-over: %d fallback wheel(s) held -- braked while '%s' asks no motion, else driven "
+											  "with its wheels -- until the robot settles or the main wheels have it"),
+		Elapsed, HandOverWheels.Num(), *ModeId.ToString());
+	StepLog.Add(Line);
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
+	StepHandOverHold(0.0f);
+}
+
+void URammsCurbNegotiationController::EndHandOverHold(const TCHAR* Why, bool bLeaveCommands)
+{
+	if (!bHandOverHold)
+	{
+		return;
+	}
+	bHandOverHold = false;
+	if (URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		for (const int32 i : HandOverWheels)
+		{
+			const FName Motor = Legs[i].Wheel.MotorId;
+			// (Leaving the commands, the brakes only if the hold has them on: any
+			// other brake there now is the new mode's.)
+			if (!bLeaveCommands || bHandOverBraked)
+			{
+				Base->SetMotorBrake(Motor, false);
+			}
+			if (!bLeaveCommands)
+			{
+				Base->ClearMotorVelocityCommand(Motor);
+				Base->SetMotorCommand(Motor, 0.0f);
+			}
+		}
+	}
+	bHandOverBraked = false;
+	const FString Line = FString::Printf(TEXT("t=%5.2fs the hand-over: the fallback wheels let go after %.2f s (%s)"), Elapsed, HandOverElapsed, Why);
+	StepLog.Add(Line);
+	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
+	HandOverWheels.Reset();
+}
+
+void URammsCurbNegotiationController::StepHandOverHold(float DeltaTime)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!bHandOverHold || !Base)
+	{
+		return;
+	}
+	if (bDriveModeActive)
+	{
+		// A crossing has the wheels again.
+		EndHandOverHold(TEXT("the curb mode selected again"));
+		return;
+	}
+	// Another mode has the robot now (switched outside the selector, which ends
+	// the hold as it stands this mode down). (None while the hand-back's own
+	// switch is still pending: the selector reports the outgoing mode until it
+	// completes.) One that drives the fallback wheels has its own commands on
+	// them; any other leaves the hold's, so they are cleared.
+	const FName ActiveNow = OtherActiveModeId();
+	if (!ActiveNow.IsNone() && ActiveNow != HandOverModeId)
+	{
+		EndHandOverHold(TEXT("another drive mode was selected"), /*bLeaveCommands=*/DrivesFallbackWheels(ActiveNow));
+		return;
+	}
+	HandOverElapsed += DeltaTime;
+	// The motion the mode asks of its own (main) wheels: the chassis' forward
+	// speed and turn rate their speed commands make (each wheel's ground speed
+	// is the forward speed less the turn rate times its offset across).
+	double SumW = 0.0, SumWY = 0.0, SumWYY = 0.0, SumV = 0.0, SumVY = 0.0;
+	int32  Mains = 0, Commanded = 0, Tracking = 0;
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		const FRammsCurbLeg& Leg = Legs[i];
+		if (Leg.Drive != ERammsCurbWheelDrive::Main)
+		{
+			continue;
+		}
+		++Mains;
+		float Cmd = 0.0f;
+		if (!Base->GetMotorVelocityCommand(Leg.Wheel.MotorId, Cmd))
+		{
+			continue;
+		}
+		++Commanded;
+		const double Sign = Leg.Wheel.bInvert ? -1.0 : 1.0;
+		const double V = Sign * Cmd * Leg.WheelRadiusCm;
+		const double Y = Leg.Wheel.Position.Y;
+		SumW += 1.0;
+		SumWY += Y;
+		SumWYY += Y * Y;
+		SumV += V;
+		SumVY += V * Y;
+		Tracking += FMath::Abs(Base->GetMotorVelocity(Leg.Wheel.MotorId) - Cmd) <= HandOverTrackRadS ? 1 : 0;
+	}
+	// Least squares for V = Vx - Yaw * Y over the commanded main wheels.
+	double Vx = 0.0, Yaw = 0.0;
+	if (SumW > 0.0)
+	{
+		const double Det = SumW * SumWYY - SumWY * SumWY;
+		if (FMath::Abs(Det) > 1e-6)
+		{
+			Vx = (SumV * SumWYY - SumVY * SumWY) / Det;
+			Yaw = -(SumW * SumVY - SumWY * SumV) / Det;
+		}
+		else
+		{
+			Vx = SumV / SumW;
+		}
+	}
+	const double				   Moving = Telemetry && Telemetry->Motion.IsFull() ? FMath::Abs(Telemetry->Motion.GetSpeed()) : 0.0;
+	const URammsDriveModeSelector* Selector = GetOwner() ? GetOwner()->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
+	// A mode that is not asking its wheels a speed while the robot still rolls
+	// (braking it to rest on its own hold) gives the held wheels no motion to
+	// roll with: braked they would drag it round, and rolled at the measured
+	// speed -- which lags a hard stop -- they braked with it at their limit
+	// and turned the robot further on a cross slope. They roll free until it
+	// is still (braked then).
+	const bool bModeBraking = Commanded == 0 && Moving >= RammsCurb::StopSpeedCmS;
+	// Let go: settled, or the main wheels have the robot (on their commands for
+	// a moment, the stance change done), or after the longest the hold may run.
+	const bool bStanceDone = !Selector || !Selector->IsSwitchingMode();
+	HandOverSettledFor = Moving < RammsCurb::StopSpeedCmS && FMath::Abs(Vx) < RammsCurb::StopSpeedCmS ? HandOverSettledFor + DeltaTime : 0.0;
+	HandOverTrackedFor = bStanceDone && Mains > 0 && Commanded == Mains && Tracking == Mains ? HandOverTrackedFor + DeltaTime : 0.0;
+	if (HandOverSettledFor >= HandOverSettleSeconds)
+	{
+		EndHandOverHold(TEXT("the robot settled"));
+		return;
+	}
+	if (HandOverTrackedFor >= HandOverTrackSeconds)
+	{
+		EndHandOverHold(TEXT("the main wheels carry on their commands"));
+		return;
+	}
+	if (HandOverElapsed >= HandOverHoldMaxSeconds)
+	{
+		EndHandOverHold(TEXT("the longest the hold runs"));
+		return;
+	}
+	// Held: braked while the robot is still and the mode asks no motion, else
+	// rolled at the speed its wheels are asked, or the robot moves (a held
+	// wheel that did not roll would drag the robot).
+	const bool bStill = FMath::Abs(Vx) < RammsCurb::StopSpeedCmS && FMath::Abs(Yaw) < 0.01 && Moving < RammsCurb::StopSpeedCmS;
+	for (const int32 i : HandOverWheels)
+	{
+		const FRammsCurbLeg& Leg = Legs[i];
+		const FName			 Motor = Leg.Wheel.MotorId;
+		if (bModeBraking)
+		{
+			Base->SetMotorBrake(Motor, false);
+			Base->ClearMotorVelocityCommand(Motor);
+			Base->SetMotorCommand(Motor, 0.0f);
+			continue;
+		}
+		if (bStill && Base->SetMotorBrake(Motor, true))
+		{
+			// The brake alone: no torque of its own.
+			Base->SetMotorCommand(Motor, 0.0f);
+			continue;
+		}
+		Base->SetMotorBrake(Motor, false);
+		const double Theta = FMath::DegreesToRadians(Leg.Wheel.RollDirectionDeg);
+		const double Dx = FMath::Cos(Theta);
+		const double Dy = FMath::Sin(Theta);
+		const double X = LegState.IsValidIndex(i) ? LegState[i].MeasuredX : 0.0;
+		const double Ground = bStill ? 0.0 : Dx * Vx + Yaw * (X * Dy - Leg.Wheel.Position.Y * Dx);
+		const double Rate = Ground / FMath::Max(Leg.WheelRadiusCm, 0.1f);
+		Base->SetMotorVelocityCommand(Motor, static_cast<float>(Leg.Wheel.bInvert ? -Rate : Rate));
+	}
+	bHandOverBraked = bStill;
+}
+
 void URammsCurbNegotiationController::StopWheels(bool bRelease)
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
@@ -4895,6 +5401,133 @@ IRammsDriveMode* URammsCurbNegotiationController::FindDriveMode(FName ModeId) co
 		}
 	}
 	return nullptr;
+}
+
+bool URammsCurbNegotiationController::BuildFinishStance(RammsCurb::FFinishStance& Out) const
+{
+	Out = RammsCurb::FFinishStance();
+	if (CVarRammsCurbFinishInStance.GetValueOnGameThread() == 0)
+	{
+		return false;
+	}
+	// The mode the crossing is set to hand back to: the one it came from, else
+	// the fallback (on a slope that one does not hold still on, the end may hand
+	// to a holding mode first -- HandBackModeId -- whose stance change then
+	// takes the robot on from this one). Planned before the crossing records
+	// the mode it came from (StartCrossingCommon): the one that has the robot
+	// now, where another does (a re-plan or a retry, with this one in control,
+	// keeps the recorded one).
+	const FName Active = OtherActiveModeId();
+	FName		Next = !ReturnModeId.IsNone() ? ReturnModeId : (!Active.IsNone() ? Active : PreviousModeId);
+	if (Next.IsNone() || Next == GetDriveModeId())
+	{
+		Next = FallbackModeId();
+	}
+	const IRammsDriveMode* Mode = FindDriveMode(Next);
+	FRammsDriveStance	   Stance;
+	if (!Mode || !Mode->GetRequiredStance(Stance) || Stance.IsEmpty())
+	{
+		return false;
+	}
+	auto TargetOf = [&Stance](FName MotorId, double& OutValue) {
+		for (const FRammsStanceMotorTarget& T : Stance.MotorTargets)
+		{
+			if (!MotorId.IsNone() && T.MotorId == MotorId)
+			{
+				OutValue = T.Target;
+				return true;
+			}
+		}
+		return false;
+	};
+	// Each leg where the stance holds it (the chassis frame, cm): a corner from
+	// its crank's target, a 5-bar from the stance's linkage pose (or where it
+	// is), and its wheel's bottom there.
+	const int32	   N = Legs.Num();
+	TArray<double> Z, Bottom;
+	TArray<uint8>  Known;
+	Z.Init(0.0, N);
+	Bottom.Init(0.0, N);
+	Known.Init(0, N);
+	double Lowest = TNumericLimits<double>::Max();
+	for (int32 i = 0; i < N; ++i)
+	{
+		const FRammsCurbLeg& Leg = Legs[i];
+		const FLegState&	 State = LegState[i];
+		double				 LegZ = 0.0;
+		if (Leg.Kind == ERammsCurbLegKind::FourBar)
+		{
+			double Crank = 0.0;
+			if (!TargetOf(Leg.FourBar.CrankMotor, Crank))
+			{
+				continue;
+			}
+			bool			bValid = false;
+			const FVector2D C = URamms4BarKinematics::ComputeWheelCenter(Leg.FourBar, static_cast<float>(Crank), bValid);
+			if (!bValid)
+			{
+				continue;
+			}
+			LegZ = C.Y;
+		}
+		else if (State.FiveBar)
+		{
+			LegZ = Stance.bHasLinkageHeight ? Stance.LinkageHeightCm : State.CmdZ;
+		}
+		else
+		{
+			continue;
+		}
+		Z[i] = LegZ;
+		Bottom[i] = LegZ - Leg.WheelRadiusCm;
+		Known[i] = 1;
+		Lowest = FMath::Min(Lowest, Bottom[i]);
+	}
+	if (Lowest == TNumericLimits<double>::Max())
+	{
+		return false;
+	}
+	// The wheels the stance carries the robot on are its lowest (its stances
+	// stand level); a wheel whose bottom sits FinishStanceLiftedCm or more over
+	// theirs is off the ground in it.
+	constexpr double LiftedCm = 1.5;
+	Out.Lift.Init(0, N);
+	Out.LiftZ.Init(0.0, N);
+	int32 NumLifted = 0;
+	for (int32 i = 0; i < N; ++i)
+	{
+		if (Known[i] && Bottom[i] - Lowest >= LiftedCm)
+		{
+			Out.Lift[i] = 1;
+			Out.LiftZ[i] = Z[i];
+			++NumLifted;
+		}
+	}
+	if (NumLifted == N)
+	{
+		return false;
+	}
+	if (Stance.bHasLinkageTranslation)
+	{
+		Out.bHasCentreX = true;
+		Out.CentreX = Stance.LinkageTranslationCm;
+	}
+	// The seat's pivot where the stance's 5-bar motor targets put it.
+	if (Seat.IsSet())
+	{
+		double A = 0.0, B = 0.0;
+		if (TargetOf(Seat.Linkage.ProximalMotorA, A) && TargetOf(Seat.Linkage.ProximalMotorB, B))
+		{
+			const RammsCurb::FSeatPose Pose = RammsCurb::SeatForward(Seat, FVector2D(A, B));
+			if (Pose.bValid)
+			{
+				Out.bHasSeatX = true;
+				Out.SeatX = Pose.Pivot.X;
+			}
+		}
+	}
+	Out.bValid = true;
+	return true;
 }
 
 bool URammsCurbNegotiationController::ModeHoldsStill(FName ModeId) const
@@ -5218,10 +5851,7 @@ bool URammsCurbNegotiationController::BeginPerWheel(const FRammsCurbProfile& Pro
 		return false;
 	};
 	// Nothing of a crossing before this one runs on.
-	if (Executor)
-	{
-		Executor->End();
-	}
+	EndExecutor();
 	RammsCurb::FPlannerInput In;
 	if (!PreparePerWheel(Profile, In, OutReason))
 	{
@@ -5300,6 +5930,13 @@ bool URammsCurbNegotiationController::StartPerWheelRun(const RammsCurb::FPlanner
 {
 	RammsCurb::FExecMeasure M;
 	GatherExecMeasure(0.0f, M);
+	// The load caps (Ramms.Curb.LoadCap), and the crossing's report of what the
+	// motors put out, from here.
+	PrimeMotorEfforts();
+	if (Executor)
+	{
+		Executor->SetLoadCaps(CVarRammsCurbLoadCap.GetValueOnGameThread() != 0);
+	}
 	if (!Executor || !Executor->Begin(Input, *Schedule, M, OutReason))
 	{
 		return false;
@@ -5369,6 +6006,11 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 		L.LagX = State.LagX;
 		L.bLagX = State.FiveBar != nullptr;
 		L.bValid = State.bHasWorld;
+		L.HipMaxRate = FiveBarHipTurns(State, L.HipTurnPerCmX, L.HipTurnPerCmZ) ? State.HipMaxRate : FVector2D::ZeroVector;
+		L.LoadN = State.LoadN;
+		L.bLoad = State.bLoad;
+		L.CapBoundShare = State.CapBoundShare;
+		L.TauMeanNm = State.TauMeanNm;
 		if (!State.bHasWorld)
 		{
 			continue;
@@ -5416,13 +6058,18 @@ float URammsCurbNegotiationController::AwaitingBrakingCap(double* OutLevelRoomCm
 	// Nor past the latest the level-in may begin: the line it must be done by,
 	// LevelBeforeEdgeCm (along the edge's normal) short of the first wheel's
 	// window, where a level-in begun standing still ends (AwaitingPlanCap).
-	if (ToFirst < TNumericLimits<double>::Max())
+	// Already past that line (asked for nearer the curb than it allows): only the
+	// windows -- braked to rest for a line behind it, the robot pitched onto its
+	// fronts and the level-in that followed began from a stop; the executor's
+	// own level-in cap has it on time for what needs the base level.
+	const bool bPastLine = ToFirst <= RammsCurb::LevelBeforeEdgeCm / Cos;
+	if (ToFirst < TNumericLimits<double>::Max() && !bPastLine)
 	{
 		Cap = FMath::Min(Cap, RammsCurb::AwaitingPlanCap(static_cast<float>(ToFirst), static_cast<float>(RammsCurb::LevelBeforeEdgeCm / Cos), Speed, Tuning.Deceleration));
 	}
 	if (OutLevelRoomCm)
 	{
-		*OutLevelRoomCm = ToFirst < TNumericLimits<double>::Max()
+		*OutLevelRoomCm = ToFirst < TNumericLimits<double>::Max() && !bPastLine
 			? ToFirst - RammsCurb::LevelBeforeEdgeCm / Cos - RammsCurb::LevelCapMarginCm
 			: TNumericLimits<double>::Max();
 	}
@@ -5449,6 +6096,7 @@ void URammsCurbNegotiationController::TakeCrossingPlan()
 			// Planned at rest, nothing has moved: say why, and hand the robot back
 			// to the mode it came from, as a refusal in the call would have left it.
 			bHandBackOnFinish = true;
+			bRefusedAtRest = true;
 			Finish(ERammsCurbPhase::Faulted, FString::Printf(TEXT("refused at rest: %s"), *Schedule->Summary), /*bRampDown=*/false);
 			return;
 		}
@@ -5784,16 +6432,20 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 				{
 					bCornersUp = bCornersUp || (!State.FiveBar && State.bHasWorld && State.WheelBottom > LevelInCornerUpCm);
 				}
-				const float LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(), Tuning.TiltRateDegPerSec,
-					Tuning.TiltAccelDegPerSec2, Tuning.ServoLagSeconds, bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
-				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Tuning.Deceleration, DeltaTime);
+				// (At the rates the plan coming and its run level in and brake with.)
+				const FRammsCurbTuning Crossing = CrossingTuning();
+				const float			   LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(),
+							   Crossing.TiltRateDegPerSec, Crossing.TiltAccelDegPerSec2, EffectiveServoLagSeconds(),
+					   bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
+				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Crossing.Deceleration, DeltaTime);
 			}
 			// The rider's stick: let go, braked to rest; held part way, slowed to
 			// its share of the drive speed -- at Deceleration either way.
 			if (bStickPaused || StickScale < 1.0)
 			{
-				const float Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * Tuning.DriveSpeed;
-				DriveSpeed = FMath::Min(DriveSpeed, FMath::Max(Want, DriveSpeed - Tuning.Deceleration * DeltaTime));
+				const FRammsCurbTuning Crossing = CrossingTuning();
+				const float			   Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * Crossing.DriveSpeed;
+				DriveSpeed = FMath::Min(DriveSpeed, FMath::Max(Want, DriveSpeed - Crossing.Deceleration * DeltaTime));
 			}
 			DriveSpeed = FMath::Max(0.0f, FMath::Min(DriveSpeed, Cap));
 			const float YawRate = PerWheelSteering(DeltaTime, Cap);
@@ -5860,12 +6512,14 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	// The executor: wheel states, leg commands, the speed -- and its runtime
 	// checks, on the terrain traced ahead of and under every wheel.
 	RammsCurb::FExecMeasure M;
+	ReadLegEfforts(DeltaTime);
 	GatherExecMeasure(DeltaTime, M);
 	RecordDebugProbes(M);
 	RammsCurb::FExecCommand Cmd;
 	Executor->SetOperator(StickScale, bStickPaused);
 	Executor->Tick(M, *Level, Cmd);
 	CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+	ApplyLoadCaps(Cmd);
 	CommandSeat(Cmd.SeatX);
 	// A re-plan a runtime trigger asks for before any wheel has begun to cross:
 	// the surfaces re-fitted by what the traces found, the heading held the
@@ -6083,7 +6737,7 @@ void URammsCurbNegotiationController::UpdateWheelSurfaces(float DeltaTime)
 	const FVector2D Bias = Level ? Level->GetBias() : FVector2D::ZeroVector;
 	// Each wheel where it will be a servo lag from now, so the legs follow the
 	// terrain without falling behind it (none while planning: nothing moves).
-	const float		Ahead = DeltaTime > 0.0f ? DriveSpeed * Tuning.ServoLagSeconds : 0.0f;
+	const float		Ahead = DeltaTime > 0.0f ? DriveSpeed * EffectiveServoLagSeconds() : 0.0f;
 	const FVector2D Forward(ChassisForward.X, ChassisForward.Y);
 
 	TArray<RammsCurb::FTerrainLeg, TInlineAllocator<8>> Wheels;
@@ -6245,7 +6899,7 @@ void URammsCurbNegotiationController::UpdateCorridor(float DeltaTime)
 	{
 		const FStep&	S = Steps[StepIndex];
 		const FVector2D H(Heading.X, Heading.Y);
-		const float		Ahead = DriveSpeed * Tuning.ServoLagSeconds;
+		const float		Ahead = DriveSpeed * EffectiveServoLagSeconds();
 		if (S.Corridor.IsValid())
 		{
 			const float Travel = static_cast<float>(FVector2D::DotProduct(ChassisOriginXY - PlanOriginXY, H)) + Ahead;
@@ -6325,13 +6979,13 @@ float URammsCurbNegotiationController::LevelInSeconds() const
 	}
 	// Under way: the support legs' commands catching up with where the
 	// terrain wants them, and their servos' tail.
-	float Seconds = Tuning.ServoLagSeconds;
+	float Seconds = EffectiveServoLagSeconds();
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
 		const FLegState& State = LegState[i];
 		if (LegGoal(i).Goal == ELegGoal::Support)
 		{
-			Seconds = FMath::Max(Seconds, RammsCurb::LegMoveSeconds(State.GoalZ - State.CmdZ, Tuning.LegSpeed, State.MeasuredZ - State.CmdZ, Tuning.ServoLagSeconds, 0.5f * Tuning.SettleTolerance));
+			Seconds = FMath::Max(Seconds, RammsCurb::LegMoveSeconds(State.GoalZ - State.CmdZ, Tuning.LegSpeed, State.MeasuredZ - State.CmdZ, EffectiveServoLagSeconds(), 0.5f * Tuning.SettleTolerance));
 		}
 	}
 	return Seconds;
@@ -6357,6 +7011,30 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	// The frames' interval and jitter, as the robot base's follower measures
+	// its commands' (a frame longer than its longest line -- the first after a
+	// level loads, a hitch -- is no interval there, and none here): on the
+	// simulation's clock where the backend keeps one, as the follower stamps
+	// them (a simulator that cannot keep up runs slower than the game), and its
+	// delay slewed as the follower slews its own.
+	{
+		const URammsRobotBaseComponent* CadenceBase = EnsureBase();
+		const double					CadenceNow = CadenceBase ? CadenceBase->GetSimulationTime() : -1.0;
+		double							Gap = DeltaTime;
+		if (CadenceNow >= 0.0)
+		{
+			if (CadenceSimTime >= 0.0 && CadenceNow < CadenceSimTime)
+			{
+				// A reset (the clock gone back): the follower starts again from its
+				// next commands, and so does this.
+				CommandCadence = RammsMotion::FCommandInterval();
+			}
+			Gap = CadenceSimTime >= 0.0 && CadenceNow > CadenceSimTime ? CadenceNow - CadenceSimTime : 0.0;
+			CadenceSimTime = CadenceNow;
+		}
+		CommandCadence.Add(Gap);
+		CommandCadence.Advance(Gap);
+	}
 	// The debug view, after whatever this tick does (it returns from several
 	// places).
 	ON_SCOPE_EXIT
@@ -6386,6 +7064,9 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	const bool bCrossing = IsNegotiating() && bDriveModeActive && (bPerWheelCrossing || Steps.IsValidIndex(StepIndex));
 	if (!bCrossing && !(bStopping && bDriveModeActive))
 	{
+		// After a hand-back: the fallback wheels held until the mode handed back
+		// to has the robot (BeginHandOverHold).
+		StepHandOverHold(DeltaTime);
 		if (bRetryPending && !IsNegotiating() && !bStopping)
 		{
 			StepRetry(DeltaTime);
@@ -6451,10 +7132,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				// Braking to rest after a fault or an abort: nothing left to brake.
 				bStopping = false;
 				StopWheels(/*bRelease=*/false);
-				if (Executor)
-				{
-					Executor->End();
-				}
+				EndExecutor();
 				CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while braking to rest"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
@@ -6564,7 +7242,7 @@ float URammsCurbNegotiationController::AdvanceLegLag(float DeltaTime)
 	// First order: each leg closes on its command with the servos' time
 	// constant. A leg that lags more than that -- stalled, overloaded, pressed
 	// into the ground -- shows as error.
-	const float Tau = Tuning.ServoLagSeconds;
+	const float Tau = EffectiveServoLagSeconds();
 	float		Worst = 0.0f;
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
@@ -6677,8 +7355,17 @@ bool URammsCurbNegotiationController::MeasureStabilityMargin(float& OutCm) const
 	}
 	RammsCurb::FMeasuredSeat SeatNow;
 	MeasuredSeat(SeatNow);
+	// (The running crossing's, as its plan and executor take them -- the
+	// slider moved since shapes the next crossing.)
+	FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, IsNegotiating() ? (bPerWheelCrossing ? CrossingTuning() : Tuning) : GetCrossingTuning());
+	if (bPerWheelCrossing && Executor && Executor->IsRunning())
+	{
+		const RammsCurb::FPlannerInput& EIn = Executor->GetInput();
+		MarginDyn = FVector2D(FMath::Max(static_cast<double>(EIn.Tuning.Acceleration), EIn.MarginAcceleration),
+			FMath::Max(static_cast<double>(EIn.Tuning.Deceleration), EIn.MarginDeceleration));
+	}
 	const RammsCurb::FPoseMargin M = RammsCurb::MeasuredMargin(*Model, Frame, XZ, Wheels, SeatNow, FVector2D(ChassisForward.X, ChassisForward.Y),
-		Tuning.Acceleration, Tuning.Deceleration);
+		MarginDyn.X, MarginDyn.Y);
 	if (M.Support == 0)
 	{
 		return false;
@@ -7283,6 +7970,8 @@ void URammsCurbNegotiationController::DescribeControls(FRammsControlSurface& Out
 	OutSurface.Add(RammsCurb::MakeStatusControl(2));
 
 	OutSurface.Add(RammsCurb::MakeAssistControl(Assist.bEnabled, 4));
+	// The rider's preferences: how the next crossing runs.
+	RammsCurb::DescribePreferenceControls(OutSurface, Preferences, 5);
 
 	// The rider's stick (Stick), while a crossing has the robot: the drive
 	// controls every drive mode offers, so that the stick a rider holds reaches
@@ -7360,8 +8049,22 @@ bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 		}
 		return true;
 	}
+	if (RammsCurb::ApplyPreferenceControl(Preferences, Id, Value))
+	{
+		return true;
+	}
 	// The debug view's switches.
 	return RammsCurb::ApplyViewControl(DebugView, RammsCurb::ViewLayer::All, Id, Value);
+}
+
+FRammsCurbTuning URammsCurbNegotiationController::GetCrossingTuning() const
+{
+	return RammsCurb::ApplyPreferences(Tuning, Preferences);
+}
+
+FRammsCurbTuning URammsCurbNegotiationController::CrossingTuning() const
+{
+	return RammsCurb::ApplyPreferences(Tuning, CrossingPreferences);
 }
 
 bool URammsCurbNegotiationController::ReadControlText(FName Id, FText& OutText) const
@@ -7559,7 +8262,7 @@ bool URammsCurbNegotiationController::ReadTarget(FName Id, float& OutTarget) con
 {
 	// A switch's target is what it is set to, however it was set (the panel
 	// steps from it).
-	if (Id == RammsCurb::AssistControlId())
+	if (Id == RammsCurb::AssistControlId() || RammsCurb::ReadPreferenceControl(Preferences, Id, OutTarget))
 	{
 		return ReadControl(Id, OutTarget);
 	}
@@ -7630,6 +8333,10 @@ bool URammsCurbNegotiationController::ReadControl(FName Id, float& OutValue) con
 		OutValue = Assist.bEnabled ? 1.0f : 0.0f;
 		return true;
 	}
+	if (RammsCurb::ReadPreferenceControl(Preferences, Id, OutValue))
+	{
+		return true;
+	}
 	// The debug view's switches.
 	return RammsCurb::ReadViewControl(DebugView, RammsCurb::ViewLayer::All, Id, OutValue);
 }
@@ -7647,5 +8354,359 @@ void URammsCurbNegotiationController::GetClaimedMotorIds(TArray<FName>& OutIds) 
 		{
 			OutIds.AddUnique(Leg.FourBar.CrankMotor);
 		}
+	}
+}
+
+// --- what the legs' motors put out, and their load caps -----------------------
+
+void URammsCurbNegotiationController::PrimeMotorEfforts()
+{
+	EffortStats.Reset();
+	SnapshotAgeMs.Reset();
+	bLoadCapsRefused = false;
+	LoadCapWouldBindTicks = LoadCapTicks = LoadCapSends = 0;
+	MaxLoadShareOfW = 0.0f;
+	MaxLoadLeg = INDEX_NONE;
+	MaxLoadAt = 0.0f;
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base)
+	{
+		return;
+	}
+	auto Add = [&](FName Motor, const FString& Role, int32 Group) {
+		if (Motor.IsNone() || EffortStats.ContainsByPredicate([Motor](const FMotorEffortStats& S) { return S.Motor == Motor; }))
+		{
+			return;
+		}
+		FMotorEffortStats& S = EffortStats.AddDefaulted_GetRef();
+		S.Motor = Motor;
+		S.Role = Role;
+		S.Group = Group;
+		FRammsMotorEffort Unused;
+		Base->GetMotorEffort(Motor, 0.0, Unused); // its backend starts recording it
+	};
+	for (int32 i = 0; i < Legs.Num() && i < LegState.Num(); ++i)
+	{
+		const FLegState& S = LegState[i];
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			Add(S.LoadMotors[k], S.NumLoadMotors == 1 ? TEXT("crank") : (k == 0 ? TEXT("hip A") : TEXT("hip B")), i);
+		}
+	}
+	if (Seat.IsSet())
+	{
+		Add(Seat.Linkage.ProximalMotorA, TEXT("A"), -1);
+		Add(Seat.Linkage.ProximalMotorB, TEXT("B"), -1);
+		Add(Seat.TiltMotor, TEXT("tilt"), -1);
+	}
+	for (const FRammsCurbLeg& Leg : Legs)
+	{
+		Add(Leg.Wheel.MotorId, Leg.Name.ToString(), -2);
+	}
+}
+
+void URammsCurbNegotiationController::ReadLegEfforts(float DeltaTime)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base || LegState.Num() != Legs.Num())
+	{
+		return;
+	}
+	const bool	 bCrossing = bPerWheelCrossing && Executor && Executor->IsRunning();
+	const double Window = FMath::Clamp(static_cast<double>(DeltaTime), 0.002, 0.5);
+	const double MinJz = FMath::Max(1e-3, static_cast<double>(CVarRammsCurbLoadCapMinJz.GetValueOnGameThread()));
+	const double Weight = Model && Model->MassKg > 0.0 ? Model->MassKg * 9.80665 : 0.0;
+	double		 Latest = -1.0;
+	bool		 bWouldBind = false;
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		const FRammsCurbLeg& Leg = Legs[i];
+		FLegState&			 S = LegState[i];
+		S.bJacobian = false;
+		S.bLoad = false;
+		S.CapBoundShare = 0.0f;
+		S.TauMeanNm = S.TauPeakNm = FVector2D::ZeroVector;
+		// The leg's Jacobian where it is measured.
+		if (Leg.Kind == ERammsCurbLegKind::FourBar)
+		{
+			FVector2D Rate = FVector2D::ZeroVector;
+			if (RammsCurb::FourBarWheelRate(Leg.FourBar, S.CrankAngle, Rate))
+			{
+				S.JxCmPerRad = FVector2D(Rate.X, 0.0);
+				S.JzCmPerRad = FVector2D(Rate.Y, 0.0);
+				S.bJacobian = true;
+			}
+		}
+		else if (S.FiveBar)
+		{
+			// The hips per cm (the inverse) probed about the measured pose, and
+			// inverted: rows hips A, B; columns x, z.
+			FVector2D PerX = FVector2D::ZeroVector, PerZ = FVector2D::ZeroVector;
+			if (FiveBarTurnsAt(S, FVector2D(S.MeasuredX, S.MeasuredZ), PerX, PerZ))
+			{
+				const double Det = PerX.X * PerZ.Y - PerZ.X * PerX.Y;
+				if (FMath::Abs(Det) > 1e-6)
+				{
+					S.TurnPerCmX = PerX;
+					S.TurnPerCmZ = PerZ;
+					S.JxCmPerRad = FVector2D(PerZ.Y, -PerZ.X) / Det;
+					S.JzCmPerRad = FVector2D(-PerX.Y, PerX.X) / Det;
+					S.bJacobian = true;
+				}
+			}
+		}
+		// What its motors put out over the frame.
+		bool bRead = S.NumLoadMotors > 0;
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			FRammsMotorEffort E;
+			if (!Base->GetMotorEffort(S.LoadMotors[k], Window, E))
+			{
+				bRead = false;
+				continue;
+			}
+			S.TauMeanNm[k] = E.MeanNm;
+			S.TauPeakNm[k] = E.PeakNm;
+			Latest = FMath::Max(Latest, E.LatestTime);
+			if (S.SentCapNm[k] != 0.0 && E.Seconds > 0.0)
+			{
+				// At the cap only where it narrows the motor's own range (a cap
+				// past the rating leaves the rating in force).
+				const double At = S.SentCapNm[k] > 0.0 ? (E.UpperNm < E.RatedUpperNm - 1e-6 ? E.AtUpperSeconds : 0.0)
+													   : (E.LowerNm > E.RatedLowerNm + 1e-6 ? E.AtLowerSeconds : 0.0);
+				S.CapBoundShare = FMath::Max(S.CapBoundShare, static_cast<float>(At / E.Seconds));
+			}
+			// The shadow caps (worked out last tick, not sent) against the frame's
+			// peak.
+			const double Cap = S.TorqueCapNm[k];
+			bWouldBind = bWouldBind || (Cap != 0.0 && S.SentCapNm[k] == 0.0 && E.PeakNm * FMath::Sign(Cap) > FMath::Abs(Cap));
+		}
+		// The load its wheel carries: F = -J^-T tau (x100, N from N*m and cm).
+		if (bRead && S.bJacobian)
+		{
+			if (S.NumLoadMotors == 1)
+			{
+				if (FMath::Abs(S.JzCmPerRad.X) >= MinJz && !S.bCrankClamped)
+				{
+					S.LoadN = static_cast<float>(-100.0 * S.TauMeanNm.X / S.JzCmPerRad.X);
+					S.bLoad = true;
+				}
+			}
+			else
+			{
+				S.LoadN = static_cast<float>(-100.0 * (S.TurnPerCmZ.X * S.TauMeanNm.X + S.TurnPerCmZ.Y * S.TauMeanNm.Y));
+				S.bLoad = true;
+			}
+		}
+		if (bCrossing && S.bLoad && Weight > 0.0 && S.LoadN / Weight > MaxLoadShareOfW)
+		{
+			MaxLoadShareOfW = static_cast<float>(S.LoadN / Weight);
+			MaxLoadLeg = i;
+			MaxLoadAt = static_cast<float>(Elapsed);
+		}
+	}
+	if (!bCrossing)
+	{
+		return;
+	}
+	LoadCapWouldBindTicks += bWouldBind ? 1 : 0;
+	// How far behind the physics this tick's measurements are: the published
+	// snapshot's time against the latest physics step recorded.
+	const double Snapshot = Base->GetSimulationTime();
+	if (Latest >= 0.0 && Snapshot >= 0.0)
+	{
+		SnapshotAgeMs.Add(static_cast<float>((Latest - Snapshot) * 1000.0));
+	}
+	// The crossing's stats of every motor reported.
+	for (FMotorEffortStats& St : EffortStats)
+	{
+		FRammsMotorEffort E;
+		if (!Base->GetMotorEffort(St.Motor, Window, E) || E.Seconds <= 0.0)
+		{
+			continue;
+		}
+		St.PeakAbsNm = FMath::Max(St.PeakAbsNm, FMath::Abs(E.PeakNm));
+		St.FrameMeanAbs.Add(static_cast<float>(FMath::Abs(E.MeanNm)));
+		St.RatedSeconds += E.AtRatedSeconds;
+		St.CapSeconds += (E.UpperNm < E.RatedUpperNm - 1e-6 ? E.AtUpperSeconds : 0.0) + (E.LowerNm > E.RatedLowerNm + 1e-6 ? E.AtLowerSeconds : 0.0);
+		St.Seconds += E.Seconds;
+		const double Rated = FMath::Max(FMath::Abs(E.RatedLowerNm), FMath::Abs(E.RatedUpperNm));
+		if (Rated < 1e20)
+		{
+			St.RatedNm = Rated;
+		}
+	}
+}
+
+void URammsCurbNegotiationController::ApplyLoadCaps(const RammsCurb::FExecCommand& Cmd)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base || LegState.Num() != Legs.Num())
+	{
+		return;
+	}
+	const int32	 Mode = CVarRammsCurbLoadCap.GetValueOnGameThread();
+	const double Ratio = FMath::Max(0.0, static_cast<double>(CVarRammsCurbLoadCapTractionRatio.GetValueOnGameThread()));
+	const double MinJz = FMath::Max(1e-3, static_cast<double>(CVarRammsCurbLoadCapMinJz.GetValueOnGameThread()));
+	const float	 Unbounded = TNumericLimits<float>::Max();
+	bool		 bInForce = false;
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		FLegState&	 S = LegState[i];
+		const double CapN = Cmd.LegLoadCapN.IsValidIndex(i) ? Cmd.LegLoadCapN[i] : 0.0;
+		FVector2D	 Want = FVector2D::ZeroVector;
+		if (Mode != 0 && CapN > 0.0 && S.bJacobian)
+		{
+			// The drive's reaction on a 5-bar's hips: the link its wheel hangs from
+			// turns as the hips do (the wheel feed's fit), so the wheel's drive
+			// torque leans on them.
+			const FVector2D Gains = S.FiveBar && Drive && Drive->Feeds.IsValidIndex(i) ? Drive->Feeds[i].GetFit().GetGains() : FVector2D::ZeroVector;
+			for (int32 k = 0; k < S.NumLoadMotors; ++k)
+			{
+				const double Reaction = Legs[i].WheelRadiusCm * FMath::Abs(Gains.X * S.JxCmPerRad[k] + Gains.Y * S.JzCmPerRad[k]);
+				double		 CapNm = 0.0;
+				int32		 Sign = 0;
+				if (RammsCurb::PressTorqueCap(S.JxCmPerRad[k], S.JzCmPerRad[k], CapN, Ratio, Reaction, MinJz, CapNm, Sign))
+				{
+					Want[k] = Sign * CapNm;
+				}
+			}
+		}
+		S.TorqueCapNm = Want;
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			const FName	 Motor = S.LoadMotors[k];
+			const double Sent = S.SentCapNm[k];
+			const double To = Mode == 1 && !bLoadCapsRefused ? Want[k] : 0.0;
+			if (To == 0.0)
+			{
+				if (Sent != 0.0)
+				{
+					Base->ClearMotorTorqueLimit(Motor);
+					S.SentCapNm[k] = 0.0;
+				}
+				continue;
+			}
+			bInForce = true;
+			// Sent only when it moves enough to matter: the backend's table is
+			// locked against the physics thread for each one.
+			const bool bResend = Sent == 0.0 || FMath::Sign(Sent) != FMath::Sign(To) || FMath::Abs(To - Sent) > FMath::Max(1.0, 0.03 * FMath::Abs(Sent));
+			if (!bResend)
+			{
+				continue;
+			}
+			const bool bOk = To > 0.0 ? Base->SetMotorTorqueLimit(Motor, -Unbounded, static_cast<float>(To))
+									  : Base->SetMotorTorqueLimit(Motor, static_cast<float>(To), Unbounded);
+			if (!bOk)
+			{
+				bLoadCapsRefused = true;
+				const FString Line = TEXT("load caps unsupported on this backend: the legs keep their full torque");
+				StepLog.Add(FString::Printf(TEXT("t=%5.2fs %s"), Elapsed, *Line));
+				UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' %s"), *GetNameSafe(GetOwner()), *Line);
+				ClearLoadCaps();
+				return;
+			}
+			S.SentCapNm[k] = To;
+			++LoadCapSends;
+		}
+	}
+	LoadCapTicks += bInForce ? 1 : 0;
+}
+
+void URammsCurbNegotiationController::ClearLoadCaps()
+{
+	URammsRobotBaseComponent* Base = BaseComponent;
+	for (FLegState& S : LegState)
+	{
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			if (Base && !S.LoadMotors[k].IsNone())
+			{
+				Base->ClearMotorTorqueLimit(S.LoadMotors[k]);
+			}
+		}
+		S.SentCapNm = S.TorqueCapNm = FVector2D::ZeroVector;
+	}
+}
+
+void URammsCurbNegotiationController::EndExecutor()
+{
+	if (Executor)
+	{
+		Executor->End();
+	}
+	ClearLoadCaps();
+}
+
+void URammsCurbNegotiationController::LogMotorEfforts()
+{
+	auto Emit = [this](const FString& Line) {
+		StepLog.Add(Line);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
+	};
+	auto Describe = [](const FMotorEffortStats& St) {
+		TArray<float> Means = St.FrameMeanAbs;
+		Means.Sort();
+		const float P99 = Means.Num() > 0 ? Means[FMath::Clamp(FMath::CeilToInt(0.99 * Means.Num()) - 1, 0, Means.Num() - 1)] : 0.0f;
+		// (A motor with no force limit of its own -- one held to its command's
+		// range instead -- has no rating to sit at.)
+		const FString Rating = St.RatedNm > 0.0 ? FString::Printf(TEXT("%.2f s at its %.0f N*m rating"), St.RatedSeconds, St.RatedNm)
+												: FString(TEXT("no force limit of its own"));
+		return FString::Printf(TEXT("%s peak |tau| %.0f N*m, p99 (frame means) %.0f, %s%s"), *St.Role, St.PeakAbsNm, P99, *Rating,
+			St.CapSeconds > 0.0 ? *FString::Printf(TEXT(", %.2f s at its load cap"), St.CapSeconds) : TEXT(""));
+	};
+	bool bAny = false;
+	for (const FMotorEffortStats& St : EffortStats)
+	{
+		bAny = bAny || St.Seconds > 0.0;
+	}
+	if (!bAny)
+	{
+		Emit(TEXT("        motors: no effort readings from this backend"));
+	}
+	else
+	{
+		// One line a leg (its load motors), one for the seat, one for the wheels.
+		TArray<int32> Groups;
+		for (const FMotorEffortStats& St : EffortStats)
+		{
+			Groups.AddUnique(St.Group);
+		}
+		for (const int32 G : Groups)
+		{
+			FString Parts;
+			for (const FMotorEffortStats& St : EffortStats)
+			{
+				if (St.Group == G && St.Seconds > 0.0)
+				{
+					Parts += (Parts.IsEmpty() ? TEXT("") : TEXT("; ")) + Describe(St);
+				}
+			}
+			if (!Parts.IsEmpty())
+			{
+				const FString Who = G >= 0 && Legs.IsValidIndex(G) ? Legs[G].Name.ToString() : G == -1 ? TEXT("seat")
+																									   : TEXT("wheels");
+				Emit(FString::Printf(TEXT("        motors: %s %s"), *Who, *Parts));
+			}
+		}
+	}
+	const int32					  Mode = CVarRammsCurbLoadCap.GetValueOnGameThread();
+	const RammsCurb::FExecCounts  NoCounts;
+	const RammsCurb::FExecCounts& C = Executor ? Executor->GetCounts() : NoCounts;
+	const TCHAR*				  How = Mode == 0 ? TEXT("off") : bLoadCapsRefused ? TEXT("unsupported")
+						 : Mode == 1											   ? TEXT("on")
+																				   : TEXT("shadow");
+	const FString				  Most = MaxLoadLeg != INDEX_NONE && Legs.IsValidIndex(MaxLoadLeg)
+						? FString::Printf(TEXT("most on one wheel %s %.0f%% of W (estimated) at %.2f s"), *Legs[MaxLoadLeg].Name.ToString(), 100.0f * MaxLoadShareOfW, MaxLoadAt)
+						: FString(TEXT("no wheel's load estimated"));
+	Emit(FString::Printf(TEXT("        load caps: %s; sent %d times, in force on %d ticks; bound on %d ticks, released %d times, off on %d ticks (no static "
+							  "share); the shadow caps would bind on %d ticks; %s"),
+		How, LoadCapSends, LoadCapTicks, C.LoadCapBoundTicks, C.LoadCapReleases, C.LoadCapOffTicks, LoadCapWouldBindTicks, *Most));
+	if (SnapshotAgeMs.Num() > 0)
+	{
+		TArray<float> Ages = SnapshotAgeMs;
+		Ages.Sort();
+		const auto At = [&Ages](double Q) { return Ages[FMath::Clamp(FMath::CeilToInt(Q * Ages.Num()) - 1, 0, Ages.Num() - 1)]; };
+		Emit(FString::Printf(TEXT("        physics readings: median %.1f ms behind the physics (p90 %.1f, max %.1f)"), At(0.5), At(0.9), Ages.Last()));
 	}
 }
