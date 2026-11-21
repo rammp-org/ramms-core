@@ -4381,13 +4381,14 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		// The rider leaving the mode the crossing handed back to: the hand-over
 		// hold lets go of its brakes and its own commands now, before the
 		// incoming mode takes the wheels and writes (or brakes) its own (the
-		// selector stands every other mode down first). Not when the hand-back's
-		// own switch completes (the mode in control then is still this one), nor
-		// when the rider selects that mode again (its stance put back): the hold
-		// goes on.
+		// selector stands every other mode down first). With a selector, the
+		// mode it brings up decides, whichever mode had the robot (this one, picked
+		// by hand meanwhile, too): the hold goes on when it is the mode handed
+		// back to again (its stance put back). Without one, the mode left active.
+		// (Not the hand-back's own switch: bOwnHandBack.)
 		const URammsDriveModeSelector* Selector = GetOwner() ? GetOwner()->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
-		if (bHandOverHold && !HandOverModeId.IsNone() && OtherActiveModeId() == HandOverModeId
-			&& (!Selector || Selector->GetActivatingModeId() != HandOverModeId))
+		const bool					   bLeaving = Selector ? Selector->GetActivatingModeId() != HandOverModeId : OtherActiveModeId() == HandOverModeId;
+		if (bHandOverHold && !HandOverModeId.IsNone() && bLeaving)
 		{
 			EndHandOverHold(TEXT("another drive mode was selected"));
 		}
@@ -5066,6 +5067,24 @@ float URammsCurbNegotiationController::PerWheelSteering(float DeltaTime, double 
 	return static_cast<float>(Tuning.HeadingGain * (HeadingErrorRad + CrossTrackSteerRad));
 }
 
+bool URammsCurbNegotiationController::DrivesFallbackWheels(FName ModeId) const
+{
+	const AActor* Owner = GetOwner();
+	if (!Owner || ModeId.IsNone())
+	{
+		return false;
+	}
+	for (UActorComponent* Component : Owner->GetComponents())
+	{
+		const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component);
+		if (Mode && Mode->GetDriveModeId() == ModeId && Component->IsA<URammsHolonomicDriveController>())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void URammsCurbNegotiationController::BeginHandOverHold(FName ModeId)
 {
 	HandOverWheels.Reset();
@@ -5077,17 +5096,9 @@ void URammsCurbNegotiationController::BeginHandOverHold(FName ModeId)
 	}
 	// A mode that drives the omni wheels itself (the holonomic one) holds them;
 	// the others leave them to roll.
-	const AActor* Owner = GetOwner();
-	if (Owner)
+	if (DrivesFallbackWheels(ModeId))
 	{
-		for (UActorComponent* Component : Owner->GetComponents())
-		{
-			const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component);
-			if (Mode && Mode->GetDriveModeId() == ModeId && Component->IsA<URammsHolonomicDriveController>())
-			{
-				return;
-			}
-		}
+		return;
 	}
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
@@ -5123,7 +5134,12 @@ void URammsCurbNegotiationController::EndHandOverHold(const TCHAR* Why, bool bLe
 		for (const int32 i : HandOverWheels)
 		{
 			const FName Motor = Legs[i].Wheel.MotorId;
-			Base->SetMotorBrake(Motor, false);
+			// (Leaving the commands, the brakes only if the hold has them on: any
+			// other brake there now is the new mode's.)
+			if (!bLeaveCommands || bHandOverBraked)
+			{
+				Base->SetMotorBrake(Motor, false);
+			}
 			if (!bLeaveCommands)
 			{
 				Base->ClearMotorVelocityCommand(Motor);
@@ -5131,6 +5147,7 @@ void URammsCurbNegotiationController::EndHandOverHold(const TCHAR* Why, bool bLe
 			}
 		}
 	}
+	bHandOverBraked = false;
 	const FString Line = FString::Printf(TEXT("t=%5.2fs the hand-over: the fallback wheels let go after %.2f s (%s)"), Elapsed, HandOverElapsed, Why);
 	StepLog.Add(Line);
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -5150,13 +5167,15 @@ void URammsCurbNegotiationController::StepHandOverHold(float DeltaTime)
 		EndHandOverHold(TEXT("the curb mode selected again"));
 		return;
 	}
-	// The rider picked another mode: it has the wheels now, and their commands
-	// are its own. (None while the hand-back's own switch is still pending:
-	// the selector reports the outgoing mode until it completes.)
+	// Another mode has the robot now (switched outside the selector, which ends
+	// the hold as it stands this mode down). (None while the hand-back's own
+	// switch is still pending: the selector reports the outgoing mode until it
+	// completes.) One that drives the fallback wheels has its own commands on
+	// them; any other leaves the hold's, so they are cleared.
 	const FName ActiveNow = OtherActiveModeId();
 	if (!ActiveNow.IsNone() && ActiveNow != HandOverModeId)
 	{
-		EndHandOverHold(TEXT("another drive mode was selected"), /*bLeaveCommands=*/true);
+		EndHandOverHold(TEXT("another drive mode was selected"), /*bLeaveCommands=*/DrivesFallbackWheels(ActiveNow));
 		return;
 	}
 	HandOverElapsed += DeltaTime;

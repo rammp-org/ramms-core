@@ -1438,6 +1438,8 @@ private:
 	double HandOverTrackedFor = 0.0;
 	/** Begin the hold for a hand-back to ModeId (when it applies). */
 	void BeginHandOverHold(FName ModeId);
+	/** ModeId drives the fallback (omni) wheels itself: the holonomic mode. */
+	bool DrivesFallbackWheels(FName ModeId) const;
 	/** One tick of it while another mode has the robot. */
 	void StepHandOverHold(float DeltaTime);
 	/** Let the held wheels go: no command, no brake -- or (bLeaveCommands: another
