@@ -408,4 +408,10 @@ namespace RammsCurb
 	 *  seat, or an invalid measure, is the plain one). */
 	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, const FVector2D& Heading, double Acceleration, double Deceleration);
+
+	/** What MeasuredMargin measures against: the centre of mass (world) and
+	 *  each wheel's contact (world; one per model leg, meaningful where it
+	 *  supports). */
+	void MeasuredContacts(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
+		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, FVector& OutCom, TArray<FVector, TInlineAllocator<8>>& OutContacts);
 } // namespace RammsCurb

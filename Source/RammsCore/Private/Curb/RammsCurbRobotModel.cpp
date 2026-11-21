@@ -560,24 +560,18 @@ namespace RammsCurb
 	FPoseMargin MeasuredMargin(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
 		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, const FVector2D& Heading, double Acceleration, double Deceleration)
 	{
-		FPoseMargin Out;
-		Out.CenterOfMass = Frame.ToWorld(Seat.bValid && Model.Seat.bHas ? Model.CenterOfMassAt(LegXZ, Seat.Pivot, Seat.PitchRad) : Model.CenterOfMassAt(LegXZ));
+		FPoseMargin							 Out;
+		TArray<FVector, TInlineAllocator<8>> All;
+		MeasuredContacts(Model, Frame, LegXZ, Wheels, Seat, Out.CenterOfMass, All);
 		TArray<FVector2D, TInlineAllocator<8>> Contacts;
 		double								   Ground = 0.0;
-		for (int32 i = 0; i < Wheels.Num() && i < Model.Legs.Num(); ++i)
+		for (int32 i = 0; i < All.Num(); ++i)
 		{
-			const FMeasuredWheel& W = Wheels[i];
-			if (!W.bSupport)
+			if (Wheels[i].bSupport)
 			{
-				continue;
+				Contacts.Add(FVector2D(All[i].X, All[i].Y));
+				Ground += All[i].Z;
 			}
-			// The axle as the chassis carries it: tilted with it.
-			const FModelLeg& M = Model.Legs[i];
-			const FVector	 Local = LevelAxle(M);
-			const FVector	 Axle = Frame.X * Local.X + Frame.Y * Local.Y;
-			const FVector	 C = WheelContact(W.Centre, Axle, W.Gradient, M.RadiusCm, M.ContactWidthCm);
-			Contacts.Add(FVector2D(C.X, C.Y));
-			Ground += C.Z;
 		}
 		Out.Support = Contacts.Num();
 		if (Contacts.Num() == 0)
@@ -590,5 +584,26 @@ namespace RammsCurb
 		Out.StaticCm = HullMargin(Contacts, C);
 		Out.DynamicCm = DynamicMargin(Contacts, C, Out.HeightCm, Heading, Acceleration, Deceleration);
 		return Out;
+	}
+
+	void MeasuredContacts(const FRobotModel& Model, const FChassisFrame& Frame, TConstArrayView<FVector2D> LegXZ,
+		TConstArrayView<FMeasuredWheel> Wheels, const FMeasuredSeat& Seat, FVector& OutCom, TArray<FVector, TInlineAllocator<8>>& OutContacts)
+	{
+		OutCom = Frame.ToWorld(Seat.bValid && Model.Seat.bHas ? Model.CenterOfMassAt(LegXZ, Seat.Pivot, Seat.PitchRad) : Model.CenterOfMassAt(LegXZ));
+		OutContacts.Reset();
+		for (int32 i = 0; i < Wheels.Num() && i < Model.Legs.Num(); ++i)
+		{
+			const FMeasuredWheel& W = Wheels[i];
+			if (!W.bSupport)
+			{
+				OutContacts.Add(W.Centre);
+				continue;
+			}
+			// The axle as the chassis carries it: tilted with it.
+			const FModelLeg& M = Model.Legs[i];
+			const FVector	 Local = LevelAxle(M);
+			const FVector	 Axle = Frame.X * Local.X + Frame.Y * Local.Y;
+			OutContacts.Add(WheelContact(W.Centre, Axle, W.Gradient, M.RadiusCm, M.ContactWidthCm));
+		}
 	}
 } // namespace RammsCurb

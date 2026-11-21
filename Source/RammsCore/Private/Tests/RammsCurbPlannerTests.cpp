@@ -1722,6 +1722,33 @@ bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 	FRammsCurbTuning Off;
 	TestNearlyEqual(TEXT("off: down at Speed"), RammsCurb::DescentSeconds(15.0, 60.0, Off), 0.25, 1e-9);
 
+	// A touchdown band (Ramms.Curb.TouchdownBandCm): through it at TouchdownSpeed,
+	// above it slowing onto it; the time to come down still the cap integrated.
+	if (IConsoleVariable* const Band = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.TouchdownBandCm")))
+	{
+		const float	 BandWas = Band->GetFloat();
+		const double Before15 = RammsCurb::DescentSeconds(15.0, 60.0, T);
+		Band->Set(1.0f, ECVF_SetByCode);
+		TestNearlyEqual(TEXT("band: in it, TouchdownSpeed"), RammsCurb::TouchdownSpeedCap(0.6, T), 15.0, 1e-4);
+		TestNearlyEqual(TEXT("band: 2 cm up, plus 1 cm over the lag"), RammsCurb::TouchdownSpeedCap(2.0, T), 15.0 + 1.0 / 0.05, 1e-4);
+		for (const double Down : { 0.5, 2.0, 15.0 })
+		{
+			double			 H = Down, Time = 0.0;
+			constexpr double Dt = 1e-5;
+			while (H > 0.0)
+			{
+				H -= FMath::Min(60.0, RammsCurb::TouchdownSpeedCap(H, T)) * Dt;
+				Time += Dt;
+			}
+			const double Said = RammsCurb::DescentSeconds(Down, 60.0, T);
+			TestTrue(FString::Printf(TEXT("band: %.1f cm down: %.4f s, integrated %.4f s"), Down, Said, Time), FMath::Abs(Said - Time) <= 0.002 + 0.01 * Time);
+		}
+		TestNearlyEqual(TEXT("band: 0.5 cm down, all of it at TouchdownSpeed"), RammsCurb::DescentSeconds(0.5, 60.0, T), 0.5 / 15.0, 1e-9);
+		TestTrue(TEXT("band: a landing takes longer than without"), RammsCurb::DescentSeconds(15.0, 60.0, T) > Before15);
+		Band->Set(BandWas, ECVF_SetByCode);
+		TestNearlyEqual(TEXT("no band: as before"), RammsCurb::DescentSeconds(15.0, 60.0, T), Before15, 1e-12);
+	}
+
 	// The planner times each landing with it: never sooner than without.
 	for (const bool bUp : { true, false })
 	{
@@ -5044,6 +5071,49 @@ bool FRammsCurbPlannerCentreSearchWalksFromLevelIn::RunTest(const FString& Param
 			}
 			TestTrue(What + FString::Printf(TEXT(": the centre wheels walk %.2f cm before the level-in begins at %.1f cm"), Most, S.LevelInFromS),
 				Most < 1e-6);
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorLoadCaps,
+	"Ramms.Curb.Executor.LoadCaps",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorLoadCaps::RunTest(const FString& Parameters)
+{
+	// The load caps worked out every tick (the kinematic robot takes no notice
+	// of them) change no target: the run with them is the run without, tick
+	// for tick, but for their own lines. Each wheel's cap follows its state --
+	// none in the air, at least the floor carrying or landing -- and the
+	// carrying wheels' shares carry the robot's weight.
+	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+	{
+		for (const bool bUp : { true, false })
+		{
+			const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+			const FString				   What = FString::Printf(TEXT("%s %s"), Id, bUp ? TEXT("up") : TEXT("down"));
+			const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+			if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()))
+			{
+				continue;
+			}
+			RammsCurb::FExecDryRunOptions Off;
+			Off.TraceEvery = 1;
+			RammsCurb::FExecDryRunOptions On = Off;
+			On.bLoadCaps = true;
+			const RammsCurb::FExecDryRunResult A = RammsCurb::ExecDryRun(In, S, Off);
+			const RammsCurb::FExecDryRunResult B = RammsCurb::ExecDryRun(In, S, On);
+			TestTrue(FString::Printf(TEXT("%s: both cross"), *What), A.bDone && B.bDone);
+			TestEqual(FString::Printf(TEXT("%s: as long"), *What), B.Seconds, A.Seconds);
+			TestTrue(FString::Printf(TEXT("%s: tick for tick the same (%d / %d trace lines)"), *What, A.Trace.Num(), B.Trace.Num()), A.Trace == B.Trace);
+			TArray<FString> BLog = B.Log;
+			BLog.RemoveAll([](const FString& Line) { return Line.Contains(TEXT("load cap")); });
+			TestTrue(FString::Printf(TEXT("%s: the same log, but for the caps' lines"), *What), BLog == A.Log);
+			TestEqual(FString::Printf(TEXT("%s: no caps without them"), *What), A.LoadCapTicks, 0);
+			TestTrue(FString::Printf(TEXT("%s: caps worked out (%d ticks)"), *What, B.LoadCapTicks), B.LoadCapTicks > 0);
+			TestEqual(FString::Printf(TEXT("%s: every cap by its wheel's state"), *What), B.LoadCapRuleBreaks, 0);
+			TestTrue(FString::Printf(TEXT("%s: the shares carry the weight (at most %.3f N off)"), *What, B.MaxShareSumErrN), B.MaxShareSumErrN < 1.0);
 		}
 	}
 	return true;

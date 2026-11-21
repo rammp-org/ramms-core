@@ -7,6 +7,7 @@
 #include "Curb/RammsCurbDebugView.h"
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
+#include "Curb/RammsCurbLoadShare.h"
 #include "Curb/RammsCurbPlanTask.h"
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
@@ -31,6 +32,7 @@
 #include "RammsDriveModeSelector.h"
 #include "RammsHolonomicDriveController.h"
 #include "RammsMotionProfile.h"
+#include "RammsActuationBackend.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
@@ -45,6 +47,19 @@ static TAutoConsoleVariable<int32> CVarRammsCurbCommandDelayLag(TEXT("Ramms.Curb
 
 // A diagnostic switch, for comparing runs with and without the hips' bound on
 // the centre walks.
+static TAutoConsoleVariable<int32> CVarRammsCurbLoadCap(TEXT("Ramms.Curb.LoadCap"), 2,
+	TEXT("Load-aware pressing: each leg carrying the robot, or landing, may press its wheel onto the ground with no more than "
+		 "(1 + Ramms.Curb.LoadCapMargin) times its share of the weight -- a press-side torque cap on its motors, applied every "
+		 "physics step (Ramms.Motor.TorqueLimit's limits). 1: sent to the motors. 2 (the default): worked out, logged and counted "
+		 "only (shadow). 0: off."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarRammsCurbLoadCapTractionRatio(TEXT("Ramms.Curb.LoadCapTractionRatio"), 0.8f,
+	TEXT("A load cap's allowance for driving the wheel along (N of fore/aft force per N of the cap) on top of carrying it."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarRammsCurbLoadCapMinJz(TEXT("Ramms.Curb.LoadCapMinJzCmPerRad"), 0.5f,
+	TEXT("A leg motor with less vertical lever than this (cm of wheel height per radian) does not carry its wheel: no load cap."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarRammsCurbHipRateWalk(TEXT("Ramms.Curb.HipRateWalk"), 1,
 	TEXT("Curb crossing (per-wheel gait): a centre 5-bar walks fore/aft no faster than its hips' motors turn at their MaxVelocity "
 		 "(RammsCurb::HipRateShare of it) with what its height's own move leaves them (1, the default), or at its walk's own caps "
@@ -457,6 +472,7 @@ void URammsCurbNegotiationController::BeginPlay()
 
 void URammsCurbNegotiationController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	ClearLoadCaps();
 	if (DebugDrawHandle.IsValid())
 	{
 		UDebugDrawService::Unregister(DebugDrawHandle);
@@ -562,11 +578,17 @@ TArray<FRammsCurbWheelStatus> URammsCurbNegotiationController::GetWheelStatus() 
 				W.SurfaceZ = static_cast<float>(State.WheelWorld.Z - R - State.WheelBottom);
 				W.ClearanceCm = State.WheelBottom;
 			}
+			W.LegTorqueNm = State.TauMeanNm;
+			W.LegTorquePeakNm = State.TauPeakNm;
+			W.CapBoundShare = State.CapBoundShare;
+			W.LoadEstimateN = State.bLoad ? State.LoadN : 0.0f;
 			if (bRunning)
 			{
 				const RammsCurb::FExecWheel& E = Executor->GetWheels()[i];
 				W.State = E.State;
 				W.Plane = E.Plane;
+				W.LoadShareN = static_cast<float>(E.LoadShareN);
+				W.LoadCapN = static_cast<float>(E.LoadCapN);
 				W.WindowLo = static_cast<float>(Executor->GetPlan().Wheels[i].DUp);
 				W.WindowHi = static_cast<float>(Executor->GetPlan().Wheels[i].DDown);
 			}
@@ -665,6 +687,8 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 		return false;
 	}
 
+	// The legs are about to be resolved afresh: no load cap of before stays on.
+	ClearLoadCaps();
 	FiveBarReachCache.Reset();
 	int32 PerAxle[3] = { 0, 0, 0 };
 	int32 CornerPivots[3] = { 0, 0, 0 };
@@ -688,6 +712,8 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 				OutReason = FString::Printf(TEXT("leg '%s' names no crank motor"), *Leg.Name.ToString());
 				return false;
 			}
+			State.LoadMotors[0] = Leg.FourBar.CrankMotor;
+			State.NumLoadMotors = 1;
 			State.HeightRange = URamms4BarKinematics::GetHeightRange(Leg.FourBar);
 			if (State.HeightRange.X >= State.HeightRange.Y)
 			{
@@ -770,6 +796,9 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 				State.HipMaxRate.X = Base->GetMotorSpec(Spec->ProximalMotorA, Motor) ? FMath::Max(0.0f, Motor.MaxVelocity) : 0.0f;
 				State.HipMaxRate.Y = Base->GetMotorSpec(Spec->ProximalMotorB, Motor) ? FMath::Max(0.0f, Motor.MaxVelocity) : 0.0f;
 			}
+			State.LoadMotors[0] = Spec->ProximalMotorA;
+			State.LoadMotors[1] = Spec->ProximalMotorB;
+			State.NumLoadMotors = !Spec->ProximalMotorA.IsNone() && !Spec->ProximalMotorB.IsNone() ? 2 : 0;
 		}
 	}
 	for (int32 Axle = 0; Axle < 3; ++Axle)
@@ -814,7 +843,12 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 	{
 		return false;
 	}
-	return ResolveSeat(OutReason);
+	if (!ResolveSeat(OutReason))
+	{
+		return false;
+	}
+	PrimeMotorEfforts();
+	return true;
 }
 
 bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
@@ -1108,6 +1142,8 @@ bool URammsCurbNegotiationController::Measure(FString& OutReason)
 			}
 			State.MeasuredX = static_cast<float>(WheelCenter.X);
 			State.MeasuredZ = static_cast<float>(WheelCenter.Y);
+			State.CrankAngle = Reading;
+			State.bCrankClamped = bClamped;
 		}
 		else if (State.FiveBar)
 		{
@@ -2058,7 +2094,16 @@ bool URammsCurbNegotiationController::FiveBarHipTurns(const FLegState& State, FV
 	{
 		return false;
 	}
-	const FVector2D At(State.CmdX, State.CmdZ);
+	return FiveBarTurnsAt(State, FVector2D(State.CmdX, State.CmdZ), OutPerCmX, OutPerCmZ);
+}
+
+bool URammsCurbNegotiationController::FiveBarTurnsAt(const FLegState& State, const FVector2D& At, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const
+{
+	OutPerCmX = OutPerCmZ = FVector2D::ZeroVector;
+	if (!State.FiveBar)
+	{
+		return false;
+	}
 	bool			bHere = false;
 	const FVector2D Here = State.FiveBar->SolveTarget(At, bHere);
 	if (!bHere)
@@ -3602,10 +3647,7 @@ void URammsCurbNegotiationController::StartPerAxleCrossing(const FRammsCurbProfi
 	bPerWheelCrossing = false;
 	bAwaitingPlan = false;
 	bReplanning = false;
-	if (Executor)
-	{
-		Executor->End();
-	}
+	EndExecutor();
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': crossing per axle"), *GetNameSafe(GetOwner()));
 	for (const FString& Line : PlanLines)
 	{
@@ -4052,6 +4094,8 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			C.AttitudeOffDeg, C.LateActions, C.MarginHolds, C.AttitudeSlowTicks, C.ReplanAsks);
 		StepLog.Add(Checked);
 		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Checked);
+		// What the motors put out, and the load caps.
+		LogMotorEfforts();
 	}
 	if (bPerWheelCrossing)
 	{
@@ -4072,9 +4116,9 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	{
 		Executor->Halt(Why);
 	}
-	else if (Executor)
+	else
 	{
-		Executor->End();
+		EndExecutor();
 	}
 	bAwaitingPlan = false;
 	bPlanningAtRest = false;
@@ -4218,11 +4262,13 @@ void URammsCurbNegotiationController::StepStopping(float DeltaTime)
 		// The halted executor: the speed braked to rest, never over the hard
 		// braking caps; every leg to its target.
 		RammsCurb::FExecMeasure M;
+		ReadLegEfforts(DeltaTime);
 		GatherExecMeasure(DeltaTime, M);
 		M.Probes.Reset(); // nothing left to check
 		RammsCurb::FExecCommand Cmd;
 		Executor->Tick(M, *Level, Cmd);
 		CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+		ApplyLoadCaps(Cmd);
 		CommandSeat(Cmd.SeatX);
 		DriveSpeed = static_cast<float>(Cmd.DriveSpeed);
 		TArray<FString> Lines;
@@ -4290,10 +4336,7 @@ void URammsCurbNegotiationController::EndStopping(const FString& Why, EStopEnd H
 	bStopping = false;
 	DriveSpeed = 0.0f;
 	StopWheels(/*bRelease=*/false);
-	if (Executor)
-	{
-		Executor->End();
-	}
+	EndExecutor();
 	const FString Line = FString::Printf(TEXT("t=%5.2fs stopped: %s; the wheels braked, the legs held"), Elapsed + StopElapsed, *Why);
 	StepLog.Add(Line);
 	UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
@@ -4340,10 +4383,7 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		if (bStopping)
 		{
 			bStopping = false;
-			if (Executor)
-			{
-				Executor->End();
-			}
+			EndExecutor();
 		}
 		if (bWheelsDriven)
 		{
@@ -5734,10 +5774,7 @@ bool URammsCurbNegotiationController::BeginPerWheel(const FRammsCurbProfile& Pro
 		return false;
 	};
 	// Nothing of a crossing before this one runs on.
-	if (Executor)
-	{
-		Executor->End();
-	}
+	EndExecutor();
 	RammsCurb::FPlannerInput In;
 	if (!PreparePerWheel(Profile, In, OutReason))
 	{
@@ -5816,6 +5853,13 @@ bool URammsCurbNegotiationController::StartPerWheelRun(const RammsCurb::FPlanner
 {
 	RammsCurb::FExecMeasure M;
 	GatherExecMeasure(0.0f, M);
+	// The load caps (Ramms.Curb.LoadCap), and the crossing's report of what the
+	// motors put out, from here.
+	PrimeMotorEfforts();
+	if (Executor)
+	{
+		Executor->SetLoadCaps(CVarRammsCurbLoadCap.GetValueOnGameThread() != 0);
+	}
 	if (!Executor || !Executor->Begin(Input, *Schedule, M, OutReason))
 	{
 		return false;
@@ -5872,6 +5916,7 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 	Out.SpeedCmS = Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f;
 	Out.bSpeedValid = Telemetry && Telemetry->Motion.IsFull();
 	Out.Legs.SetNum(Legs.Num());
+	Out.bEffort = bLegEffortsRead;
 	MeasuredSeat(Out.Seat);
 	Out.Probes.Reset();
 	const FVector2D Forward = Out.Forward;
@@ -5886,6 +5931,10 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 		L.bLagX = State.FiveBar != nullptr;
 		L.bValid = State.bHasWorld;
 		L.HipMaxRate = FiveBarHipTurns(State, L.HipTurnPerCmX, L.HipTurnPerCmZ) ? State.HipMaxRate : FVector2D::ZeroVector;
+		L.LoadN = State.LoadN;
+		L.bLoad = State.bLoad;
+		L.CapBoundShare = State.CapBoundShare;
+		L.TauMeanNm = State.TauMeanNm;
 		if (!State.bHasWorld)
 		{
 			continue;
@@ -6383,12 +6432,14 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 	// The executor: wheel states, leg commands, the speed -- and its runtime
 	// checks, on the terrain traced ahead of and under every wheel.
 	RammsCurb::FExecMeasure M;
+	ReadLegEfforts(DeltaTime);
 	GatherExecMeasure(DeltaTime, M);
 	RecordDebugProbes(M);
 	RammsCurb::FExecCommand Cmd;
 	Executor->SetOperator(StickScale, bStickPaused);
 	Executor->Tick(M, *Level, Cmd);
 	CommandPerWheelLegs(Cmd.LegZ, Cmd.LegX);
+	ApplyLoadCaps(Cmd);
 	CommandSeat(Cmd.SeatX);
 	// A re-plan a runtime trigger asks for before any wheel has begun to cross:
 	// the surfaces re-fitted by what the traces found, the heading held the
@@ -6981,10 +7032,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 				// Braking to rest after a fault or an abort: nothing left to brake.
 				bStopping = false;
 				StopWheels(/*bRelease=*/false);
-				if (Executor)
-				{
-					Executor->End();
-				}
+				EndExecutor();
 				CancelRetry(TEXT("the simulation was reset"), /*bForgetHere=*/true);
 				const FString Line = FString::Printf(TEXT("t=%5.2fs the simulation was reset while braking to rest"), Elapsed + StopElapsed);
 				StepLog.Add(Line);
@@ -8201,5 +8249,358 @@ void URammsCurbNegotiationController::GetClaimedMotorIds(TArray<FName>& OutIds) 
 		{
 			OutIds.AddUnique(Leg.FourBar.CrankMotor);
 		}
+	}
+}
+
+// --- what the legs' motors put out, and their load caps -----------------------
+
+void URammsCurbNegotiationController::PrimeMotorEfforts()
+{
+	EffortStats.Reset();
+	SnapshotAgeMs.Reset();
+	bLoadCapsRefused = false;
+	LoadCapWouldBindTicks = LoadCapTicks = LoadCapSends = 0;
+	MaxLoadShareOfW = 0.0f;
+	MaxLoadLeg = INDEX_NONE;
+	MaxLoadAt = 0.0f;
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base)
+	{
+		return;
+	}
+	auto Add = [&](FName Motor, const FString& Role, int32 Group) {
+		if (Motor.IsNone() || EffortStats.ContainsByPredicate([Motor](const FMotorEffortStats& S) { return S.Motor == Motor; }))
+		{
+			return;
+		}
+		FMotorEffortStats& S = EffortStats.AddDefaulted_GetRef();
+		S.Motor = Motor;
+		S.Role = Role;
+		S.Group = Group;
+		FRammsMotorEffort Unused;
+		Base->GetMotorEffort(Motor, 0.0, Unused); // its backend starts recording it
+	};
+	for (int32 i = 0; i < Legs.Num() && i < LegState.Num(); ++i)
+	{
+		const FLegState& S = LegState[i];
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			Add(S.LoadMotors[k], S.NumLoadMotors == 1 ? TEXT("crank") : (k == 0 ? TEXT("hip A") : TEXT("hip B")), i);
+		}
+	}
+	if (Seat.IsSet())
+	{
+		Add(Seat.Linkage.ProximalMotorA, TEXT("A"), -1);
+		Add(Seat.Linkage.ProximalMotorB, TEXT("B"), -1);
+		Add(Seat.TiltMotor, TEXT("tilt"), -1);
+	}
+	for (const FRammsCurbLeg& Leg : Legs)
+	{
+		Add(Leg.Wheel.MotorId, Leg.Name.ToString(), -2);
+	}
+}
+
+void URammsCurbNegotiationController::ReadLegEfforts(float DeltaTime)
+{
+	bLegEffortsRead = false;
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base || LegState.Num() != Legs.Num())
+	{
+		return;
+	}
+	const bool	 bCrossing = bPerWheelCrossing && Executor && Executor->IsRunning();
+	const double Window = FMath::Clamp(static_cast<double>(DeltaTime), 0.002, 0.5);
+	const double MinJz = FMath::Max(1e-3, static_cast<double>(CVarRammsCurbLoadCapMinJz.GetValueOnGameThread()));
+	const double Weight = Model && Model->MassKg > 0.0 ? Model->MassKg * 9.80665 : 0.0;
+	double		 Latest = -1.0;
+	bool		 bWouldBind = false;
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		const FRammsCurbLeg& Leg = Legs[i];
+		FLegState&			 S = LegState[i];
+		S.bJacobian = false;
+		S.bLoad = false;
+		S.CapBoundShare = 0.0f;
+		S.TauMeanNm = S.TauPeakNm = FVector2D::ZeroVector;
+		// The leg's Jacobian where it is measured.
+		if (Leg.Kind == ERammsCurbLegKind::FourBar)
+		{
+			FVector2D Rate = FVector2D::ZeroVector;
+			if (RammsCurb::FourBarWheelRate(Leg.FourBar, S.CrankAngle, Rate))
+			{
+				S.JxCmPerRad = FVector2D(Rate.X, 0.0);
+				S.JzCmPerRad = FVector2D(Rate.Y, 0.0);
+				S.bJacobian = true;
+			}
+		}
+		else if (S.FiveBar)
+		{
+			// The hips per cm (the inverse) probed about the measured pose, and
+			// inverted: rows hips A, B; columns x, z.
+			FVector2D PerX = FVector2D::ZeroVector, PerZ = FVector2D::ZeroVector;
+			if (FiveBarTurnsAt(S, FVector2D(S.MeasuredX, S.MeasuredZ), PerX, PerZ))
+			{
+				const double Det = PerX.X * PerZ.Y - PerZ.X * PerX.Y;
+				if (FMath::Abs(Det) > 1e-6)
+				{
+					S.TurnPerCmX = PerX;
+					S.TurnPerCmZ = PerZ;
+					S.JxCmPerRad = FVector2D(PerZ.Y, -PerZ.X) / Det;
+					S.JzCmPerRad = FVector2D(-PerX.Y, PerX.X) / Det;
+					S.bJacobian = true;
+				}
+			}
+		}
+		// What its motors put out over the frame.
+		bool bRead = S.NumLoadMotors > 0;
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			FRammsMotorEffort E;
+			if (!Base->GetMotorEffort(S.LoadMotors[k], Window, E))
+			{
+				bRead = false;
+				continue;
+			}
+			S.TauMeanNm[k] = E.MeanNm;
+			S.TauPeakNm[k] = E.PeakNm;
+			Latest = FMath::Max(Latest, E.LatestTime);
+			if (S.SentCapNm[k] != 0.0 && E.Seconds > 0.0)
+			{
+				const double At = S.SentCapNm[k] > 0.0 ? E.AtUpperSeconds : E.AtLowerSeconds;
+				S.CapBoundShare = FMath::Max(S.CapBoundShare, static_cast<float>(At / E.Seconds));
+			}
+			// The shadow caps (worked out last tick, not sent) against the frame's
+			// peak.
+			const double Cap = S.TorqueCapNm[k];
+			bWouldBind = bWouldBind || (Cap != 0.0 && S.SentCapNm[k] == 0.0 && E.PeakNm * FMath::Sign(Cap) > FMath::Abs(Cap));
+		}
+		bLegEffortsRead = bLegEffortsRead || bRead;
+		// The load its wheel carries: F = -J^-T tau (x100, N from N*m and cm).
+		if (bRead && S.bJacobian)
+		{
+			if (S.NumLoadMotors == 1)
+			{
+				if (FMath::Abs(S.JzCmPerRad.X) >= MinJz && !S.bCrankClamped)
+				{
+					S.LoadN = static_cast<float>(-100.0 * S.TauMeanNm.X / S.JzCmPerRad.X);
+					S.bLoad = true;
+				}
+			}
+			else
+			{
+				S.LoadN = static_cast<float>(-100.0 * (S.TurnPerCmZ.X * S.TauMeanNm.X + S.TurnPerCmZ.Y * S.TauMeanNm.Y));
+				S.bLoad = true;
+			}
+		}
+		if (bCrossing && S.bLoad && Weight > 0.0 && S.LoadN / Weight > MaxLoadShareOfW)
+		{
+			MaxLoadShareOfW = static_cast<float>(S.LoadN / Weight);
+			MaxLoadLeg = i;
+			MaxLoadAt = static_cast<float>(Elapsed);
+		}
+	}
+	if (!bCrossing)
+	{
+		return;
+	}
+	LoadCapWouldBindTicks += bWouldBind ? 1 : 0;
+	// How far behind the physics this tick's measurements are: the published
+	// snapshot's time against the latest physics step recorded.
+	const double Snapshot = Base->GetSimulationTime();
+	if (Latest >= 0.0 && Snapshot >= 0.0)
+	{
+		SnapshotAgeMs.Add(static_cast<float>((Latest - Snapshot) * 1000.0));
+	}
+	// The crossing's stats of every motor reported.
+	for (FMotorEffortStats& St : EffortStats)
+	{
+		FRammsMotorEffort E;
+		if (!Base->GetMotorEffort(St.Motor, Window, E) || E.Seconds <= 0.0)
+		{
+			continue;
+		}
+		St.PeakAbsNm = FMath::Max(St.PeakAbsNm, FMath::Abs(E.PeakNm));
+		St.FrameMeanAbs.Add(static_cast<float>(FMath::Abs(E.MeanNm)));
+		St.RatedSeconds += E.AtRatedSeconds;
+		St.CapSeconds += (E.UpperNm < E.RatedUpperNm - 1e-6 ? E.AtUpperSeconds : 0.0) + (E.LowerNm > E.RatedLowerNm + 1e-6 ? E.AtLowerSeconds : 0.0);
+		St.Seconds += E.Seconds;
+		const double Rated = FMath::Max(FMath::Abs(E.RatedLowerNm), FMath::Abs(E.RatedUpperNm));
+		if (Rated < 1e20)
+		{
+			St.RatedNm = Rated;
+		}
+	}
+}
+
+void URammsCurbNegotiationController::ApplyLoadCaps(const RammsCurb::FExecCommand& Cmd)
+{
+	URammsRobotBaseComponent* Base = EnsureBase();
+	if (!Base || LegState.Num() != Legs.Num())
+	{
+		return;
+	}
+	const int32	 Mode = CVarRammsCurbLoadCap.GetValueOnGameThread();
+	const double Ratio = FMath::Max(0.0, static_cast<double>(CVarRammsCurbLoadCapTractionRatio.GetValueOnGameThread()));
+	const double MinJz = FMath::Max(1e-3, static_cast<double>(CVarRammsCurbLoadCapMinJz.GetValueOnGameThread()));
+	const float	 Unbounded = TNumericLimits<float>::Max();
+	bool		 bInForce = false;
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		FLegState&	 S = LegState[i];
+		const double CapN = Cmd.LegLoadCapN.IsValidIndex(i) ? Cmd.LegLoadCapN[i] : 0.0;
+		FVector2D	 Want = FVector2D::ZeroVector;
+		if (Mode != 0 && CapN > 0.0 && S.bJacobian)
+		{
+			// The drive's reaction on a 5-bar's hips: the link its wheel hangs from
+			// turns as the hips do (the wheel feed's fit), so the wheel's drive
+			// torque leans on them.
+			const FVector2D Gains = S.FiveBar && Drive && Drive->Feeds.IsValidIndex(i) ? Drive->Feeds[i].GetFit().GetGains() : FVector2D::ZeroVector;
+			for (int32 k = 0; k < S.NumLoadMotors; ++k)
+			{
+				const double Reaction = Legs[i].WheelRadiusCm * FMath::Abs(Gains.X * S.JxCmPerRad[k] + Gains.Y * S.JzCmPerRad[k]);
+				double		 CapNm = 0.0;
+				int32		 Sign = 0;
+				if (RammsCurb::PressTorqueCap(S.JxCmPerRad[k], S.JzCmPerRad[k], CapN, Ratio, Reaction, MinJz, CapNm, Sign))
+				{
+					Want[k] = Sign * CapNm;
+				}
+			}
+		}
+		S.TorqueCapNm = Want;
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			const FName	 Motor = S.LoadMotors[k];
+			const double Sent = S.SentCapNm[k];
+			const double To = Mode == 1 && !bLoadCapsRefused ? Want[k] : 0.0;
+			if (To == 0.0)
+			{
+				if (Sent != 0.0)
+				{
+					Base->ClearMotorTorqueLimit(Motor);
+					S.SentCapNm[k] = 0.0;
+				}
+				continue;
+			}
+			bInForce = true;
+			// Sent only when it moves enough to matter: the backend's table is
+			// locked against the physics thread for each one.
+			const bool bResend = Sent == 0.0 || FMath::Sign(Sent) != FMath::Sign(To) || FMath::Abs(To - Sent) > FMath::Max(1.0, 0.03 * FMath::Abs(Sent));
+			if (!bResend)
+			{
+				continue;
+			}
+			const bool bOk = To > 0.0 ? Base->SetMotorTorqueLimit(Motor, -Unbounded, static_cast<float>(To))
+									  : Base->SetMotorTorqueLimit(Motor, static_cast<float>(To), Unbounded);
+			if (!bOk)
+			{
+				bLoadCapsRefused = true;
+				const FString Line = TEXT("load caps unsupported on this backend: the legs keep their full torque");
+				StepLog.Add(FString::Printf(TEXT("t=%5.2fs %s"), Elapsed, *Line));
+				UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' %s"), *GetNameSafe(GetOwner()), *Line);
+				ClearLoadCaps();
+				return;
+			}
+			S.SentCapNm[k] = To;
+			++LoadCapSends;
+		}
+	}
+	LoadCapTicks += bInForce ? 1 : 0;
+}
+
+void URammsCurbNegotiationController::ClearLoadCaps()
+{
+	URammsRobotBaseComponent* Base = BaseComponent;
+	for (FLegState& S : LegState)
+	{
+		for (int32 k = 0; k < S.NumLoadMotors; ++k)
+		{
+			if (Base && !S.LoadMotors[k].IsNone())
+			{
+				Base->ClearMotorTorqueLimit(S.LoadMotors[k]);
+			}
+		}
+		S.SentCapNm = S.TorqueCapNm = FVector2D::ZeroVector;
+	}
+}
+
+void URammsCurbNegotiationController::EndExecutor()
+{
+	if (Executor)
+	{
+		Executor->End();
+	}
+	ClearLoadCaps();
+}
+
+void URammsCurbNegotiationController::LogMotorEfforts()
+{
+	auto Emit = [this](const FString& Line) {
+		StepLog.Add(Line);
+		UE_LOG(LogRammsCurb, Log, TEXT("[Curb] %s"), *Line);
+	};
+	auto Describe = [](const FMotorEffortStats& St) {
+		TArray<float> Means = St.FrameMeanAbs;
+		Means.Sort();
+		const float P99 = Means.Num() > 0 ? Means[FMath::Clamp(FMath::CeilToInt(0.99 * Means.Num()) - 1, 0, Means.Num() - 1)] : 0.0f;
+		// (A motor with no force limit of its own -- one held to its command's
+		// range instead -- has no rating to sit at.)
+		const FString Rating = St.RatedNm > 0.0 ? FString::Printf(TEXT("%.2f s at its %.0f N*m rating"), St.RatedSeconds, St.RatedNm)
+												: FString(TEXT("no force limit of its own"));
+		return FString::Printf(TEXT("%s peak |tau| %.0f N*m, p99 (frame means) %.0f, %s%s"), *St.Role, St.PeakAbsNm, P99, *Rating,
+			St.CapSeconds > 0.0 ? *FString::Printf(TEXT(", %.2f s at its load cap"), St.CapSeconds) : TEXT(""));
+	};
+	bool bAny = false;
+	for (const FMotorEffortStats& St : EffortStats)
+	{
+		bAny = bAny || St.Seconds > 0.0;
+	}
+	if (!bAny)
+	{
+		Emit(TEXT("        motors: no effort readings from this backend"));
+	}
+	else
+	{
+		// One line a leg (its load motors), one for the seat, one for the wheels.
+		TArray<int32> Groups;
+		for (const FMotorEffortStats& St : EffortStats)
+		{
+			Groups.AddUnique(St.Group);
+		}
+		for (const int32 G : Groups)
+		{
+			FString Parts;
+			for (const FMotorEffortStats& St : EffortStats)
+			{
+				if (St.Group == G && St.Seconds > 0.0)
+				{
+					Parts += (Parts.IsEmpty() ? TEXT("") : TEXT("; ")) + Describe(St);
+				}
+			}
+			if (!Parts.IsEmpty())
+			{
+				const FString Who = G >= 0 && Legs.IsValidIndex(G) ? Legs[G].Name.ToString() : G == -1 ? TEXT("seat")
+																									   : TEXT("wheels");
+				Emit(FString::Printf(TEXT("        motors: %s %s"), *Who, *Parts));
+			}
+		}
+	}
+	const int32					  Mode = CVarRammsCurbLoadCap.GetValueOnGameThread();
+	const RammsCurb::FExecCounts  NoCounts;
+	const RammsCurb::FExecCounts& C = Executor ? Executor->GetCounts() : NoCounts;
+	const TCHAR*				  How = Mode == 0 ? TEXT("off") : bLoadCapsRefused ? TEXT("unsupported")
+						 : Mode == 1											   ? TEXT("on")
+																				   : TEXT("shadow");
+	const FString				  Most = MaxLoadLeg != INDEX_NONE && Legs.IsValidIndex(MaxLoadLeg)
+						? FString::Printf(TEXT("most on one wheel %s %.0f%% of W (estimated) at %.2f s"), *Legs[MaxLoadLeg].Name.ToString(), 100.0f * MaxLoadShareOfW, MaxLoadAt)
+						: FString(TEXT("no wheel's load estimated"));
+	Emit(FString::Printf(TEXT("        load caps: %s; sent %d times, in force on %d ticks; bound on %d ticks, released %d times, off on %d ticks (no static "
+							  "share); the shadow caps would bind on %d ticks; %s"),
+		How, LoadCapSends, LoadCapTicks, C.LoadCapBoundTicks, C.LoadCapReleases, C.LoadCapOffTicks, LoadCapWouldBindTicks, *Most));
+	if (SnapshotAgeMs.Num() > 0)
+	{
+		TArray<float> Ages = SnapshotAgeMs;
+		Ages.Sort();
+		const auto At = [&Ages](double Q) { return Ages[FMath::Clamp(FMath::CeilToInt(Q * Ages.Num()) - 1, 0, Ages.Num() - 1)]; };
+		Emit(FString::Printf(TEXT("        physics readings: median %.1f ms behind the physics (p90 %.1f, max %.1f)"), At(0.5), At(0.9), Ages.Last()));
 	}
 }

@@ -8,6 +8,37 @@
 class URammsRobotBaseComponent;
 
 /**
+ * What a motor's actuator put out over a trailing window of simulated time, in
+ * its joint's own sense (N*m; N on a slide): IRammsActuationBackend::
+ * GetMotorEffort. On a real robot, the drive's current times its torque
+ * constant and gear.
+ */
+struct FRammsMotorEffort
+{
+	/** The time-weighted mean over the window, the sample of largest
+	 *  magnitude (signed), and the last physics step's. */
+	double MeanNm = 0.0;
+	double PeakNm = 0.0;
+	double LastNm = 0.0;
+	/** The limits the last step ran under -- the actuator's own range within
+	 *  any torque limit (SetMotorTorqueLimit) -- and the actuator's own
+	 *  (authored) range; +-the largest double where there is none. */
+	double LowerNm = 0.0;
+	double UpperNm = 0.0;
+	double RatedLowerNm = 0.0;
+	double RatedUpperNm = 0.0;
+	/** The simulated time the window covered (s), and of it how long the
+	 *  force was at its lower and upper limits (within 0.5%) and at its own
+	 *  rating on the side it pushed. */
+	double Seconds = 0.0;
+	double AtLowerSeconds = 0.0;
+	double AtUpperSeconds = 0.0;
+	double AtRatedSeconds = 0.0;
+	/** The simulation time (s) of the last step recorded; -1 for none. */
+	double LatestTime = -1.0;
+};
+
+/**
  * The physics I/O of a robot's motors, abstracted away from the engine that
  * simulates them. `URammsRobotBaseComponent` owns one of these (Chaos skeletal
  * by default, MuJoCo/URLab supplied by RammsMujocoSupport) and routes every
@@ -135,4 +166,22 @@ public:
 	 *  (SimulatesMotorJoint) says so here, for a drive mode holding the robot
 	 *  still to close the brakes once its own hold has brought it to rest. */
 	virtual bool HasMotorBrake(FName MotorId) const { return false; }
+
+	/**
+	 * What the motor's actuator put out over the last WindowSeconds of
+	 * simulated time (FRammsMotorEffort), averaged on the physics clock: a
+	 * single step's force scatters far wider than what the leg carries. The
+	 * first call on a motor starts recording it and may return false, as may a
+	 * motor with nothing recorded yet. False: this backend cannot say.
+	 */
+	virtual bool GetMotorEffort(FName MotorId, double WindowSeconds, FRammsMotorEffort& Out) const { return false; }
+
+	/**
+	 * Hold a motor's output within [MinTorque, MaxTorque] (its joint's sense,
+	 * N*m; N on a slide), applied every physics step inside the actuator's own
+	 * range -- a drive's per-direction torque limit. MinTorque >= MaxTorque
+	 * clears it; a side at +-the largest float keeps the actuator's own limit
+	 * there. False: this backend cannot limit this motor.
+	 */
+	virtual bool SetMotorTorqueLimit(FName MotorId, float MinTorque, float MaxTorque) { return false; }
 };

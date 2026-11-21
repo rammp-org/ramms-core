@@ -478,6 +478,13 @@ namespace RammsCurb
 		FVector2D HipTurnPerCmX = FVector2D::ZeroVector;
 		FVector2D HipTurnPerCmZ = FVector2D::ZeroVector;
 		FVector2D HipMaxRate = FVector2D::ZeroVector;
+		/** What its motors put out over the last frame (FExecMeasure::bEffort):
+		 *  the load its wheel carries, through its leg (N; bLoad: read), and
+		 *  the most of the frame a motor of it sat at the load cap sent it. */
+		double	  LoadN = 0.0;
+		bool	  bLoad = false;
+		double	  CapBoundShare = 0.0;
+		FVector2D TauMeanNm = FVector2D::ZeroVector;
 	};
 
 	/** The robot, as measured this tick. */
@@ -505,6 +512,9 @@ namespace RammsCurb
 		 *  monitor, the landing check and swing clearance; none: those checks
 		 *  see nothing (and do not act). */
 		TArray<FTerrainProbe> Probes;
+		/** The legs' motors' efforts were read this tick (FExecLeg::LoadN and
+		 *  CapBoundShare mean something). */
+		bool bEffort = false;
 	};
 
 	/** What to command this tick. */
@@ -519,6 +529,11 @@ namespace RammsCurb
 		/** The seat's pivot fore/aft (cm, chassis frame) to hold it at, toward
 		 *  the plan's; meaningful on a robot whose seat shifts. */
 		double SeatX = 0.0;
+		/** The most each leg may press its wheel onto the ground (N; 0: no
+		 *  cap), and the share of the robot's weight it was worked out from
+		 *  (N): FExecutor::SetLoadCaps. */
+		TArray<double> LegLoadCapN;
+		TArray<double> LegLoadShareN;
 	};
 
 	/** One wheel's crossing, live. */
@@ -626,6 +641,21 @@ namespace RammsCurb
 		bool   bHaltHeld = false;
 		double HaltPressCm = 0.0;
 		double HaltHeldAtZ = 0.0;
+
+		/** Its load cap (SetLoadCaps): the share of the weight it carries -- or,
+		 *  landing, will -- with the others as stiff as it (N), the most its leg
+		 *  may press with (N; 0 none), how long its leg has sagged over its
+		 *  command against the cap (s), and that the cap was taken off for it
+		 *  (until it next lifts or lands). Standing off its surface (by
+		 *  Ramms.Curb.LoadCapOffSurfaceCm): left out of the shares. */
+		double LoadShareN = 0.0;
+		double LoadCapN = 0.0;
+		double CapSagFor = 0.0;
+		bool   bCapReleased = false;
+		bool   bOffSurface = false;
+		/** Its walk aft held for its load (Ramms.Curb.LoadCapWalkHold), logged
+		 *  (once a state). */
+		bool bWalkHoldLogged = false;
 	};
 
 	/** Why the speed is what it is, as of the last tick (cm/s; the largest
@@ -693,6 +723,12 @@ namespace RammsCurb
 		int32  TerrainOffPlane = INDEX_NONE;
 		double TerrainOffAheadCm = 0.0;
 		double AttitudeOffDeg = 0.0;
+		/** The load caps (SetLoadCaps): ticks a support leg sat at its cap for a
+		 *  fifth of the frame or more; caps taken off a sagging leg; ticks with
+		 *  no caps, the centre of mass outside the wheels carrying. */
+		int32 LoadCapBoundTicks = 0;
+		int32 LoadCapReleases = 0;
+		int32 LoadCapOffTicks = 0;
 	};
 
 	class FExecutor
@@ -719,6 +755,13 @@ namespace RammsCurb
 		/** The crossing is over (done, faulted or aborted): IsRunning is false
 		 *  until the next Begin. What it counted stays readable. */
 		void End() { bRunning = false; }
+
+		/** Work out each leg's load cap every tick (FExecCommand::LegLoadCapN):
+		 *  how hard it may press its wheel onto the ground, from the share of
+		 *  the weight it carries. Off by default -- dry runs never cap; the
+		 *  controller turns it on for a crossing (Ramms.Curb.LoadCap). Caps
+		 *  change no target. */
+		void SetLoadCaps(bool bOn) { bLoadCaps = bOn; }
 
 		/** One tick: the wheels' states, the legs' commands, the speed. The
 		 *  level state's attitude loop and plane biases are run here. */
@@ -916,6 +959,24 @@ namespace RammsCurb
 		/** The measured margin with Without (bit per leg) off the ground too, and
 		 *  With (bit per leg) on it. */
 		double MarginWithout(const FExecMeasure& Measure, uint32 Without, uint32 With = 0) const;
+		/** The legs as MarginWithout measures them: each wheel's centre and
+		 *  chassis x-z, its surface, and whether it supports -- the supports
+		 *  but those in Without, and those in With (on the far surface once past
+		 *  the edge). */
+		void MeasuredWheels(const FExecMeasure& Measure, uint32 Without, uint32 With, TArray<FVector2D, TInlineAllocator<MaxPlanLegs>>& OutXZ,
+			TArray<FMeasuredWheel, TInlineAllocator<MaxPlanLegs>>& OutWheels) const;
+		/** The share of the weight (N) each wheel carries (MinNormLoadShares) on
+		 *  the supports but those in Without, and those in With; false where the
+		 *  centre of mass is outside them. */
+		bool LoadShares(const FExecMeasure& Measure, uint32 Without, uint32 With, TArray<double, TInlineAllocator<MaxPlanLegs>>& OutShares) const;
+		/** This tick's load caps (SetLoadCaps) into Out. Changes no target. */
+		void UpdateLoadCaps(const FExecMeasure& Measure, FExecCommand& Out, double Dt);
+		/** Last tick's load caps into Out (an early return keeps them in force). */
+		void HoldLoadCaps(FExecCommand& Out) const;
+		/** A centre wheel overloaded, by its motors' efforts
+		 *  (Ramms.Curb.LoadCapWalkHold; false with it off): at its load cap for
+		 *  half the frame, or carrying more than 0.7 of the weight. */
+		bool Overloaded(int32 Leg, const FExecMeasure& Measure) const;
 		/** The measured dynamic margin (cm) on the wheels now carrying the
 		 *  robot with the seat's pivot held at SeatX (its crossing height, the
 		 *  platform's measured pitch); -1e9 with fewer than three. */
@@ -1059,6 +1120,10 @@ namespace RammsCurb
 		FExecDiag		   Diag;
 		TArray<FString>	   Pending;
 		bool			   bRunning = false;
+		/** SetLoadCaps; and the centre of mass outside the wheels carrying was
+		 *  logged (once an episode). */
+		bool			   bLoadCaps = false;
+		bool			   bLoadCapsOffLogged = false;
 		EExecPhase		   Phase = EExecPhase::Approach;
 		FString			   Status;
 		double			   Elapsed = 0.0;
@@ -1252,6 +1317,13 @@ namespace RammsCurb
 		 *  load -- or, where its touchdown is enough (TouchSufficesMask), had
 		 *  touched down (FExecutor::IsDownFor). */
 		int32 EarlyLifts = 0;
+		/** With the load caps on (FExecDryRunOptions::bLoadCaps): ticks some leg
+		 *  had one; ticks a wheel's cap broke its rule (a wheel in the air capped;
+		 *  a carrying or landing one, the shares solved, under the floor); the
+		 *  most the carrying wheels' shares summed off the weight (N). */
+		int32  LoadCapTicks = 0;
+		int32  LoadCapRuleBreaks = 0;
+		double MaxShareSumErrN = 0.0;
 		/** Paused by the stick (FExecDryRunOptions::PauseAtTravelCm): lifts and
 		 *  level-ins begun meanwhile, how far (cm) the robot went on from where it
 		 *  was let go, and how long (s) it then stood at rest (under 0.5 cm/s). */
@@ -1425,6 +1497,9 @@ namespace RammsCurb
 		 *  begun to cross by then. */
 		bool   bReplan = true;
 		double ReplanDelaySeconds = 0.0;
+		/** The executor works out the load caps (FExecutor::SetLoadCaps); the
+		 *  kinematic robot takes no notice of them. */
+		bool bLoadCaps = false;
 	};
 
 	/**

@@ -123,6 +123,12 @@ namespace
 		return FMath::Max(0.0, static_cast<double>(CVarCurbLandingApproach.GetValueOnAnyThread()));
 	}
 
+	TAutoConsoleVariable<float> CVarCurbTouchdownBand(TEXT("Ramms.Curb.TouchdownBandCm"), 0.0f,
+		TEXT("A wheel being set down comes through this band (cm) over the ground at TouchdownSpeed itself, rather than closing on "
+			 "the ground faster until it is there (0, the default): the leg's height is a frame old when its command goes out, so a "
+			 "command closing at speed when the wheel meets the ground presses it in at once. The planner times the landings with it."),
+		ECVF_Default);
+
 	TAutoConsoleVariable<float> CVarCurbPlantedWalkShare(TEXT("Ramms.Curb.PlantedWalkFloorShare"), 0.85f,
 		TEXT("Of the level plans whose floor is at least this share of the fastest one's, the one whose centre wheels walk least on the "
 			 "ground is kept (walking them while they are lifted instead: a planted wheel walking fore/aft rolls at another speed than "
@@ -593,6 +599,11 @@ namespace
 
 namespace RammsCurb
 {
+	double TouchdownBandCm()
+	{
+		return FMath::Max(0.0, static_cast<double>(CVarCurbTouchdownBand.GetValueOnAnyThread()));
+	}
+
 	// --- small pure helpers ------------------------------------------------------------
 
 	/** The seat's fore/aft is chosen every this many cm across its reach, and a

@@ -624,6 +624,35 @@ struct RAMMSCORE_API FRammsCurbWheelStatus
 	/** The wheel bottom is on (or pressed into) the surface under it. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
 	bool bContact = false;
+
+	/** The per-wheel gait's load sharing (Ramms.Curb.LoadCap): the share of
+	 *  the robot's weight this wheel carries -- landing, will carry -- with
+	 *  the others' legs as stiff as its own (N), and the most its leg may
+	 *  press it onto the ground with (N; 0: no cap). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float LoadShareN = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float LoadCapN = 0.0f;
+
+	/** What its leg's motors put out over the last frame (N*m, the robot's
+	 *  sense; X a 4-bar's crank or a 5-bar's hip A, Y hip B): the mean and
+	 *  the peak. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	FVector2D LegTorqueNm = FVector2D::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	FVector2D LegTorquePeakNm = FVector2D::ZeroVector;
+
+	/** The most of the last frame a motor of its leg sat at its load cap (0..1). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float CapBoundShare = 0.0f;
+
+	/** The load its wheel carries, from its motors' efforts through its leg
+	 *  (N; the leg's own weight below its motors not counted; 0 where it
+	 *  cannot be read). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Curb")
+	float LoadEstimateN = 0.0f;
 };
 
 /**

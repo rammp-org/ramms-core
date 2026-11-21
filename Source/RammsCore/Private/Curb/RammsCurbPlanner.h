@@ -148,9 +148,19 @@ namespace RammsCurb
 	/** The least servo lag (s) a touchdown's approach is shaped by. */
 	constexpr double MinTouchdownLagSeconds = 0.02;
 
+	/** The band (cm) over the ground a wheel being set down comes through at
+	 *  TouchdownSpeed itself (Ramms.Curb.TouchdownBandCm; 0 by default): the
+	 *  leg's measured height is a frame old by the time its command goes out
+	 *  and the command runs a servo lag ahead of the wheel, so a command still
+	 *  closing on the ground at speed when the wheel meets it presses it in
+	 *  by that much at once -- one leg then carries the robot until the
+	 *  touchdown is seen. */
+	double TouchdownBandCm();
+
 	/** How fast a wheel being set down may be sent down with its command
-	 *  HeightCm over where it meets the ground (cm/s): TouchdownSpeed plus
-	 *  that height over a servo lag, so it slows over its last few
+	 *  HeightCm over where it meets the ground (cm/s): TouchdownSpeed within
+	 *  TouchdownBandCm of it, and above the band TouchdownSpeed plus the height
+	 *  over the band over a servo lag, so it slows over its last few
 	 *  centimetres; no limit with TouchdownSpeed 0. The executor's landings
 	 *  and the planner's timing of them both use it. */
 	inline double TouchdownSpeedCap(double HeightCm, const FRammsCurbTuning& T)
@@ -159,7 +169,8 @@ namespace RammsCurb
 		{
 			return TNumericLimits<double>::Max();
 		}
-		return T.TouchdownSpeed + FMath::Max(0.0, HeightCm) / FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
+		return T.TouchdownSpeed
+			+ FMath::Max(0.0, HeightCm - TouchdownBandCm()) / FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
 	}
 
 	/** The hard braking caps' deceleration (cm/s^2): BrakingDeceleration, else
@@ -189,13 +200,16 @@ namespace RammsCurb
 		{
 			return DownCm / Speed;
 		}
-		// Within Zone of the ground the cap is under Speed; there the command
-		// closes on the ground exponentially, at TouchdownSpeed at the last.
+		// Within Zone of the touchdown band the cap is under Speed; there the
+		// command closes on the band exponentially, and through the band at
+		// TouchdownSpeed itself.
 		const double Tau = FMath::Max(MinTouchdownLagSeconds, static_cast<double>(T.ServoLagSeconds));
 		const double Vt = T.TouchdownSpeed;
+		const double Band = FMath::Min(TouchdownBandCm(), DownCm);
+		const double Over = DownCm - Band;
 		const double Zone = (Speed - Vt) * Tau;
-		const double Above = FMath::Max(0.0, DownCm - Zone);
-		return Above / Speed + Tau * FMath::Loge((Vt + FMath::Min(DownCm, Zone) / Tau) / Vt);
+		const double Above = FMath::Max(0.0, Over - Zone);
+		return Above / Speed + Tau * FMath::Loge((Vt + FMath::Min(Over, Zone) / Tau) / Vt) + Band / Vt;
 	}
 
 	/** What the planner knows of one leg beyond the robot model. */

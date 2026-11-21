@@ -8,6 +8,7 @@
 #include "RammsChaosActuationBackend.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
+#include "UObject/UObjectIterator.h"
 
 namespace
 {
@@ -70,6 +71,7 @@ void URammsRobotBaseComponent::BeginPlay()
 
 void URammsRobotBaseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	ClearAllMotorTorqueLimits();
 	delete Backend_;
 	Backend_ = nullptr;
 	bBackendResolved = false;
@@ -677,6 +679,74 @@ bool URammsRobotBaseComponent::HasMotorBrake(FName MotorId) const
 	return Backend_ && Backend_->HasMotorBrake(MotorId);
 }
 
+bool URammsRobotBaseComponent::SetMotorTorqueLimit(FName MotorId, float MinNm, float MaxNm)
+{
+	EnsureBackend();
+	if (!Backend_ || MotorId.IsNone())
+	{
+		return false;
+	}
+	if (!(MinNm < MaxNm))
+	{
+		ClearMotorTorqueLimit(MotorId);
+		return true;
+	}
+	// The robot's sense to the joint's: a reversed motor's range is mirrored.
+	const bool	Reversed = DirectionOf(MotorId) < 0.0f;
+	const float Lo = Reversed ? -MaxNm : MinNm;
+	const float Hi = Reversed ? -MinNm : MaxNm;
+	if (!Backend_->SetMotorTorqueLimit(MotorId, Lo, Hi))
+	{
+		return false;
+	}
+	TorqueLimited.Add(MotorId);
+	return true;
+}
+
+void URammsRobotBaseComponent::ClearMotorTorqueLimit(FName MotorId)
+{
+	if (TorqueLimited.Remove(MotorId) > 0 && Backend_)
+	{
+		Backend_->SetMotorTorqueLimit(MotorId, 0.0f, 0.0f);
+	}
+}
+
+void URammsRobotBaseComponent::ClearAllMotorTorqueLimits()
+{
+	if (Backend_)
+	{
+		for (const FName& MotorId : TorqueLimited)
+		{
+			Backend_->SetMotorTorqueLimit(MotorId, 0.0f, 0.0f);
+		}
+	}
+	TorqueLimited.Reset();
+}
+
+bool URammsRobotBaseComponent::GetMotorEffort(FName MotorId, double WindowSeconds, FRammsMotorEffort& Out) const
+{
+	EnsureBackend();
+	if (!Backend_ || MotorId.IsNone() || !Backend_->GetMotorEffort(MotorId, WindowSeconds, Out))
+	{
+		return false;
+	}
+	if (DirectionOf(MotorId) < 0.0f)
+	{
+		// The joint's sense to the robot's: the forces negated, the limits
+		// mirrored (lower and upper trade places).
+		Out.MeanNm = -Out.MeanNm;
+		Out.PeakNm = -Out.PeakNm;
+		Out.LastNm = -Out.LastNm;
+		const double Lower = Out.LowerNm, RatedLower = Out.RatedLowerNm;
+		Out.LowerNm = -Out.UpperNm;
+		Out.UpperNm = -Lower;
+		Out.RatedLowerNm = -Out.RatedUpperNm;
+		Out.RatedUpperNm = -RatedLower;
+		Swap(Out.AtLowerSeconds, Out.AtUpperSeconds);
+	}
+	return true;
+}
+
 bool URammsRobotBaseComponent::GetMotorTransform(FName MotorId, FTransform& OutWorld) const
 {
 	EnsureBackend();
@@ -692,3 +762,88 @@ float URammsRobotBaseComponent::GetMotorSeparation(FName MotorIdA, FName MotorId
 	}
 	return -1.0f;
 }
+
+namespace
+{
+	/** Every robot base playing in World (dev console commands). */
+	template <typename FnType>
+	int32 ForEachRobotBase(UWorld* World, FnType&& Fn)
+	{
+		int32 Count = 0;
+		for (TObjectIterator<URammsRobotBaseComponent> It; It; ++It)
+		{
+			URammsRobotBaseComponent* Base = *It;
+			if (IsValid(Base) && Base->GetWorld() == World && Base->HasBegunPlay())
+			{
+				Fn(*Base);
+				++Count;
+			}
+		}
+		return Count;
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs CmdMotorTorqueLimit(TEXT("Ramms.Motor.TorqueLimit"),
+		TEXT("Ramms.Motor.TorqueLimit <Motor> <MinNm> <MaxNm> | <Motor> clear: a motor's torque limit in the robot's sense "
+			 "(a drive's per-direction limit, within its own rating), on every robot in this world that has it. A side "
+			 "given as inf keeps the motor's own limit there. Dev bench only: the curb controller sets and clears its own."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) {
+			if (Args.Num() < 2)
+			{
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit <Motor> <MinNm> <MaxNm> | <Motor> clear"));
+				return;
+			}
+			const FName Motor(*Args[0]);
+			const bool	bClear = Args[1].Equals(TEXT("clear"), ESearchCase::IgnoreCase);
+			if (!bClear && Args.Num() < 3)
+			{
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit <Motor> <MinNm> <MaxNm> | <Motor> clear"));
+				return;
+			}
+			const auto Parse = [](const FString& S, float Inf) {
+				return S.Equals(TEXT("inf"), ESearchCase::IgnoreCase) || S.Equals(TEXT("+inf"), ESearchCase::IgnoreCase)
+					? Inf
+					: S.Equals(TEXT("-inf"), ESearchCase::IgnoreCase) ? -Inf
+																	  : FCString::Atof(*S);
+			};
+			const float Max = TNumericLimits<float>::Max();
+			const float Lo = bClear ? 0.0f : Parse(Args[1], -Max);
+			const float Hi = bClear ? 0.0f : Parse(Args[2], Max);
+			const int32 N = ForEachRobotBase(World, [&](URammsRobotBaseComponent& Base) {
+				const bool bOk = bClear ? (Base.ClearMotorTorqueLimit(Motor), true) : Base.SetMotorTorqueLimit(Motor, Lo, Hi);
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit: %s '%s' %s"), *GetNameSafe(Base.GetOwner()), *Motor.ToString(),
+					bClear ? TEXT("cleared") : bOk ? *FString::Printf(TEXT("limited to [%.1f, %.1f] N*m"), Lo, Hi)
+												   : TEXT("not limited (unsupported)"));
+			});
+			if (N == 0)
+			{
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit: no robot playing in this world"));
+			}
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdMotorEffort(TEXT("Ramms.Motor.Effort"),
+		TEXT("Ramms.Motor.Effort <Motor> [WindowSeconds=0.1]: what a motor put out over the last window of simulated time "
+			 "(mean, peak, last; its limits; time at them), in the robot's sense. The first call on a motor starts recording it."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) {
+			if (Args.Num() < 1)
+			{
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.Effort <Motor> [WindowSeconds=0.1]"));
+				return;
+			}
+			const FName	 Motor(*Args[0]);
+			const double Window = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 0.1;
+			ForEachRobotBase(World, [&](URammsRobotBaseComponent& Base) {
+				FRammsMotorEffort E;
+				if (!Base.GetMotorEffort(Motor, Window, E))
+				{
+					UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.Effort: %s '%s' no readings (yet, or unsupported)"), *GetNameSafe(Base.GetOwner()),
+						*Motor.ToString());
+					return;
+				}
+				UE_LOG(LogTemp, Display,
+					TEXT("Ramms.Motor.Effort: %s '%s' over %.3f s: mean %.1f, peak %.1f, last %.1f N*m; limits [%.1f, %.1f] (rated [%.1f, %.1f]); "
+						 "%.3f s at lower, %.3f s at upper, %.3f s at rated; t %.3f"),
+					*GetNameSafe(Base.GetOwner()), *Motor.ToString(), E.Seconds, E.MeanNm, E.PeakNm, E.LastNm, E.LowerNm, E.UpperNm,
+					E.RatedLowerNm, E.RatedUpperNm, E.AtLowerSeconds, E.AtUpperSeconds, E.AtRatedSeconds, E.LatestTime);
+			});
+		}));
+} // namespace

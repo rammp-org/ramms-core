@@ -10,6 +10,7 @@
 class USkeletalMeshComponent;
 
 class IRammsActuationBackend;
+struct FRammsMotorEffort;
 
 /**
  * Which physics engine simulates this robot's motors.
@@ -212,6 +213,23 @@ public:
 	 *  (IRammsActuationBackend::HasMotorBrake); false without a backend. */
 	bool HasMotorBrake(FName MotorId) const;
 
+	/** Hold a motor's output within [MinNm, MaxNm], in the robot's sense (its
+	 *  registry Direction applied; IRammsActuationBackend::SetMotorTorqueLimit):
+	 *  a side at +-the largest float keeps the actuator's own limit there,
+	 *  MinNm >= MaxNm clears it. False when the backend cannot. */
+	bool SetMotorTorqueLimit(FName MotorId, float MinNm, float MaxNm);
+
+	/** Clear one motor's torque limit, or every one this base set (EndPlay
+	 *  clears them all). */
+	void ClearMotorTorqueLimit(FName MotorId);
+	void ClearAllMotorTorqueLimits();
+
+	/** What the motor's actuator put out over the last WindowSeconds of
+	 *  simulated time, in the robot's sense (IRammsActuationBackend::
+	 *  GetMotorEffort; the first call starts recording it). False without
+	 *  a reading. */
+	bool GetMotorEffort(FName MotorId, double WindowSeconds, FRammsMotorEffort& Out) const;
+
 	/** True if the registry contains a motor with this Id. */
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool HasMotor(FName MotorId) const;
@@ -298,6 +316,9 @@ private:
 	 *  Mutable so const accessors can resolve lazily. */
 	mutable IRammsActuationBackend* Backend_ = nullptr;
 	mutable bool					bBackendResolved = false;
+
+	/** The motors SetMotorTorqueLimit limited (ClearAllMotorTorqueLimits). */
+	TSet<FName> TorqueLimited;
 
 	/** Ids commanded without a registry row (warned once each). */
 	mutable TSet<FName> WarnedUnregistered;

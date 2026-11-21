@@ -39,6 +39,7 @@ namespace RammsCurb
 	class FExecutor;
 	class FAssistWatch;
 	struct FExecMeasure;
+	struct FExecCommand;
 	struct FDebugViewState;
 	struct FDebugPainter;
 } // namespace RammsCurb
@@ -810,6 +811,58 @@ private:
 		float	  LagZ = 0.0f;
 		FVector2D LagRate = FVector2D::ZeroVector;
 		bool	  bHasWorld = false;
+
+		/** The motors that carry the wheel: a 4-bar's crank (one), a 5-bar's
+		 *  hips A and B (two). */
+		FName LoadMotors[2];
+		int32 NumLoadMotors = 0;
+		/** A 4-bar's crank as last read (rad, the motor's sense), and that it
+		 *  read past an end of its range (pressed against its stop, which then
+		 *  carries some of the load). */
+		float CrankAngle = 0.0f;
+		bool  bCrankClamped = false;
+		/** The leg's Jacobian at its measured pose (ReadLegEfforts): how far
+		 *  its wheel moves (cm, chassis x and z) per radian of each load motor
+		 *  (A, B; a 4-bar's in X only); a 5-bar's hips per cm of fore/aft and
+		 *  of height (rad/cm, A and B), the inverse. */
+		bool	  bJacobian = false;
+		FVector2D JxCmPerRad = FVector2D::ZeroVector;
+		FVector2D JzCmPerRad = FVector2D::ZeroVector;
+		FVector2D TurnPerCmX = FVector2D::ZeroVector;
+		FVector2D TurnPerCmZ = FVector2D::ZeroVector;
+		/** What its load motors put out over the last frame (N*m, the robot's
+		 *  sense; A, B): the mean and the peak; the most of the frame either sat
+		 *  at the load cap sent it; the load its wheel carries, from the mean
+		 *  through the Jacobian (N; the leg's own weight below its motors not
+		 *  counted), and that it could be read. */
+		FVector2D TauMeanNm = FVector2D::ZeroVector;
+		FVector2D TauPeakNm = FVector2D::ZeroVector;
+		float	  CapBoundShare = 0.0f;
+		float	  LoadN = 0.0f;
+		bool	  bLoad = false;
+		/** Each load motor's press-side torque cap (ApplyLoadCaps; N*m, signed:
+		 *  + bounds its push from above, - from below, 0 none) as worked out
+		 *  this tick, and as last sent to it. */
+		FVector2D TorqueCapNm = FVector2D::ZeroVector;
+		FVector2D SentCapNm = FVector2D::ZeroVector;
+	};
+
+	/** One motor's effort over a crossing, for the Finish line "motors:"
+	 *  (what the motors actually needed). */
+	struct FMotorEffortStats
+	{
+		FName	Motor;
+		FString Role;
+		/** The line it is reported on: its leg's index; -1 the seat, -2 the
+		 *  wheels. */
+		int32 Group = 0;
+		/** Its own rating (N*m; the larger end), as its readings report it. */
+		double		  RatedNm = 0.0;
+		double		  PeakAbsNm = 0.0;
+		TArray<float> FrameMeanAbs;
+		double		  RatedSeconds = 0.0;
+		double		  CapSeconds = 0.0;
+		double		  Seconds = 0.0;
 	};
 
 	URammsRobotBaseComponent* EnsureBase() const;
@@ -846,6 +899,45 @@ private:
 	 *  and of height. False for any other leg, or where the hips are
 	 *  unbounded, the pose unreachable, or no probe about it reaches. */
 	bool FiveBarHipTurns(const FLegState& State, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const;
+	/** FiveBarHipTurns' probes at any pose At (chassis x-z, cm), ungated. */
+	bool FiveBarTurnsAt(const FLegState& State, const FVector2D& At, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const;
+
+	// --- what the legs' motors put out, and their load caps ----------------------
+
+	/** Every motor the crossing's report covers (the legs', the seat's, the
+	 *  wheels'), each read once so its backend starts recording it. */
+	void PrimeMotorEfforts();
+	/** This tick's readings of the legs' motors (FLegState::TauMeanNm and
+	 *  on), over the frame just gone (DeltaTime), and the crossing's stats. */
+	void ReadLegEfforts(float DeltaTime);
+	/** The executor's load caps (FExecCommand::LegLoadCapN) as each load
+	 *  motor's press-side torque cap (Ramms.Curb.LoadCap: 1 sent to the
+	 *  motors, 2 worked out and counted only). */
+	void ApplyLoadCaps(const RammsCurb::FExecCommand& Cmd);
+	/** Every load cap sent taken off. */
+	void ClearLoadCaps();
+	/** The executor ended, and its load caps taken off with it. */
+	void EndExecutor();
+	/** The crossing's "motors:", "load caps:" and "physics readings:" lines. */
+	void LogMotorEfforts();
+
+	TArray<FMotorEffortStats> EffortStats;
+	/** Some leg's efforts were read this tick (RammsCurb::FExecMeasure::bEffort). */
+	bool bLegEffortsRead = false;
+	/** How far behind the physics the measurements were (ms; per tick). */
+	TArray<float> SnapshotAgeMs;
+	/** This backend cannot take the load caps (refused once this crossing). */
+	bool bLoadCapsRefused = false;
+	/** Ticks the shadow caps would have bound (a load motor's frame peak past
+	 *  its cap), ticks the caps were sent, and how many times one was sent. */
+	int32 LoadCapWouldBindTicks = 0;
+	int32 LoadCapTicks = 0;
+	int32 LoadCapSends = 0;
+	/** The most one wheel carried (share of the weight, estimated) this
+	 *  crossing: which, and when (s). */
+	float MaxLoadShareOfW = 0.0f;
+	int32 MaxLoadLeg = INDEX_NONE;
+	float MaxLoadAt = 0.0f;
 
 	/** The frames' interval and jitter, smoothed as the follower smooths its
 	 *  commands': how often position commands go out, and how evenly. */
