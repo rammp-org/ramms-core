@@ -34,7 +34,7 @@ namespace
 		return Spec;
 	}
 
-	double SumOf(const TArray<double>& V)
+	double LoadShareSum(const TArray<double>& V)
 	{
 		double S = 0.0;
 		for (const double X : V)
@@ -46,7 +46,7 @@ namespace
 
 	/** The shares' moment about the origin over the weight: where they put
 	 *  the centre of mass. */
-	FVector2D CentreOf(TConstArrayView<FVector2D> P, const TArray<double>& F)
+	FVector2D LoadShareCentre(TConstArrayView<FVector2D> P, const TArray<double>& F)
 	{
 		FVector2D M = FVector2D::ZeroVector;
 		double	  W = 0.0;
@@ -167,8 +167,8 @@ bool FRammsCurbLoadShareShares::RunTest(const FString& Parameters)
 		const TArray<FVector2D> P = { { 40, 0 }, { -20, -30 }, { -20, 30 } };
 		const FVector2D			Com(5, 4);
 		TestTrue(TEXT("three: solved"), RammsCurb::MinNormLoadShares(P, Com, W, F));
-		TestNearlyEqual(TEXT("three: the weight"), SumOf(F), W, 1e-6);
-		const FVector2D At = CentreOf(P, F);
+		TestNearlyEqual(TEXT("three: the weight"), LoadShareSum(F), W, 1e-6);
+		const FVector2D At = LoadShareCentre(P, F);
 		TestNearlyEqual(TEXT("three: centre x"), At.X, Com.X, 1e-6);
 		TestNearlyEqual(TEXT("three: centre y"), At.Y, Com.Y, 1e-6);
 	}
@@ -184,8 +184,8 @@ bool FRammsCurbLoadShareShares::RunTest(const FString& Parameters)
 			bNegative = bNegative || X < 0.0;
 		}
 		TestFalse(TEXT("edge: no negative share"), bNegative);
-		TestNearlyEqual(TEXT("edge: the weight"), SumOf(F), W, 1e-6);
-		const FVector2D At = CentreOf(P, F);
+		TestNearlyEqual(TEXT("edge: the weight"), LoadShareSum(F), W, 1e-6);
+		const FVector2D At = LoadShareCentre(P, F);
 		TestNearlyEqual(TEXT("edge: centre x"), At.X, Com.X, 1e-6);
 		TestNearlyEqual(TEXT("edge: centre y"), At.Y, Com.Y, 1e-6);
 	}
@@ -193,8 +193,8 @@ bool FRammsCurbLoadShareShares::RunTest(const FString& Parameters)
 	{
 		const TArray<FVector2D> P = { { -30, 0 }, { 0, 0 }, { 30, 0 } };
 		TestTrue(TEXT("line: solved"), RammsCurb::MinNormLoadShares(P, FVector2D(10, 0), W, F));
-		TestNearlyEqual(TEXT("line: the weight"), SumOf(F), W, 1e-6);
-		TestNearlyEqual(TEXT("line: centre"), CentreOf(P, F).X, 10.0, 1e-6);
+		TestNearlyEqual(TEXT("line: the weight"), LoadShareSum(F), W, 1e-6);
+		TestNearlyEqual(TEXT("line: centre"), LoadShareCentre(P, F).X, 10.0, 1e-6);
 		TestFalse(TEXT("line: the centre of mass off it"), RammsCurb::MinNormLoadShares(P, FVector2D(0, 5), W, F));
 	}
 	// The centre of mass outside the contacts: none carry it.
