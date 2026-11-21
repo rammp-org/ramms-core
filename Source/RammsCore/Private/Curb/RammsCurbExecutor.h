@@ -234,6 +234,9 @@ namespace RammsCurb
 	/** The most (cm) an action is begun ahead of the plan's position for the
 	 *  tick it falls in (FExecutor::TickLeadCm). */
 	constexpr double MaxTickLeadCm = 3.0;
+	/** The share of a 5-bar's hip motors' speed its commands may ask of them
+	 *  (FExecLeg::HipMaxRate): the rest is the model's slack. */
+	constexpr double HipRateShare = 0.9;
 	/** Over how long (s) the attitude the level-in's ramp is sized from is
 	 *  taken (FExecutor::RampAttitudeDeg): a braking pitch of a moment is not
 	 *  the base's tilt. */
@@ -466,6 +469,14 @@ namespace RammsCurb
 		double LagX = 0.0;
 		bool   bLagX = false;
 		bool   bValid = false;
+		/** A 5-bar's hips at its commanded pose: how far each turns (rad, A and
+		 *  B) per cm of the wheel's fore/aft and per cm of its height there, and
+		 *  each motor's MaxVelocity (rad/s; 0 where unbounded, or for any other
+		 *  leg). The walk takes what speed the height's own move leaves them
+		 *  (FExecutor's centre walk). */
+		FVector2D HipTurnPerCmX = FVector2D::ZeroVector;
+		FVector2D HipTurnPerCmZ = FVector2D::ZeroVector;
+		FVector2D HipMaxRate = FVector2D::ZeroVector;
 	};
 
 	/** The robot, as measured this tick. */
@@ -572,6 +583,9 @@ namespace RammsCurb
 		 *  lands it trails its own command, not the plan's). */
 		bool bReachWalk = false;
 		bool bReachWalked = false;
+		/** A centre wheel's fore/aft target this tick, before its walk's per-tick
+		 *  caps (cm; the run log's "to"). */
+		double WalkTo = 0.0;
 
 		/** Its leg's measured height last tick, and its rate (cm/s, filtered). */
 		double MeasZ = 0.0;
@@ -1051,9 +1065,20 @@ namespace RammsCurb
 		 *  RammsMotion::MaxInterpolationGapSeconds; 0 before the first). */
 		double TickDt = 0.0;
 		/** How long (s) a leg's servos take to start a move sent them: the
-		 *  motors' profiles' delay behind their commands (Ramms.Motor.
-		 *  FollowDelayIntervals at TickDt) and two servo lags to get going. */
+		 *  motors' profiles' delay behind their commands (FollowDelaySeconds)
+		 *  and two of the servos' own lags to get going (the tuning's less the
+		 *  command delay the controller put into it, FPlannerInput::
+		 *  CommandDelaySeconds). */
 		double LegStartSeconds() const;
+		/** The fastest fore/aft walk (cm/s) leg L's hips allow with its height
+		 *  moving at HeightRateCmS: each hip's HipRateShare of its MaxVelocity,
+		 *  less what the height turns it, over what a cm of walk does; the
+		 *  largest double where nothing bounds it. */
+		static double HipWalkCmS(const FExecLeg& L, double HeightRateCmS);
+		/** The motors' profiles' delay behind their commands (s):
+		 *  Ramms.Motor.FollowDelayIntervals at TickDt, at most
+		 *  RammsMotion::MaxInterpolationGapSeconds. */
+		double FollowDelaySeconds() const;
 		/** How far (cm) the robot goes in a tick (TickDt at the speed it has,
 		 *  at most MaxTickLeadCm): an action due on the plan's position is begun
 		 *  on the last tick short of it rather than the first past it. */

@@ -775,6 +775,8 @@ private:
 		float WheelBottom = 0.0f;
 		/** The height the leg's command ramps towards this tick. */
 		float GoalZ = 0.0f;
+		/** A 5-bar's hip motors' MaxVelocity (rad/s; A, B; 0 where unbounded). */
+		FVector2D HipMaxRate = FVector2D::ZeroVector;
 		/** The surface the wheel follows: the far one (or, lifted, headed
 		 *  for it); else the near one. */
 		bool bOnFar = false;
@@ -826,6 +828,26 @@ private:
 
 	/** PlanPerWheel's checks and the planner's input, without planning. */
 	bool PreparePerWheel(const FRammsCurbProfile& Profile, RammsCurb::FPlannerInput& OutInput, FString& OutReason);
+
+	/** How far (s) behind the frame it is sent in a position command reaches
+	 *  its servo: the robot base's physics-rate follower runs
+	 *  Ramms.Motor.FollowDelayIntervals command intervals behind its commands
+	 *  (RammsMotion::FFollower), at CommandIntervalSeconds; without it
+	 *  (Ramms.Motor.PhysicsRateProfiles 0) one step a frame, half a frame late. */
+	float CommandDelaySeconds() const;
+
+	/** The legs' lag behind their commands (s): Tuning.ServoLagSeconds, the
+	 *  servos' own, and CommandDelaySeconds on top. */
+	float EffectiveServoLagSeconds() const;
+
+	/** A 5-bar's hips at its commanded pose (RammsCurb::FExecLeg::
+	 *  HipTurnPerCmX / HipTurnPerCmZ): how far each turns per cm of fore/aft
+	 *  and of height. False for any other leg, or where the hips are
+	 *  unbounded, the pose unreachable, or no probe about it reaches. */
+	bool FiveBarHipTurns(const FLegState& State, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const;
+
+	/** The frame interval (s), smoothed: how often position commands go out. */
+	float CommandIntervalSeconds = 0.0f;
 
 	/** A per-wheel re-plan: the same input, planned off the game thread
 	 *  (RammsCurb::FPlanTask), the schedule swapped in by PollReplan when it is

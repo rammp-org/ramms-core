@@ -30,10 +30,27 @@
 #include "RammsControlIds.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsHolonomicDriveController.h"
+#include "RammsMotionProfile.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogRammsCurb, Log, All);
+
+// A diagnostic switch, for comparing runs with and without the command delay in
+// the legs' lag.
+static TAutoConsoleVariable<int32> CVarRammsCurbCommandDelayLag(TEXT("Ramms.Curb.CommandDelayLag"), 1,
+	TEXT("Curb crossing: the legs' lag the plans and their runs take is Tuning.ServoLagSeconds and the robot base's command "
+		 "delay at the controller's frame rate on top (1, the default; CommandDelaySeconds), or ServoLagSeconds alone (0)."),
+	ECVF_Default);
+
+// A diagnostic switch, for comparing runs with and without the hips' bound on
+// the centre walks.
+static TAutoConsoleVariable<int32> CVarRammsCurbHipRateWalk(TEXT("Ramms.Curb.HipRateWalk"), 1,
+	TEXT("Curb crossing (per-wheel gait): a centre 5-bar walks fore/aft no faster than its hips' motors turn at their MaxVelocity "
+		 "(RammsCurb::HipRateShare of it) with what its height's own move leaves them (1, the default), or at its walk's own caps "
+		 "alone (0). Walked past it, the faster hip falls behind the other, the leg bends off its pose and the wheel pushes the "
+		 "chassis up."),
+	ECVF_Default);
 
 // A diagnostic switch, for comparing runs with and without the carrier term.
 static TAutoConsoleVariable<int32> CVarRammsCurbCarrierSpin(
@@ -735,6 +752,24 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 			}
 			bool bValid = false;
 			State.HeightRange = State.FiveBar->GetReachableExtent(true, bValid);
+			// Its hips' speed (the base's motor specs), for the walks
+			// (FExecLeg::HipMaxRate): the spec the 5-bar resolves, its table's row
+			// over its inline one.
+			State.HipMaxRate = FVector2D::ZeroVector;
+			const FRamms5BarLinkageSpec* Spec = &State.FiveBar->Linkage;
+			if (State.FiveBar->KinematicTable && !State.FiveBar->LinkageRow.IsNone())
+			{
+				if (const FRamms5BarLinkageSpec* Row = State.FiveBar->KinematicTable->FindRow<FRamms5BarLinkageSpec>(State.FiveBar->LinkageRow, TEXT("curb hips")))
+				{
+					Spec = Row;
+				}
+			}
+			FRammsMotorSpec Motor;
+			if (const URammsRobotBaseComponent* Base = EnsureBase())
+			{
+				State.HipMaxRate.X = Base->GetMotorSpec(Spec->ProximalMotorA, Motor) ? FMath::Max(0.0f, Motor.MaxVelocity) : 0.0f;
+				State.HipMaxRate.Y = Base->GetMotorSpec(Spec->ProximalMotorB, Motor) ? FMath::Max(0.0f, Motor.MaxVelocity) : 0.0f;
+			}
 		}
 	}
 	for (int32 Axle = 0; Axle < 3; ++Axle)
@@ -1997,6 +2032,67 @@ void URammsCurbNegotiationController::AdoptSchedule()
 	bPlannedMargin = Schedule->IsValid();
 }
 
+float URammsCurbNegotiationController::CommandDelaySeconds() const
+{
+	if (CVarRammsCurbCommandDelayLag.GetValueOnGameThread() == 0)
+	{
+		return 0.0f;
+	}
+	static IConsoleVariable* const Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
+	static IConsoleVariable* const Follow = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.FollowDelayIntervals"));
+	if (Profiles && Profiles->GetInt() == 0)
+	{
+		return 0.5f * CommandIntervalSeconds;
+	}
+	const float Intervals = Follow ? FMath::Max(0.0f, Follow->GetFloat()) : static_cast<float>(RammsMotion::FollowDelayIntervals);
+	return FMath::Min(Intervals * CommandIntervalSeconds, static_cast<float>(RammsMotion::MaxInterpolationGapSeconds));
+}
+
+float URammsCurbNegotiationController::EffectiveServoLagSeconds() const
+{
+	return Tuning.ServoLagSeconds + CommandDelaySeconds();
+}
+
+bool URammsCurbNegotiationController::FiveBarHipTurns(const FLegState& State, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const
+{
+	OutPerCmX = OutPerCmZ = FVector2D::ZeroVector;
+	if (!State.FiveBar || CVarRammsCurbHipRateWalk.GetValueOnGameThread() == 0 || (State.HipMaxRate.X <= 0.0f && State.HipMaxRate.Y <= 0.0f))
+	{
+		return false;
+	}
+	const FVector2D At(State.CmdX, State.CmdZ);
+	bool			bHere = false;
+	const FVector2D Here = State.FiveBar->SolveTarget(At, bHere);
+	if (!bHere)
+	{
+		return false;
+	}
+	// How far each hip turns per cm along Axis at the commanded pose: a probe
+	// either side, the step halved where one side leaves the reach (near the
+	// top of its travel a 5-bar's fore/aft band narrows to well under 2 cm),
+	// one side alone at the edge.
+	auto Turns = [&](const FVector2D& Axis, FVector2D& Out) {
+		for (double HalfStepCm = 1.0; HalfStepCm >= 0.25 - 1e-9; HalfStepCm *= 0.5)
+		{
+			bool			bBack = false, bOn = false;
+			const FVector2D Back = State.FiveBar->SolveTarget(At - Axis * HalfStepCm, bBack);
+			const FVector2D On = State.FiveBar->SolveTarget(At + Axis * HalfStepCm, bOn);
+			if (bBack && bOn)
+			{
+				Out = (On - Back) / (2.0 * HalfStepCm);
+				return true;
+			}
+			if (HalfStepCm < 0.5 && (bBack || bOn))
+			{
+				Out = bOn ? (On - Here) / HalfStepCm : (Here - Back) / HalfStepCm;
+				return true;
+			}
+		}
+		return false;
+	};
+	return Turns(FVector2D(1.0, 0.0), OutPerCmX) && Turns(FVector2D(0.0, 1.0), OutPerCmZ);
+}
+
 bool URammsCurbNegotiationController::PreparePerWheel(const FRammsCurbProfile& Profile, RammsCurb::FPlannerInput& In, FString& OutReason)
 {
 	const bool	bTerrain = Profile.Terrain.bValid;
@@ -2118,6 +2214,12 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	In.AttitudeDeg = FVector2D(MeasuredPitchDeg, MeasuredRollDeg);
 	// The tuning as the rider's preferences shape it (FRammsCurbPreferences).
 	In.Tuning = GetCrossingTuning();
+	// The legs' lag the plan and its run take: the servos' own and the robot
+	// base's command delay at this frame rate on top -- every position
+	// command reaches its servo that much after it is sent (the follower's
+	// 1.3 frames is 0.08 s at 16 Hz, which the walks' leads left out).
+	In.CommandDelaySeconds = CommandDelaySeconds();
+	In.Tuning.ServoLagSeconds += static_cast<float>(In.CommandDelaySeconds);
 	In.SeatReachShare = RammsCurb::SeatReachShare(Preferences);
 	// Every stability margin at no less than the authored speeding up and
 	// braking: a gentler smoothness slows the robot's moves, not its reserve
@@ -4395,7 +4497,7 @@ float URammsCurbNegotiationController::StepSeconds(int32 Index, bool bPlanned) c
 	const FStep& S = Steps[Index];
 	const bool	 bLive = !bPlanned && Index == StepIndex;
 	const FStep* Before = Index > 0 ? &Steps[Index - 1] : nullptr;
-	const float	 Tau = Tuning.ServoLagSeconds;
+	const float	 Tau = EffectiveServoLagSeconds();
 	const float	 Tol = Tuning.SettleTolerance;
 	const float	 FromBase = bLive ? BaseHeightCmd : (Before ? Before->BaseHeight : InitialBaseHeight);
 	// A corridor's shift off the plan height comes back to 0 alongside (and
@@ -4445,12 +4547,12 @@ float URammsCurbNegotiationController::LiftClearSeconds(int32 Index) const
 		{
 			// From where the wheel is measured over the terrain.
 			const float Need = static_cast<float>(ClearBottomZ(i) - (State.WheelWorld.Z - Legs[i].WheelRadiusCm));
-			Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(State.MeasuredZ, State.CmdZ, Tuning.LegSpeed, State.MeasuredZ + Need, Tuning.ServoLagSeconds));
+			Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(State.MeasuredZ, State.CmdZ, Tuning.LegSpeed, State.MeasuredZ + Need, EffectiveServoLagSeconds()));
 			continue;
 		}
 		const float ClearZ = PlannedGoalHeight(Index, i) - 0.5f * Tuning.SwingClearance;
 		const float FromZ = Index > 0 ? PlannedGoalHeight(Index - 1, i) : State.InitialZ;
-		Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(FromZ, FromZ, Tuning.LegSpeed, ClearZ, Tuning.ServoLagSeconds));
+		Seconds = FMath::Max(Seconds, RammsCurb::LegReachSeconds(FromZ, FromZ, Tuning.LegSpeed, ClearZ, EffectiveServoLagSeconds()));
 	}
 	return Seconds;
 }
@@ -4660,7 +4762,7 @@ void URammsCurbNegotiationController::PredictLegRates(float DeltaTime)
 		return;
 	}
 	Drive->Feeds.SetNum(Legs.Num());
-	const float Tau = Tuning.ServoLagSeconds;
+	const float Tau = EffectiveServoLagSeconds();
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
 		const FLegState& State = LegState[i];
@@ -5785,6 +5887,7 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 		L.LagX = State.LagX;
 		L.bLagX = State.FiveBar != nullptr;
 		L.bValid = State.bHasWorld;
+		L.HipMaxRate = FiveBarHipTurns(State, L.HipTurnPerCmX, L.HipTurnPerCmZ) ? State.HipMaxRate : FVector2D::ZeroVector;
 		if (!State.bHasWorld)
 		{
 			continue;
@@ -6207,7 +6310,7 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 					bCornersUp = bCornersUp || (!State.FiveBar && State.bHasWorld && State.WheelBottom > LevelInCornerUpCm);
 				}
 				const float LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(), Tuning.TiltRateDegPerSec,
-					Tuning.TiltAccelDegPerSec2, Tuning.ServoLagSeconds, bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
+					Tuning.TiltAccelDegPerSec2, EffectiveServoLagSeconds(), bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
 				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Tuning.Deceleration, DeltaTime);
 			}
 			// The rider's stick: let go, braked to rest; held part way, slowed to
@@ -6505,7 +6608,7 @@ void URammsCurbNegotiationController::UpdateWheelSurfaces(float DeltaTime)
 	const FVector2D Bias = Level ? Level->GetBias() : FVector2D::ZeroVector;
 	// Each wheel where it will be a servo lag from now, so the legs follow the
 	// terrain without falling behind it (none while planning: nothing moves).
-	const float		Ahead = DeltaTime > 0.0f ? DriveSpeed * Tuning.ServoLagSeconds : 0.0f;
+	const float		Ahead = DeltaTime > 0.0f ? DriveSpeed * EffectiveServoLagSeconds() : 0.0f;
 	const FVector2D Forward(ChassisForward.X, ChassisForward.Y);
 
 	TArray<RammsCurb::FTerrainLeg, TInlineAllocator<8>> Wheels;
@@ -6667,7 +6770,7 @@ void URammsCurbNegotiationController::UpdateCorridor(float DeltaTime)
 	{
 		const FStep&	S = Steps[StepIndex];
 		const FVector2D H(Heading.X, Heading.Y);
-		const float		Ahead = DriveSpeed * Tuning.ServoLagSeconds;
+		const float		Ahead = DriveSpeed * EffectiveServoLagSeconds();
 		if (S.Corridor.IsValid())
 		{
 			const float Travel = static_cast<float>(FVector2D::DotProduct(ChassisOriginXY - PlanOriginXY, H)) + Ahead;
@@ -6747,13 +6850,13 @@ float URammsCurbNegotiationController::LevelInSeconds() const
 	}
 	// Under way: the support legs' commands catching up with where the
 	// terrain wants them, and their servos' tail.
-	float Seconds = Tuning.ServoLagSeconds;
+	float Seconds = EffectiveServoLagSeconds();
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
 		const FLegState& State = LegState[i];
 		if (LegGoal(i).Goal == ELegGoal::Support)
 		{
-			Seconds = FMath::Max(Seconds, RammsCurb::LegMoveSeconds(State.GoalZ - State.CmdZ, Tuning.LegSpeed, State.MeasuredZ - State.CmdZ, Tuning.ServoLagSeconds, 0.5f * Tuning.SettleTolerance));
+			Seconds = FMath::Max(Seconds, RammsCurb::LegMoveSeconds(State.GoalZ - State.CmdZ, Tuning.LegSpeed, State.MeasuredZ - State.CmdZ, EffectiveServoLagSeconds(), 0.5f * Tuning.SettleTolerance));
 		}
 	}
 	return Seconds;
@@ -6779,6 +6882,16 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	// The command interval, as the robot base's follower smooths its own: a
+	// frame longer than its longest line (MaxInterpolationGapSeconds -- the
+	// first after a level loads, a hitch) is no interval at all there, so it is
+	// left out here too, and never taken as the first.
+	if (DeltaTime > 0.0f && DeltaTime <= static_cast<float>(RammsMotion::MaxInterpolationGapSeconds))
+	{
+		CommandIntervalSeconds = CommandIntervalSeconds > 0.0f
+			? CommandIntervalSeconds + (DeltaTime - CommandIntervalSeconds) * static_cast<float>(RammsMotion::IntervalSmoothing)
+			: DeltaTime;
+	}
 	// The debug view, after whatever this tick does (it returns from several
 	// places).
 	ON_SCOPE_EXIT
@@ -6989,7 +7102,7 @@ float URammsCurbNegotiationController::AdvanceLegLag(float DeltaTime)
 	// First order: each leg closes on its command with the servos' time
 	// constant. A leg that lags more than that -- stalled, overloaded, pressed
 	// into the ground -- shows as error.
-	const float Tau = Tuning.ServoLagSeconds;
+	const float Tau = EffectiveServoLagSeconds();
 	float		Worst = 0.0f;
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{

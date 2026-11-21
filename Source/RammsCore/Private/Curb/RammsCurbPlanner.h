@@ -276,6 +276,12 @@ namespace RammsCurb
 		FVector2D AttitudeDeg = FVector2D::ZeroVector;
 		/** The chassis' speed now (cm/s): where the plan's speed starts. */
 		double EntrySpeedCmS = 0.0;
+		/** The share of Tuning.ServoLagSeconds (s) that is the robot base's
+		 *  command delay -- its motor follower's, at the controller's frame rate
+		 *  -- rather than the servos' own: the controller adds it to the tuning's
+		 *  lag (URammsCurbNegotiationController::CommandDelaySeconds). 0 for an
+		 *  input that leaves it out (a test's, or one recorded before). */
+		double CommandDelaySeconds = 0.0;
 		/** The robot moving as it asks (rolling on, or back: EntrySpeedCmS is
 		 *  never under 0): the robot does not wait at rest for the plan
 		 *  (PlanCrossing's work budget). An entry speed over StopSpeedCmS is

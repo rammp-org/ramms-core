@@ -983,9 +983,12 @@ struct RAMMSCORE_API FRammsCurbTuning
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.0"))
 	float MainWheelPreload = 1.0f;
 
-	/** The leg servos' lag (s), modelled as first order: how far behind its
-	 *  command a leg is expected to run. Leg error in the run stats is taken
-	 *  against this model rather than the raw command. */
+	/** The leg servos' own lag (s), modelled as first order: how far behind
+	 *  the command its servo is given a leg is expected to run. The controller
+	 *  adds the robot base's command delay at its frame rate on top (the
+	 *  physics-rate follower's, URammsCurbNegotiationController::
+	 *  CommandDelaySeconds) for everything it plans and runs. Leg error in the
+	 *  run stats is taken against this model rather than the raw command. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Curb|Legs", meta = (ClampMin = "0.0"))
 	float ServoLagSeconds = 0.1f;
 

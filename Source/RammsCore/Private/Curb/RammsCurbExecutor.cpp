@@ -274,12 +274,16 @@ namespace RammsCurb
 	/** The time constant (s) the steady offset follows the measure with after
 	 *  that, while the chassis command is steady on every wheel. */
 	constexpr double OffsetFollowSeconds = 0.5;
-	/** The centre wheels' fore/aft is logged every this much travel (cm). */
-	constexpr double CentreLogCm = 10.0;
 	/** Settle ends only once the seat is within this (cm) of the plan's end
 	 *  fore/aft, sent and measured. */
 	namespace
 	{
+		// A diagnostic: how often the run log takes the centre wheels' fore/aft.
+		TAutoConsoleVariable<float> CVarCurbCentreLogCm(TEXT("Ramms.Curb.CentreLogCm"), 10.0f,
+			TEXT("Development: the run log takes the centre wheels' fore/aft against the plan (plan, the target walked to, sent, "
+				 "measured) every this much travel (cm; 10 by default, 0 every tick)."),
+			ECVF_Default);
+
 		TAutoConsoleVariable<int32> CVarCurbFinishCentreLead(TEXT("Ramms.Curb.FinishCentreLead"), 0,
 			TEXT("1 (the default): finishing in the drive stance (Ramms.Curb.FinishInStance), the centre wheels are led forward of the "
 				 "stance's fore/aft while the seat is still forward -- as far as lets the stance's lifted wheels (the front corners) go up "
@@ -430,6 +434,9 @@ namespace RammsCurb
 		SeatCmdRate = 0.0;
 		bSeatHeld = false;
 		SeatPlanLogged = 1.0e9;
+		// The centre wheels' log line from this run's start (kept from the last
+		// run it would wait out that run's whole travel first).
+		CentreLoggedS = -1.0e9;
 		bLoweredDown = false;
 		LevelRampFrom = -1.0;
 		BCmdRamp = 0.0;
@@ -1285,12 +1292,35 @@ namespace RammsCurb
 		return FMath::Min(FMath::Max(VHat, VCmd) * TickDt, MaxTickLeadCm);
 	}
 
-	double FExecutor::LegStartSeconds() const
+	double FExecutor::HipWalkCmS(const FExecLeg& L, double HeightRateCmS)
+	{
+		double		 Most = TNumericLimits<double>::Max();
+		const double Rates[2] = { L.HipMaxRate.X, L.HipMaxRate.Y };
+		const double PerX[2] = { FMath::Abs(L.HipTurnPerCmX.X), FMath::Abs(L.HipTurnPerCmX.Y) };
+		const double PerZ[2] = { FMath::Abs(L.HipTurnPerCmZ.X), FMath::Abs(L.HipTurnPerCmZ.Y) };
+		for (int32 k = 0; k < 2; ++k)
+		{
+			if (Rates[k] > 0.0 && PerX[k] > 1e-6)
+			{
+				const double Left = HipRateShare * Rates[k] - PerZ[k] * FMath::Abs(HeightRateCmS);
+				Most = FMath::Min(Most, FMath::Max(0.0, Left) / PerX[k]);
+			}
+		}
+		return Most;
+	}
+
+	double FExecutor::FollowDelaySeconds() const
 	{
 		static IConsoleVariable* const Follow = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.FollowDelayIntervals"));
 		const double				   Intervals = Follow ? FMath::Max(0.0, static_cast<double>(Follow->GetFloat())) : RammsMotion::FollowDelayIntervals;
-		return 2.0 * FMath::Max(0.0, static_cast<double>(In.Tuning.ServoLagSeconds))
-			+ FMath::Min(Intervals * TickDt, RammsMotion::MaxInterpolationGapSeconds);
+		return FMath::Min(Intervals * TickDt, RammsMotion::MaxInterpolationGapSeconds);
+	}
+
+	double FExecutor::LegStartSeconds() const
+	{
+		// (The follower's delay at this run's rate stands for the command delay the
+		// controller put into the tuning's lag.)
+		return 2.0 * FMath::Max(0.0, static_cast<double>(In.Tuning.ServoLagSeconds) - In.CommandDelaySeconds) + FollowDelaySeconds();
 	}
 
 	void FExecutor::SetState(int32 Leg, ERammsCurbWheelState NewState, const FString& Why)
@@ -2058,7 +2088,7 @@ namespace RammsCurb
 						const double Touch = TouchDistance(i, Measure);
 						if (Touch < TNumericLimits<double>::Max())
 						{
-							const double Late = bStarting ? FMath::Max(0.0, LegStartSeconds() - 2.0 * T.ServoLagSeconds - (Elapsed - W.Since)) : 0.0;
+							const double Late = bStarting ? FMath::Max(0.0, FollowDelaySeconds() - (Elapsed - W.Since)) : 0.0;
 							Distance = Touch - TouchMarginCm - VHat * Late;
 						}
 					}
@@ -3060,6 +3090,8 @@ namespace RammsCurb
 			FExecWheel&		W = Wheels[i];
 			const FExecLeg& L = Measure.Legs[i];
 			const bool		bCentre = M->IsCentre(i);
+			// (Not walked this tick, its target is where it is sent.)
+			W.WalkTo = W.CmdX;
 			if (bCentre && bLevelInBegun && bLoweredDown)
 			{
 				// A 5-bar walks to the plan's fore/aft a servo lag ahead; at a planned
@@ -3156,13 +3188,19 @@ namespace RammsCurb
 					{
 						Step = FMath::Min(Step, FinishWalkSpeedCmS * Dt);
 					}
+					// No faster than its hips turn (FExecLeg::HipMaxRate), with what the
+					// height's own move leaves them: walked past them, one hip falls behind
+					// the other and the leg bends off its pose. (The plan's walk it then
+					// lags slows the robot: the Track term.)
+					Step = FMath::Min(Step, HipWalkCmS(L, W.CmdVz) * Dt);
 					// In the level-in's ramp, a wheel carrying the robot walks along it
 					// from where the stance had it (Ramms.Curb.LevelInWalkRamp).
 					const bool bRampWalk = LevelInWalkRampOn() && LevelRampFrom >= 0.0 && !bRampDone && !Level.bLevelled && IsSupport(i) && !bDwelling
 						&& !bFinishInPlace;
 					// (Towards it no faster than Step: a re-plan adopted in the ramp, or
 					// the hand-off's aft-walk cap, still bound each tick.)
-					W.CmdX = StepTowards(W.CmdX, bRampWalk ? FMath::Lerp(W.StanceX, To, Ramp) : To, Step);
+					W.WalkTo = bRampWalk ? FMath::Lerp(W.StanceX, To, Ramp) : To;
+					W.CmdX = StepTowards(W.CmdX, W.WalkTo, Step);
 				}
 			}
 			if (!bLevelInBegun)
@@ -3444,7 +3482,8 @@ namespace RammsCurb
 		BCmdLagPrev = BCmdLag;
 		// The centre wheels' fore/aft against the plan, every CentreLogCm of
 		// travel (for the run traces).
-		if (S - CentreLoggedS >= CentreLogCm)
+		const double CentreLogEvery = CVarCurbCentreLogCm.GetValueOnAnyThread();
+		if (CentreLogEvery <= 0.0 || S - CentreLoggedS >= CentreLogEvery)
 		{
 			CentreLoggedS = S;
 			FString Line = TEXT("centres:");
@@ -3455,6 +3494,11 @@ namespace RammsCurb
 				{
 					Line += FString::Printf(TEXT(" %s plan %+.1f sent %+.1f measured %+.1f;"), *In.Legs[Leg].Name.ToString(), Here.X[Side],
 						Wheels[Leg].CmdX, Measure.Legs[Leg].XZ.X);
+					// (Every tick, the diagnostic's: the target before the walk's caps, too.)
+					if (CentreLogEvery <= 0.0)
+					{
+						Line += FString::Printf(TEXT(" to %+.2f plan2 %+.2f meas2 %+.2f;"), Wheels[Leg].WalkTo, Here.X[Side], Measure.Legs[Leg].XZ.X);
+					}
 				}
 			}
 			Log(Line);
