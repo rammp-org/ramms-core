@@ -86,6 +86,9 @@ struct RAMMSCORE_API FKinematicJointConfig
 	FName GetEffectiveName() const { return JointName.IsNone() ? BoneName : JointName; }
 };
 
+/** Fired whenever joint targets are written (SetAllJointTargets, SetJointTarget, SetJointTargetByName, pose assets). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRammsJointTargetsSet);
+
 /**
  * Component for kinematically posing UPoseableMeshComponents using joint angles/positions.
  *
@@ -130,6 +133,18 @@ public:
 	float InterpolationSpeed = 180.0f;
 
 	// ── Set Joint Targets ───────────────────────────────────────────
+
+	/**
+	 * Broadcast after joint targets are written, from any caller -- Remote Control
+	 * (RCPS "setJoints"), the bridge, Blueprints or a pose asset. Read the new
+	 * values with GetAllJointTargets / GetJointTarget.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Ramms|Skeletal Pose")
+	FOnRammsJointTargetsSet OnJointTargetsSet;
+
+	/** Index of a joint by its effective name (JointName, else BoneName), or INDEX_NONE. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Skeletal Pose")
+	int32 GetJointIndexByName(FName JointName) const;
 
 	/** Set a single joint target by index (degrees for revolute, cm for prismatic). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Skeletal Pose")

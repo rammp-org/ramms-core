@@ -17,11 +17,13 @@ namespace
 	using RammsCurb::FRunStatsTracker;
 	using RammsCurb::FRunTick;
 
-	constexpr float TickSeconds = 0.01f;
+	// Named for this file: a unity build puts these anonymous namespaces in one
+	// translation unit, where a bare TickSeconds shadows any parameter of that name.
+	constexpr float CurbTickSeconds = 0.01f;
 	/** A made-up drive speed of 30 cm/s: the speed minima start at 7.5. */
 	constexpr float CruiseFloor = 0.25f * 30.0f;
 
-	/** Feeds a tracker ticks of TickSeconds, keeping the clock. */
+	/** Feeds a tracker ticks of CurbTickSeconds, keeping the clock. */
 	struct FTickFeeder
 	{
 		FRunStatsTracker& Tracker;
@@ -30,12 +32,12 @@ namespace
 		/** Seconds of ticks at these speeds, everything else at rest. */
 		void Run(float Seconds, float Commanded, float Measured, bool bLegsMoved = false)
 		{
-			const int32 N = FMath::RoundToInt(Seconds / TickSeconds);
+			const int32 N = FMath::RoundToInt(Seconds / CurbTickSeconds);
 			for (int32 i = 0; i < N; ++i)
 			{
-				Elapsed += TickSeconds;
+				Elapsed += CurbTickSeconds;
 				FRunTick T;
-				T.DeltaSeconds = TickSeconds;
+				T.DeltaSeconds = CurbTickSeconds;
 				T.Elapsed = Elapsed;
 				T.CommandedSpeed = Commanded;
 				T.MeasuredSpeed = Measured;
@@ -173,8 +175,8 @@ bool FRammsCurbRunStatsFirstMotion::RunTest(const FString& Parameters)
 
 	// A tick whose window is not full does not start it either.
 	FRunTick Partial;
-	Partial.DeltaSeconds = TickSeconds;
-	Partial.Elapsed = Feed.Elapsed += TickSeconds;
+	Partial.DeltaSeconds = CurbTickSeconds;
+	Partial.Elapsed = Feed.Elapsed += CurbTickSeconds;
 	Partial.CommandedSpeed = 30.0f;
 	Partial.MeasuredSpeed = 30.0f;
 	Partial.bMeasuredSpeedValid = false;
@@ -324,8 +326,8 @@ bool FRammsCurbRunStatsAttitudeAndEnd::RunTest(const FString& Parameters)
 
 	auto Tick = [&](float Pitch, float Roll, bool bPlanned, TOptional<float> Swing, TOptional<float> Margin, float LegError) {
 		FRunTick T;
-		T.DeltaSeconds = TickSeconds;
-		T.Elapsed = Feed.Elapsed += TickSeconds;
+		T.DeltaSeconds = CurbTickSeconds;
+		T.Elapsed = Feed.Elapsed += CurbTickSeconds;
 		T.CommandedSpeed = 30.0f;
 		T.MeasuredSpeed = 30.0f;
 		T.bMeasuredSpeedValid = true;
@@ -400,8 +402,8 @@ bool FRammsCurbRunStatsAttitudeAndEnd::RunTest(const FString& Parameters)
 	FRunStatsTracker Standing;
 	Standing.Begin(10.0f, 0.0f, 0.0f, TOptional<float>(), CruiseFloor);
 	FRunTick Still;
-	Still.DeltaSeconds = TickSeconds;
-	Still.Elapsed = TickSeconds;
+	Still.DeltaSeconds = CurbTickSeconds;
+	Still.Elapsed = CurbTickSeconds;
 	Still.bMeasuredSpeedValid = true;
 	Still.PitchDeg = 9.5f;
 	Still.RollDeg = -2.0f;
