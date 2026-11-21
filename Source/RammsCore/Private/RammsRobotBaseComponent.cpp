@@ -765,6 +765,13 @@ float URammsRobotBaseComponent::GetMotorSeparation(FName MotorIdA, FName MotorId
 
 namespace
 {
+	/** A torque for the console: N*m, or inf where a side is unbounded. */
+	FString TorqueText(double Nm)
+	{
+		return Nm >= 1e30 ? FString(TEXT("inf")) : Nm <= -1e30 ? FString(TEXT("-inf"))
+															   : FString::Printf(TEXT("%.1f"), Nm);
+	}
+
 	/** Every robot base playing in World (dev console commands). */
 	template <typename FnType>
 	int32 ForEachRobotBase(UWorld* World, FnType&& Fn)
@@ -799,20 +806,29 @@ namespace
 				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit <Motor> <MinNm> <MaxNm> | <Motor> clear"));
 				return;
 			}
-			const auto Parse = [](const FString& S, float Inf) {
-				return S.Equals(TEXT("inf"), ESearchCase::IgnoreCase) || S.Equals(TEXT("+inf"), ESearchCase::IgnoreCase)
-					? Inf
-					: S.Equals(TEXT("-inf"), ESearchCase::IgnoreCase) ? -Inf
-																	  : FCString::Atof(*S);
-			};
+			// Any inf on a side (inf, +inf, -inf) leaves that side unbounded: the
+			// motor's own limit there.
 			const float Max = TNumericLimits<float>::Max();
+			const auto	Parse = [](const FString& S, float Unbounded) {
+				 return S.Equals(TEXT("inf"), ESearchCase::IgnoreCase) || S.Equals(TEXT("+inf"), ESearchCase::IgnoreCase)
+						 || S.Equals(TEXT("-inf"), ESearchCase::IgnoreCase)
+					 ? Unbounded
+					 : FCString::Atof(*S);
+			};
 			const float Lo = bClear ? 0.0f : Parse(Args[1], -Max);
 			const float Hi = bClear ? 0.0f : Parse(Args[2], Max);
+			if (!bClear && !(Lo < Hi))
+			{
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit: min %s is not under max %s (use 'clear' to clear a limit)"),
+					*TorqueText(Lo), *TorqueText(Hi));
+				return;
+			}
 			const int32 N = ForEachRobotBase(World, [&](URammsRobotBaseComponent& Base) {
 				const bool bOk = bClear ? (Base.ClearMotorTorqueLimit(Motor), true) : Base.SetMotorTorqueLimit(Motor, Lo, Hi);
 				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.TorqueLimit: %s '%s' %s"), *GetNameSafe(Base.GetOwner()), *Motor.ToString(),
-					bClear ? TEXT("cleared") : bOk ? *FString::Printf(TEXT("limited to [%.1f, %.1f] N*m"), Lo, Hi)
-												   : TEXT("not limited (unsupported)"));
+					bClear	  ? TEXT("cleared")
+						: bOk ? *FString::Printf(TEXT("limited to [%s, %s] N*m"), *TorqueText(Lo), *TorqueText(Hi))
+							  : TEXT("not limited (unsupported)"));
 			});
 			if (N == 0)
 			{
@@ -831,19 +847,24 @@ namespace
 			}
 			const FName	 Motor(*Args[0]);
 			const double Window = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 0.1;
-			ForEachRobotBase(World, [&](URammsRobotBaseComponent& Base) {
-				FRammsMotorEffort E;
-				if (!Base.GetMotorEffort(Motor, Window, E))
-				{
-					UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.Effort: %s '%s' no readings (yet, or unsupported)"), *GetNameSafe(Base.GetOwner()),
-						*Motor.ToString());
-					return;
-				}
-				UE_LOG(LogTemp, Display,
-					TEXT("Ramms.Motor.Effort: %s '%s' over %.3f s: mean %.1f, peak %.1f, last %.1f N*m; limits [%.1f, %.1f] (rated [%.1f, %.1f]); "
-						 "%.3f s at lower, %.3f s at upper, %.3f s at rated; t %.3f"),
-					*GetNameSafe(Base.GetOwner()), *Motor.ToString(), E.Seconds, E.MeanNm, E.PeakNm, E.LastNm, E.LowerNm, E.UpperNm,
-					E.RatedLowerNm, E.RatedUpperNm, E.AtLowerSeconds, E.AtUpperSeconds, E.AtRatedSeconds, E.LatestTime);
-			});
+			const int32	 N = ForEachRobotBase(World, [&](URammsRobotBaseComponent& Base) {
+				 FRammsMotorEffort E;
+				 if (!Base.GetMotorEffort(Motor, Window, E))
+				 {
+					 UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.Effort: %s '%s' no readings (yet, or unsupported)"), *GetNameSafe(Base.GetOwner()),
+						 *Motor.ToString());
+					 return;
+				 }
+				 UE_LOG(LogTemp, Display,
+					 TEXT("Ramms.Motor.Effort: %s '%s' over %.3f s: mean %.1f, peak %.1f, last %.1f N*m; limits [%s, %s] (rated [%s, %s]); "
+						   "%.3f s at lower, %.3f s at upper, %.3f s at rated; t %.3f"),
+					 *GetNameSafe(Base.GetOwner()), *Motor.ToString(), E.Seconds, E.MeanNm, E.PeakNm, E.LastNm, *TorqueText(E.LowerNm),
+					 *TorqueText(E.UpperNm), *TorqueText(E.RatedLowerNm), *TorqueText(E.RatedUpperNm), E.AtLowerSeconds, E.AtUpperSeconds,
+					 E.AtRatedSeconds, E.LatestTime);
+			 });
+			if (N == 0)
+			{
+				UE_LOG(LogTemp, Display, TEXT("Ramms.Motor.Effort: no robot playing in this world"));
+			}
 		}));
 } // namespace

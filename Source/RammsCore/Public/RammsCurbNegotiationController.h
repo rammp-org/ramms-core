@@ -922,8 +922,6 @@ private:
 	void LogMotorEfforts();
 
 	TArray<FMotorEffortStats> EffortStats;
-	/** Some leg's efforts were read this tick (RammsCurb::FExecMeasure::bEffort). */
-	bool bLegEffortsRead = false;
 	/** How far behind the physics the measurements were (ms; per tick). */
 	TArray<float> SnapshotAgeMs;
 	/** This backend cannot take the load caps (refused once this crossing). */

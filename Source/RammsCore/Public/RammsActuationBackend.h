@@ -179,9 +179,11 @@ public:
 	/**
 	 * Hold a motor's output within [MinTorque, MaxTorque] (its joint's sense,
 	 * N*m; N on a slide), applied every physics step inside the actuator's own
-	 * range -- a drive's per-direction torque limit. MinTorque >= MaxTorque
-	 * clears it; a side at +-the largest float keeps the actuator's own limit
-	 * there. False: this backend cannot limit this motor.
+	 * range -- a drive's per-direction torque limit. A limit bounds a push and
+	 * never commands one: a range that leaves out zero is widened to it.
+	 * MinTorque >= MaxTorque clears it; a side at +-the largest float keeps
+	 * the actuator's own limit there. False: this backend cannot limit this
+	 * motor.
 	 */
 	virtual bool SetMotorTorqueLimit(FName MotorId, float MinTorque, float MaxTorque) { return false; }
 };

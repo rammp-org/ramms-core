@@ -478,7 +478,7 @@ namespace RammsCurb
 		FVector2D HipTurnPerCmX = FVector2D::ZeroVector;
 		FVector2D HipTurnPerCmZ = FVector2D::ZeroVector;
 		FVector2D HipMaxRate = FVector2D::ZeroVector;
-		/** What its motors put out over the last frame (FExecMeasure::bEffort):
+		/** What its motors put out over the last frame (ReadLegEfforts):
 		 *  the load its wheel carries, through its leg (N; bLoad: read), and
 		 *  the most of the frame a motor of it sat at the load cap sent it. */
 		double	  LoadN = 0.0;
@@ -512,9 +512,6 @@ namespace RammsCurb
 		 *  monitor, the landing check and swing clearance; none: those checks
 		 *  see nothing (and do not act). */
 		TArray<FTerrainProbe> Probes;
-		/** The legs' motors' efforts were read this tick (FExecLeg::LoadN and
-		 *  CapBoundShare mean something). */
-		bool bEffort = false;
 	};
 
 	/** What to command this tick. */
@@ -1122,11 +1119,11 @@ namespace RammsCurb
 		bool			   bRunning = false;
 		/** SetLoadCaps; and the centre of mass outside the wheels carrying was
 		 *  logged (once an episode). */
-		bool			   bLoadCaps = false;
-		bool			   bLoadCapsOffLogged = false;
-		EExecPhase		   Phase = EExecPhase::Approach;
-		FString			   Status;
-		double			   Elapsed = 0.0;
+		bool	   bLoadCaps = false;
+		bool	   bLoadCapsOffLogged = false;
+		EExecPhase Phase = EExecPhase::Approach;
+		FString	   Status;
+		double	   Elapsed = 0.0;
 		/** The ticks' running length (s, each counted to at most
 		 *  RammsMotion::MaxInterpolationGapSeconds; 0 before the first). */
 		double TickDt = 0.0;

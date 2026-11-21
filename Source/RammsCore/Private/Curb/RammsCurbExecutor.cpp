@@ -53,9 +53,11 @@ namespace RammsCurb
 				 "before."),
 			ECVF_Default);
 
-		TAutoConsoleVariable<int32> CVarCurbLoadCapLegs(TEXT("Ramms.Curb.LoadCapLegs"), 1,
-			TEXT("The load caps (Ramms.Curb.LoadCap): 1 (the default) on every leg carrying the robot and every one landing; 0 on the "
-				 "landing legs only (a wheel being set down, or loading)."),
+		TAutoConsoleVariable<int32> CVarCurbLoadCapLegs(TEXT("Ramms.Curb.LoadCapLegs"), 0,
+			TEXT("The load caps (Ramms.Curb.LoadCap): 0 (the default) on the landing legs only (a wheel being set down, or loading); "
+				 "1 on every leg carrying the robot as well. A planted leg's share, from the robot model's centre of mass with every "
+				 "leg as stiff as the others, can be well under what it carries (the centre of mass near an axle, the robot braking): "
+				 "capped at it, the leg cannot hold the base up."),
 			ECVF_Default);
 		TAutoConsoleVariable<float> CVarCurbLoadCapMargin(TEXT("Ramms.Curb.LoadCapMargin"), 1.0f,
 			TEXT("A carrying leg's load cap: (1 + this) times the share of the weight it carries with the others as stiff as it."),
@@ -1664,7 +1666,9 @@ namespace RammsCurb
 			switch (W.State)
 			{
 				case ERammsCurbWheelState::Planted:
-					if (bAllLegs && !W.bCapReleased && !((Off >> i) & 1u))
+					// (Off its surface it carries no share: held at the floor, as a
+					// loading wheel is, for when it comes back down.)
+					if (bAllLegs && !W.bCapReleased)
 					{
 						CapN = FMath::Max(Floor, (1.0 + Margin) * ShareN);
 					}
@@ -1694,7 +1698,9 @@ namespace RammsCurb
 			// job).
 			if (W.State == ERammsCurbWheelState::Planted && CapN > 0.0 && Elapsed - W.Since >= ArmSeconds)
 			{
-				const bool bSag = L.XZ.Y - L.LagZ > ReleaseCm && (L.CapBoundShare >= LoadCapBoundShare || !Measure.bEffort);
+				// (A cap that was sent and found binding: a backend that reads no
+				// efforts takes no caps either.)
+				const bool bSag = L.XZ.Y - L.LagZ > ReleaseCm && L.CapBoundShare >= LoadCapBoundShare;
 				W.CapSagFor = bSag ? W.CapSagFor + Dt : 0.0;
 				if (W.CapSagFor > ReleaseSeconds)
 				{
@@ -1706,7 +1712,7 @@ namespace RammsCurb
 						L.XZ.Y - L.LagZ, ReleaseSeconds));
 				}
 			}
-			else if (W.State != ERammsCurbWheelState::Planted)
+			else
 			{
 				W.CapSagFor = 0.0;
 			}
@@ -4868,6 +4874,7 @@ namespace RammsCurb
 				{
 					// Each wheel's cap by its state; the shares the weight.
 					const double CapFloor = static_cast<double>(CVarCurbLoadCapFloorN.GetValueOnAnyThread());
+					const bool	 bAllLegCaps = CVarCurbLoadCapLegs.GetValueOnAnyThread() != 0;
 					bool		 bAny = false, bSolved = false;
 					double		 Sum = 0.0;
 					for (int32 i = 0; i < N; ++i)
@@ -4878,7 +4885,7 @@ namespace RammsCurb
 						bSolved = bSolved || Cmd.LegLoadShareN[i] > 0.0;
 						Sum += E.IsSupport(i) && !W.bOffSurface ? Cmd.LegLoadShareN[i] : 0.0;
 						const bool bAir = W.State == ERammsCurbWheelState::Lifting || W.State == ERammsCurbWheelState::Clear || W.State == ERammsCurbWheelState::Held;
-						const bool bCarrying = (W.State == ERammsCurbWheelState::Planted && !W.bCapReleased && !W.bOffSurface)
+						const bool bCarrying = (W.State == ERammsCurbWheelState::Planted && !W.bCapReleased && bAllLegCaps)
 							|| W.State == ERammsCurbWheelState::Loading || W.State == ERammsCurbWheelState::Planting;
 						if ((bAir && Cap != 0.0) || (E.IsRunning() && bCarrying && !W.bStanceUp && Cap < CapFloor - 1e-6 && Cmd.LegLoadShareN.ContainsByPredicate([](double V) { return V > 0.0; })))
 						{

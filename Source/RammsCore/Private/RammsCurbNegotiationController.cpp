@@ -45,13 +45,12 @@ static TAutoConsoleVariable<int32> CVarRammsCurbCommandDelayLag(TEXT("Ramms.Curb
 		 "delay at the controller's frame rate on top (1, the default; CommandDelaySeconds), or ServoLagSeconds alone (0)."),
 	ECVF_Default);
 
-// A diagnostic switch, for comparing runs with and without the hips' bound on
-// the centre walks.
-static TAutoConsoleVariable<int32> CVarRammsCurbLoadCap(TEXT("Ramms.Curb.LoadCap"), 2,
-	TEXT("Load-aware pressing: each leg carrying the robot, or landing, may press its wheel onto the ground with no more than "
-		 "(1 + Ramms.Curb.LoadCapMargin) times its share of the weight -- a press-side torque cap on its motors, applied every "
-		 "physics step (Ramms.Motor.TorqueLimit's limits). 1: sent to the motors. 2 (the default): worked out, logged and counted "
-		 "only (shadow). 0: off."),
+static TAutoConsoleVariable<int32> CVarRammsCurbLoadCap(TEXT("Ramms.Curb.LoadCap"), 1,
+	TEXT("Load-aware pressing: a leg landing its wheel (and, with Ramms.Curb.LoadCapLegs 1, each carrying the robot) may press "
+		 "it onto the ground with no more than (1 + Ramms.Curb.LoadCapMargin) times its share of the weight -- a press-side "
+		 "torque cap on its motors, applied every physics step (Ramms.Motor.TorqueLimit's limits): stiff legs with strong motors "
+		 "otherwise let one landing wheel take nearly the whole robot within a frame. 1 (the default): sent to the motors. 2: "
+		 "worked out, logged and counted only (shadow). 0: off."),
 	ECVF_Default);
 static TAutoConsoleVariable<float> CVarRammsCurbLoadCapTractionRatio(TEXT("Ramms.Curb.LoadCapTractionRatio"), 0.8f,
 	TEXT("A load cap's allowance for driving the wheel along (N of fore/aft force per N of the cap) on top of carrying it."),
@@ -60,6 +59,8 @@ static TAutoConsoleVariable<float> CVarRammsCurbLoadCapMinJz(TEXT("Ramms.Curb.Lo
 	TEXT("A leg motor with less vertical lever than this (cm of wheel height per radian) does not carry its wheel: no load cap."),
 	ECVF_Default);
 
+// A diagnostic switch, for comparing runs with and without the hips' bound on
+// the centre walks.
 static TAutoConsoleVariable<int32> CVarRammsCurbHipRateWalk(TEXT("Ramms.Curb.HipRateWalk"), 1,
 	TEXT("Curb crossing (per-wheel gait): a centre 5-bar walks fore/aft no faster than its hips' motors turn at their MaxVelocity "
 		 "(RammsCurb::HipRateShare of it) with what its height's own move leaves them (1, the default), or at its walk's own caps "
@@ -3814,6 +3815,13 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 		Status = OutReason;
 		return false;
 	}
+	// Refused before measuring: measuring resolves the legs afresh, which would
+	// reset the crossing under way (its legs' state, its load caps, its report).
+	if (IsNegotiating())
+	{
+		OutReason = TEXT("a manoeuvre is already running");
+		return false;
+	}
 	// The profile a detection of this terrain would give, from where the robot
 	// stands (its legacy fields; the crossing runs on the terrain itself).
 	FRammsCurbProfile Profile;
@@ -5916,7 +5924,6 @@ void URammsCurbNegotiationController::GatherExecMeasure(float DeltaTime, RammsCu
 	Out.SpeedCmS = Telemetry ? Telemetry->Motion.GetSpeed() : 0.0f;
 	Out.bSpeedValid = Telemetry && Telemetry->Motion.IsFull();
 	Out.Legs.SetNum(Legs.Num());
-	Out.bEffort = bLegEffortsRead;
 	MeasuredSeat(Out.Seat);
 	Out.Probes.Reset();
 	const FVector2D Forward = Out.Forward;
@@ -8302,7 +8309,6 @@ void URammsCurbNegotiationController::PrimeMotorEfforts()
 
 void URammsCurbNegotiationController::ReadLegEfforts(float DeltaTime)
 {
-	bLegEffortsRead = false;
 	URammsRobotBaseComponent* Base = EnsureBase();
 	if (!Base || LegState.Num() != Legs.Num())
 	{
@@ -8366,7 +8372,10 @@ void URammsCurbNegotiationController::ReadLegEfforts(float DeltaTime)
 			Latest = FMath::Max(Latest, E.LatestTime);
 			if (S.SentCapNm[k] != 0.0 && E.Seconds > 0.0)
 			{
-				const double At = S.SentCapNm[k] > 0.0 ? E.AtUpperSeconds : E.AtLowerSeconds;
+				// At the cap only where it narrows the motor's own range (a cap
+				// past the rating leaves the rating in force).
+				const double At = S.SentCapNm[k] > 0.0 ? (E.UpperNm < E.RatedUpperNm - 1e-6 ? E.AtUpperSeconds : 0.0)
+													   : (E.LowerNm > E.RatedLowerNm + 1e-6 ? E.AtLowerSeconds : 0.0);
 				S.CapBoundShare = FMath::Max(S.CapBoundShare, static_cast<float>(At / E.Seconds));
 			}
 			// The shadow caps (worked out last tick, not sent) against the frame's
@@ -8374,7 +8383,6 @@ void URammsCurbNegotiationController::ReadLegEfforts(float DeltaTime)
 			const double Cap = S.TorqueCapNm[k];
 			bWouldBind = bWouldBind || (Cap != 0.0 && S.SentCapNm[k] == 0.0 && E.PeakNm * FMath::Sign(Cap) > FMath::Abs(Cap));
 		}
-		bLegEffortsRead = bLegEffortsRead || bRead;
 		// The load its wheel carries: F = -J^-T tau (x100, N from N*m and cm).
 		if (bRead && S.bJacobian)
 		{

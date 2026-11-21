@@ -62,25 +62,39 @@ namespace
 		}
 	};
 	/** A float console variable set for a scope (by code), restored after. */
+	/** Set a console variable for a test, at its own priority where that is
+	 *  above code's -- a variable last set at the console (as the PIE runner's
+	 *  --cvar leaves one) ignores a lower-priority set -- and say whether it
+	 *  took. */
+	bool SetTestCVar(IConsoleVariable* Var, float Value)
+	{
+		if (!Var)
+		{
+			return false;
+		}
+		const uint32 Was = static_cast<uint32>(Var->GetFlags()) & ECVF_SetByMask;
+		const uint32 By = FMath::Max(Was, static_cast<uint32>(ECVF_SetByCode));
+		Var->Set(Value, static_cast<EConsoleVariableFlags>(By));
+		return FMath::IsNearlyEqual(Var->GetFloat(), Value);
+	}
+
 	struct FScopedCVarFloat
 	{
 		IConsoleVariable* Var = nullptr;
 		float			  Was = 0.0f;
+		bool			  bSet = false;
 		FScopedCVarFloat(const TCHAR* Name, float Value)
 			: Var(IConsoleManager::Get().FindConsoleVariable(Name))
 		{
 			if (Var)
 			{
 				Was = Var->GetFloat();
-				Var->Set(Value, ECVF_SetByCode);
+				bSet = SetTestCVar(Var, Value);
 			}
 		}
 		~FScopedCVarFloat()
 		{
-			if (Var)
-			{
-				Var->Set(Was, ECVF_SetByCode);
-			}
+			SetTestCVar(Var, Was);
 		}
 	};
 	/** An int console variable set for a scope (by code), restored after. */
@@ -1694,6 +1708,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerTouchdownSpeed,
 
 bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 {
+	// No touchdown band (Ramms.Curb.TouchdownBandCm) but where one is set below.
+	const FScopedCVarFloat NoBand(TEXT("Ramms.Curb.TouchdownBandCm"), 0.0f);
+	if (!TestTrue(TEXT("the touchdown band set to 0 for the test"), NoBand.bSet))
+	{
+		return true;
+	}
 	FRammsCurbTuning T;
 	T.ServoLagSeconds = 0.05f;
 	TestTrue(TEXT("off: no limit"), RammsCurb::TouchdownSpeedCap(1.0, T) > 1e6);
@@ -1724,11 +1744,10 @@ bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 
 	// A touchdown band (Ramms.Curb.TouchdownBandCm): through it at TouchdownSpeed,
 	// above it slowing onto it; the time to come down still the cap integrated.
-	if (IConsoleVariable* const Band = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.TouchdownBandCm")))
+	const double Before15 = RammsCurb::DescentSeconds(15.0, 60.0, T);
 	{
-		const float	 BandWas = Band->GetFloat();
-		const double Before15 = RammsCurb::DescentSeconds(15.0, 60.0, T);
-		Band->Set(1.0f, ECVF_SetByCode);
+		const FScopedCVarFloat Band(TEXT("Ramms.Curb.TouchdownBandCm"), 1.0f);
+		TestTrue(TEXT("band: set to 1 cm"), Band.bSet);
 		TestNearlyEqual(TEXT("band: in it, TouchdownSpeed"), RammsCurb::TouchdownSpeedCap(0.6, T), 15.0, 1e-4);
 		TestNearlyEqual(TEXT("band: 2 cm up, plus 1 cm over the lag"), RammsCurb::TouchdownSpeedCap(2.0, T), 15.0 + 1.0 / 0.05, 1e-4);
 		for (const double Down : { 0.5, 2.0, 15.0 })
@@ -1745,9 +1764,8 @@ bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 		}
 		TestNearlyEqual(TEXT("band: 0.5 cm down, all of it at TouchdownSpeed"), RammsCurb::DescentSeconds(0.5, 60.0, T), 0.5 / 15.0, 1e-9);
 		TestTrue(TEXT("band: a landing takes longer than without"), RammsCurb::DescentSeconds(15.0, 60.0, T) > Before15);
-		Band->Set(BandWas, ECVF_SetByCode);
-		TestNearlyEqual(TEXT("no band: as before"), RammsCurb::DescentSeconds(15.0, 60.0, T), Before15, 1e-12);
 	}
+	TestNearlyEqual(TEXT("no band: as before"), RammsCurb::DescentSeconds(15.0, 60.0, T), Before15, 1e-12);
 
 	// The planner times each landing with it: never sooner than without.
 	for (const bool bUp : { true, false })
@@ -5086,36 +5104,52 @@ bool FRammsCurbExecutorLoadCaps::RunTest(const FString& Parameters)
 	// of them) change no target: the run with them is the run without, tick
 	// for tick, but for their own lines. Each wheel's cap follows its state --
 	// none in the air, at least the floor carrying or landing -- and the
-	// carrying wheels' shares carry the robot's weight.
-	for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
+	// carrying wheels' shares carry the robot's weight. On the landing legs only
+	// (Ramms.Curb.LoadCapLegs 0, the default) and on every carrying leg (1).
+	IConsoleVariable* const LegsVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.LoadCapLegs"));
+	if (!TestNotNull(TEXT("Ramms.Curb.LoadCapLegs"), LegsVar))
 	{
-		for (const bool bUp : { true, false })
+		return true;
+	}
+	const int32 LegsWas = LegsVar->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(LegsVar, static_cast<float>(LegsWas));
+	};
+	for (const int32 AllLegs : { 0, 1 })
+		for (const TCHAR* Id : { TEXT("Square"), TEXT("Oblique30") })
 		{
-			const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
-			const FString				   What = FString::Printf(TEXT("%s %s"), Id, bUp ? TEXT("up") : TEXT("down"));
-			const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
-			if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()))
+			if (!TestTrue(FString::Printf(TEXT("Ramms.Curb.LoadCapLegs set to %d"), AllLegs), SetTestCVar(LegsVar, static_cast<float>(AllLegs))))
 			{
 				continue;
 			}
-			RammsCurb::FExecDryRunOptions Off;
-			Off.TraceEvery = 1;
-			RammsCurb::FExecDryRunOptions On = Off;
-			On.bLoadCaps = true;
-			const RammsCurb::FExecDryRunResult A = RammsCurb::ExecDryRun(In, S, Off);
-			const RammsCurb::FExecDryRunResult B = RammsCurb::ExecDryRun(In, S, On);
-			TestTrue(FString::Printf(TEXT("%s: both cross"), *What), A.bDone && B.bDone);
-			TestEqual(FString::Printf(TEXT("%s: as long"), *What), B.Seconds, A.Seconds);
-			TestTrue(FString::Printf(TEXT("%s: tick for tick the same (%d / %d trace lines)"), *What, A.Trace.Num(), B.Trace.Num()), A.Trace == B.Trace);
-			TArray<FString> BLog = B.Log;
-			BLog.RemoveAll([](const FString& Line) { return Line.Contains(TEXT("load cap")); });
-			TestTrue(FString::Printf(TEXT("%s: the same log, but for the caps' lines"), *What), BLog == A.Log);
-			TestEqual(FString::Printf(TEXT("%s: no caps without them"), *What), A.LoadCapTicks, 0);
-			TestTrue(FString::Printf(TEXT("%s: caps worked out (%d ticks)"), *What, B.LoadCapTicks), B.LoadCapTicks > 0);
-			TestEqual(FString::Printf(TEXT("%s: every cap by its wheel's state"), *What), B.LoadCapRuleBreaks, 0);
-			TestTrue(FString::Printf(TEXT("%s: the shares carry the weight (at most %.3f N off)"), *What, B.MaxShareSumErrN), B.MaxShareSumErrN < 1.0);
+			for (const bool bUp : { true, false })
+			{
+				const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(Id, bUp));
+				const FString				   What = FString::Printf(TEXT("%s %s, %s"), Id, bUp ? TEXT("up") : TEXT("down"), AllLegs ? TEXT("every carrying leg") : TEXT("landing legs"));
+								 const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, *What);
+				if (!TestTrue(FString::Printf(TEXT("%s: planned (%s)"), *What, *S.Summary), S.IsValid()))
+				{
+					continue;
+				}
+				RammsCurb::FExecDryRunOptions Off;
+				Off.TraceEvery = 1;
+				RammsCurb::FExecDryRunOptions On = Off;
+				On.bLoadCaps = true;
+				const RammsCurb::FExecDryRunResult A = RammsCurb::ExecDryRun(In, S, Off);
+				const RammsCurb::FExecDryRunResult B = RammsCurb::ExecDryRun(In, S, On);
+				TestTrue(FString::Printf(TEXT("%s: both cross"), *What), A.bDone && B.bDone);
+				TestEqual(FString::Printf(TEXT("%s: as long"), *What), B.Seconds, A.Seconds);
+				TestTrue(FString::Printf(TEXT("%s: tick for tick the same (%d / %d trace lines)"), *What, A.Trace.Num(), B.Trace.Num()), A.Trace == B.Trace);
+				TArray<FString> BLog = B.Log;
+				BLog.RemoveAll([](const FString& Line) { return Line.Contains(TEXT("load cap")); });
+				TestTrue(FString::Printf(TEXT("%s: the same log, but for the caps' lines"), *What), BLog == A.Log);
+				TestEqual(FString::Printf(TEXT("%s: no caps without them"), *What), A.LoadCapTicks, 0);
+				TestTrue(FString::Printf(TEXT("%s: caps worked out (%d ticks)"), *What, B.LoadCapTicks), B.LoadCapTicks > 0);
+				TestEqual(FString::Printf(TEXT("%s: every cap by its wheel's state"), *What), B.LoadCapRuleBreaks, 0);
+				TestTrue(FString::Printf(TEXT("%s: the shares carry the weight (at most %.3f N off)"), *What, B.MaxShareSumErrN), B.MaxShareSumErrN < 1.0);
+			}
 		}
-	}
 	return true;
 }
 
