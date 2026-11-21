@@ -4,6 +4,7 @@
 // stands for, never changes its rate faster, and still arrives.
 
 #include "CoreMinimal.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
 #include "RammsMotionProfile.h"
 
@@ -172,7 +173,8 @@ namespace
 	struct FStream
 	{
 		double Ripple = 0.0;	// worst |rate - Speed| while the ramp runs, past its start
-		double LagError = 0.0;	// worst |setpoint - the ramp 1.3 frames ago| over the same span
+		double LagError = 0.0;	// worst |setpoint - the ramp its delay ago| over the same span
+		double Delay = 0.0;		// the follower's delay at the end (s)
 		double Overshoot = 0.0; // furthest past End
 		double WorstRate = 0.0;
 		double WorstAccel = 0.0;
@@ -209,7 +211,7 @@ namespace
 			if (T > 0.4 && T < End / Speed - 0.15)
 			{
 				Out.Ripple = FMath::Max(Out.Ripple, FMath::Abs(Rate - Speed));
-				Out.LagError = FMath::Max(Out.LagError, FMath::Abs(Setpoint - Speed * (T + Dt - RammsMotion::FollowDelayIntervals * Frame)));
+				Out.LagError = FMath::Max(Out.LagError, FMath::Abs(Setpoint - Speed * (T + Dt - F.Delay())));
 			}
 			Out.Overshoot = FMath::Max(Out.Overshoot, Setpoint - End);
 			Out.WorstRate = FMath::Max(Out.WorstRate, FMath::Abs(Rate));
@@ -217,6 +219,7 @@ namespace
 			PrevRate = Rate;
 		}
 		Out.Final = Setpoint;
+		Out.Delay = F.Delay();
 		return Out;
 	}
 } // namespace
@@ -227,14 +230,20 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsMotionProfileFollower, "Ramms.Motion.Prof
 bool FRammsMotionProfileFollower::RunTest(const FString& Parameters)
 {
 	// A crank commanded along a 1 rad/s ramp at 16 Hz (the curb runner's frame
-	// rate) and stepped at 1 kHz: the follower moves at the ramp's rate, 1.3
-	// command periods behind; easing to each command as it came moved in a
-	// staircase, stopping and starting every frame.
+	// rate) and stepped at 1 kHz: the follower moves at the ramp's rate, its
+	// delay behind; easing to each command as it came moved in a staircase,
+	// stopping and starting every frame.
 	const FStream Smooth = Stream(1.0, 1.0, 0.062, false);
 	const FStream Stairs = Stream(1.0, 1.0, 0.062, true);
 	TestTrue(FString::Printf(TEXT("a smooth rate (within %.3f of the ramp's)"), Smooth.Ripple), Smooth.Ripple < 0.01);
 	TestTrue(FString::Printf(TEXT("the staircase it replaces stops and starts (%.3f)"), Stairs.Ripple), Stairs.Ripple > 0.5);
-	TestTrue(FString::Printf(TEXT("1.3 command periods behind (%.4f)"), Smooth.LagError), Smooth.LagError < 0.002);
+	TestTrue(FString::Printf(TEXT("its delay behind the ramp (%.4f)"), Smooth.LagError), Smooth.LagError < 0.002);
+	// About one period behind (no jitter margin by default), never under one:
+	// the line to each command is drawn by the time the target gets there.
+	TestTrue(FString::Printf(TEXT("about one period behind (%.3f s)"), Smooth.Delay), Smooth.Delay >= 0.061 && Smooth.Delay < 1.05 * 0.063);
+	const FStream Long = Stream(1.0, 6.0, 0.062, false);
+	TestTrue(FString::Printf(TEXT("even frames: about one period behind after a few seconds (%.3f s)"), Long.Delay), Long.Delay < 1.05 * 0.062);
+	TestTrue(FString::Printf(TEXT("even frames, still smooth (%.3f)"), Long.Ripple), Long.Ripple < 0.01);
 	TestTrue(FString::Printf(TEXT("hardly past where the ramp stopped (%.4f; v^2/2a = 0.0125)"), Smooth.Overshoot),
 		Smooth.Overshoot < 0.0125 + 1e-3);
 	TestEqual(TEXT("settles on the last command"), Smooth.Final, 1.0, 1e-9);
@@ -242,9 +251,25 @@ bool FRammsMotionProfileFollower::RunTest(const FString& Parameters)
 	TestTrue(TEXT("never over the acceleration"), Smooth.WorstAccel <= 40.0 + 1e-6);
 
 	// Frames of uneven length (62 ms +-25%): the line's slopes come from the
-	// commands' stamps, so the motion stays all but smooth.
+	// commands' stamps, and the delay grows with the jitter it measures, so
+	// the late ones still find their line and the motion stays all but smooth.
+	// (With a jitter margin: none by default, which stutters here.)
+	IConsoleVariable* const Margin = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.FollowJitterMargin"));
+	const float				MarginWas = Margin ? Margin->GetFloat() : 0.0f;
+	if (Margin)
+	{
+		Margin->Set(2.0f, ECVF_SetByCode);
+	}
 	const FStream Uneven = Stream(1.0, 1.0, 0.062, false, 0.25);
 	TestTrue(FString::Printf(TEXT("uneven frames, still smooth (%.3f)"), Uneven.Ripple), Uneven.Ripple < 0.25);
+	const FStream UnevenLong = Stream(1.0, 6.0, 0.062, false, 0.25);
+	if (Margin)
+	{
+		Margin->Set(MarginWas, ECVF_SetByCode);
+	}
+	TestTrue(FString::Printf(TEXT("uneven frames, a longer delay than even ones (%.3f s against %.3f)"), UnevenLong.Delay, Long.Delay),
+		UnevenLong.Delay > Long.Delay + 0.1 * 0.062);
+	TestTrue(FString::Printf(TEXT("uneven frames, smooth on a long ramp too (%.3f)"), UnevenLong.Ripple), UnevenLong.Ripple < 0.25);
 	TestTrue(TEXT("uneven frames, never over the acceleration"), Uneven.WorstAccel <= 40.0 + 1e-6);
 	TestEqual(TEXT("uneven frames settle"), Uneven.Final, 1.0, 1e-9);
 

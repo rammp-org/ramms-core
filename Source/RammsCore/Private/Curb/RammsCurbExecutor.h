@@ -10,6 +10,7 @@
 #include "Curb/RammsCurbSchedule.h"
 #include "Curb/RammsCurbSpeedLaw.h"
 #include "RammsCurbNegotiationTypes.h"
+#include "RammsMotionProfile.h"
 #include "Templates/UniquePtr.h"
 
 /**
@@ -1064,6 +1065,9 @@ namespace RammsCurb
 		/** The ticks' running length (s, each counted to at most
 		 *  RammsMotion::MaxInterpolationGapSeconds; 0 before the first). */
 		double TickDt = 0.0;
+		/** The ticks' interval and jitter, as the motors' follower measures its
+		 *  commands' (FollowDelaySeconds). */
+		RammsMotion::FCommandInterval TickCadence;
 		/** How long (s) a leg's servos take to start a move sent them: the
 		 *  motors' profiles' delay behind their commands (FollowDelaySeconds)
 		 *  and two of the servos' own lags to get going (the tuning's less the
@@ -1075,9 +1079,8 @@ namespace RammsCurb
 		 *  less what the height turns it, over what a cm of walk does; the
 		 *  largest double where nothing bounds it. */
 		static double HipWalkCmS(const FExecLeg& L, double HeightRateCmS);
-		/** The motors' profiles' delay behind their commands (s):
-		 *  Ramms.Motor.FollowDelayIntervals at TickDt, at most
-		 *  RammsMotion::MaxInterpolationGapSeconds. */
+		/** The motors' profiles' delay behind their commands (s): the follower's
+		 *  at the ticks' interval and jitter (TickCadence). */
 		double FollowDelaySeconds() const;
 		/** How far (cm) the robot goes in a tick (TickDt at the speed it has,
 		 *  at most MaxTickLeadCm): an action due on the plan's position is begun

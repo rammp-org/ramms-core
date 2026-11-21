@@ -8,6 +8,7 @@
 #include "RammsCurbNegotiationTypes.h"
 #include "RammsDriveMode.h"
 #include "RammsHUDPanelProvider.h"
+#include "RammsMotionProfile.h"
 #include "Templates/PimplPtr.h"
 
 #include "RammsCurbNegotiationController.generated.h"
@@ -830,10 +831,10 @@ private:
 	bool PreparePerWheel(const FRammsCurbProfile& Profile, RammsCurb::FPlannerInput& OutInput, FString& OutReason);
 
 	/** How far (s) behind the frame it is sent in a position command reaches
-	 *  its servo: the robot base's physics-rate follower runs
-	 *  Ramms.Motor.FollowDelayIntervals command intervals behind its commands
-	 *  (RammsMotion::FFollower), at CommandIntervalSeconds; without it
-	 *  (Ramms.Motor.PhysicsRateProfiles 0) one step a frame, half a frame late. */
+	 *  its servo: the robot base's physics-rate follower runs its delay behind
+	 *  its commands (RammsMotion::FFollower: FCommandInterval::Delay of the
+	 *  frames, CommandCadence here); without it (Ramms.Motor.
+	 *  PhysicsRateProfiles 0) one step a frame, half a frame late. */
 	float CommandDelaySeconds() const;
 
 	/** The legs' lag behind their commands (s): Tuning.ServoLagSeconds, the
@@ -846,8 +847,9 @@ private:
 	 *  unbounded, the pose unreachable, or no probe about it reaches. */
 	bool FiveBarHipTurns(const FLegState& State, FVector2D& OutPerCmX, FVector2D& OutPerCmZ) const;
 
-	/** The frame interval (s), smoothed: how often position commands go out. */
-	float CommandIntervalSeconds = 0.0f;
+	/** The frames' interval and jitter, smoothed as the follower smooths its
+	 *  commands': how often position commands go out, and how evenly. */
+	RammsMotion::FCommandInterval CommandCadence;
 
 	/** A per-wheel re-plan: the same input, planned off the game thread
 	 *  (RammsCurb::FPlanTask), the schedule swapped in by PollReplan when it is

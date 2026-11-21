@@ -40,21 +40,77 @@ namespace RammsMotion
 	 *  longer silence is a new target, not the next point of a motion. */
 	constexpr double MaxInterpolationGapSeconds = 0.15;
 
-	/** FFollower's delay, in command intervals: more than one, so a frame
-	 *  that comes late still finds the line drawn to its command. */
-	constexpr double FollowDelayIntervals = 1.3;
+	/** FFollower's delay, in command intervals, on top of its jitter margin
+	 *  (FCommandInterval::Delay): the line to a command is drawn by the time
+	 *  the target gets there when the commands come on time. (1.3 intervals
+	 *  before 2026-11-20: 0.08 s of delay at 16 Hz on every command.) A command
+	 *  that comes late finds the target already at the last one's, and it
+	 *  holds there until the command comes: the motion stutters on uneven
+	 *  frames unless a jitter margin is given (FollowJitterMargin). */
+	constexpr double FollowDelayIntervals = 1.0;
+
+	/** How many of the commands' measured jitters (FCommandInterval::Jitter)
+	 *  FFollower's delay runs behind them on top of FollowDelayIntervals:
+	 *  none by default -- the jitter estimate follows the late frames, and in
+	 *  a capped 16 Hz editor two of them came to 0.4 interval, more than the
+	 *  1.3's whole margin; 2 for a frame rate that is uneven enough to stutter
+	 *  (Ramms.Motor.FollowJitterMargin). */
+	constexpr double FollowJitterMargin = 0.0;
 
 	/** How fast FFollower's estimate of the command interval follows each new
 	 *  one (the weight of the newest): slowly, as every change of the delay
 	 *  moves the target in time. */
 	constexpr double IntervalSmoothing = 0.03;
 
+	/** How fast the jitter estimate follows a gap further off the interval
+	 *  than it has (a late frame: soon) and one nearer (slowly). */
+	constexpr double JitterRiseSmoothing = 0.1;
+	constexpr double JitterFallSmoothing = 0.02;
+
+	/** How fast (s of delay per s) FFollower's delay may grow and shrink
+	 *  toward its commands' (FCommandInterval::Delay): the target slows by as
+	 *  much while it grows and speeds up by as much while it shrinks. Stepped
+	 *  at each command instead, the target jumped back a little every frame
+	 *  and the setpoint's rate dipped to close the gap. */
+	constexpr double DelayRiseRate = 0.1;
+	constexpr double DelayFallRate = 0.005;
+
+	/**
+	 * A command stream's interval and jitter (s), both smoothed: the delay a
+	 * follower of the stream needs (Delay) so that a command that comes late
+	 * still finds the line drawn to it. FFollower keeps one of its commands;
+	 * the curb controller and its executor keep one of their frames, to know
+	 * the delay their commands run behind.
+	 */
+	struct RAMMSCORE_API FCommandInterval
+	{
+		/** The interval (s); 0 before the first gap. */
+		double Interval = 0.0;
+		/** The gaps' mean distance from the interval (s). */
+		double Jitter = 0.0;
+
+		/** One gap (s) between two commands. A gap over
+		 *  MaxInterpolationGapSeconds is a silence, not an interval: left out.
+		 *  The first gap starts the jitter at FirstJitterShare of itself, so the
+		 *  delay starts where it once stood (1.3 intervals) and comes down as
+		 *  the frames show themselves even. */
+		void Add(double Gap);
+
+		/** The delay (s): Ramms.Motor.FollowDelayIntervals intervals and
+		 *  Ramms.Motor.FollowJitterMargin jitters, at most
+		 *  MaxInterpolationGapSeconds; 0 before the first gap. */
+		double Delay() const;
+
+		static constexpr double FirstJitterShare = 0.15;
+	};
+
 	/**
 	 * A position command that arrives once per game frame, followed by a
 	 * setpoint stepped every physics step. Each command is a point, stamped
 	 * with the time it was first seen; the target runs along the line through
-	 * those points FollowDelayIntervals command intervals behind (an estimate
-	 * of the interval, smoothed), and the setpoint follows the target. The
+	 * those points its delay behind (FCommandInterval::Delay: FollowDelayIntervals
+	 * of the commands' interval and FollowJitterMargin of their jitter, both
+	 * measured and smoothed), and the setpoint follows the target. The
 	 * line's slopes come from the stamps, so frames of uneven length still
 	 * make a smooth motion, where easing to each command as it came made a
 	 * staircase at the frame rate -- a jitter buffer, the way a servo drive
@@ -82,7 +138,9 @@ namespace RammsMotion
 		/** Where the target stands at time Now, and (OutRate) how fast it moves. */
 		double TargetAt(double Now, double* OutRate = nullptr) const;
 
-		/** How far (s) the target runs behind the commands. */
+		/** How far (s) the target runs behind the commands: its commands'
+		 *  delay (FCommandInterval::Delay), slewed (DelayRiseRate /
+		 *  DelayFallRate) as Step goes. */
 		double Delay() const;
 
 	private:
@@ -93,7 +151,12 @@ namespace RammsMotion
 		};
 		/** The commands the target has yet to pass, and the one it is leaving. */
 		TArray<FPoint, TInlineAllocator<16>> Points;
-		/** The command interval, smoothed (s); 0 before the second command. */
-		double Interval = 0.0;
+		/** The commands' interval and jitter (smoothed; none before the second
+		 *  command). */
+		FCommandInterval Cadence;
+		/** The delay the target runs behind (s), slewed toward Cadence's; set
+		 *  outright the first time there is one. */
+		double DelayNow = 0.0;
+		bool   bDelayNow = false;
 	};
 } // namespace RammsMotion

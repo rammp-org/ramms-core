@@ -413,6 +413,7 @@ namespace RammsCurb
 		Status = TEXT("Approach");
 		Elapsed = 0.0;
 		TickDt = 0.0;
+		TickCadence = RammsMotion::FCommandInterval();
 		bRampAttitude = false;
 		S = FVector2D::DotProduct(Measure.OriginXY - Plan.Origin, Plan.Heading);
 		// From the speed the robot has (no faster than the plan was made for): the
@@ -1311,9 +1312,7 @@ namespace RammsCurb
 
 	double FExecutor::FollowDelaySeconds() const
 	{
-		static IConsoleVariable* const Follow = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.FollowDelayIntervals"));
-		const double				   Intervals = Follow ? FMath::Max(0.0, static_cast<double>(Follow->GetFloat())) : RammsMotion::FollowDelayIntervals;
-		return FMath::Min(Intervals * TickDt, RammsMotion::MaxInterpolationGapSeconds);
+		return TickCadence.Delay();
 	}
 
 	double FExecutor::LegStartSeconds() const
@@ -2177,6 +2176,7 @@ namespace RammsCurb
 			// (A frame's hitch counted as no more than MaxInterpolationGapSeconds.)
 			const double D = FMath::Min(Dt, RammsMotion::MaxInterpolationGapSeconds);
 			TickDt = TickDt > 0.0 ? TickDt + (D - TickDt) * TickDtSmoothing : D;
+			TickCadence.Add(Dt);
 		}
 		if (!bRampAttitude)
 		{

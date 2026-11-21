@@ -2039,13 +2039,11 @@ float URammsCurbNegotiationController::CommandDelaySeconds() const
 		return 0.0f;
 	}
 	static IConsoleVariable* const Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
-	static IConsoleVariable* const Follow = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.FollowDelayIntervals"));
 	if (Profiles && Profiles->GetInt() == 0)
 	{
-		return 0.5f * CommandIntervalSeconds;
+		return static_cast<float>(0.5 * CommandCadence.Interval);
 	}
-	const float Intervals = Follow ? FMath::Max(0.0f, Follow->GetFloat()) : static_cast<float>(RammsMotion::FollowDelayIntervals);
-	return FMath::Min(Intervals * CommandIntervalSeconds, static_cast<float>(RammsMotion::MaxInterpolationGapSeconds));
+	return static_cast<float>(CommandCadence.Delay());
 }
 
 float URammsCurbNegotiationController::EffectiveServoLagSeconds() const
@@ -2217,7 +2215,7 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	// The legs' lag the plan and its run take: the servos' own and the robot
 	// base's command delay at this frame rate on top -- every position
 	// command reaches its servo that much after it is sent (the follower's
-	// 1.3 frames is 0.08 s at 16 Hz, which the walks' leads left out).
+	// delay, which the walks' leads once left out).
 	In.CommandDelaySeconds = CommandDelaySeconds();
 	In.Tuning.ServoLagSeconds += static_cast<float>(In.CommandDelaySeconds);
 	In.SeatReachShare = RammsCurb::SeatReachShare(Preferences);
@@ -6882,16 +6880,10 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	// The command interval, as the robot base's follower smooths its own: a
-	// frame longer than its longest line (MaxInterpolationGapSeconds -- the
-	// first after a level loads, a hitch) is no interval at all there, so it is
-	// left out here too, and never taken as the first.
-	if (DeltaTime > 0.0f && DeltaTime <= static_cast<float>(RammsMotion::MaxInterpolationGapSeconds))
-	{
-		CommandIntervalSeconds = CommandIntervalSeconds > 0.0f
-			? CommandIntervalSeconds + (DeltaTime - CommandIntervalSeconds) * static_cast<float>(RammsMotion::IntervalSmoothing)
-			: DeltaTime;
-	}
+	// The frames' interval and jitter, as the robot base's follower measures
+	// its commands' (a frame longer than its longest line -- the first after a
+	// level loads, a hitch -- is no interval there, and none here).
+	CommandCadence.Add(DeltaTime);
 	// The debug view, after whatever this tick does (it returns from several
 	// places).
 	ON_SCOPE_EXIT
