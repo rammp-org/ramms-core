@@ -971,9 +971,11 @@ namespace RammsCurb
 		/** Last tick's load caps into Out (an early return keeps them in force). */
 		void HoldLoadCaps(FExecCommand& Out) const;
 		/** A centre wheel overloaded, by its motors' efforts
-		 *  (Ramms.Curb.LoadCapWalkHold; false with it off): at its load cap for
-		 *  half the frame, or carrying more than 0.7 of the weight. */
-		bool Overloaded(int32 Leg, const FExecMeasure& Measure) const;
+		 *  (Ramms.Curb.LoadCapWalkHold; false with it off): carrying more than
+		 *  0.7 of the weight, or (bCountCap) at its load cap for half the frame
+		 *  -- left out for its loading timer: a loading wheel sits at its own
+		 *  landing cap by design, and would never finish loading. */
+		bool Overloaded(int32 Leg, const FExecMeasure& Measure, bool bCountCap) const;
 		/** The measured dynamic margin (cm) on the wheels now carrying the
 		 *  robot with the seat's pivot held at SeatX (its crossing height, the
 		 *  platform's measured pitch); -1e9 with fewer than three. */

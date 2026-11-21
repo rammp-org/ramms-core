@@ -890,6 +890,11 @@ private:
 	 *  PhysicsRateProfiles 0) one step a frame, half a frame late. */
 	float CommandDelaySeconds() const;
 
+	/** The legs' position commands go through the robot base's physics-rate
+	 *  follower: physics-rate profiles on (Ramms.Motor.PhysicsRateProfiles)
+	 *  and a backend that keeps its own clock (MuJoCo; Chaos runs none). */
+	bool RunsFollower() const;
+
 	/** The legs' lag behind their commands (s): Tuning.ServoLagSeconds, the
 	 *  servos' own, and CommandDelaySeconds on top. */
 	float EffectiveServoLagSeconds() const;

@@ -296,6 +296,11 @@ namespace RammsCurb
 		 *  lag (URammsCurbNegotiationController::CommandDelaySeconds). 0 for an
 		 *  input that leaves it out (a test's, or one recorded before). */
 		double CommandDelaySeconds = 0.0;
+		/** The legs' position commands reach their servos through the robot
+		 *  base's physics-rate follower (else stepped once a tick: half a tick
+		 *  late on average, which the executor's lift start then counts). Not
+		 *  recorded in plan inputs (a replay takes the follower). */
+		bool bFollower = true;
 		/** The robot moving as it asks (rolling on, or back: EntrySpeedCmS is
 		 *  never under 0): the robot does not wait at rest for the plan
 		 *  (PlanCrossing's work budget). An entry speed over StopSpeedCmS is

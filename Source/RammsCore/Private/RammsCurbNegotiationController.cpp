@@ -2079,13 +2079,18 @@ float URammsCurbNegotiationController::CommandDelaySeconds() const
 	// (Ramms.Motor.PhysicsRateProfiles 0), or a backend that runs none (one with
 	// no clock of its own, Chaos) -- each command reaches its servo half a frame
 	// late on average.
-	static IConsoleVariable* const	Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
-	const URammsRobotBaseComponent* Base = EnsureBase();
-	if ((Profiles && Profiles->GetInt() == 0) || !Base || Base->GetSimulationTime() < 0.0)
+	if (!RunsFollower())
 	{
 		return static_cast<float>(0.5 * CommandCadence.Interval);
 	}
 	return static_cast<float>(CommandCadence.SlewedDelay());
+}
+
+bool URammsCurbNegotiationController::RunsFollower() const
+{
+	static IConsoleVariable* const	Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
+	const URammsRobotBaseComponent* Base = EnsureBase();
+	return !(Profiles && Profiles->GetInt() == 0) && Base && Base->GetSimulationTime() >= 0.0;
 }
 
 float URammsCurbNegotiationController::EffectiveServoLagSeconds() const
@@ -2272,6 +2277,7 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	// command reaches its servo that much after it is sent (the follower's
 	// delay, which the walks' leads once left out).
 	In.CommandDelaySeconds = CommandDelaySeconds();
+	In.bFollower = RunsFollower();
 	In.Tuning.ServoLagSeconds += static_cast<float>(In.CommandDelaySeconds);
 	In.SeatReachShare = RammsCurb::SeatReachShare(CrossingPreferences);
 	// Every stability margin at no less than the authored speeding up and
@@ -4372,6 +4378,15 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		// mode but the one chosen, so choosing another after a refusal at rest handed the robot back comes here too,
 		// with this mode already inactive.
 		CancelRetry(TEXT("another drive mode was selected"));
+		// The rider leaving the mode the crossing handed back to: the hand-over
+		// hold lets go of its brakes now, before the incoming mode takes the
+		// wheels and closes any of its own (the selector stands every other mode
+		// down first). Not when the hand-back's own switch completes: the mode
+		// in control then is still this one.
+		if (bHandOverHold && !HandOverModeId.IsNone() && OtherActiveModeId() == HandOverModeId)
+		{
+			EndHandOverHold(TEXT("another drive mode was selected"), /*bLeaveCommands=*/true);
+		}
 	}
 	if (bDriveModeActive == bActive)
 	{
@@ -6985,6 +7000,12 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 		double							Gap = DeltaTime;
 		if (CadenceNow >= 0.0)
 		{
+			if (CadenceSimTime >= 0.0 && CadenceNow < CadenceSimTime)
+			{
+				// A reset (the clock gone back): the follower starts again from its
+				// next commands, and so does this.
+				CommandCadence = RammsMotion::FCommandInterval();
+			}
 			Gap = CadenceSimTime >= 0.0 && CadenceNow > CadenceSimTime ? CadenceNow - CadenceSimTime : 0.0;
 			CadenceSimTime = CadenceNow;
 		}
@@ -7313,7 +7334,7 @@ bool URammsCurbNegotiationController::MeasureStabilityMargin(float& OutCm) const
 	MeasuredSeat(SeatNow);
 	// (The running crossing's, as its plan and executor take them -- the
 	// slider moved since shapes the next crossing.)
-	FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, GetCrossingTuning());
+	FVector2D MarginDyn = RammsCurb::MarginDynamics(Tuning, IsNegotiating() ? (bPerWheelCrossing ? CrossingTuning() : Tuning) : GetCrossingTuning());
 	if (bPerWheelCrossing && Executor && Executor->IsRunning())
 	{
 		const RammsCurb::FPlannerInput& EIn = Executor->GetInput();

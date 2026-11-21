@@ -4821,6 +4821,14 @@ bool FRammsCurbExecutorStickPause::RunTest(const FString& Parameters)
 			const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Half);
 			Check(R, What + TEXT(", held half way"));
 			TestTrue(FString::Printf(TEXT("%s, held half way: slower (%.1f s against %.1f)"), *What, R.Seconds, Free.Seconds), R.Seconds > Free.Seconds + 1.0);
+			// Held low, a lift aimed over the rise to come reaches its height long
+			// before the chassis rises to its window, and waits up there past its
+			// own timing: lifted, which the lift watchdog must not fault.
+			RammsCurb::FExecDryRunOptions Low;
+			Low.StickScale = 0.15;
+			Low.MaxSeconds = 300.0;
+			const RammsCurb::FExecDryRunResult RL = RammsCurb::ExecDryRun(In, S, Low);
+			Check(RL, What + TEXT(", held low"));
 		}
 	}
 	return true;

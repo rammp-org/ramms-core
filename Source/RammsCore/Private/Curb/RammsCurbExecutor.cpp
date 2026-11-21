@@ -1374,8 +1374,10 @@ namespace RammsCurb
 
 	double FExecutor::FollowDelaySeconds() const
 	{
-		// The delay the follower runs (slewed), not the estimate it slews toward.
-		return TickCadence.SlewedDelay();
+		// The delay the follower runs (slewed), not the estimate it slews toward;
+		// with none (FPlannerInput::bFollower), a command reaches its servo half
+		// a tick late on average.
+		return In.bFollower ? TickCadence.SlewedDelay() : 0.5 * TickCadence.Interval;
 	}
 
 	double FExecutor::LegStartSeconds() const
@@ -1455,11 +1457,13 @@ namespace RammsCurb
 
 	double FExecutor::ChassisRiseToWindow(int32 Leg) const
 	{
-		// Not while the robot is held where it stands (the rider's stick let go,
-		// a hold, finishing in place): the chassis does not rise until it moves
-		// on, and a lift aimed over a rise to come would never reach its
-		// clearance there -- it would stay Lifting, and the lift watchdog fault.
-		if (!LiftAtWindowHeightOn() || bOperatorPaused || bHolding || bFinishInPlace)
+		// Not while the rider holds the robot where it stands (the stick let go,
+		// finishing in place): the chassis does not rise until it moves on, and
+		// the lift goes clear over it as it stands. (A hold is the plan's own
+		// wait: dropping the rise there would change the deadline the hold waits
+		// on, and the hold flap. The lift watchdog judges a lift by the height
+		// it is aimed at, so one waiting on the rise does not fault.)
+		if (!LiftAtWindowHeightOn() || bOperatorPaused || bFinishInPlace)
 		{
 			return 0.0;
 		}
@@ -1591,7 +1595,7 @@ namespace RammsCurb
 		return true;
 	}
 
-	bool FExecutor::Overloaded(int32 Leg, const FExecMeasure& Measure) const
+	bool FExecutor::Overloaded(int32 Leg, const FExecMeasure& Measure, bool bCountCap) const
 	{
 		if (!bLoadCaps || CVarCurbLoadCapWalkHold.GetValueOnAnyThread() == 0 || !Measure.Legs.IsValidIndex(Leg) || !Wheels.IsValidIndex(Leg)
 			|| M->Axle(Leg) != ERammsCurbAxle::Center)
@@ -1600,10 +1604,7 @@ namespace RammsCurb
 		}
 		const FExecLeg& L = Measure.Legs[Leg];
 		const double	Weight = In.Model.MassKg * 9.80665;
-		// (At its cap only once planted: a loading wheel sits at its own landing
-		// cap by design, and would never finish loading.)
-		return (L.CapBoundShare >= 0.5 && Wheels[Leg].State == ERammsCurbWheelState::Planted)
-			|| (L.bLoad && Weight > 0.0 && L.LoadN > 0.7 * Weight);
+		return (bCountCap && L.CapBoundShare >= 0.5) || (L.bLoad && Weight > 0.0 && L.LoadN > 0.7 * Weight);
 	}
 
 	void FExecutor::HoldLoadCaps(FExecCommand& Out) const
@@ -3066,7 +3067,11 @@ namespace RammsCurb
 							SetState(i, ERammsCurbWheelState::Planted, FString::Printf(TEXT("lift aborted %.2f cm off the ground: %s"), W.BottomCm, *W.BlockedWhy));
 						}
 					}
-					else if (M->IsClimb() && Elapsed - W.Since > ActionTimeoutFactor * (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) + P.TEase + ActionTimeoutExtraSeconds)
+					else if (M->IsClimb() && Elapsed - W.Since > ActionTimeoutFactor * (P.TLiftMin > 0.0 ? P.TLiftMin : P.TLift) + P.TEase + ActionTimeoutExtraSeconds
+						// ...and is short of the height it is aimed at: one up there,
+						// waiting on the chassis to rise to its window (aimed over the
+						// rise to come; the robot slowed), has lifted.
+						&& L.WheelWorld.Z < W.ZTop + SwingRaise - W.TargetRiseCm - ClearToleranceCm)
 					{
 						// A climb's lift is the leg's rise to clear the curb top: it
 						// never got there.
@@ -3245,7 +3250,7 @@ namespace RammsCurb
 				case ERammsCurbWheelState::Loading:
 					// Loaded once it has pressed down for LoadSeconds: not while its leg
 					// is at its reach, unable to.
-					W.Loading += W.bReachClamped || Overloaded(i, Measure) ? 0.0 : Dt;
+					W.Loading += W.bReachClamped || Overloaded(i, Measure, /*bCountCap=*/false) ? 0.0 : Dt;
 					if (W.Loading >= LoadSeconds)
 					{
 						const FString Check = FMath::Abs(W.BottomCm) > T.SwingClearance * 0.6
@@ -3483,7 +3488,7 @@ namespace RammsCurb
 					Step = FMath::Min(Step, HipWalkCmS(L, W.CmdVz) * Dt);
 					// Overloaded, it holds its fore/aft (Ramms.Curb.LoadCapWalkHold): walked
 					// aft it would carry yet more.
-					if (To < W.CmdX && IsSupport(i) && Overloaded(i, Measure))
+					if (To < W.CmdX && IsSupport(i) && Overloaded(i, Measure, /*bCountCap=*/true))
 					{
 						Step = 0.0;
 						if (!W.bWalkHoldLogged)
