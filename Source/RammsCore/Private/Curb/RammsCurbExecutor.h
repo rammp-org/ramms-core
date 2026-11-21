@@ -566,6 +566,10 @@ namespace RammsCurb
 		 *  (a lifted wheel aimed for its window: ChassisRiseToWindow); 0 for any
 		 *  other target. */
 		double TargetRiseCm = 0.0;
+		/** When a lift's aim last rose at once (Elapsed: its TargetRiseCm
+		 *  dropped, the stick let go): the lift watchdog gives it its time to
+		 *  get up there from then. */
+		double AimRaisedAt = 0.0;
 		/** The attitude loop's share (cm), while it supports; and the tilt of the
 		 *  plane that best fits the support legs' preloads, taken out (cm): the
 		 *  preloads share the load out among the legs, but do not tilt the base. */

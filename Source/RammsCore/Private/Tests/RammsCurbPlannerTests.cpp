@@ -4829,6 +4829,18 @@ bool FRammsCurbExecutorStickPause::RunTest(const FString& Parameters)
 			Low.MaxSeconds = 300.0;
 			const RammsCurb::FExecDryRunResult RL = RammsCurb::ExecDryRun(In, S, Low);
 			Check(RL, What + TEXT(", held low"));
+			// ...and let go along the climb, such a lift is aimed over the robot as
+			// it stands at once: it has its time to get up there from then.
+			if (bUp)
+			{
+				for (double At = 0.0; At < RL.DoneAtCm; At += 10.0)
+				{
+					RammsCurb::FExecDryRunOptions O = Low;
+					O.PauseAtTravelCm = At;
+					O.PauseSeconds = 2.0;
+					Check(RammsCurb::ExecDryRun(In, S, O), FString::Printf(TEXT("%s, held low, let go at %.0f cm"), *What, At));
+				}
+			}
 		}
 	}
 	return true;

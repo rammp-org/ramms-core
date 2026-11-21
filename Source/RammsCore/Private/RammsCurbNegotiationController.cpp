@@ -4379,13 +4379,17 @@ void URammsCurbNegotiationController::SetDriveModeActive(bool bActive)
 		// with this mode already inactive.
 		CancelRetry(TEXT("another drive mode was selected"));
 		// The rider leaving the mode the crossing handed back to: the hand-over
-		// hold lets go of its brakes now, before the incoming mode takes the
-		// wheels and closes any of its own (the selector stands every other mode
-		// down first). Not when the hand-back's own switch completes: the mode
-		// in control then is still this one.
-		if (bHandOverHold && !HandOverModeId.IsNone() && OtherActiveModeId() == HandOverModeId)
+		// hold lets go of its brakes and its own commands now, before the
+		// incoming mode takes the wheels and writes (or brakes) its own (the
+		// selector stands every other mode down first). Not when the hand-back's
+		// own switch completes (the mode in control then is still this one), nor
+		// when the rider selects that mode again (its stance put back): the hold
+		// goes on.
+		const URammsDriveModeSelector* Selector = GetOwner() ? GetOwner()->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
+		if (bHandOverHold && !HandOverModeId.IsNone() && OtherActiveModeId() == HandOverModeId
+			&& (!Selector || Selector->GetActivatingModeId() != HandOverModeId))
 		{
-			EndHandOverHold(TEXT("another drive mode was selected"), /*bLeaveCommands=*/true);
+			EndHandOverHold(TEXT("another drive mode was selected"));
 		}
 	}
 	if (bDriveModeActive == bActive)

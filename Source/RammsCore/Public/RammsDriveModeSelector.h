@@ -171,6 +171,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Drive Mode")
 	FName GetActiveModeId() const;
 
+	/** The mode being activated while the others are stood down for it (a
+	 *  mode told it is inactive can tell the one coming in -- possibly the
+	 *  active mode again, re-selected -- from GetActiveModeId, still the
+	 *  outgoing mode then); None at any other time. */
+	FName GetActivatingModeId() const;
+
 	/**
 	 * Switch to a mode by id. False when no such mode is on this robot.
 	 * Otherwise the switch is under way: the incoming mode is active when this
@@ -222,6 +228,10 @@ private:
 	/** Components implementing IRammsDriveMode, gathered once at BeginPlay. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UActorComponent>> Modes;
+
+	/** The mode ActivateMode is bringing up, while it stands the others down
+	 *  (GetActivatingModeId). */
+	int32 ActivatingIndex = INDEX_NONE;
 
 	void GatherModes();
 	/** The initial mode, run a tick after BeginPlay so every contributor has
