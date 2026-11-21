@@ -2075,12 +2075,17 @@ float URammsCurbNegotiationController::CommandDelaySeconds() const
 	{
 		return 0.0f;
 	}
-	static IConsoleVariable* const Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
-	if (Profiles && Profiles->GetInt() == 0)
+	// Without the physics-rate follower -- profiles stepped once a frame
+	// (Ramms.Motor.PhysicsRateProfiles 0), or a backend that runs none (one with
+	// no clock of its own, Chaos) -- each command reaches its servo half a frame
+	// late on average.
+	static IConsoleVariable* const	Profiles = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Motor.PhysicsRateProfiles"));
+	const URammsRobotBaseComponent* Base = EnsureBase();
+	if ((Profiles && Profiles->GetInt() == 0) || !Base || Base->GetSimulationTime() < 0.0)
 	{
 		return static_cast<float>(0.5 * CommandCadence.Interval);
 	}
-	return static_cast<float>(CommandCadence.Delay());
+	return static_cast<float>(CommandCadence.SlewedDelay());
 }
 
 float URammsCurbNegotiationController::EffectiveServoLagSeconds() const
@@ -2240,6 +2245,9 @@ bool URammsCurbNegotiationController::PreparePerWheel(const FRammsCurbProfile& P
 		}
 	}
 
+	// A crossing (or a look at one) planned afresh: the rider's preferences as
+	// they are now (its re-plans keep these).
+	CrossingPreferences = Preferences;
 	FillPlannerInput(In);
 	return true;
 }
@@ -2256,15 +2264,16 @@ void URammsCurbNegotiationController::FillPlannerInput(RammsCurb::FPlannerInput&
 	In.OriginZ = MeasuredOriginZ;
 	In.Heading = FVector2D(Heading.X, Heading.Y).GetSafeNormal();
 	In.AttitudeDeg = FVector2D(MeasuredPitchDeg, MeasuredRollDeg);
-	// The tuning as the rider's preferences shape it (FRammsCurbPreferences).
-	In.Tuning = GetCrossingTuning();
+	// The tuning as the rider's preferences shape it (FRammsCurbPreferences):
+	// those the crossing was planned with (a re-plan keeps them).
+	In.Tuning = CrossingTuning();
 	// The legs' lag the plan and its run take: the servos' own and the robot
 	// base's command delay at this frame rate on top -- every position
 	// command reaches its servo that much after it is sent (the follower's
 	// delay, which the walks' leads once left out).
 	In.CommandDelaySeconds = CommandDelaySeconds();
 	In.Tuning.ServoLagSeconds += static_cast<float>(In.CommandDelaySeconds);
-	In.SeatReachShare = RammsCurb::SeatReachShare(Preferences);
+	In.SeatReachShare = RammsCurb::SeatReachShare(CrossingPreferences);
 	// Every stability margin at no less than the authored speeding up and
 	// braking: a gentler smoothness slows the robot's moves, not its reserve
 	// (the drive's catch-up ran past the gentler rates, and the poses planned
@@ -2701,7 +2710,9 @@ bool URammsCurbNegotiationController::PlanLiftCorridor(ERammsCurbAxle Axle, TArr
 	}
 	const int32 N = FMath::Max(2, FMath::CeilToInt((To - From) / SpanSampleCm) + 1);
 	const float Ds = (To - From) / (N - 1);
-	const float VPlan = FMath::Max3(GetCrossingTuning().DriveSpeed, MeasuredWheelSpeed(), 1.0f);
+	// (The per-axle gait runs at the authored speed -- the rider's preferences
+	// shape the per-wheel gait only -- and plans at it.)
+	const float VPlan = FMath::Max3(Tuning.DriveSpeed, MeasuredWheelSpeed(), 1.0f);
 	const float Rate = Tuning.BaseHeightSpeed * Ds / VPlan;
 	const float Half = 0.5f * Tuning.MinCorridorCm;
 
@@ -2963,7 +2974,7 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	// the base is level before any wheel is LevelBeforeEdgeCm from its edge.
 	const float PrepareFrom = (bClimb ? -(FrontRadius + Tuning.FaceMargin) : -Tuning.EdgeMargin) - Tuning.PrepareDistance;
 	const float ApproachDeg = Profile.Terrain.bValid ? Profile.Terrain.ApproachAngleDeg : Profile.ApproachAngleDeg;
-	const float VPlan = FMath::Max(GetCrossingTuning().DriveSpeed, MeasuredWheelSpeed());
+	const float VPlan = FMath::Max(Tuning.DriveSpeed, MeasuredWheelSpeed());
 	const float EarliestLevelIn = FMath::Min(PrepareFrom, -RammsCurb::LevelInStartCm(RammsCurb::LevelInPlanSeconds, VPlan, ApproachDeg));
 	// Where each axle's legs may start to move for it: the level-in for the
 	// front, the axle before's landing for the others (moved on below when
@@ -3354,7 +3365,7 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 	}
 	Steps.Add(Settle);
 
-	const float Cruise = GetCrossingTuning().DriveSpeed;
+	const float Cruise = Tuning.DriveSpeed;
 	PlannedMinSpeed = Cruise;
 	for (const FStep& S : Steps)
 	{
@@ -3733,6 +3744,9 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 			}
 		}
 	}
+	// A hand-over hold still running from the crossing before lets go first:
+	// this crossing takes the wheels (and the brakes the hold set itself).
+	EndHandOverHold(TEXT("a crossing takes the wheels"));
 	SetActiveModeThroughSelector(GetDriveModeId());
 	bDriveModeActive = true;
 	bHandBackPending = false;
@@ -3773,7 +3787,7 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	if (Telemetry)
 	{
 		Telemetry->Stats.Begin(PlannedMinSpeedCmS, PlannedTiltDeg, PlannedSeconds,
-			bPlannedMargin ? TOptional<float>(PlannedMinMargin) : TOptional<float>(), GetCrossingTuning().DriveSpeed * RammsCurb::CruiseFloorFraction);
+			bPlannedMargin ? TOptional<float>(PlannedMinMargin) : TOptional<float>(), (bPerWheelCrossing ? CrossingTuning() : Tuning).DriveSpeed * RammsCurb::CruiseFloorFraction);
 		FVector2D Centre, Forward;
 		if (LocateChassis(Centre, Forward))
 		{
@@ -5037,6 +5051,7 @@ void URammsCurbNegotiationController::BeginHandOverHold(FName ModeId)
 {
 	HandOverWheels.Reset();
 	bHandOverHold = false;
+	HandOverModeId = ModeId;
 	if (CVarRammsCurbHandOverOmniHold.GetValueOnGameThread() == 0 || !bPerWheelCrossing || ModeId.IsNone())
 	{
 		return;
@@ -5077,7 +5092,7 @@ void URammsCurbNegotiationController::BeginHandOverHold(FName ModeId)
 	StepHandOverHold(0.0f);
 }
 
-void URammsCurbNegotiationController::EndHandOverHold(const TCHAR* Why)
+void URammsCurbNegotiationController::EndHandOverHold(const TCHAR* Why, bool bLeaveCommands)
 {
 	if (!bHandOverHold)
 	{
@@ -5090,8 +5105,11 @@ void URammsCurbNegotiationController::EndHandOverHold(const TCHAR* Why)
 		{
 			const FName Motor = Legs[i].Wheel.MotorId;
 			Base->SetMotorBrake(Motor, false);
-			Base->ClearMotorVelocityCommand(Motor);
-			Base->SetMotorCommand(Motor, 0.0f);
+			if (!bLeaveCommands)
+			{
+				Base->ClearMotorVelocityCommand(Motor);
+				Base->SetMotorCommand(Motor, 0.0f);
+			}
 		}
 	}
 	const FString Line = FString::Printf(TEXT("t=%5.2fs the hand-over: the fallback wheels let go after %.2f s (%s)"), Elapsed, HandOverElapsed, Why);
@@ -5111,6 +5129,15 @@ void URammsCurbNegotiationController::StepHandOverHold(float DeltaTime)
 	{
 		// A crossing has the wheels again.
 		EndHandOverHold(TEXT("the curb mode selected again"));
+		return;
+	}
+	// The rider picked another mode: it has the wheels now, and their commands
+	// are its own. (None while the hand-back's own switch is still pending:
+	// the selector reports the outgoing mode until it completes.)
+	const FName ActiveNow = OtherActiveModeId();
+	if (!ActiveNow.IsNone() && ActiveNow != HandOverModeId)
+	{
+		EndHandOverHold(TEXT("another drive mode was selected"), /*bLeaveCommands=*/true);
 		return;
 	}
 	HandOverElapsed += DeltaTime;
@@ -5348,8 +5375,12 @@ bool URammsCurbNegotiationController::BuildFinishStance(RammsCurb::FFinishStance
 	// The mode the crossing is set to hand back to: the one it came from, else
 	// the fallback (on a slope that one does not hold still on, the end may hand
 	// to a holding mode first -- HandBackModeId -- whose stance change then
-	// takes the robot on from this one).
-	FName Next = !ReturnModeId.IsNone() ? ReturnModeId : PreviousModeId;
+	// takes the robot on from this one). Planned before the crossing records
+	// the mode it came from (StartCrossingCommon): the one that has the robot
+	// now, where another does (a re-plan or a retry, with this one in control,
+	// keeps the recorded one).
+	const FName Active = OtherActiveModeId();
+	FName		Next = !ReturnModeId.IsNone() ? ReturnModeId : (!Active.IsNone() ? Active : PreviousModeId);
 	if (Next.IsNone() || Next == GetDriveModeId())
 	{
 		Next = FallbackModeId();
@@ -6363,16 +6394,20 @@ void URammsCurbNegotiationController::StepPerWheel(float DeltaTime)
 				{
 					bCornersUp = bCornersUp || (!State.FiveBar && State.bHasWorld && State.WheelBottom > LevelInCornerUpCm);
 				}
-				const float LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(), Tuning.TiltRateDegPerSec,
-					Tuning.TiltAccelDegPerSec2, EffectiveServoLagSeconds(), bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
-				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Tuning.Deceleration, DeltaTime);
+				// (At the rates the plan coming and its run level in and brake with.)
+				const FRammsCurbTuning Crossing = CrossingTuning();
+				const float			   LevelIn = RammsCurb::AwaitingLevelInSeconds(FVector2D(MeasuredPitchDeg, MeasuredRollDeg).Size(),
+							   Crossing.TiltRateDegPerSec, Crossing.TiltAccelDegPerSec2, EffectiveServoLagSeconds(),
+					   bCornersUp ? RammsCurb::LevelInCornersDownSeconds : 0.0f);
+				DriveSpeed = RammsCurb::AwaitingLevelInStep(DriveSpeed, static_cast<float>(LevelRoom), LevelIn, Crossing.Deceleration, DeltaTime);
 			}
 			// The rider's stick: let go, braked to rest; held part way, slowed to
 			// its share of the drive speed -- at Deceleration either way.
 			if (bStickPaused || StickScale < 1.0)
 			{
-				const float Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * GetCrossingTuning().DriveSpeed;
-				DriveSpeed = FMath::Min(DriveSpeed, FMath::Max(Want, DriveSpeed - Tuning.Deceleration * DeltaTime));
+				const FRammsCurbTuning Crossing = CrossingTuning();
+				const float			   Want = bStickPaused ? 0.0f : static_cast<float>(StickScale) * Crossing.DriveSpeed;
+				DriveSpeed = FMath::Min(DriveSpeed, FMath::Max(Want, DriveSpeed - Crossing.Deceleration * DeltaTime));
 			}
 			DriveSpeed = FMath::Max(0.0f, FMath::Min(DriveSpeed, Cap));
 			const float YawRate = PerWheelSteering(DeltaTime, Cap);
@@ -6940,8 +6975,22 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	// The frames' interval and jitter, as the robot base's follower measures
 	// its commands' (a frame longer than its longest line -- the first after a
-	// level loads, a hitch -- is no interval there, and none here).
-	CommandCadence.Add(DeltaTime);
+	// level loads, a hitch -- is no interval there, and none here): on the
+	// simulation's clock where the backend keeps one, as the follower stamps
+	// them (a simulator that cannot keep up runs slower than the game), and its
+	// delay slewed as the follower slews its own.
+	{
+		const URammsRobotBaseComponent* CadenceBase = EnsureBase();
+		const double					CadenceNow = CadenceBase ? CadenceBase->GetSimulationTime() : -1.0;
+		double							Gap = DeltaTime;
+		if (CadenceNow >= 0.0)
+		{
+			Gap = CadenceSimTime >= 0.0 && CadenceNow > CadenceSimTime ? CadenceNow - CadenceSimTime : 0.0;
+			CadenceSimTime = CadenceNow;
+		}
+		CommandCadence.Add(Gap);
+		CommandCadence.Advance(Gap);
+	}
 	// The debug view, after whatever this tick does (it returns from several
 	// places).
 	ON_SCOPE_EXIT
@@ -7967,6 +8016,11 @@ bool URammsCurbNegotiationController::ApplyControl(FName Id, float Value)
 FRammsCurbTuning URammsCurbNegotiationController::GetCrossingTuning() const
 {
 	return RammsCurb::ApplyPreferences(Tuning, Preferences);
+}
+
+FRammsCurbTuning URammsCurbNegotiationController::CrossingTuning() const
+{
+	return RammsCurb::ApplyPreferences(Tuning, CrossingPreferences);
 }
 
 bool URammsCurbNegotiationController::ReadControlText(FName Id, FText& OutText) const

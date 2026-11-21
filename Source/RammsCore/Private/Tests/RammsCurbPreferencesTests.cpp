@@ -55,6 +55,18 @@ bool FRammsCurbPreferencesMapTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("tilt 1: no more than its ceiling"), FMath::IsNearlyEqual(RammsCurb::ApplyPreferences(T, P).MaxPlannedTiltDeg, 10.0f, 1e-3f));
 	P.Tilt = 7.0f;
 	TestTrue(TEXT("out of range: clamped"), FMath::IsNearlyEqual(RammsCurb::ApplyPreferences(T, P).MaxPlannedTiltDeg, 10.0f, 1e-3f));
+	// Out of range on the others too (the sliders' clamps hold in the editor
+	// only; Blueprints and the controls can set anything): as at their ends.
+	FRammsCurbPreferences Q;
+	Q.Speed = 7.0f;
+	TestTrue(TEXT("speed over 1: as at 1 (1.3x)"), FMath::IsNearlyEqual(RammsCurb::ApplyPreferences(T, Q).DriveSpeed, 58.5f, 1e-3f));
+	Q.Speed = -3.0f;
+	TestTrue(TEXT("speed under 0: as at 0 (0.6x)"), FMath::IsNearlyEqual(RammsCurb::ApplyPreferences(T, Q).DriveSpeed, 27.0f, 1e-3f));
+	Q = FRammsCurbPreferences();
+	Q.Smoothness = 5.0f;
+	TestTrue(TEXT("smoothness over 1: as at 1 (0.6x)"), FMath::IsNearlyEqual(RammsCurb::ApplyPreferences(T, Q).Acceleration, 36.0f, 1e-3f));
+	Q.Smoothness = -2.0f;
+	TestTrue(TEXT("smoothness under 0: as at 0 (1.5x)"), FMath::IsNearlyEqual(RammsCurb::ApplyPreferences(T, Q).Acceleration, 90.0f, 1e-3f));
 	return true;
 }
 

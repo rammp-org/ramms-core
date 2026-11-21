@@ -938,8 +938,18 @@ private:
 	float MaxLoadAt = 0.0f;
 
 	/** The frames' interval and jitter, smoothed as the follower smooths its
-	 *  commands': how often position commands go out, and how evenly. */
+	 *  commands': how often position commands go out, and how evenly -- on the
+	 *  simulation's clock, as the follower stamps them, where the backend has
+	 *  one (CadenceSimTime: the last frame's), else the game's. */
 	RammsMotion::FCommandInterval CommandCadence;
+	double						  CadenceSimTime = -1.0;
+
+	/** The rider's preferences the crossing under way was planned with (taken
+	 *  as its first plan is prepared): its re-plans keep them, the sliders
+	 *  moved since shape the next crossing. */
+	FRammsCurbPreferences CrossingPreferences;
+	/** Tuning as CrossingPreferences shape it. */
+	FRammsCurbTuning CrossingTuning() const;
 
 	/** A per-wheel re-plan: the same input, planned off the game thread
 	 *  (RammsCurb::FPlanTask), the schedule swapped in by PollReplan when it is
@@ -1415,16 +1425,19 @@ private:
 	 */
 	TArray<int32> HandOverWheels;
 	bool		  bHandOverHold = false;
-	bool		  bHandOverBraked = false;
-	double		  HandOverElapsed = 0.0;
-	double		  HandOverSettledFor = 0.0;
-	double		  HandOverTrackedFor = 0.0;
+	/** The mode the robot was handed back to: the hold ends once another has it. */
+	FName  HandOverModeId;
+	bool   bHandOverBraked = false;
+	double HandOverElapsed = 0.0;
+	double HandOverSettledFor = 0.0;
+	double HandOverTrackedFor = 0.0;
 	/** Begin the hold for a hand-back to ModeId (when it applies). */
 	void BeginHandOverHold(FName ModeId);
 	/** One tick of it while another mode has the robot. */
 	void StepHandOverHold(float DeltaTime);
-	/** Let the held wheels go: no command, no brake. */
-	void EndHandOverHold(const TCHAR* Why);
+	/** Let the held wheels go: no command, no brake -- or (bLeaveCommands: another
+	 *  mode has the robot now, and its commands) only the brakes the hold set. */
+	void EndHandOverHold(const TCHAR* Why, bool bLeaveCommands = false);
 	/** Whether the drive mode ModeId holds the robot still with no command
 	 *  (IRammsDriveMode::HoldsRobotStill); and the first such mode, or None. */
 	bool  ModeHoldsStill(FName ModeId) const;

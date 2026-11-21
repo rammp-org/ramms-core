@@ -114,7 +114,7 @@ namespace RammsCurb
 	 *  (Ramms.Curb.ClimbCentreWalkSpeedCmS), and how far ahead in time (s) it
 	 *  sends a planned seat moving forward once a wheel stands across
 	 *  (Ramms.Curb.ClimbSeatLeadSeconds). */
-	bool   CentreHandOffOn(bool bClimb, const FRobotModel& Model);
+	bool CentreHandOffOn(bool bClimb, const FRobotModel& Model);
 	/** Ramms.Curb.CentreSearchWalk: the centre wheels walk from the level-in --
 	 *  the centre-path search plans no walk before it begins, and the executor
 	 *  walks them through it to where the plan has them as it is done. */

@@ -258,14 +258,17 @@ bool FRammsMotionProfileFollower::RunTest(const FString& Parameters)
 	const float				MarginWas = Margin ? Margin->GetFloat() : 0.0f;
 	if (Margin)
 	{
-		Margin->Set(2.0f, ECVF_SetByCode);
+		// (At its own priority where that is above code's: one last set at the
+		// console ignores a set by code.)
+		Margin->Set(2.0f, static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Margin->GetFlags()) & ECVF_SetByMask, static_cast<uint32>(ECVF_SetByCode))));
+		TestEqual(TEXT("the jitter margin set for the test"), Margin->GetFloat(), 2.0f);
 	}
 	const FStream Uneven = Stream(1.0, 1.0, 0.062, false, 0.25);
 	TestTrue(FString::Printf(TEXT("uneven frames, still smooth (%.3f)"), Uneven.Ripple), Uneven.Ripple < 0.25);
 	const FStream UnevenLong = Stream(1.0, 6.0, 0.062, false, 0.25);
 	if (Margin)
 	{
-		Margin->Set(MarginWas, ECVF_SetByCode);
+		Margin->Set(MarginWas, static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Margin->GetFlags()) & ECVF_SetByMask, static_cast<uint32>(ECVF_SetByCode))));
 	}
 	TestTrue(FString::Printf(TEXT("uneven frames, a longer delay than even ones (%.3f s against %.3f)"), UnevenLong.Delay, Long.Delay),
 		UnevenLong.Delay > Long.Delay + 0.1 * 0.062);

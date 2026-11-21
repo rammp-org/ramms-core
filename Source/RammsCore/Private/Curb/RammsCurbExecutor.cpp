@@ -330,10 +330,10 @@ namespace RammsCurb
 			ECVF_Default);
 
 		TAutoConsoleVariable<int32> CVarCurbFinishCentreLead(TEXT("Ramms.Curb.FinishCentreLead"), 0,
-			TEXT("1 (the default): finishing in the drive stance (Ramms.Curb.FinishInStance), the centre wheels are led forward of the "
+			TEXT("1: finishing in the drive stance (Ramms.Curb.FinishInStance), the centre wheels are led forward of the "
 				 "stance's fore/aft while the seat is still forward -- as far as lets the stance's lifted wheels (the front corners) go up "
 				 "with the robot standing inside the centre wheels and the rear corners -- and come back to it as the seat comes back aft. "
-				 "0: they walk straight to the stance's, and the lifted wheels wait for the seat."),
+				 "0 (the default): they walk straight to the stance's, and the lifted wheels wait for the seat."),
 			ECVF_Default);
 		bool						FinishCentreLeadOn()
 		{
@@ -460,6 +460,10 @@ namespace RammsCurb
 		Elapsed = 0.0;
 		TickDt = 0.0;
 		TickCadence = RammsMotion::FCommandInterval();
+		// The follower's delay as the controller has it (In.CommandDelaySeconds,
+		// slewed as the follower slews its own), to slew on from: a first tick
+		// that came with a hitch does not leave the lag model long.
+		TickCadence.Seed(In.CommandDelaySeconds);
 		bRampAttitude = false;
 		S = FVector2D::DotProduct(Measure.OriginXY - Plan.Origin, Plan.Heading);
 		// From the speed the robot has (no faster than the plan was made for): the
@@ -597,13 +601,24 @@ namespace RammsCurb
 		// Where the robot is along the new plan: from where it was along the old
 		// one (until the next tick measures it).
 		const FVector2D Was = Plan.Origin + Plan.Heading * S;
+		const double	SWas = S;
 		M.Reset();
 		In = InInput;
 		AtPlanOrigin(In, InPlan);
 		M = MakeUnique<FPlanModel>(In);
 		Plan = InPlan;
 		S = FVector2D::DotProduct(Was - Plan.Origin, Plan.Heading);
+		// The re-plan throttle counts travel: carried into the new plan's frame.
+		if (ReplanAskedAt > -TNumericLimits<double>::Max())
+		{
+			ReplanAskedAt += S - SWas;
+		}
+		// A planned stop the robot was resting at is the old plan's: the new
+		// plan's own stops take over (one where the robot rests is entered
+		// again on the next tick).
 		SResume = 0.0;
+		bDwelling = false;
+		DwellFor = 0.0;
 		for (int32 i = 0; i < Wheels.Num(); ++i)
 		{
 			FExecWheel& W = Wheels[i];
@@ -850,7 +865,8 @@ namespace RammsCurb
 			for (int32 Side = 0; Side < 2 && bThere; ++Side)
 			{
 				const int32 C = Centre[Side];
-				bThere = C == INDEX_NONE || !F.bHasCentreX || FMath::Abs(Wheels[C].CmdX - F.CentreX) <= ExecCaughtUpCm;
+				bThere = C == INDEX_NONE || !F.bHasCentreX
+					|| FMath::Abs(Wheels[C].CmdX - (bFinishCentreGoal ? FinishCentreGoal : F.CentreX)) <= ExecCaughtUpCm;
 			}
 			StanceLiftWaited = bThere ? StanceLiftWaited + FMath::Max(0.0, Dt) : 0.0;
 			if (StanceLiftWaited >= FinishLiftWaitSeconds)
@@ -1358,7 +1374,8 @@ namespace RammsCurb
 
 	double FExecutor::FollowDelaySeconds() const
 	{
-		return TickCadence.Delay();
+		// The delay the follower runs (slewed), not the estimate it slews toward.
+		return TickCadence.SlewedDelay();
 	}
 
 	double FExecutor::LegStartSeconds() const
@@ -1438,7 +1455,11 @@ namespace RammsCurb
 
 	double FExecutor::ChassisRiseToWindow(int32 Leg) const
 	{
-		if (!LiftAtWindowHeightOn())
+		// Not while the robot is held where it stands (the rider's stick let go,
+		// a hold, finishing in place): the chassis does not rise until it moves
+		// on, and a lift aimed over a rise to come would never reach its
+		// clearance there -- it would stay Lifting, and the lift watchdog fault.
+		if (!LiftAtWindowHeightOn() || bOperatorPaused || bHolding || bFinishInPlace)
 		{
 			return 0.0;
 		}
@@ -1579,7 +1600,10 @@ namespace RammsCurb
 		}
 		const FExecLeg& L = Measure.Legs[Leg];
 		const double	Weight = In.Model.MassKg * 9.80665;
-		return L.CapBoundShare >= 0.5 || (L.bLoad && Weight > 0.0 && L.LoadN > 0.7 * Weight);
+		// (At its cap only once planted: a loading wheel sits at its own landing
+		// cap by design, and would never finish loading.)
+		return (L.CapBoundShare >= 0.5 && Wheels[Leg].State == ERammsCurbWheelState::Planted)
+			|| (L.bLoad && Weight > 0.0 && L.LoadN > 0.7 * Weight);
 	}
 
 	void FExecutor::HoldLoadCaps(FExecCommand& Out) const
@@ -2430,6 +2454,7 @@ namespace RammsCurb
 			const double D = FMath::Min(Dt, RammsMotion::MaxInterpolationGapSeconds);
 			TickDt = TickDt > 0.0 ? TickDt + (D - TickDt) * TickDtSmoothing : D;
 			TickCadence.Add(Dt);
+			TickCadence.Advance(Dt);
 		}
 		if (!bRampAttitude)
 		{
@@ -4095,7 +4120,7 @@ namespace RammsCurb
 		const double Braking = BrakingCap(Measure, BrakingLeg);
 		const double Over = VCmd - Braking;
 		// Down the braking cap's own curve (BrakingDecel) where it binds.
-		const float	 Decel = Braking < VTarget ? static_cast<float>(BrakingDecel(T)) : T.Deceleration;
+		const float Decel = Braking < VTarget ? static_cast<float>(BrakingDecel(T)) : T.Deceleration;
 		// (The margin hold, and the base off its planned attitude --
 		// Ramms.Curb.AttitudeSlowGentle -- braked gently: braking shifts the robot's
 		// weight forward.)
@@ -4195,7 +4220,8 @@ namespace RammsCurb
 			{
 				bHolding = false;
 				Log(bFinishInPlace ? FString(TEXT("hold over: finishing in place")) : FString(TEXT("hold over: the rider's stick is not held forward")));
-				Phase = Level.bLevelled ? EExecPhase::Cross : EExecPhase::Prepare;
+				// (A hold the robot settled under ends in Settle, not back in Cross.)
+				Phase = Phase == EExecPhase::Settle ? Phase : (Level.bLevelled ? EExecPhase::Cross : EExecPhase::Prepare);
 			}
 		}
 		else if (!bHolding && VCmd <= HoldSpeedCmS && Waits(HoldSpeedCmS) && !bDwelling && bLevelInBegun && Phase != EExecPhase::Settle)
@@ -4209,7 +4235,7 @@ namespace RammsCurb
 		{
 			bHolding = false;
 			Log(FString::Printf(TEXT("hold over (now %s)"), *Binding()));
-			Phase = Level.bLevelled ? EExecPhase::Cross : EExecPhase::Prepare;
+			Phase = Phase == EExecPhase::Settle ? Phase : (Level.bLevelled ? EExecPhase::Cross : EExecPhase::Prepare);
 		}
 
 		// The invariants, counted (never planned).

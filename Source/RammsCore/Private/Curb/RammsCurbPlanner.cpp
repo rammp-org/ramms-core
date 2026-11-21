@@ -377,7 +377,7 @@ namespace
 	{
 		return FMath::Max(0.0, EntrySpeedCmS) * FMath::Max(0.0, static_cast<double>(CVarCurbHeldCornerLeadSeconds.GetValueOnAnyThread()));
 	}
-	double						CentreGroundHoldCm()
+	double CentreGroundHoldCm()
 	{
 		return FMath::Max(0.0, static_cast<double>(CVarCurbCentreGroundHold.GetValueOnAnyThread()));
 	}
@@ -1659,7 +1659,7 @@ namespace RammsCurb
 		}
 		const double Required = Tuning.MinStabilityMargin + (bHandOff && Down <= 3 ? HandOffTripodReserveCm : 0.0);
 		const double Enough = Required + SeatEnoughOverCm + HandOffSeatReserveCm;
-		double BestX = Home, BestScore = -1e18;
+		double		 BestX = Home, BestScore = -1e18;
 		// Every fore/aft tried and its margin, for the band. (The support's hull
 		// built once; the centre of mass affine in the seat's fore/aft: the
 		// seat's mechanism and its rider move with it.)
@@ -2342,10 +2342,10 @@ namespace RammsCurb
 			bool bSearchedPaths = false;
 			/** Planned from a knot set (PlanKnots): the set and how, for the
 			 *  ground hold to plan it again. */
-			bool	bFromKnots = false;
-			double	Knot[4] = { 0.0, 0.0, 0.0, 0.0 };
-			bool	bKnotPerSide = false;
-			bool	bKnotDropWalk = false;
+			bool   bFromKnots = false;
+			double Knot[4] = { 0.0, 0.0, 0.0, 0.0 };
+			bool   bKnotPerSide = false;
+			bool   bKnotDropWalk = false;
 			/** The knots are each centre wheel's own offsets from where it began
 			 *  (FKnot::bFromStart), not fore/afts. */
 			bool	bKnotFromStart = false;
@@ -3189,8 +3189,11 @@ namespace RammsCurb
 
 	double FPlanner::LowMarginCm(const FPlan& P, double Below) const
 	{
+		// From the level-in on: no margin is worked out before it (Verify), and a
+		// corner held up from the start would count the approach as travel near
+		// the floor.
 		double Cm = 0.0;
-		for (int32 k = 1; k < NumS && k < P.Margin.Num() && k < P.Air.Num(); ++k)
+		for (int32 k = FMath::Max(1, Index(LevelFromS) + 1); k < NumS && k < P.Margin.Num() && k < P.Air.Num(); ++k)
 		{
 			if (P.Air[k] != 0 && P.Margin[k] < Below)
 			{
@@ -7409,9 +7412,12 @@ namespace RammsCurb
 		{
 			Found = TiltBasesAtLimit;
 			Tried.Add(TEXT("tilt: the candidates' least tilts as the search up to the same limit found them"));
-			// Under a lower ceiling (a slowed search for less tilt), the same least
-			// tilts where they are within it -- the least is the least, searched up
-			// from none -- and none where they are not.
+			// Under a lower ceiling (a slowed search for less tilt): the rings' least
+			// tilts where they are within it -- a ring's least is the least, searched
+			// up from none -- and none where they are not. Not so the squares: their
+			// search takes, size by size, the first pose that stands within its
+			// ceiling, so one over this ceiling may hide a less inclined one at a
+			// larger size -- those stretches are searched again under it.
 			for (FBaseTilt& C : Found)
 			{
 				if (bAtLimit)
@@ -7426,7 +7432,13 @@ namespace RammsCurb
 				}
 				if (C.bSquare && SizeOf(C.Square) > MaxTilt + 1e-9)
 				{
-					C.bSquare = false;
+					for (int32 r = 0; r < C.Ranges.Num() && C.bSquare; ++r)
+					{
+						if (InclinationDeg(C.Square[r].X, C.Square[r].Y) > MaxTilt + 1e-9)
+						{
+							C.bSquare = PickLeastTilt(ETiltPick::Square, TiltGridDeg, MaxTilt, [&](const FVector2D& D) { return StandsOver(C.Floor, C.Ranges[r], D); }, C.Square[r]);
+						}
+					}
 				}
 				C.Least = TNumericLimits<double>::Max();
 				if (C.bRing)

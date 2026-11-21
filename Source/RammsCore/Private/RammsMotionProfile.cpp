@@ -113,8 +113,6 @@ namespace RammsMotion
 		Rate = 0.0;
 		Points.Reset();
 		Cadence = FCommandInterval();
-		DelayNow = 0.0;
-		bDelayNow = false;
 	}
 
 	static TAutoConsoleVariable<float> CVarFollowDelayIntervals(TEXT("Ramms.Motor.FollowDelayIntervals"), static_cast<float>(FollowDelayIntervals),
@@ -156,9 +154,26 @@ namespace RammsMotion
 		return FMath::Min(Intervals * Interval + Margin * Jitter, MaxInterpolationGapSeconds);
 	}
 
+	void FCommandInterval::Advance(double Dt)
+	{
+		const double Want = Delay();
+		if (!bSlewed)
+		{
+			if (Want > 0.0)
+			{
+				Slewed = Want;
+				bSlewed = true;
+			}
+		}
+		else if (Dt > 0.0)
+		{
+			Slewed += FMath::Clamp(Want - Slewed, -DelayFallRate * Dt, DelayRiseRate * Dt);
+		}
+	}
+
 	double FFollower::Delay() const
 	{
-		return bDelayNow ? DelayNow : Cadence.Delay();
+		return Cadence.SlewedDelay();
 	}
 
 	double FFollower::TargetAt(double Now, double* OutRate) const
@@ -238,19 +253,7 @@ namespace RammsMotion
 			return Setpoint;
 		}
 		// The delay slewed toward the commands' (the first one taken outright).
-		const double Want = Cadence.Delay();
-		if (!bDelayNow)
-		{
-			if (Want > 0.0)
-			{
-				DelayNow = Want;
-				bDelayNow = true;
-			}
-		}
-		else if (Dt > 0.0)
-		{
-			DelayNow += FMath::Clamp(Want - DelayNow, -DelayFallRate * Dt, DelayRiseRate * Dt);
-		}
+		Cadence.Advance(Dt);
 		double		 TargetRate = 0.0;
 		const double Target = TargetAt(Now, &TargetRate);
 		return StepTowardMoving(Setpoint, Rate, Target, TargetRate, MaxRate, MaxAccel, Dt);

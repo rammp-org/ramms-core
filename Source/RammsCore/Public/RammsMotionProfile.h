@@ -101,7 +101,27 @@ namespace RammsMotion
 		 *  MaxInterpolationGapSeconds; 0 before the first gap. */
 		double Delay() const;
 
+		/** The delay as a follower runs it (FFollower::Delay): Delay, slewed
+		 *  toward as time goes on (DelayRiseRate / DelayFallRate) and taken
+		 *  outright the first time there is one. Advance moves it on by Dt
+		 *  (s); a stream's other readers (the curb's controller and executor)
+		 *  advance theirs with their frames, so the delay they plan with is the
+		 *  one the follower runs, not the estimate it slews toward. */
+		void   Advance(double Dt);
+		double SlewedDelay() const { return bSlewed ? Slewed : Delay(); }
+		/** Start the slew from Delay (s): a reader that begins again (each
+		 *  crossing's executor) takes up where a longer-lived one stands. */
+		void Seed(double Delay)
+		{
+			Slewed = Delay;
+			bSlewed = Delay > 0.0;
+		}
+
 		static constexpr double FirstJitterShare = 0.15;
+
+	private:
+		double Slewed = 0.0;
+		bool   bSlewed = false;
 	};
 
 	/**
@@ -152,11 +172,8 @@ namespace RammsMotion
 		/** The commands the target has yet to pass, and the one it is leaving. */
 		TArray<FPoint, TInlineAllocator<16>> Points;
 		/** The commands' interval and jitter (smoothed; none before the second
-		 *  command). */
+		 *  command), and the delay the target runs behind, slewed toward theirs
+		 *  (FCommandInterval::SlewedDelay). */
 		FCommandInterval Cadence;
-		/** The delay the target runs behind (s), slewed toward Cadence's; set
-		 *  outright the first time there is one. */
-		double DelayNow = 0.0;
-		bool   bDelayNow = false;
 	};
 } // namespace RammsMotion
