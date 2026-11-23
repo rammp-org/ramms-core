@@ -96,10 +96,11 @@ static TAutoConsoleVariable<int32> CVarRammsCurbKinematicWheelFeed(
 			TEXT("model's motion. 0: the link's turn from a fit against the leg's rates, as before 2026-11-22. 2: the leg's\n")
 				TEXT("fore/aft rate and the link's turn for where its hips' motion profiles take them on the commands just sent --\n")
 					TEXT("copies of the base's followers run on the commands alone: a setpoint a command interval behind them, within\n")
-						TEXT("the motors' speed and acceleration (where the base runs no follower, as 1). 2 gives each wheel the speed\n")
-							TEXT("its leg's motion needs most nearly (the lag model has a walk's first tick a good way into its speed, where\n")
-								TEXT("the motor is slow off the mark), but crossings were no quicker or steadier for it, and now and then one\n")
-									TEXT("rolled faster at a landing than with 1: not the default."),
+						TEXT("the motors' speed and acceleration (where the base runs no follower for a hip, as 1; the copies start each\n")
+							TEXT("crossing with the delay its first frames show, so they match the base's only on evenly timed frames). 2 gives each wheel the speed\n")
+								TEXT("its leg's motion needs most nearly (the lag model has a walk's first tick a good way into its speed, where\n")
+									TEXT("the motor is slow off the mark), but crossings were no quicker or steadier for it, and now and then one\n")
+										TEXT("rolled faster at a landing than with 1: not the default."),
 	ECVF_Default);
 
 // A diagnostic switch, for planning with and without the corridor fallback.
@@ -879,7 +880,12 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 
 bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
 {
+	// (Afresh, but for the rider's setting as the last crossing left it.)
+	const FSeatState Last = SeatState;
 	SeatState = FSeatState();
+	SeatState.bKept = Last.bKept;
+	SeatState.KeptPitchOwn = Last.KeptPitchOwn;
+	FMemory::Memcpy(SeatState.KeptCommands, Last.KeptCommands, sizeof(SeatState.KeptCommands));
 	Model->Seat = RammsCurb::FModelSeat();
 	if (!Seat.IsSet())
 	{
@@ -986,11 +992,17 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		const RammsCurb::FSeatPose Start = RammsCurb::SeatForward(Seat,
 			FVector2D(Commanded(Seat.Linkage.ProximalMotorA), Commanded(Seat.Linkage.ProximalMotorB)));
 		// (Against the base: the rider's own setting, which they are brought to
-		// as the base levels in -- StepSeatPitchRef.)
-		SeatState.PitchOwn = Start.bValid && !Seat.TiltMotor.IsNone()
-			? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor))
-			: 0.0;
-		SeatState.PitchRef = Start.bValid && !Seat.TiltMotor.IsNone() ? SeatState.PitchOwn + SeatPitchRad : 0.0;
+		// as the base levels in -- StepSeatPitchRef. Where the seat still stands
+		// commanded as the last crossing left it, its tilt making up for the
+		// base's pitch then, the setting is the one that crossing held, and the
+		// pitch read back is only where the rider is now.)
+		const bool	 bTilts = Start.bValid && !Seat.TiltMotor.IsNone();
+		const double Found = bTilts ? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) : 0.0;
+		float		 Now[3] = { 0.0f, 0.0f, 0.0f };
+		const bool	 bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
+			&& !Seat.TiltMotor.IsNone() && Base->GetMotorCommand(Seat.TiltMotor, Now[2]);
+		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && SeatState.bKept, SeatState.KeptPitchOwn, SeatState.KeptCommands, Now, Found);
+		SeatState.PitchRef = bTilts ? Found + SeatPitchRad : 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
 	FVector2D			 Angles;
@@ -1014,6 +1026,11 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		const double Max = FMath::DegreesToRadians(static_cast<double>(Seat.MaxPitchDeg));
 		const double Pitch = FMath::Clamp(SeatState.PitchRef - static_cast<double>(SeatPitchRad), -Max, Max);
 		Base->SetMotorCommand(Seat.TiltMotor, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, SeatState.LinkAngle0, Pitch)));
+		// The setting held and the commands as they now stand (read back: a
+		// command is clamped to its motor's range), for the next take-over.
+		SeatState.bKept = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, SeatState.KeptCommands[0])
+			&& Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, SeatState.KeptCommands[1]) && Base->GetMotorCommand(Seat.TiltMotor, SeatState.KeptCommands[2]);
+		SeatState.KeptPitchOwn = SeatState.PitchOwn;
 	}
 }
 
@@ -3742,6 +3759,7 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 	if (Drive)
 	{
 		Drive->Feeds.Init(RammsCurb::FWheelFeed(), Legs.Num());
+		Drive->bHasLastChassis = false;
 		Drive->Stall.Reset();
 		Drive->CommitRest.Reset();
 		Drive->Stick.Reset();
@@ -4867,48 +4885,14 @@ namespace
 		return bSigns ? Spec : nullptr;
 	}
 
-	// A 5-bar with its hips at Hips (rad; A, B): its endpoint (the robot's x-z,
-	// cm, as its controller's targets are) and the directions (rad, in the
-	// linkage's own x-z plane) of its two distal links, knee to endpoint, arm
-	// A's then arm B's. False where the links do not meet there.
-	bool FiveBarPose(const FRamms5BarLinkageSpec& Spec, const FVector2D& Hips, FVector2D& OutEnd, FVector2D& OutLinks)
-	{
-		bool			bValid = false;
-		const FVector2D End = URamms5BarKinematics::ComputeEndpoint(Spec, Hips, bValid);
-		if (!bValid)
-		{
-			return false;
-		}
-		const auto Knee = [](const FVector2D& Pivot, double Length, double ZeroDir, double Sign, double Hip) {
-			const double Dir = ZeroDir + (Sign > 0.0 ? 1.0 : -1.0) * Hip;
-			return Pivot + FVector2D(Length * FMath::Cos(Dir), Length * FMath::Sin(Dir));
-		};
-		const FVector2D KneeA = Knee(Spec.PivotA, Spec.ProximalLengthA, Spec.ZeroDirA, Spec.AngleSignA, Hips.X);
-		const FVector2D KneeB = Knee(Spec.PivotB, Spec.ProximalLengthB, Spec.ZeroDirB, Spec.AngleSignB, Hips.Y);
-		OutLinks = FVector2D(FMath::Atan2(End.Y - KneeA.Y, End.X - KneeA.X), FMath::Atan2(End.Y - KneeB.Y, End.X - KneeB.X));
-		OutEnd = FVector2D(End.X * (Spec.TranslationSign < 0.0f ? -1.0 : 1.0), End.Y);
-		return true;
-	}
-
-	// The directions of a 5-bar's two distal links (FiveBarPose) with its
-	// endpoint at At (the robot's x-z, cm). False where its kinematics do not
-	// solve there.
+	// The directions of a 5-bar's two distal links (RammsCurb::FiveBarLinksAt)
+	// with its endpoint at At (the robot's x-z, cm). False where its kinematics
+	// do not solve there.
 	bool FiveBarLinkAngles(const URamms5BarLinkageController* FiveBar, const FVector2D& At, FVector2D& OutAngles)
 	{
 		OutAngles = FVector2D::ZeroVector;
 		const FRamms5BarLinkageSpec* Spec = FiveBarSpecOf(FiveBar);
-		if (!Spec)
-		{
-			return false;
-		}
-		const FVector2D End(At.X * (Spec->TranslationSign < 0.0f ? -1.0 : 1.0), At.Y);
-		// The hips' angles there, whatever the knees' and motors' ranges say (a
-		// leg pressed a little past one is still where it is): only the two
-		// arms' own reach decides.
-		bool			bReachable = false;
-		const FVector2D Hips = URamms5BarKinematics::SolveIK(*Spec, End, bReachable);
-		FVector2D		Back;
-		return FiveBarPose(*Spec, Hips, Back, OutAngles) && FVector2D::Distance(Back, At) <= 0.05;
+		return Spec && RammsCurb::FiveBarLinksAt(*Spec, At, OutAngles);
 	}
 
 	// Where a 5-bar's hips will have its endpoint a tick on, by the hips' own
@@ -4930,8 +4914,14 @@ namespace
 		const double				 Now = Base.GetSimulationTime();
 		float						 CmdA = 0.0f, CmdB = 0.0f;
 		FRammsMotorSpec				 MotorA, MotorB;
+		// (A hip the base does not run a profile for -- not a position motor, or
+		// one with neither a speed nor an acceleration limit, whose commands go
+		// straight through -- has no follower to copy.)
+		const auto Profiled = [](const FRammsMotorSpec& Motor) {
+			return Motor.Type == ERammsActuatorType::Position && (Motor.MaxVelocity > 0.0f || Motor.MaxAcceleration > 0.0f);
+		};
 		if (!Spec || Dt <= 0.0f || Now < 0.0 || !Base.GetMotorCommand(Spec->ProximalMotorA, CmdA) || !Base.GetMotorCommand(Spec->ProximalMotorB, CmdB)
-			|| !Base.GetMotorSpec(Spec->ProximalMotorA, MotorA) || !Base.GetMotorSpec(Spec->ProximalMotorB, MotorB))
+			|| !Base.GetMotorSpec(Spec->ProximalMotorA, MotorA) || !Base.GetMotorSpec(Spec->ProximalMotorB, MotorB) || !Profiled(MotorA) || !Profiled(MotorB))
 		{
 			Feed.ForgetMotors();
 			return false;
@@ -4944,7 +4934,7 @@ namespace
 			return false;
 		}
 		FVector2D End0, End1, Links0, Links1;
-		if (!FiveBarPose(*Spec, Hips, End0, Links0) || !FiveBarPose(*Spec, Next, End1, Links1))
+		if (!RammsCurb::FiveBarPose(*Spec, Hips, End0, Links0) || !RammsCurb::FiveBarPose(*Spec, Next, End1, Links1))
 		{
 			return false;
 		}
@@ -4968,6 +4958,11 @@ void URammsCurbNegotiationController::TrackLegRates(float DeltaTime)
 	Drive->Feeds.SetNum(Legs.Num());
 	const FVector Forward = ChassisForward;
 	const FVector Right = FVector::CrossProduct(FVector::UpVector, Forward);
+	// The chassis' own rotation, for its turn over the tick about each wheel's
+	// axis: a carrier's measured turn is its link's in the world, and the
+	// links are told apart by their turn against the chassis.
+	const FQuat Chassis = FRotationMatrix::MakeFromXZ(ChassisAxisX, ChassisAxisZ).ToQuat();
+	const bool	bChassisTurn = Drive->bHasLastChassis && DeltaTime > 0.0f && DeltaTime <= MaxWheelTurnSampleSeconds;
 	for (int32 i = 0; i < Legs.Num(); ++i)
 	{
 		const FRammsCurbLeg&   Leg = Legs[i];
@@ -4977,11 +4972,11 @@ void URammsCurbNegotiationController::TrackLegRates(float DeltaTime)
 		{
 			continue;
 		}
-		float Carrier = 0.0f;
+		float		  Carrier = 0.0f;
+		const double  Theta = FMath::DegreesToRadians(Leg.Wheel.RollDirectionDeg);
+		const FVector Axis = (Right * FMath::Cos(Theta) - Forward * FMath::Sin(Theta)).GetSafeNormal();
 		if (State.bHasLastWheel && DeltaTime > 0.0f && DeltaTime <= MaxWheelTurnSampleSeconds)
 		{
-			const double  Theta = FMath::DegreesToRadians(Leg.Wheel.RollDirectionDeg);
-			const FVector Axis = (Right * FMath::Cos(Theta) - Forward * FMath::Sin(Theta)).GetSafeNormal();
 			const double  World = RammsCurb::TurnAbout(State.LastWheelRotation, State.WheelRotation, Axis);
 			const float	  Sense = Leg.Wheel.bInvert ? -1.0f : 1.0f;
 			Carrier = RammsCurb::CarrierRate(World, Sense * State.LastWheelAngle, Sense * State.WheelAngle,
@@ -5000,13 +4995,16 @@ void URammsCurbNegotiationController::TrackLegRates(float DeltaTime)
 		{
 			FVector2D  Links;
 			const bool bLinks = FiveBarLinkAngles(State.FiveBar, FVector2D(State.MeasuredX, State.MeasuredZ), Links);
-			Feed.MeasureLinks(DeltaTime, Links, bLinks);
+			const double ChassisRate = bChassisTurn ? RammsCurb::TurnAbout(Drive->LastChassis, Chassis, Axis) / DeltaTime : 0.0;
+			Feed.MeasureLinks(DeltaTime, Links, bLinks, static_cast<float>(ChassisRate));
 		}
 		State.LastWheelRotation = State.WheelRotation;
 		State.LastWheelAngle = State.WheelAngle;
 		State.LastWheelRate = State.WheelRate;
 		State.bHasLastWheel = true;
 	}
+	Drive->LastChassis = Chassis;
+	Drive->bHasLastChassis = true;
 }
 
 void URammsCurbNegotiationController::PredictLegRates(float DeltaTime)

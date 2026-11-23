@@ -2,8 +2,41 @@
 
 #include "Curb/RammsCurbSpeedLaw.h"
 
+#include "Ramms5BarKinematics.h"
+#include "Ramms5BarLinkageSpec.h"
+
 namespace RammsCurb
 {
+	bool FiveBarPose(const FRamms5BarLinkageSpec& Spec, const FVector2D& Hips, FVector2D& OutEnd, FVector2D& OutLinks)
+	{
+		bool			bValid = false;
+		const FVector2D End = URamms5BarKinematics::ComputeEndpoint(Spec, Hips, bValid);
+		if (!bValid)
+		{
+			return false;
+		}
+		const auto Knee = [](const FVector2D& Pivot, double Length, double ZeroDir, double Sign, double Hip) {
+			const double Dir = ZeroDir + (Sign > 0.0 ? 1.0 : -1.0) * Hip;
+			return Pivot + FVector2D(Length * FMath::Cos(Dir), Length * FMath::Sin(Dir));
+		};
+		const FVector2D KneeA = Knee(Spec.PivotA, Spec.ProximalLengthA, Spec.ZeroDirA, Spec.AngleSignA, Hips.X);
+		const FVector2D KneeB = Knee(Spec.PivotB, Spec.ProximalLengthB, Spec.ZeroDirB, Spec.AngleSignB, Hips.Y);
+		OutLinks = FVector2D(FMath::Atan2(End.Y - KneeA.Y, End.X - KneeA.X), FMath::Atan2(End.Y - KneeB.Y, End.X - KneeB.X));
+		OutEnd = FVector2D(End.X * (Spec.TranslationSign < 0.0f ? -1.0 : 1.0), End.Y);
+		return true;
+	}
+
+	bool FiveBarLinksAt(const FRamms5BarLinkageSpec& Spec, const FVector2D& At, FVector2D& OutLinks)
+	{
+		OutLinks = FVector2D::ZeroVector;
+		const FVector2D End(At.X * (Spec.TranslationSign < 0.0f ? -1.0 : 1.0), At.Y);
+		// Only the two arms' own reach decides.
+		bool			bReachable = false;
+		const FVector2D Hips = URamms5BarKinematics::SolveIK(Spec, End, bReachable);
+		FVector2D		Back;
+		return FiveBarPose(Spec, Hips, Back, OutLinks) && FVector2D::Distance(Back, At) <= 0.05;
+	}
+
 	float BrakingSpeed(float DistanceCm, float Deceleration)
 	{
 		return DistanceCm <= 0.0f ? 0.0f : FMath::Sqrt(2.0f * FMath::Max(Deceleration, 0.0f) * DistanceCm);
@@ -273,7 +306,7 @@ namespace RammsCurb
 		bMeasuredLinks = false;
 	}
 
-	void FWheelFeed::MeasureLinks(float Dt, const FVector2D& LinkAngles, bool bValid)
+	void FWheelFeed::MeasureLinks(float Dt, const FVector2D& LinkAngles, bool bValid, float ChassisRate)
 	{
 		if (bValid && bHasLastLinks && Dt > 0.0f)
 		{
@@ -284,7 +317,7 @@ namespace RammsCurb
 			const double Of[4] = { Rate.X, -Rate.X, Rate.Y, -Rate.Y };
 			for (int32 i = 0; i < 4; ++i)
 			{
-				LinkMisfit[i] = Keep * LinkMisfit[i] + Dt * FMath::Square(static_cast<double>(MeasuredCarrier) - Of[i]);
+				LinkMisfit[i] = Keep * LinkMisfit[i] + Dt * FMath::Square(static_cast<double>(MeasuredCarrier) - static_cast<double>(ChassisRate) - Of[i]);
 			}
 			LinkTurn = Keep * LinkTurn + Dt * (Rate.X * Rate.X + Rate.Y * Rate.Y);
 			MeasuredLinkRate = Rate;
@@ -313,6 +346,13 @@ namespace RammsCurb
 			Best = LinkMisfit[i] < LinkMisfit[Best] ? i : Best;
 		}
 		if (LinkMisfit[Best] >= CarrierLinkSenseShare * LinkMisfit[Best ^ 1])
+		{
+			return INDEX_NONE;
+		}
+		// And apart from the other link, taken either way: what one kind of
+		// motion alone does not show (CarrierLinkSenseShare).
+		const int32 Other = Best ^ 2;
+		if (LinkMisfit[Best] >= CarrierLinkSenseShare * FMath::Min(LinkMisfit[Other], LinkMisfit[Other ^ 1]))
 		{
 			return INDEX_NONE;
 		}

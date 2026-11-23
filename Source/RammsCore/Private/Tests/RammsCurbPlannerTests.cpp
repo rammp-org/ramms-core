@@ -12,6 +12,7 @@
 #include "CoreMinimal.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
+#include "Algo/Reverse.h"
 #include "Misc/ScopeExit.h"
 
 #include "Curb/RammsCurbDryRun.h"
@@ -1827,9 +1828,13 @@ bool FRammsCurbPlannerPlanInStep::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("run %d: taken at once"), Run), Task.Take(Got));
 		TestEqual(FString::Printf(TEXT("run %d: the same floor"), Run), Got.VFloor, Sync.VFloor);
 		TestEqual(FString::Printf(TEXT("run %d: as many samples"), Run), Got.Samples.Num(), Sync.Samples.Num());
-		TestTrue(FString::Printf(TEXT("run %d: the wait is counted as pending time, not as the launch's (%.1f ms pending, %.2f ms launch)"), Run,
-					 1000.0 * Task.PendingSeconds(), 1000.0 * Task.LaunchSeconds()),
-			Task.PendingSeconds() >= Task.LaunchSeconds());
+		// (Against the plan's own time: a launch that took the wait in would be
+		// as long as the plan, and a pending time that left it out shorter.)
+		TestTrue(FString::Printf(TEXT("run %d: the launch's time leaves the wait out (%.2f ms launch, the plan %.1f ms)"), Run, 1000.0 * Task.LaunchSeconds(),
+					 Got.PlanMs),
+			Task.LaunchSeconds() < 0.001 * Got.PlanMs);
+		TestTrue(FString::Printf(TEXT("run %d: the pending time has it (%.1f ms pending, the plan %.1f ms)"), Run, 1000.0 * Task.PendingSeconds(), Got.PlanMs),
+			Task.PendingSeconds() >= 0.001 * Got.PlanMs - 0.001);
 	}
 	return true;
 }
@@ -1913,6 +1918,48 @@ bool FRammsCurbPlannerSteadyPath::RunTest(const FString& Parameters)
 	Same(TEXT("a ramp stays"), Steady(Ramp, 1.0), Ramp);
 	Same(TEXT("a window of 0 changes nothing"), Steady(Flat({ { 20, 10.0 }, { 5, 17.0 }, { 20, 14.0 } }), 0.0),
 		Flat({ { 20, 10.0 }, { 5, 17.0 }, { 20, 14.0 } }));
+	// Samples of uneven length, as a plan's are (the robot speeds up, and a stop
+	// is a window of its own): a path that only falls or only rises stays as
+	// it is, whichever is kept, and so does a rise or a dip held for the window
+	// whose last samples are shorter than its first.
+	{
+		auto Uneven = [&](const TCHAR* What, const TArray<double>& Path, const TArray<double>& Seconds) {
+			for (const bool bRisesKept : { false, true })
+			{
+				TArray<double> Out;
+				RammsCurb::SteadyPath(Path, Seconds, 1.0, bRisesKept, TConstArrayView<FVector2D>(), Out);
+				Same(*FString::Printf(TEXT("%s (%s)"), What, bRisesKept ? TEXT("rises kept") : TEXT("rises cut")), Out, Path);
+			}
+		};
+		auto Reversed = [](TArray<double> Path) {
+			Algo::Reverse(Path);
+			return Path;
+		};
+		TArray<double> Falling, SpeedingUp;
+		for (int32 k = 0; k <= 10; ++k)
+		{
+			Falling.Add(10.0 - k);
+			SpeedingUp.Add(k < 2 ? 1.0 : 0.25);
+		}
+		Uneven(TEXT("uneven samples: a fall stays"), Falling, SpeedingUp);
+		Uneven(TEXT("uneven samples: a rise stays"), Reversed(Falling), SpeedingUp);
+		TArray<double> AfterStop = Flat({ { 11, 30.0 } }), StopSeconds = Flat({ { 10, 0.1 }, { 1, 1.0 } });
+		for (int32 k = 1; k <= 30; ++k)
+		{
+			AfterStop.Add(30.0 - 0.2 * k);
+			StopSeconds.Add(0.1);
+		}
+		Uneven(TEXT("after a stop's sample: a fall stays"), AfterStop, StopSeconds);
+		TArray<double> Mirror;
+		for (const double V : AfterStop)
+		{
+			Mirror.Add(60.0 - V);
+		}
+		Uneven(TEXT("after a stop's sample: a rise stays"), Mirror, StopSeconds);
+		const TArray<double> PlateauSeconds = Flat({ { 6, 0.5 }, { 2, 0.5 }, { 2, 0.2 }, { 6, 0.5 } });
+		Uneven(TEXT("uneven samples: a rise held 1.4 s stays"), Flat({ { 6, 10.0 }, { 4, 17.0 }, { 6, 14.0 } }), PlateauSeconds);
+		Uneven(TEXT("uneven samples: a dip held 1.4 s stays"), Flat({ { 6, 14.0 }, { 4, 8.0 }, { 6, 12.0 } }), PlateauSeconds);
+	}
 
 	// Then a plan: with the window the square climb's chassis height turns
 	// round no more often than without it and travels no further in all, stays
@@ -1925,7 +1972,7 @@ bool FRammsCurbPlannerSteadyPath::RunTest(const FString& Parameters)
 	const float Was = Window->GetFloat();
 	ON_SCOPE_EXIT
 	{
-		Window->Set(Was, ECVF_SetByConsole);
+		SetTestCVar(Window, Was);
 	};
 	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
 	auto						   Measure = [&](const RammsCurb::FCurbSchedule& Plan, int32& OutTurns, double& OutTravel, bool& bInside) {
@@ -1952,9 +1999,9 @@ bool FRammsCurbPlannerSteadyPath::RunTest(const FString& Parameters)
 			  }
 		  }
 	};
-	Window->Set(0.0f, ECVF_SetByConsole);
+	SetTestCVar(Window, 0.0f);
 	const RammsCurb::FCurbSchedule Before = RammsCurb::PlanCrossing(In);
-	Window->Set(1.5f, ECVF_SetByConsole);
+	SetTestCVar(Window, 1.5f);
 	const RammsCurb::FCurbSchedule After = RammsCurb::PlanCrossing(In);
 	if (!TestTrue(TEXT("both plans are made"), Before.Class != RammsCurb::EPlanClass::Refused && After.Class != RammsCurb::EPlanClass::Refused))
 	{
@@ -1969,6 +2016,9 @@ bool FRammsCurbPlannerSteadyPath::RunTest(const FString& Parameters)
 		Travel0, Turns1, Travel1));
 	TestTrue(TEXT("no more turns with the window"), Turns1 <= Turns0);
 	TestTrue(TEXT("no more travel with the window"), Travel1 <= Travel0 + 1e-6);
+	// (And it does something: a plan the window left as it was would pass the
+	// two above.)
+	TestTrue(TEXT("the window takes something out of the square climb's height"), Turns1 < Turns0 || Travel1 < Travel0 - 0.1);
 	TestTrue(TEXT("inside every sample's corridor (where it was without the window)"), bInside1 || !bInside0);
 	TestTrue(FString::Printf(TEXT("as fast (floor %.2f against %.2f cm/s)"), After.VFloor, Before.VFloor), After.VFloor >= Before.VFloor - 0.5);
 	return true;

@@ -7,6 +7,8 @@
 #include "RammsCurbNegotiationTypes.h"
 #include "RammsMotionProfile.h"
 
+struct FRamms5BarLinkageSpec;
+
 /**
  * The curb controller's speed law and the leg and wheel rates it drives with,
  * as plain C++ so that each can be tested on made-up numbers. Not reflected,
@@ -58,9 +60,13 @@ namespace RammsCurb
 	 *  fifth of a second at about a quarter of a radian a second. */
 	constexpr float CarrierLinkMinTurn = 0.012f;
 	/** The chosen link's misfit against the carrier's measured turn must be
-	 *  under this share of the same link's taken the other way round. (The two
-	 *  links may turn alike, and then either serves; a link and its opposite
-	 *  never do.) */
+	 *  under this share of the same link's taken the other way round, and of
+	 *  the other link's taken either way. (A symmetric 5-bar's two links turn
+	 *  alike as the leg walks and opposite as it lifts: from one kind of
+	 *  motion alone a link and the other taken the right way round cannot be
+	 *  told apart, and the wrong one of the two feeds the other kind of motion
+	 *  with its turn reversed. Until both have been seen the link is not told,
+	 *  and the fit serves.) */
 	constexpr float CarrierLinkSenseShare = 0.25f;
 	/** A wheel feed's copies of its leg's motor profiles (FWheelFeed::
 	 *  FollowMotors) begin again where the motors are after this long (s)
@@ -401,8 +407,14 @@ namespace RammsCurb
 		 * fore/aft, and a fit that has forgotten the last walk (a second ago)
 		 * gives a walk's first ticks no turn at all. The link's own direction,
 		 * out of the leg's kinematics, has none of that to learn.
+		 *
+		 * ChassisRate: the chassis' own turn rate over the tick (rad/s, about
+		 * the wheel's axis, in the carrier's sense). The carrier's measured
+		 * turn is the link's in the world, the links' directions are against
+		 * the chassis: the chassis' own turn is taken out before the two are
+		 * compared, or a base pitching through a lift tells the wrong link.
 		 */
-		void MeasureLinks(float Dt, const FVector2D& LinkAngles, bool bValid);
+		void MeasureLinks(float Dt, const FVector2D& LinkAngles, bool bValid, float ChassisRate = 0.0f);
 
 		/** Those links' turn rates (rad/s) over the coming tick, as the servo
 		 *  lag model has the leg move under the commands just sent (after
@@ -436,7 +448,7 @@ namespace RammsCurb
 		 * has the leg a good way into its speed and the tick after hardly
 		 * faster, where the motor is slow off the mark and at full speed the
 		 * tick after -- so a walk's start and its stop each sent the wheel a
-		 * tick's worth of the wrong speed, 20 to 30 cm/s of it.
+		 * tick's worth of the wrong speed.
 		 */
 		void PredictMotion(const FVector2D& LegRateNext, const FVector2D& LinkRateNext, bool bValid);
 
@@ -521,7 +533,26 @@ namespace RammsCurb
 		FRestWatch		   CommitRest;
 		TArray<FWheelFeed> Feeds;
 		FStickGate		   Stick;
+		/** The chassis' rotation at the last tick the feeds measured over, for
+		 *  its own turn over the next (FWheelFeed::MeasureLinks). */
+		FQuat LastChassis = FQuat::Identity;
+		bool  bHasLastChassis = false;
 	};
+
+	/**
+	 * A 5-bar with its hips at Hips (rad; A, B): its endpoint (the robot's x-z,
+	 * cm, as its controller's targets are) and the directions (rad, in the
+	 * linkage's own x-z plane) of its two distal links, knee to endpoint, arm
+	 * A's then arm B's. False where the links do not meet there.
+	 */
+	bool FiveBarPose(const FRamms5BarLinkageSpec& Spec, const FVector2D& Hips, FVector2D& OutEnd, FVector2D& OutLinks);
+
+	/** The directions of a 5-bar's two distal links (FiveBarPose) with its
+	 *  endpoint at At (the robot's x-z, cm): by the hips' angles there,
+	 *  whatever the knees' and motors' ranges say (a leg pressed a little past
+	 *  one is still where it is). False where its kinematics do not solve
+	 *  there. */
+	bool FiveBarLinksAt(const FRamms5BarLinkageSpec& Spec, const FVector2D& At, FVector2D& OutLinks);
 
 	/** A first-order follower (time constant Lag) of Command, Dt on from
 	 *  Value: the servo lag model. */

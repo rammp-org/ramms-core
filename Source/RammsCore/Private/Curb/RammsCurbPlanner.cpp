@@ -825,7 +825,11 @@ namespace RammsCurb
 		// holds at the least: a height the path keeps for that long somewhere
 		// around the sample stays, one it only passes through on the way up and
 		// back is cut to the higher of its two sides. (Sign -1: the same on the
-		// path upside down, which fills the dips.)
+		// path upside down, which fills the dips.) The stretches are the
+		// shortest of Window from every sample on, and the shortest of it up to
+		// every sample: with samples of uneven length (the robot speeding up, a
+		// stop) the ones taken forward alone end on no sample of a run of short
+		// ones, and a path that only fell was pulled down early there.
 		TArray<double> In, Level;
 		auto		   Cut = [&](double Sign) {
 			  In.SetNum(N);
@@ -840,14 +844,23 @@ namespace RammsCurb
 					  Level[c] = FMath::Max(Level[c], Least);
 				  }
 			  };
-			  // (The stretches the path's start cuts short: whole ones, as the ones
-			  // its end cuts short are below.)
+			  // (A stretch the path's start or its end cuts short counts as whole.)
 			  double Acc = 0.0, Least = TNumericLimits<double>::Max();
-			  for (int32 B = 0; B < N && Acc < Window - 1e-9; ++B)
+			  for (int32 B = 0; B < N; ++B)
 			  {
-				  Least = FMath::Min(Least, In[B]);
-				  Keep(0, B, Least);
-				  Acc += FMath::Max(0.0, Seconds[B]);
+				  Acc = 0.0;
+				  Least = TNumericLimits<double>::Max();
+				  int32 A = B;
+				  for (; A >= 0; --A)
+				  {
+					  Least = FMath::Min(Least, In[A]);
+					  Acc += FMath::Max(0.0, Seconds[A]);
+					  if (Acc >= Window - 1e-9)
+					  {
+						  break;
+					  }
+				  }
+				  Keep(FMath::Max(A, 0), B, Least);
 			  }
 			  for (int32 A = 0; A < N; ++A)
 			  {

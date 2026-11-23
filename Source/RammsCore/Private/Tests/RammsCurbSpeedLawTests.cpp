@@ -10,6 +10,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "Curb/RammsCurbSpeedLaw.h"
+#include "Ramms5BarLinkageSpec.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -862,6 +863,67 @@ bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
 		Told.ForgetMotors();
 		Told.FollowMotors(5.0 + 2.0 * Step, Step, Moved, Moved, MaxRate, MaxAccel, Now, Next);
 		TestTrue(TEXT("forgotten: from where the motors are"), Now.Equals(Moved, 1e-9));
+	}
+
+	// A real 5-bar (the default linkage, its hips either side of the wheel),
+	// by the same kinematics the controller gives the feed (FiveBarLinksAt).
+	// Its two distal links turn opposite ways as the leg lifts and alike as it
+	// walks, so with the wheel mid-way a lift alone does not tell the wheel's
+	// link from the other taken the other way round: the link is not told
+	// until the walk has shown which, and never told wrong -- not at the
+	// stance a robot crosses from either (the wheel ahead of mid-way), nor
+	// with the base pitching through the lift, its own turn given. The
+	// carrier's turn is measured a little off (0.02 rad/s, as a wheel's angle
+	// and its body's rotation read a tick apart are): without that the
+	// thousandth of a centimetre the default linkage's hips differ by would
+	// tell its links apart.
+	{
+		const FRamms5BarLinkageSpec Spec;
+		const int32					TrueLink = 1;
+		const float					TrueSense = -1.0f;
+		const double				Z0 = -6.0;
+		for (const double StanceX : { 0.0, 6.0 })
+		{
+			for (const double PitchRate : { 0.0, 0.07, -0.07 })
+			{
+				RammsCurb::FWheelFeed Real;
+				FVector2D			  Prev;
+				if (!TestTrue(TEXT("the default 5-bar solves at its stance"), RammsCurb::FiveBarLinksAt(Spec, FVector2D(StanceX, Z0), Prev)))
+				{
+					continue;
+				}
+				bool  bWrong = false, bToldByLiftAlone = false, bSolved = true;
+				int32 Told = INDEX_NONE;
+				float ToldSense = 1.0f;
+				// A lift of 8 cm in a second, a rest of half a second, a walk of 6 cm
+				// aft in half a second.
+				for (int32 k = 1; k <= 32; ++k)
+				{
+					const bool	 bLift = k <= 16, bWalk = k > 24;
+					const double AtZ = Z0 + 8.0 * FMath::Min(k, 16) / 16.0;
+					const double AtX = StanceX - (bWalk ? 6.0 * (k - 24) / 8.0 : 0.0);
+					FVector2D	 Now;
+					bSolved &= RammsCurb::FiveBarLinksAt(Spec, FVector2D(AtX, AtZ), Now);
+					const FVector2D Rate(FMath::UnwindRadians(Now.X - Prev.X) / Tick, FMath::UnwindRadians(Now.Y - Prev.Y) / Tick);
+					const double	Chassis = bLift ? PitchRate : 0.0;
+					const double	Off = 0.02 * FMath::Sin(2.3 * k + 0.7 * StanceX + 40.0 * PitchRate);
+					Real.Measure(static_cast<float>(Tick), FVector2D(AtX, AtZ), static_cast<float>(TrueSense * Rate.Y + Chassis + Off), FVector2D::ZeroVector);
+					Real.MeasureLinks(static_cast<float>(Tick), Now, true, static_cast<float>(Chassis));
+					Told = Real.GetCarrierLink(ToldSense);
+					bWrong |= Told != INDEX_NONE && (Told != TrueLink || ToldSense != TrueSense);
+					bToldByLiftAlone |= k <= 24 && Told != INDEX_NONE;
+					Prev = Now;
+				}
+				const FString What = FString::Printf(TEXT("a real 5-bar, stance %+.0f cm, the base pitching %+.2f rad/s through the lift"), StanceX, PitchRate);
+				TestTrue(*FString::Printf(TEXT("%s: every pose solved"), *What), bSolved);
+				TestFalse(*FString::Printf(TEXT("%s: never the wrong link or sense"), *What), bWrong);
+				TestTrue(*FString::Printf(TEXT("%s: the wheel's link told once it has walked"), *What), Told == TrueLink && ToldSense == TrueSense);
+				if (StanceX == 0.0)
+				{
+					TestFalse(*FString::Printf(TEXT("%s: a lift alone does not tell the links apart"), *What), bToldByLiftAlone);
+				}
+			}
+		}
 	}
 
 	// No links given (a leg without them, a pose its kinematics do not solve):

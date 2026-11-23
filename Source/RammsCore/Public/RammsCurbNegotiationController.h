@@ -1631,6 +1631,17 @@ private:
 		 *  own controls had tilted it: the rider's own setting, and their pitch
 		 *  in the world once the base is level. */
 		double PitchOwn = 0.0;
+		/** The rider's setting kept from one crossing to the next (ResolveSeat
+		 *  begins each afresh but for these): the PitchOwn last held, and the
+		 *  seat's motors' commands (arm A, arm B, tilt) as last sent. A
+		 *  take-over that finds those commands still standing -- no stance and
+		 *  none of the seat's own controls has commanded the seat since -- keeps
+		 *  the setting: a crossing leaves the tilt making up for the base's
+		 *  pitch at its last tick, and a retry from there would read that back
+		 *  as the rider's own (RammsCurb::SeatOwnPitchAtTakeOver). */
+		bool   bKept = false;
+		double KeptPitchOwn = 0.0;
+		float  KeptCommands[3] = { 0.0f, 0.0f, 0.0f };
 	};
 	FSeatState SeatState;
 
