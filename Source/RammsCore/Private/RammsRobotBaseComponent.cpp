@@ -77,6 +77,8 @@ void URammsRobotBaseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	bMotorsLoaded = false;
 	PositionProfiles.Reset();
 	LastCommands.Reset();
+	CommandOffsets.Reset();
+	CommandOffsetLayer.Reset();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -225,6 +227,13 @@ bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 	DropVelocityDrive(MotorId);
 	DropPositionProfile(MotorId);
 	LastCommands.Remove(MotorId);
+	if (FCommandOffset* Layered = CommandOffsets.Find(MotorId))
+	{
+		// Its offset goes with its command: one left standing would be added
+		// to whatever commands the motor next, from a layer that may not know
+		// it was let go.
+		*Layered = FCommandOffset();
+	}
 	return Backend_ && Backend_->ReleaseMotor(MotorId);
 }
 
@@ -414,6 +423,8 @@ void URammsRobotBaseComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	// First: a profile stepped here below starts from this frame's command.
+	FlushCommandOffsets();
 	StepPositionProfiles(DeltaTime);
 	StepVelocityDrives(DeltaTime);
 }
@@ -588,6 +599,21 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 			static_cast<float>(Spec->ControlRange.Y));
 	}
 	LastCommands.Add(MotorId, Value);
+	if (FCommandOffset* Layered = CommandOffsets.Find(MotorId))
+	{
+		// Claimed for the offset layer: told once, in the tick, as the sum.
+		// Told here it would get the bare baseline now and the sum a moment
+		// later, and a servo eased at the physics rate would start for the
+		// first.
+		Layered->Effective = ClampToControlRange(Spec, Value + Layered->Offset);
+		Layered->bDirty = true;
+		return;
+	}
+	PushCommand(MotorId, Spec, Value);
+}
+
+void URammsRobotBaseComponent::PushCommand(FName MotorId, const FRammsMotorSpec* Spec, float Value)
+{
 	// A profiled position servo is eased to the value from where it stands;
 	// the first command to it holds the joint where it is, so nothing jumps.
 	// The backend eases it every physics step where it can, else
@@ -632,6 +658,171 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 	}
 	DropPositionProfile(MotorId);
 	Backend_->SetCommand(MotorId, Value * DirectionOf(MotorId));
+}
+
+float URammsRobotBaseComponent::ClampToControlRange(const FRammsMotorSpec* Spec, float Value)
+{
+	// As SetMotorCommand clamps: a range with min >= max is no range.
+	return (Spec && Spec->ControlRange.X < Spec->ControlRange.Y)
+		? FMath::Clamp(Value, static_cast<float>(Spec->ControlRange.X), static_cast<float>(Spec->ControlRange.Y))
+		: Value;
+}
+
+bool URammsRobotBaseComponent::ClaimCommandOffsetLayer(const UObject* Layer, TConstArrayView<FName> MotorIds)
+{
+	if (!Layer)
+	{
+		return false;
+	}
+	LoadMotorRegistry();
+	if (CommandOffsets.Num() > 0 && !CommandOffsetLayer.IsValid())
+	{
+		// The last holder was collected without releasing.
+		DropCommandOffsetLayer();
+	}
+	if (CommandOffsetLayer.IsValid() && CommandOffsetLayer.Get() != Layer)
+	{
+		return false;
+	}
+	for (const FName& MotorId : MotorIds)
+	{
+		// An offset is an angle or a length added to one: it means nothing on
+		// a torque or a speed, and a motor with no row has no type to go by.
+		const FRammsMotorSpec* Spec = Motors.Find(MotorId);
+		if (!Spec || Spec->Type != ERammsActuatorType::Position)
+		{
+			return false;
+		}
+	}
+	CommandOffsetLayer = Layer;
+	for (const FName& MotorId : MotorIds)
+	{
+		if (!CommandOffsets.Contains(MotorId))
+		{
+			FCommandOffset& Layered = CommandOffsets.Add(MotorId);
+			if (const float* Baseline = LastCommands.Find(MotorId))
+			{
+				Layered.Effective = *Baseline;
+			}
+		}
+	}
+	return true;
+}
+
+void URammsRobotBaseComponent::ReleaseCommandOffsetLayer(const UObject* Layer)
+{
+	if (Layer && CommandOffsetLayer.Get() == Layer)
+	{
+		DropCommandOffsetLayer();
+	}
+}
+
+void URammsRobotBaseComponent::DropCommandOffsetLayer()
+{
+	// Taken out first: from here each motor is commanded at once again, this
+	// last command included.
+	const TMap<FName, FCommandOffset> Dropped = MoveTemp(CommandOffsets);
+	CommandOffsets.Reset();
+	CommandOffsetLayer.Reset();
+	for (const TPair<FName, FCommandOffset>& Pair : Dropped)
+	{
+		const float* Baseline = LastCommands.Find(Pair.Key);
+		if (!Baseline)
+		{
+			continue;
+		}
+		if (Pair.Value.Offset != 0.0f)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("RammsRobotBaseComponent on '%s': the command offset layer was given up with an offset of %g still on motor '%s'; it steps to its baseline."),
+				*GetNameSafe(GetOwner()), Pair.Value.Offset, *Pair.Key.ToString());
+		}
+		if (Backend_ && (Pair.Value.bDirty || Pair.Value.Effective != *Baseline))
+		{
+			PushCommand(Pair.Key, Motors.Find(Pair.Key), *Baseline);
+		}
+	}
+}
+
+bool URammsRobotBaseComponent::SetMotorCommandOffset(FName MotorId, float Offset, const UObject* Layer)
+{
+	FCommandOffset* Layered = (Layer && CommandOffsetLayer.Get() == Layer) ? CommandOffsets.Find(MotorId) : nullptr;
+	if (!Layered || !FMath::IsFinite(Offset))
+	{
+		return false;
+	}
+	Layered->Offset = Offset;
+	if (const float* Baseline = LastCommands.Find(MotorId))
+	{
+		Layered->Effective = ClampToControlRange(Motors.Find(MotorId), *Baseline + Offset);
+		Layered->bDirty = true;
+	}
+	return true;
+}
+
+bool URammsRobotBaseComponent::RebaseMotorCommand(FName MotorId, float NewBaseline, const UObject* Layer)
+{
+	FCommandOffset* Layered = (Layer && CommandOffsetLayer.Get() == Layer) ? CommandOffsets.Find(MotorId) : nullptr;
+	float*			Baseline = LastCommands.Find(MotorId);
+	if (!Layered || !Baseline || !FMath::IsFinite(NewBaseline))
+	{
+		return false;
+	}
+	// A baseline is always within the range, as SetMotorCommand leaves it.
+	*Baseline = ClampToControlRange(Motors.Find(MotorId), NewBaseline);
+	// Effective stays: what the motor is told does not change, to the bit, and
+	// a write still waiting to be told is still waiting.
+	Layered->Offset = Layered->Effective - *Baseline;
+	return true;
+}
+
+bool URammsRobotBaseComponent::GetMotorEffectiveCommand(FName MotorId, float& OutValue) const
+{
+	const float* Baseline = LastCommands.Find(MotorId);
+	if (!Baseline)
+	{
+		return false;
+	}
+	const FCommandOffset* Layered = CommandOffsets.Find(MotorId);
+	OutValue = Layered ? Layered->Effective : *Baseline;
+	return true;
+}
+
+float URammsRobotBaseComponent::GetMotorCommandOffset(FName MotorId) const
+{
+	const FCommandOffset* Layered = CommandOffsets.Find(MotorId);
+	return Layered ? Layered->Offset : 0.0f;
+}
+
+void URammsRobotBaseComponent::FlushCommandOffsets()
+{
+	if (CommandOffsets.Num() == 0)
+	{
+		return;
+	}
+	if (!CommandOffsetLayer.IsValid())
+	{
+		// Collected without releasing: its offsets must not stay on for good.
+		DropCommandOffsetLayer();
+		return;
+	}
+	if (!Backend_)
+	{
+		return;
+	}
+	for (TPair<FName, FCommandOffset>& Pair : CommandOffsets)
+	{
+		FCommandOffset& Layered = Pair.Value;
+		if (!Layered.bDirty)
+		{
+			continue;
+		}
+		Layered.bDirty = false;
+		if (LastCommands.Contains(Pair.Key))
+		{
+			PushCommand(Pair.Key, Motors.Find(Pair.Key), Layered.Effective);
+		}
+	}
 }
 
 void URammsRobotBaseComponent::DropPositionProfile(FName MotorId)

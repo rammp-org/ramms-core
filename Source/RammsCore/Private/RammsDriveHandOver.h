@@ -190,6 +190,31 @@ namespace RammsDrive
 	double StanceRampValue(const FStanceChannel& Channel, double Elapsed, double Duration);
 
 	/**
+	 * Where a stance change starts a motor that carries a command offset
+	 * (URammsRobotBaseComponent::SetMotorCommandOffset). A ramp commands
+	 * baselines, and the offset rides on top of them: started from where the
+	 * joint is, the ramp would take the offset into the baseline and the motor
+	 * would jump by it. So in the baseline's terms: Baseline itself while the
+	 * joint is where it was told to be (within Tolerance of Effective, the
+	 * baseline plus the offset as told), else the joint less what the offset
+	 * adds (Effective - Baseline: less than the offset where the sum is
+	 * against the motor's range).
+	 */
+	double StanceStartUnderOffset(double Baseline, double Effective, double Joint, double Tolerance);
+
+	/**
+	 * Where a stance change starts a motor of Base, in the terms a ramp
+	 * commands it in (baselines). With no command offset on it: what a stance
+	 * last commanded it (StanceCommanded, null for none) while its joint is
+	 * still within Tolerance of that -- its servo error is not a move to make
+	 * -- else where its joint is. Under an offset that rule would always pick
+	 * the joint, which stands off every baseline by the offset:
+	 * StanceStartUnderOffset then, on the base's own record of the baseline
+	 * and of what the motor was told.
+	 */
+	double StanceMotorStart(const URammsRobotBaseComponent& Base, FName MotorId, const float* StanceCommanded, float Tolerance);
+
+	/**
 	 * From moved towards To by at most LinearAccel * DeltaSeconds of
 	 * velocity (forward and right together, along the straight way between
 	 * them, cm/s^2) and YawAccel * DeltaSeconds of yaw rate (deg/s^2). A

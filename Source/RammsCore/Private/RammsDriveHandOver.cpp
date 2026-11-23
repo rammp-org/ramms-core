@@ -320,6 +320,22 @@ namespace RammsDrive
 		return FMath::Lerp(Channel.From, Channel.To, SmoothStep(Elapsed / Duration));
 	}
 
+	double StanceStartUnderOffset(double Baseline, double Effective, double Joint, double Tolerance)
+	{
+		return FMath::Abs(Effective - Joint) <= Tolerance ? Baseline : Joint - (Effective - Baseline);
+	}
+
+	double StanceMotorStart(const URammsRobotBaseComponent& Base, FName MotorId, const float* StanceCommanded, float Tolerance)
+	{
+		const float At = Base.GetMotorValue(MotorId);
+		float		Baseline = 0.0f, Effective = 0.0f;
+		if (Base.GetMotorCommandOffset(MotorId) != 0.0f && Base.GetMotorCommand(MotorId, Baseline) && Base.GetMotorEffectiveCommand(MotorId, Effective))
+		{
+			return StanceStartUnderOffset(Baseline, Effective, At, Tolerance);
+		}
+		return (StanceCommanded && FMath::Abs(*StanceCommanded - At) <= Tolerance) ? *StanceCommanded : At;
+	}
+
 	// --- carrying a motion -------------------------------------------------------
 
 	FRammsDriveMotion RampMotion(const FRammsDriveMotion& From, const FRammsDriveMotion& To, double LinearAccel, double YawAccel,
