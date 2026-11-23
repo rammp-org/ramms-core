@@ -2,8 +2,41 @@
 
 #include "Curb/RammsCurbSpeedLaw.h"
 
+#include "Ramms5BarKinematics.h"
+#include "Ramms5BarLinkageSpec.h"
+
 namespace RammsCurb
 {
+	bool FiveBarPose(const FRamms5BarLinkageSpec& Spec, const FVector2D& Hips, FVector2D& OutEnd, FVector2D& OutLinks)
+	{
+		bool			bValid = false;
+		const FVector2D End = URamms5BarKinematics::ComputeEndpoint(Spec, Hips, bValid);
+		if (!bValid)
+		{
+			return false;
+		}
+		const auto Knee = [](const FVector2D& Pivot, double Length, double ZeroDir, double Sign, double Hip) {
+			const double Dir = ZeroDir + (Sign > 0.0 ? 1.0 : -1.0) * Hip;
+			return Pivot + FVector2D(Length * FMath::Cos(Dir), Length * FMath::Sin(Dir));
+		};
+		const FVector2D KneeA = Knee(Spec.PivotA, Spec.ProximalLengthA, Spec.ZeroDirA, Spec.AngleSignA, Hips.X);
+		const FVector2D KneeB = Knee(Spec.PivotB, Spec.ProximalLengthB, Spec.ZeroDirB, Spec.AngleSignB, Hips.Y);
+		OutLinks = FVector2D(FMath::Atan2(End.Y - KneeA.Y, End.X - KneeA.X), FMath::Atan2(End.Y - KneeB.Y, End.X - KneeB.X));
+		OutEnd = FVector2D(End.X * (Spec.TranslationSign < 0.0f ? -1.0 : 1.0), End.Y);
+		return true;
+	}
+
+	bool FiveBarLinksAt(const FRamms5BarLinkageSpec& Spec, const FVector2D& At, FVector2D& OutLinks)
+	{
+		OutLinks = FVector2D::ZeroVector;
+		const FVector2D End(At.X * (Spec.TranslationSign < 0.0f ? -1.0 : 1.0), At.Y);
+		// Only the two arms' own reach decides.
+		bool			bReachable = false;
+		const FVector2D Hips = URamms5BarKinematics::SolveIK(Spec, End, bReachable);
+		FVector2D		Back;
+		return FiveBarPose(Spec, Hips, Back, OutLinks) && FVector2D::Distance(Back, At) <= 0.05;
+	}
+
 	float BrakingSpeed(float DistanceCm, float Deceleration)
 	{
 		return DistanceCm <= 0.0f ? 0.0f : FMath::Sqrt(2.0f * FMath::Max(Deceleration, 0.0f) * DistanceCm);
@@ -264,6 +297,158 @@ namespace RammsCurb
 		LastXZ = LegXZ;
 		bHasLast = true;
 		Change = FVector2D::ZeroVector;
+		// The model's link rates given for the tick just gone, kept to take the
+		// change to the next from.
+		ModelLinkRateLast = ModelLinkRateNext;
+		bModelLinksLast = bModelLinksNext;
+		bModelLinksNext = false;
+		bMotionNext = false;
+		bMeasuredLinks = false;
+	}
+
+	void FWheelFeed::MeasureLinks(float Dt, const FVector2D& LinkAngles, bool bValid, float ChassisRate)
+	{
+		if (bValid && bHasLastLinks && Dt > 0.0f)
+		{
+			const FVector2D Rate(FMath::UnwindRadians(LinkAngles.X - LastLinkAngles.X) / Dt, FMath::UnwindRadians(LinkAngles.Y - LastLinkAngles.Y) / Dt);
+			// Forgetting on simulated time, each tick weighted by its length, as
+			// the fit's.
+			const double Keep = FMath::Exp(-static_cast<double>(Dt) / CarrierLinkMemorySeconds);
+			const double Of[4] = { Rate.X, -Rate.X, Rate.Y, -Rate.Y };
+			for (int32 i = 0; i < 4; ++i)
+			{
+				LinkMisfit[i] = Keep * LinkMisfit[i] + Dt * FMath::Square(static_cast<double>(MeasuredCarrier) - static_cast<double>(ChassisRate) - Of[i]);
+			}
+			LinkTurn = Keep * LinkTurn + Dt * (Rate.X * Rate.X + Rate.Y * Rate.Y);
+			MeasuredLinkRate = Rate;
+			bMeasuredLinks = true;
+		}
+		LastLinkAngles = LinkAngles;
+		bHasLastLinks = bValid;
+	}
+
+	void FWheelFeed::PredictLinks(const FVector2D& InModelLinkRateNext, bool bValid)
+	{
+		ModelLinkRateNext = bValid ? InModelLinkRateNext : FVector2D::ZeroVector;
+		bModelLinksNext = bValid;
+	}
+
+	int32 FWheelFeed::GetCarrierLink(float& OutSense) const
+	{
+		OutSense = 1.0f;
+		if (LinkTurn < CarrierLinkMinTurn)
+		{
+			return INDEX_NONE;
+		}
+		int32 Best = 0;
+		for (int32 i = 1; i < 4; ++i)
+		{
+			Best = LinkMisfit[i] < LinkMisfit[Best] ? i : Best;
+		}
+		if (LinkMisfit[Best] >= CarrierLinkSenseShare * LinkMisfit[Best ^ 1])
+		{
+			return INDEX_NONE;
+		}
+		// And apart from the other link, taken either way: what one kind of
+		// motion alone does not show (CarrierLinkSenseShare).
+		const int32 Other = Best ^ 2;
+		if (LinkMisfit[Best] >= CarrierLinkSenseShare * FMath::Min(LinkMisfit[Other], LinkMisfit[Other ^ 1]))
+		{
+			return INDEX_NONE;
+		}
+		OutSense = (Best & 1) ? -1.0f : 1.0f;
+		return Best / 2;
+	}
+
+	bool FWheelFeed::HasLinkFeed() const
+	{
+		float Sense = 1.0f;
+		return bModelLinksNext && bModelLinksLast && GetCarrierLink(Sense) != INDEX_NONE;
+	}
+
+	void FWheelFeed::PredictMotion(const FVector2D& LegRateNext, const FVector2D& LinkRateNext, bool bValid)
+	{
+		MotionLegRate = bValid ? LegRateNext : FVector2D::ZeroVector;
+		MotionLinkRate = bValid ? LinkRateNext : FVector2D::ZeroVector;
+		bMotionNext = bValid;
+	}
+
+	bool FWheelFeed::HasMotionFeed() const
+	{
+		float Sense = 1.0f;
+		return bMotionNext && GetCarrierLink(Sense) != INDEX_NONE;
+	}
+
+	float FWheelFeed::GetMotionCarrierRate() const
+	{
+		float		Sense = 1.0f;
+		const int32 Link = GetCarrierLink(Sense);
+		if (Link == INDEX_NONE || !bMotionNext)
+		{
+			return GetLinkCarrierRate();
+		}
+		const double Next = Sense * (Link == 0 ? MotionLinkRate.X : MotionLinkRate.Y);
+		// What the carrier turned over the tick just gone beyond its link's own
+		// turn: the chassis pitching, which turns the wheel's link with it.
+		const double Beyond = bMeasuredLinks ? MeasuredCarrier - Sense * (Link == 0 ? MeasuredLinkRate.X : MeasuredLinkRate.Y) : 0.0;
+		return static_cast<float>(Next + Beyond);
+	}
+
+	bool FWheelFeed::FollowMotors(double Now, double Dt, const FVector2D& Commands, const FVector2D& Measured, const FVector2D& MaxRate,
+		const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext)
+	{
+		OutNow = OutNext = Measured;
+		if (Dt <= 0.0)
+		{
+			return false;
+		}
+		const auto Run = [](RammsMotion::FFollower& Follower, double From, double To, double Rate, double Accel) {
+			const double Span = To - From;
+			if (Span <= 0.0)
+			{
+				return;
+			}
+			const int32	 Steps = FMath::Clamp(FMath::CeilToInt32(Span / MotorReplicaStepSeconds), 1, 4096);
+			const double H = Span / Steps;
+			for (int32 k = 0; k < Steps; ++k)
+			{
+				Follower.Step(From + H * k, H, Rate, Accel);
+			}
+		};
+		const bool bAfresh = !bMotorReplicas || Now < MotorReplicaTime || Now - MotorReplicaTime > MotorReplicaSilenceSeconds;
+		for (int32 m = 0; m < 2; ++m)
+		{
+			RammsMotion::FFollower& Follower = MotorReplica[m];
+			if (bAfresh)
+			{
+				Follower = RammsMotion::FFollower();
+				Follower.Reset(Measured[m]);
+			}
+			else
+			{
+				Run(Follower, MotorReplicaTime, Now, MaxRate[m], MaxAccel[m]);
+			}
+			Follower.Command(Commands[m], Now);
+			OutNow[m] = Follower.Setpoint;
+			RammsMotion::FFollower Ahead = Follower;
+			Run(Ahead, Now, Now + Dt, MaxRate[m], MaxAccel[m]);
+			OutNext[m] = Ahead.Setpoint;
+		}
+		MotorReplicaTime = Now;
+		bMotorReplicas = true;
+		return true;
+	}
+
+	float FWheelFeed::GetLinkCarrierRate() const
+	{
+		float		Sense = 1.0f;
+		const int32 Link = GetCarrierLink(Sense);
+		if (Link == INDEX_NONE || !bModelLinksNext || !bModelLinksLast)
+		{
+			return GetCarrierRate();
+		}
+		const FVector2D LinkChange = ModelLinkRateNext - ModelLinkRateLast;
+		return MeasuredCarrier + Sense * static_cast<float>(Link == 0 ? LinkChange.X : LinkChange.Y);
 	}
 
 	void FWheelFeed::Predict(const FVector2D& ModelRateNext)

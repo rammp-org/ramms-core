@@ -101,6 +101,29 @@ namespace RammsCurb
 		return (PitchRad - FMath::FindDeltaAngleRadians(LinkAngle0, LinkAngle)) / Sign;
 	}
 
+	double SeatPitchRefStep(double RefRad, double OwnRad, double MaxStepRad)
+	{
+		const double Step = FMath::Max(0.0, MaxStepRad);
+		return RefRad + FMath::Clamp(OwnRad - RefRad, -Step, Step);
+	}
+
+	double SeatOwnPitchAtTakeOver(bool bKept, double KeptOwnRad, TConstArrayView<float> KeptCommands, TConstArrayView<float> NowCommands,
+		double CommandedRad)
+	{
+		if (!bKept || KeptCommands.Num() == 0 || KeptCommands.Num() != NowCommands.Num())
+		{
+			return CommandedRad;
+		}
+		for (int32 i = 0; i < KeptCommands.Num(); ++i)
+		{
+			if (!FMath::IsNearlyEqual(KeptCommands[i], NowCommands[i], 1e-5f))
+			{
+				return CommandedRad;
+			}
+		}
+		return KeptOwnRad;
+	}
+
 	FVector2D SeatReachX(const FRammsCurbSeat& Seat, double Z, FVector2D Hint, FVector2D RangeA, FVector2D RangeB, bool& bValid,
 		double StepCm, double SpanCm)
 	{

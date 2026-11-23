@@ -170,4 +170,60 @@ bool FRammsCurbSeatCentreOfMass::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSeatPitchRef, "Ramms.Curb.Seat.PitchRef",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSeatPitchRef::RunTest(const FString& Parameters)
+{
+	// A crossing begun on a road falling 6 deg toward the curb takes the seat
+	// over 6 deg nose-down in the world, the rider's own setting level. From
+	// the level-in on the pitch the tilt holds is turned to the rider's own,
+	// by the step it is given at most, and stays there: level once the base
+	// is, not at the slope's for the crossing.
+	const double Own = 0.0;
+	const double Slope = FMath::DegreesToRadians(-6.0);
+	const double Step = FMath::DegreesToRadians(3.0) * 0.0625; // 3 deg/s over a 1/16 s tick
+	double		 Ref = Own + Slope;
+	TestEqual(TEXT("one tick: a step toward the rider's own"), RammsCurb::SeatPitchRefStep(Ref, Own, Step), Slope + Step, 1e-12);
+	int32 Ticks = 0;
+	for (; Ticks < 1000 && Ref != Own; ++Ticks)
+	{
+		const double Next = RammsCurb::SeatPitchRefStep(Ref, Own, Step);
+		TestTrue(TEXT("never by more than the step"), FMath::Abs(Next - Ref) <= Step + 1e-12);
+		TestTrue(TEXT("never past the rider's own"), Next <= Own + 1e-12);
+		Ref = Next;
+	}
+	TestTrue(FString::Printf(TEXT("6 deg at 3 deg/s: 2 s of ticks (%d)"), Ticks), Ticks == 32 || Ticks == 33);
+	TestEqual(TEXT("there, it stays"), RammsCurb::SeatPitchRefStep(Ref, Own, Step), Own, 0.0);
+	// From the other side (a road rising toward the curb), and to a setting
+	// that is not level (the rider's own tilt): the same.
+	TestEqual(TEXT("nose-up, a step down"), RammsCurb::SeatPitchRefStep(0.1, 0.02, 0.03), 0.07, 1e-12);
+	TestEqual(TEXT("within a step: onto it"), RammsCurb::SeatPitchRefStep(0.04, 0.02, 0.03), 0.02, 1e-12);
+	// No step (the physics has not advanced), or a bad one: where it is.
+	TestEqual(TEXT("no step"), RammsCurb::SeatPitchRefStep(0.1, 0.0, 0.0), 0.1, 0.0);
+	TestEqual(TEXT("a negative step is none"), RammsCurb::SeatPitchRefStep(0.1, 0.0, -1.0), 0.1, 0.0);
+
+	// The rider's own setting at a take-over. A crossing stopped part way
+	// through its level-in leaves the tilt making up for the base's pitch
+	// then: read back at the retry, that would be taken for the rider's own
+	// setting, and the rider left that much off level for good. Where the
+	// seat's commands still stand as the crossing left them, the setting it
+	// held is kept; commanded since (a stance, the seat's own controls), the
+	// pitch now commanded is the setting.
+	const float	 Left[3] = { 0.41f, -0.22f, 0.105f };
+	const double Held = 0.0, ReadBack = FMath::DegreesToRadians(-3.5);
+	TestEqual(TEXT("no crossing before: what is commanded"), RammsCurb::SeatOwnPitchAtTakeOver(false, Held, Left, Left, ReadBack), ReadBack, 0.0);
+	TestEqual(TEXT("as the last crossing left it: the setting it held"), RammsCurb::SeatOwnPitchAtTakeOver(true, Held, Left, Left, ReadBack), Held, 0.0);
+	for (int32 Motor = 0; Motor < 3; ++Motor)
+	{
+		float Since[3] = { Left[0], Left[1], Left[2] };
+		Since[Motor] += 0.01f;
+		TestEqual(FString::Printf(TEXT("motor %d commanded since: what is commanded"), Motor),
+			RammsCurb::SeatOwnPitchAtTakeOver(true, Held, Left, Since, ReadBack), ReadBack, 0.0);
+	}
+	TestEqual(TEXT("nothing to compare: what is commanded"),
+		RammsCurb::SeatOwnPitchAtTakeOver(true, Held, TConstArrayView<float>(), TConstArrayView<float>(), ReadBack), ReadBack, 0.0);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

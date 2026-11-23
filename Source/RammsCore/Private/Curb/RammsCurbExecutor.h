@@ -1533,4 +1533,13 @@ namespace RammsCurb
 	 * it asks for is made and adopted as the controller does (bReplan).
 	 */
 	FExecDryRunResult ExecDryRun(const FPlannerInput& In, const FCurbSchedule& Plan, const FExecDryRunOptions& Options = FExecDryRunOptions());
+
+	/** Where a seat command at X (cm) that moves at Rate (cm/s, + forward)
+	 *  comes to rest when it is slowed at Accel (cm/s^2) from this tick (Dt,
+	 *  s) on: what a seat that is to stay where it is is sent toward, so that
+	 *  its easing (the executor's: its speed changed by Accel Dt a tick at
+	 *  most, slowed in time to stop on what it is sent toward) brings it to
+	 *  rest, rather than its command stopping in one tick with half the
+	 *  robot's mass on it. Without an easing (Accel or Dt 0 or less): X. */
+	double SeatRestAt(double X, double Rate, double Accel, double Dt);
 } // namespace RammsCurb

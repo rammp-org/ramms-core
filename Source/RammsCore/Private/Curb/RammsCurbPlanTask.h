@@ -26,7 +26,9 @@ namespace RammsCurb
 		FPlanTask(const FPlanTask&) = delete;
 		FPlanTask& operator=(const FPlanTask&) = delete;
 
-		/** Plan a copy of In in the background. A plan already under way is
+		/** Plan a copy of In on a task: in the background, or, with
+		 *  Ramms.Curb.PlanInStep 1, waited for here (the caller held until it is
+		 *  done, so IsReady() is true on return). A plan already under way is
 		 *  left to finish and its result dropped: only the latest counts. */
 		void Launch(const FPlannerInput& In);
 
@@ -46,7 +48,8 @@ namespace RammsCurb
 		/** Seconds from launch to now (or to when it was taken). */
 		double PendingSeconds() const;
 
-		/** How long Launch itself held the caller (s): the copy and the hand-off. */
+		/** How long Launch held the caller for the copy and the hand-off (s).
+		 *  Not the wait under Ramms.Curb.PlanInStep: PendingSeconds has that. */
 		double LaunchSeconds() const { return LastLaunchSeconds; }
 
 	private:

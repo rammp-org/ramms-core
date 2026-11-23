@@ -345,6 +345,25 @@ namespace RammsCurb
 	double SCurveSeconds(double Delta, double Rate, double Accel);
 	double SCurveShare(double T, double Delta, double Rate, double Accel);
 
+	/**
+	 * A path with what it would give back at once taken out: a rise it undoes
+	 * within Window seconds is cut to the higher of the heights either side of
+	 * it, and a dip it makes up within Window is filled to the lower of its
+	 * two sides. Seconds[k] is the time sample k takes. With bRisesKept the
+	 * dips are filled first -- a rise followed by a short dip and more rise
+	 * keeps what it rose, the dip filled up to it -- and then the rises that
+	 * are still short are cut; without it the rises are cut first, and a
+	 * lowering keeps what it lowered. Limits (X least, Y most, per sample; or
+	 * none) hold after each of the two: a dip under a ceiling is filled no
+	 * higher than it, and the rise before it, left standing over the dip, is
+	 * then cut like any other. A stretch cut short by the path's start or end
+	 * counts as whole, so the ends keep their heights; a path that only rises
+	 * or only falls is left as it is, and so is a rise or a dip held for
+	 * Window or longer. Window 0 or less: Out = Path.
+	 */
+	void SteadyPath(TConstArrayView<double> Path, TConstArrayView<double> Seconds, double Window, bool bRisesKept, TConstArrayView<FVector2D> Limits,
+		TArray<double>& Out);
+
 	/** One stretch of a planned tilt: held at Tilt (deg; X pitch, Y roll) from
 	 *  sample First to sample Last. */
 	struct FTiltHold

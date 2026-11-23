@@ -48,6 +48,25 @@ namespace RammsCurb
 	 *  the chassis with the link at LinkAngle (the inverse of SeatPlatformPitch). */
 	double SeatTiltFor(const FRammsCurbSeat& Seat, double LinkAngle, double LinkAngle0, double PitchRad);
 
+	/** The pitch in the world the platform is held at (rad), a step on from
+	 *  RefRad toward the rider's own OwnRad: by MaxStepRad at most, and never
+	 *  past it. A crossing that begins on a slope takes the seat over at the
+	 *  slope's pitch; the rider is level (at their own setting) once the base
+	 *  is, not held at the slope's for the crossing. */
+	double SeatPitchRefStep(double RefRad, double OwnRad, double MaxStepRad);
+
+	/** The rider's own platform pitch (rad, against the base) as a crossing
+	 *  takes the seat over. CommandedRad is the pitch the seat's commands
+	 *  stand for now. A crossing before this one that held KeptOwnRad (bKept)
+	 *  left the seat's motors commanded to KeptCommands, its tilt making up for
+	 *  the base's pitch at its last tick; where they are commanded the same
+	 *  still (NowCommands, the same motors in the same order), nobody has set
+	 *  the seat since and the rider's setting is the one kept, not the pitch
+	 *  read back. Commanded otherwise since (a drive stance, the seat's own
+	 *  controls): what is commanded now is the setting. */
+	double SeatOwnPitchAtTakeOver(bool bKept, double KeptOwnRad, TConstArrayView<float> KeptCommands, TConstArrayView<float> NowCommands,
+		double CommandedRad);
+
 	/**
 	 * The fore/aft the pivot can be held at while at height Z (cm, chassis
 	 * frame): the least and most x the mechanism reaches there, scanned at
