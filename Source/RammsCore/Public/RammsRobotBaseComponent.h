@@ -221,7 +221,9 @@ public:
 
 	/** The offset last set on this motor; 0 for a motor not claimed. As set:
 	 *  where the sum runs into the ControlRange, more than what the motor is
-	 *  told past its baseline. */
+	 *  told past its baseline. Reflected so that a recorder can log what a
+	 *  motor was told (GetMotorCommand keeps meaning the baseline). */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Robot")
 	float GetMotorCommandOffset(FName MotorId) const;
 
 	/** Retune the velocity loop and reset its integrators. Gains are the one

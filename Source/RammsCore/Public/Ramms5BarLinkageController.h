@@ -101,6 +101,14 @@ public:
 	 */
 	void SyncTargetToCommands();
 
+	/** The linkage this controller solves with: the kinematic table's row where
+	 *  one resolved at BeginPlay, else the inline Linkage (before BeginPlay, a
+	 *  default spec). In the linkage's own frame, not the robot's: its x is the
+	 *  robot's times TranslationSign's sign. For whoever must work out where
+	 *  the hips' commands put the endpoint without moving this controller's
+	 *  target (the level assist). Plain C++. */
+	const FRamms5BarLinkageSpec& GetResolvedLinkage() const { return Resolved; }
+
 	/** IK preview without commanding: joint angles for TargetXZ. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	FVector2D SolveTarget(FVector2D TargetXZ, bool& bReachable) const;

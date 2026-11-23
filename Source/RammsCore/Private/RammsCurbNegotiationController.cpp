@@ -8,6 +8,7 @@
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
 #include "Curb/RammsCurbLoadShare.h"
+#include "Curb/RammsCurbMeasure.h"
 #include "Curb/RammsCurbPlanTask.h"
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
@@ -31,6 +32,7 @@
 #include "RammsControlIds.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsHolonomicDriveController.h"
+#include "RammsLevelAssistComponent.h"
 #include "RammsMotionProfile.h"
 #include "RammsActuationBackend.h"
 #include "RammsRobotBaseComponent.h"
@@ -279,6 +281,15 @@ namespace
 	FVector Horizontal(const FVector& V)
 	{
 		return FVector(V.X, V.Y, 0.0);
+	}
+
+	/** The robot's level assist, where it has one: it keeps the base level between crossings with offsets on top of the
+	 *  legs' commands, and a crossing about to start must have those folded into the commands before it reads one
+	 *  (URammsLevelAssistComponent::YieldTo). */
+	URammsLevelAssistComponent* LevelAssistOf(const UActorComponent& Component)
+	{
+		const AActor* Owner = Component.GetOwner();
+		return Owner ? Owner->FindComponentByClass<URammsLevelAssistComponent>() : nullptr;
 	}
 
 	/** The most one tick moves a ramp. Commands reach the physics once a tick,
@@ -1060,78 +1071,24 @@ bool URammsCurbNegotiationController::Measure(FString& OutReason)
 		return false;
 	}
 
-	// Chassis attitude from the crank pivots.
-	FVector	  FrontW = FVector::ZeroVector, RearW = FVector::ZeroVector;
-	FVector	  PlusW = FVector::ZeroVector, MinusW = FVector::ZeroVector, AllW = FVector::ZeroVector;
-	FVector2D FrontL = FVector2D::ZeroVector, RearL = FVector2D::ZeroVector, AllL = FVector2D::ZeroVector;
-	double	  AllZ = 0.0;
-	double	  AllY = 0.0;
-	int32	  NFront = 0, NRear = 0, NPlus = 0, NMinus = 0, NAll = 0;
-	for (const FRammsCurbLeg& Leg : Legs)
-	{
-		if (Leg.Kind != ERammsCurbLegKind::FourBar || Leg.Axle == ERammsCurbAxle::Center)
-		{
-			continue;
-		}
-		FTransform Pivot;
-		if (!Base->GetMotorTransform(Leg.FourBar.CrankMotor, Pivot))
-		{
-			OutReason = Unlocated;
-			return false;
-		}
-		const FVector P = Pivot.GetLocation();
-		if (Leg.Axle == ERammsCurbAxle::Front)
-		{
-			FrontW += P;
-			FrontL += Leg.FourBar.CrankPivot;
-			++NFront;
-		}
-		else
-		{
-			RearW += P;
-			RearL += Leg.FourBar.CrankPivot;
-			++NRear;
-		}
-		if (IsPlusY(Leg))
-		{
-			PlusW += P;
-			++NPlus;
-		}
-		else
-		{
-			MinusW += P;
-			++NMinus;
-		}
-		AllZ += P.Z;
-		AllW += P;
-		AllY += Leg.Wheel.Position.Y;
-		AllL += Leg.FourBar.CrankPivot;
-		++NAll;
-	}
-	if (NFront == 0 || NRear == 0)
+	// Chassis attitude from the crank pivots (RammsCurb::AttitudeFromPivots: the level assist reads the base by the
+	// same arithmetic).
+	TArray<RammsCurb::FPivotSample, TInlineAllocator<4>> Pivots;
+	RammsCurb::FPivotAttitude							 PivotAttitude;
+	if (!RammsCurb::GatherPivots(*Base, Legs, Pivots) || !RammsCurb::AttitudeFromPivots(Pivots, PivotAttitude))
 	{
 		OutReason = Unlocated;
 		return false;
 	}
-	FrontW /= NFront;
-	RearW /= NRear;
-	FrontL /= NFront;
-	RearL /= NRear;
-	AllL /= NAll;
-	AllZ /= NAll;
-
-	const FVector Along = FrontW - RearW;
-	const double  Pitch =
-		FMath::Atan2(Along.Z, Horizontal(Along).Size()) - FMath::Atan2(FrontL.Y - RearL.Y, FrontL.X - RearL.X);
-	const FVector Forward = Horizontal(Along).GetSafeNormal();
-	FVector		  Side = FVector::ZeroVector;
-	double		  Roll = 0.0;
-	if (NPlus > 0 && NMinus > 0)
-	{
-		const FVector Across = PlusW / NPlus - MinusW / NMinus;
-		Roll = FMath::Atan2(Across.Z, Horizontal(Across).Size());
-		Side = Horizontal(Across).GetSafeNormal();
-	}
+	const FVector	AllW = PivotAttitude.SumWorld;
+	const FVector2D AllL = PivotAttitude.MeanLocal;
+	const double	AllZ = PivotAttitude.MeanZ;
+	const double	AllY = PivotAttitude.SumWheelY;
+	const int32		NAll = PivotAttitude.Count;
+	const double	Pitch = PivotAttitude.PitchRad;
+	const double	Roll = PivotAttitude.RollRad;
+	const FVector	Forward = PivotAttitude.Forward;
+	const FVector	Side = PivotAttitude.Side;
 	MeasuredPitchDeg = static_cast<float>(FMath::RadiansToDegrees(Pitch));
 	MeasuredRollDeg = static_cast<float>(FMath::RadiansToDegrees(Roll));
 	// The whole chassis frame, for where its centre of mass is: the pivots'
@@ -3743,10 +3700,21 @@ bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile
 		Status = OutReason;
 		return false;
 	}
+	// The level assist's offsets into the legs' commands before the plan reads one (the refusals above read none of
+	// them, and one of them is for a crossing already running, which must not hand its legs back).
+	URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+	if (LevelAssist)
+	{
+		LevelAssist->YieldTo(this);
+	}
 	if (!BuildPlan(Profile, OutReason))
 	{
 		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
 		Status = OutReason;
+		if (LevelAssist)
+		{
+			LevelAssist->ResumeFrom(this, nullptr); // nothing was begun: the legs back as they were
+		}
 		return false;
 	}
 	StartPerAxleCrossing(Profile);
@@ -6089,10 +6057,21 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 
 bool URammsCurbNegotiationController::BeginPerWheel(const FRammsCurbProfile& Profile, FString& OutReason)
 {
-	auto Refuse = [this, &OutReason](const FString& Why) {
+	// First of all, the level assist's offsets into the legs' commands: everything below that reads a command (and the
+	// crossing's "last commands", which its level-in starts from) must read the pose the robot is in. Nothing moves.
+	URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+	if (LevelAssist)
+	{
+		LevelAssist->YieldTo(this);
+	}
+	auto Refuse = [this, &OutReason, LevelAssist](const FString& Why) {
 		OutReason = Why;
 		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *Why);
 		Status = Why;
+		if (LevelAssist)
+		{
+			LevelAssist->ResumeFrom(this, nullptr); // nothing was begun: the legs back as they were
+		}
 		return false;
 	};
 	// Nothing of a crossing before this one runs on.

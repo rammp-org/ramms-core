@@ -229,7 +229,12 @@ namespace RammsLevel::DryRun
 		/** For Seconds the attitude cannot be read. */
 		AttitudeLoss,
 		/** For Seconds the active mode is one to release for (EMode::Release). */
-		ModeRelease
+		ModeRelease,
+		/** What "level" means becomes PlaneDeg (deg; it replaces
+		 *  Tuning.LevelReferenceDeg from here on): the rider changing the tilt
+		 *  they prefer. "Off level" in the result is measured against the
+		 *  reference in force on each frame. */
+		SetReference
 	};
 
 	struct FDryEvent

@@ -21,9 +21,11 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 
+#include "Level/RammsLevelControls.h"
 #include "Level/RammsLevelDryRun.h"
 #include "Level/RammsLevelLaw.h"
 #include "Level/RammsLevelTypes.h"
+#include "RammsLevelAssistComponent.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -1581,6 +1583,472 @@ bool FRammsLevelDryRunAtSpeed::RunTest(const FString& Parameters)
 				TestTrue(Label(Kit, Rate, TEXT("most of the speed kept")), Result.MeanSpeedCmS >= 0.6 * Speeds[SpeedIndex]);
 			}
 			TestTrue(Label(Kit, Rate, TEXT("the faster the break is taken, the further the base is left behind")), Peaks[1] > Peaks[0] && Peaks[2] > Peaks[1]);
+		}
+	}
+	return true;
+}
+
+namespace RammsLevelDryRunTests
+{
+	/** The tilt each made-up robot's rider prefers in the preference cases
+	 *  (deg; pitch, roll): a few degrees, both axes, inside what its legs can
+	 *  give on top of its courses' slopes. */
+	FVector2D PreferredTilt(const FKit& Kit)
+	{
+		return Kit.Robot.Legs.Num() == 6 ? FVector2D(2.0, -1.5) : FVector2D(1.5, 1.0);
+	}
+
+	/** The true attitude at a time (the last frame at or before it). */
+	FVector2D TrueAttitudeAt(const FResult& Result, double Seconds)
+	{
+		FVector2D Out = FVector2D::ZeroVector;
+		for (const FSample& Sample : Result.Trace)
+		{
+			if (Sample.Seconds > Seconds + 1.0e-6)
+			{
+				break;
+			}
+			Out = Sample.TrueAttitudeDeg;
+		}
+		return Out;
+	}
+
+	/** The level reference the law is given for a rider's preference, made as the component makes it (the reflected
+	 *  tuning's own reference, the preference added within its bounds): the preference cases then run on what the
+	 *  level.pref controls would give the law. */
+	FVector2D ReferenceFor(const FVector2D& PreferenceDeg)
+	{
+		return MakeTuning(FRammsLevelTuning(), PreferenceDeg).LevelReferenceDeg;
+	}
+
+	const FSample* SampleAt(const FResult& Result, double Seconds)
+	{
+		const FSample* Out = nullptr;
+		for (const FSample& Sample : Result.Trace)
+		{
+			if (Sample.Seconds > Seconds + 1.0e-6)
+			{
+				break;
+			}
+			Out = &Sample;
+		}
+		return Out;
+	}
+} // namespace RammsLevelDryRunTests
+
+// Catches: a law that levels to the horizontal whatever the rider prefers
+// (the reference left out of the wanted attitude's goal), a preference held
+// on one kind of ground and lost on another, and a preference reached by a
+// snap rather than on the tilt policy.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferredTiltHeld,
+	"Ramms.Level.DryRun.PreferredTiltHeld",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunPreferredTiltHeld::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FKit& Kit : Kits())
+	{
+		const FVector2D Preferred = PreferredTilt(Kit);
+		const double	CrossDeg = 0.5 * Kit.CrossDeg;
+		const FVector2D GradeKnots[2] = { { 120.0, 0.0 }, { 620.0, Rise(500.0, Kit.GradeDeg) } };
+		struct FCourse
+		{
+			const TCHAR* Name;
+			FGround		 Ground;
+			/** The ground's own attitude where the run starts and where it
+			 *  ends (deg). */
+			FVector2D StartGroundDeg;
+			FVector2D EndGroundDeg;
+			double	  DistanceCm;
+			double	  MaxSeconds;
+		};
+		const FCourse Courses[3] = {
+			{ TEXT("preferred tilt, ramp"), RampUp(Kit.GradeDeg, 500.0), FVector2D::ZeroVector, FVector2D(Kit.GradeDeg, 0.0), 480.0, 40.0 },
+			{ TEXT("preferred tilt, cross slope"), Plane(0.0, Kit.CrossDeg), FVector2D(0.0, Kit.CrossDeg), FVector2D(0.0, Kit.CrossDeg), 0.0, 9.0 },
+			{ TEXT("preferred tilt, grade with cross fall"), Profile(MakeArrayView(GradeKnots), CrossDeg), FVector2D(0.0, CrossDeg), FVector2D(Kit.GradeDeg, CrossDeg), 480.0, 40.0 },
+		};
+		for (const FCourse& Course : Courses)
+		{
+			double Steadies[3] = { 0.0, 0.0, 0.0 };
+			for (int32 Rate = 0; Rate < 3; ++Rate)
+			{
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.Tuning.LevelReferenceDeg = ReferenceFor(Preferred);
+				TestTrue(Label(Kit, Rate, TEXT("(the preference is inside its bounds: the law is given all of it)")), Options.Tuning.LevelReferenceDeg.Equals(Preferred, 1.0e-9));
+				Options.DistanceCm = Course.DistanceCm;
+				Options.MaxSeconds = Course.MaxSeconds;
+				Options.bKeepTrace = true;
+				const FResult Result = DryRun::Run(Kit.Robot, Course.Ground, Options);
+				Report(*this, Kit, Course.Name, Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				Steadies[Rate] = Result.SteadyResidualDeg;
+				if (!TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+				{
+					continue;
+				}
+				const FVector2D End = Result.Trace.Last().TrueAttitudeDeg;
+				// It starts as the ground has it and is walked to the
+				// preference on the tilt policy: that far at its rate, the time
+				// to get up to that rate, and a little for the legs. From there
+				// on what is left is the grade breaks'.
+				const double WalkedBy = FMath::Max(2.6,
+					(Preferred - Course.StartGroundDeg).Size() / Kit.Tuning.TiltRateDegPerSec + Kit.Tuning.TiltRateDegPerSec / Kit.Tuning.TiltAccelDegPerSec2 + 0.4);
+				const double BreakPeakDeg = PeakTiltBetween(Result, Options.Tuning, WalkedBy, 100.0);
+				AddInfo(FString::Printf(TEXT("%s | %s | %s | prefers (%.1f, %.1f) deg on ground ending (%.1f, %.1f): ends at (%.2f, %.2f), at most %.2f deg off its preference from %.1f s on"),
+					Kit.Name, Course.Name, FrameNames[Rate], Preferred.X, Preferred.Y, Course.EndGroundDeg.X, Course.EndGroundDeg.Y, End.X, End.Y, BreakPeakDeg, WalkedBy));
+				// (off level here is off the preference: the reference is the
+				// preference, RammsLevelDryRun.h.)
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: held at the preferred tilt"), Course.Name)), Result.SteadyResidualDeg <= 0.5);
+				TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: the preferred pitch"), Course.Name)), End.X, Preferred.X, 0.25);
+				TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: the preferred roll"), Course.Name)), End.Y, Preferred.Y, 0.25);
+				// ... which is neither level nor the ground's own attitude.
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: not levelled to the horizontal"), Course.Name)), Inclination(End) >= Inclination(Preferred) - 0.4);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the legs took the ground out"), Course.Name)), (End - Course.EndGroundDeg).Size() >= 1.0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the peak once at the preference"), Course.Name)), BreakPeakDeg <= 0.7);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: walked there, not snapped"), Course.Name)), Result.MaxTrueRateDegPerSec <= 3.5);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: inside the legs' reach"), Course.Name)), Result.SecondsAtReach == 0.0);
+			}
+			ExpectRatesAgree(*this, Kit, Course.Name, Steadies, Kit.Tuning.DeadbandDeg);
+		}
+	}
+	return true;
+}
+
+// Catches: a change of the preferred tilt that steps the rider (the wanted
+// attitude set to its new goal at once, or moved past the tilt policy's rate
+// or acceleration), one that overshoots, and one that a robot at rest on a
+// slope never answers (settled, it stopped looking at where level is).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferenceChange,
+	"Ramms.Level.DryRun.PreferenceChangeOnASlope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunPreferenceChange::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FKit& Kit : Kits())
+	{
+		// Parked on a grade with a cross fall. Level first; at 6 s the rider
+		// asks for the preferred tilt, at 11 s for its opposite, at 17 s for
+		// level again.
+		const FGround	Course = Plane(Kit.GradeDeg, 0.5 * Kit.CrossDeg);
+		const FVector2D Preferred = PreferredTilt(Kit);
+		const double	ChangeAt[3] = { 6.0, 11.0, 17.0 };
+		const FVector2D References[4] = { FVector2D::ZeroVector, Preferred, -Preferred, FVector2D::ZeroVector };
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 22.0;
+			Options.bKeepTrace = true;
+			for (int32 Change = 0; Change < 3; ++Change)
+			{
+				FDryEvent Event = MakeEvent(ChangeAt[Change], EEvent::SetReference);
+				Event.PlaneDeg = ReferenceFor(References[Change + 1]);
+				Options.Events.Add(Event);
+			}
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, TEXT("preference change, parked on a slope"), Rate, Result);
+			// The wanted attitude within the tilt policy's rate and
+			// acceleration over the whole run, the three changes included.
+			ExpectSound(*this, Kit, Rate, Result);
+			TestTrue(Label(Kit, Rate, TEXT("the rider moved, and no faster than the tilt policy allows")),
+				Result.MaxTrueRateDegPerSec >= 1.0 && Result.MaxTrueRateDegPerSec <= 3.5);
+			TestTrue(Label(Kit, Rate, TEXT("inside the legs' reach throughout")), Result.SecondsAtReach == 0.0);
+			TestTrue(Label(Kit, Rate, TEXT("level again at the end")), Result.FinalTiltDeg <= 0.4);
+
+			// At rest before the first change: settled, nothing written.
+			const FSample* Before = SampleAt(Result, ChangeAt[0] - 0.1);
+			if (TestNotNull(Label(Kit, Rate, TEXT("a frame before the first change")), Before))
+			{
+				TestTrue(Label(Kit, Rate, TEXT("settled level before the change")), Before->Out.bQuiet && Inclination(Before->TrueAttitudeDeg) <= 0.4);
+			}
+			for (int32 Change = 0; Change < 3; ++Change)
+			{
+				const FVector2D From = References[Change];
+				const FVector2D To = References[Change + 1];
+				const double	Until = Change < 2 ? ChangeAt[Change + 1] : Options.MaxSeconds;
+				const double	Length = (To - From).Size();
+				const FVector2D Along = (To - From) / Length;
+				// The change wakes it, and it is at the new preference well
+				// before the next one.
+				const FSample* Woken = SampleAt(Result, ChangeAt[Change] + 0.5);
+				const FSample* There = SampleAt(Result, Until - 0.1);
+				if (!TestNotNull(Label(Kit, Rate, TEXT("frames after the change")), Woken) || !TestNotNull(Label(Kit, Rate, TEXT("frames before the next")), There))
+				{
+					continue;
+				}
+				TestFalse(Label(Kit, Rate, *FString::Printf(TEXT("change %d: it is answered (not left at rest)"), Change + 1)), Woken->Out.bQuiet);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("change %d: the wanted attitude arrives"), Change + 1)), There->Out.WantedDeg.Equals(To, 0.05));
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("change %d: the rider is held at the new preference"), Change + 1)), (There->TrueAttitudeDeg - To).Size() <= 0.4);
+				// No overshoot, and no wandering off the straight line between
+				// the two: frame by frame from the change to the next.
+				double	  MostAlong = 0.0, MostWantedAlong = 0.0, MostAcross = 0.0, MostStepDeg = 0.0;
+				FVector2D Last = TrueAttitudeAt(Result, ChangeAt[Change] - 1.0e-3);
+				for (const FSample& Sample : Result.Trace)
+				{
+					if (Sample.Seconds < ChangeAt[Change] - 1.0e-6 || Sample.Seconds >= Until - 1.0e-6)
+					{
+						continue;
+					}
+					MostAlong = FMath::Max(MostAlong, FVector2D::DotProduct(Sample.TrueAttitudeDeg - From, Along));
+					MostWantedAlong = FMath::Max(MostWantedAlong, FVector2D::DotProduct(Sample.Out.WantedDeg - From, Along));
+					MostAcross = FMath::Max(MostAcross, FMath::Abs(FVector2D::CrossProduct(Sample.Out.WantedDeg - From, Along)));
+					MostStepDeg = FMath::Max(MostStepDeg, (Sample.TrueAttitudeDeg - Last).Size());
+					Last = Sample.TrueAttitudeDeg;
+				}
+				AddInfo(FString::Printf(TEXT("%s | preference change %d | %s | %.2f deg asked: rider at most %.2f deg along it, wanted %.3f; wanted off the line %.3f; largest step in a frame %.3f deg"),
+					Kit.Name, Change + 1, FrameNames[Rate], Length, MostAlong, MostWantedAlong, MostAcross, MostStepDeg));
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("change %d: the wanted attitude never passes the preference"), Change + 1)), MostWantedAlong <= Length + 1.0e-6);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("change %d: the wanted attitude goes straight there"), Change + 1)), MostAcross <= 0.02);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("change %d: the rider does not overshoot"), Change + 1)), MostAlong <= Length + 0.1);
+				// A frame's worth of the policy's rate, and the legs' lag.
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("change %d: no step in any one frame"), Change + 1)), MostStepDeg <= 3.5 * FrameSeconds[Rate] + 0.05);
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: a change of the preferred tilt made on the move, as the ground
+// changes under the robot, that is lost (the grade break's own correction
+// taken for the answer), that steps the rider, or that takes the wanted
+// attitude past the tilt policy while both are being answered at once.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferenceChangeOnTheMove,
+	"Ramms.Level.DryRun.PreferenceChangeOverAGradeBreak",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunPreferenceChangeOnTheMove::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FKit& Kit : Kits())
+	{
+		// Driving level ground onto a grade; the rider asks for the preferred
+		// tilt as the first wheels meet it.
+		const FVector2D Preferred = PreferredTilt(Kit);
+		const FGround	Course = RampUp(Kit.GradeDeg, 500.0);
+		double			Steadies[3] = { 0.0, 0.0, 0.0 };
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.DistanceCm = 480.0;
+			Options.MaxSeconds = 40.0;
+			Options.bKeepTrace = true;
+			FDryEvent Event = MakeEvent(Kit.StallAtSeconds, EEvent::SetReference);
+			Event.PlaneDeg = ReferenceFor(Preferred);
+			Options.Events.Add(Event);
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, TEXT("preference change over a grade break"), Rate, Result);
+			// The wanted attitude within the tilt policy's rate and
+			// acceleration throughout, the change and the break together.
+			ExpectSound(*this, Kit, Rate, Result);
+			Steadies[Rate] = Result.SteadyResidualDeg;
+			if (!TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const FSample*	Before = SampleAt(Result, Kit.StallAtSeconds - 0.2);
+			const FVector2D End = Result.Trace.Last().TrueAttitudeDeg;
+			// The most the rider was off the reference in force from when the
+			// walk to the preference is over.
+			const double WalkedBy = Kit.StallAtSeconds + Preferred.Size() / Kit.Tuning.TiltRateDegPerSec + Kit.Tuning.TiltRateDegPerSec / Kit.Tuning.TiltAccelDegPerSec2 + 0.4;
+			double		 MostOffDeg = 0.0;
+			for (const FSample& Sample : Result.Trace)
+			{
+				if (Sample.Seconds >= WalkedBy)
+				{
+					MostOffDeg = FMath::Max(MostOffDeg, Inclination(Sample.TrueAttitudeDeg - Preferred));
+				}
+			}
+			AddInfo(FString::Printf(TEXT("%s | preference change over a grade break | %s | asked (%.1f, %.1f) deg at %.1f s: ends at (%.2f, %.2f) on %.1f deg of grade, at most %.2f deg off it from %.1f s on"),
+				Kit.Name, FrameNames[Rate], Preferred.X, Preferred.Y, Kit.StallAtSeconds, End.X, End.Y, Kit.GradeDeg, MostOffDeg, WalkedBy));
+			if (TestNotNull(Label(Kit, Rate, TEXT("a frame before the change")), Before))
+			{
+				TestTrue(Label(Kit, Rate, TEXT("level before the change")), Inclination(Before->TrueAttitudeDeg) <= 0.4 && Before->Out.WantedDeg.Size() <= 0.05);
+			}
+			TestTrue(Label(Kit, Rate, TEXT("it got onto the grade")), Result.TravelCm >= 480.0);
+			TestEqual(Label(Kit, Rate, TEXT("the preferred pitch, on the grade")), End.X, Preferred.X, 0.25);
+			TestEqual(Label(Kit, Rate, TEXT("the preferred roll, on the grade")), End.Y, Preferred.Y, 0.25);
+			TestTrue(Label(Kit, Rate, TEXT("the wanted attitude is the preference")), Result.Trace.Last().Out.WantedDeg.Equals(Preferred, 0.05));
+			TestTrue(Label(Kit, Rate, TEXT("held at the preference")), Result.SteadyResidualDeg <= 0.5);
+			TestTrue(Label(Kit, Rate, TEXT("the grade break costs no more with the change than without")), MostOffDeg <= 0.7);
+			TestTrue(Label(Kit, Rate, TEXT("the rider moved, and no faster than the tilt policy allows")), Result.MaxTrueRateDegPerSec >= 1.0 && Result.MaxTrueRateDegPerSec <= 3.5);
+			TestTrue(Label(Kit, Rate, TEXT("inside the legs' reach")), Result.SecondsAtReach == 0.0);
+		}
+		ExpectRatesAgree(*this, Kit, TEXT("preference change over a grade break"), Steadies, Kit.Tuning.DeadbandDeg);
+	}
+	return true;
+}
+
+// Catches: a preference chosen while the level assist was off that is
+// snapped to when it is switched on (the wanted attitude must start where
+// the base is and walk), or forgotten (levelled to the horizontal).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferenceBeforeSwitchOn,
+	"Ramms.Level.DryRun.PreferenceSetBeforeSwitchingOn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunPreferenceBeforeSwitchOn::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FKit& Kit : Kits())
+	{
+		// Parked on a grade with a cross fall, off, the preference already
+		// chosen; switched on at 2 s.
+		const FVector2D GroundDeg(Kit.GradeDeg, 0.5 * Kit.CrossDeg);
+		const FGround	Course = Plane(GroundDeg.X, GroundDeg.Y);
+		const FVector2D Preferred = PreferredTilt(Kit);
+		const double	OnAt = 2.0;
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.Tuning.LevelReferenceDeg = ReferenceFor(Preferred);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 12.0;
+			Options.bEnabledAtStart = false;
+			Options.bKeepTrace = true;
+			Options.Events.Add(MakeEvent(OnAt, EEvent::Enable));
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, TEXT("preference set before switching on"), Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			const FSample* Off = SampleAt(Result, OnAt - 0.2);
+			if (!TestNotNull(Label(Kit, Rate, TEXT("a frame while off")), Off) || !TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const FVector2D Stood = Off->TrueAttitudeDeg;
+			TestTrue(Label(Kit, Rate, TEXT("off: the base lies as the ground has it, nothing on the legs")),
+				Off->Out.State == EState::Off && (Stood - GroundDeg).Size() <= 0.3 && Result.Trace[0].Out.Dz.Num() > 0);
+			// The first frame it is levelling on: the wanted attitude is where
+			// the base is, not where the rider prefers.
+			const FSample* First = nullptr;
+			for (const FSample& Sample : Result.Trace)
+			{
+				if (Sample.Out.State == EState::Active)
+				{
+					First = &Sample;
+					break;
+				}
+			}
+			const FVector2D End = Result.Trace.Last().TrueAttitudeDeg;
+			AddInfo(FString::Printf(TEXT("%s | preference set before switching on | %s | stood at (%.2f, %.2f), prefers (%.1f, %.1f): first wanted (%.2f, %.2f), ends at (%.2f, %.2f); largest leg step in a frame %.3f cm"),
+				Kit.Name, FrameNames[Rate], Stood.X, Stood.Y, Preferred.X, Preferred.Y, First ? First->Out.WantedDeg.X : 0.0, First ? First->Out.WantedDeg.Y : 0.0, End.X, End.Y, Result.MaxLegStepCm));
+			if (TestNotNull(Label(Kit, Rate, TEXT("it came on")), First))
+			{
+				TestTrue(Label(Kit, Rate, TEXT("switched on: the wanted attitude starts where the base is")), (First->Out.WantedDeg - Stood).Size() <= 0.3);
+				TestTrue(Label(Kit, Rate, TEXT("(which is not the preference)")), (Stood - Preferred).Size() >= 2.0);
+			}
+			TestTrue(Label(Kit, Rate, TEXT("walked to the preference, not snapped")), Result.MaxTrueRateDegPerSec >= 1.0 && Result.MaxTrueRateDegPerSec <= 3.5);
+			// A frame of the policy's rate at the farthest leg, and a little.
+			TestTrue(Label(Kit, Rate, TEXT("no leg stepped")), Result.MaxLegStepCm <= 0.6);
+			TestEqual(Label(Kit, Rate, TEXT("the preferred pitch")), End.X, Preferred.X, 0.25);
+			TestEqual(Label(Kit, Rate, TEXT("the preferred roll")), End.Y, Preferred.Y, 0.25);
+			TestTrue(Label(Kit, Rate, TEXT("held at the preference")), Result.SteadyResidualDeg <= 0.4);
+		}
+	}
+	return true;
+}
+
+// Catches: a preference that, with the ground's slope, asks more of the legs
+// than they have, taken for a fault or answered by legs past their margin;
+// the wanted tilt's allowance and the past-reach status measured from the
+// horizontal rather than from what the rider asked for; and the base not
+// brought as near the preference as the law plans to.
+//
+// What the rider gets, by the law's own rule (WantedTiltGoal): the part of
+// the asked correction the legs' PLANNED reach (their travel less the margin
+// and the soft zone) cannot give is kept as tilt off the preference, up to
+// MaxTiltDeg; resting there is Levelling or Settled, not "at reach". Asked
+// for more than that, the legs go to their margin, the base keeps the rest,
+// and the status is "slope past levelling reach".
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferencePastReach,
+	"Ramms.Level.DryRun.PreferencePastTheLegsReach",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunPreferencePastReach::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	// The six-wheeled robot with its legs cut to 4 cm either way, parked nose
+	// up. At the corners' 45 cm the legs plan on 1.5 cm (0.5 margin and 2
+	// soft zone off): 1.91 deg; to the margin they have 3.5 cm: 4.45 deg.
+	FKit Kit = SixWheel();
+	Kit.Name = TEXT("six wheels, shorter legs");
+	for (FRobotLeg& Leg : Kit.Robot.Legs)
+	{
+		Leg.MinZ = Leg.StanceZ - 4.0;
+		Leg.MaxZ = Leg.StanceZ + 4.0;
+	}
+	const double PlannedDeg = FMath::RadiansToDegrees(FMath::Atan(1.5 / 45.0));
+	const double HardDeg = FMath::RadiansToDegrees(FMath::Atan(3.5 / 45.0));
+	struct FCase
+	{
+		const TCHAR* Name;
+		double		 GroundDeg;
+		double		 PreferredDeg;
+		/** Where the base ends (deg, pitch), and whether that is past the
+		 *  tilt policy's allowance off the preference. */
+		double EndsAtDeg;
+		bool   bPast;
+	};
+	const FCase Cases[2] = {
+		// 3 deg nose up, 3 deg nose down asked: 6 asked of a planned 1.91.
+		// The other 4.09 is kept, inside the 5 deg allowance.
+		{ TEXT("preference a little past the legs' planned reach"), 3.0, -3.0, 3.0 - PlannedDeg, false },
+		// 6 deg nose up, 4 deg nose down asked: 10 asked. The wanted tilt
+		// stops 5 deg off the preference, which asks 5 of the legs' 4.45: the
+		// legs sit on their margin and the base is 5.55 deg off the
+		// preference. Off the horizontal it is only 1.55 deg, well inside the
+		// allowance: measured from there nothing would be said.
+		{ TEXT("preference far past the legs' reach"), 6.0, -4.0, 6.0 - HardDeg, true },
+	};
+	for (const FCase& Case : Cases)
+	{
+		const FVector2D Preferred(Case.PreferredDeg, 0.0);
+		const double	ShortDeg = Case.EndsAtDeg - Case.PreferredDeg;
+		const FGround	Course = Plane(Case.GroundDeg, 0.0);
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.Tuning.LevelReferenceDeg = ReferenceFor(Preferred);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 14.0;
+			Options.bKeepTrace = true;
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, Case.Name, Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			if (!TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const FSample& Last = Result.Trace.Last();
+			AddInfo(FString::Printf(TEXT("%s | %s | %s | %.1f deg ground, prefers %.1f: ends at (%.2f, %.2f), %.2f deg off the preference; wanted (%.2f, %.2f); status %d; at reach %.2f s; largest offset %.2f cm"),
+				Kit.Name, Case.Name, FrameNames[Rate], Case.GroundDeg, Case.PreferredDeg, Last.TrueAttitudeDeg.X, Last.TrueAttitudeDeg.Y, Result.SteadyResidualDeg, Last.Out.WantedDeg.X,
+				Last.Out.WantedDeg.Y, static_cast<int32>(Last.Out.Status), Result.SecondsAtReach, Result.MaxOffsetCm));
+			TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: where the base ends"), Case.Name)), Last.TrueAttitudeDeg.X, Case.EndsAtDeg, 0.3);
+			TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: no roll comes of it"), Case.Name)), Last.TrueAttitudeDeg.Y, 0.0, 0.2);
+			// (Off the horizontal it would read EndsAtDeg, 2.5 deg and more away.)
+			TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: the shortfall is measured against the preference"), Case.Name)), Result.SteadyResidualDeg, ShortDeg, 0.3);
+			TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: still levelling"), Case.Name)), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Active));
+			if (Case.bPast)
+			{
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the wanted tilt stops at the policy's allowance off the preference"), Case.Name)),
+					FMath::IsNearlyEqual(Last.Out.WantedDeg.X, Case.PreferredDeg + Kit.Tuning.MaxTiltDeg, 0.05));
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the allocation was cut back"), Case.Name)), Result.SecondsAtReach > 1.0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: no leg past its margin"), Case.Name)), Result.MaxOffsetCm <= 3.5 + 0.01);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: it says the slope is past reach"), Case.Name)), Last.Out.Status == EStatus::PastReach);
+			}
+			else
+			{
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the wanted tilt takes what the legs do not plan to"), Case.Name)),
+					FMath::IsNearlyEqual(Last.Out.WantedDeg.X, Case.EndsAtDeg, 0.1));
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the legs stay out of their soft zone"), Case.Name)), Result.MaxOffsetCm <= 1.5 + 0.15 && Result.SecondsAtReach == 0.0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: resting there is not a warning"), Case.Name)),
+					Last.Out.Status == EStatus::Settled || Last.Out.Status == EStatus::Levelling);
+			}
 		}
 	}
 	return true;

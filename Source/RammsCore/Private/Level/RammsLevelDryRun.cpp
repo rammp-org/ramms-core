@@ -447,7 +447,8 @@ namespace RammsLevel::DryRun
 		{
 			return Result;
 		}
-		const FTuning& Tuning = Options.Tuning;
+		// A copy: an event may change what level means on the way (EEvent::SetReference).
+		FTuning		   Tuning = Options.Tuning;
 		const double   FrameSeconds = FMath::Max(Options.FrameSeconds, 1.0e-3);
 		const double   Tick = FMath::Clamp(Options.PhysicsStepSeconds, 1.0e-4, FrameSeconds);
 		const int32	   PoseEvery = FMath::Max(1, FMath::RoundToInt32(Options.PoseStepSeconds / Tick));
@@ -699,6 +700,9 @@ namespace RammsLevel::DryRun
 							break;
 						case EEvent::ModeRelease:
 							ReleaseUntil = Time + Event.Seconds;
+							break;
+						case EEvent::SetReference:
+							Tuning.LevelReferenceDeg = Event.PlaneDeg;
 							break;
 						default:
 							break;
