@@ -884,7 +884,9 @@ bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
 		const double				Z0 = -6.0;
 		for (const double StanceX : { 0.0, 6.0 })
 		{
-			for (const double PitchRate : { 0.0, 0.07, -0.07 })
+			// (Pitching fast enough that, its turn left in the carrier's, the wrong
+			// link is told or none is.)
+			for (const double PitchRate : { 0.0, 0.2, -0.2 })
 			{
 				RammsCurb::FWheelFeed Real;
 				FVector2D			  Prev;
@@ -906,7 +908,7 @@ bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
 					bSolved &= RammsCurb::FiveBarLinksAt(Spec, FVector2D(AtX, AtZ), Now);
 					const FVector2D Rate(FMath::UnwindRadians(Now.X - Prev.X) / Tick, FMath::UnwindRadians(Now.Y - Prev.Y) / Tick);
 					const double	Chassis = bLift ? PitchRate : 0.0;
-					const double	Off = 0.02 * FMath::Sin(2.3 * k + 0.7 * StanceX + 40.0 * PitchRate);
+					const double	Off = 0.02 * FMath::Sin(2.3 * k + 0.7 * StanceX + 14.0 * PitchRate);
 					Real.Measure(static_cast<float>(Tick), FVector2D(AtX, AtZ), static_cast<float>(TrueSense * Rate.Y + Chassis + Off), FVector2D::ZeroVector);
 					Real.MeasureLinks(static_cast<float>(Tick), Now, true, static_cast<float>(Chassis));
 					Told = Real.GetCarrierLink(ToldSense);
@@ -921,6 +923,10 @@ bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
 				if (StanceX == 0.0)
 				{
 					TestFalse(*FString::Printf(TEXT("%s: a lift alone does not tell the links apart"), *What), bToldByLiftAlone);
+				}
+				else
+				{
+					TestTrue(*FString::Printf(TEXT("%s: off mid-way the lift alone tells the link"), *What), bToldByLiftAlone);
 				}
 			}
 		}
