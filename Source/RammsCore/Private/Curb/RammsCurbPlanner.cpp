@@ -6450,10 +6450,15 @@ namespace RammsCurb
 			// under the rider within a fraction of a second. Up a curb a rise is
 			// kept (it has the lifting wheels clear sooner, and the chassis is on
 			// its way up anyway) and the dip after it filled; down a curb a
-			// lowering is. Each sample stays inside its corridor and what rising or
-			// lowering early kept its wish to (or where the path already was past
-			// that), and the levelled path is run through the rates once more;
-			// where that does not go (it should), the path stays as it was.
+			// lowering is. No sample is moved nearer its corridor's edge than
+			// RiseSlackCm, or than its middle where the corridor is narrower than
+			// twice that (a path already nearer stays where it is): a narrow
+			// corridor's middle is where the legs have their reach and the pose its
+			// margin, and a chassis levelled onto its floor through a landing left
+			// the wheels just landed lightly loaded as the next pair lifted. Nor past
+			// what rising or lowering early kept its wish to. The levelled path is
+			// run through the rates once more; where that does not go (it should),
+			// the path stays as it was.
 			const double Steady = HeightSteadySeconds();
 			if (bPath && Steady > 0.0)
 			{
@@ -6470,8 +6475,9 @@ namespace RammsCurb
 				Limits.SetNum(Count);
 				for (int32 c = 0; c < Count; ++c)
 				{
-					const double Lo = FMath::Max(Bands[c].X, FMath::Min(WishFloor[c], Path[c]));
-					const double Hi = FMath::Min(FMath::Max(Bands[c].X, Bands[c].Y), FMath::Max(WishCeil[c], Path[c]));
+					const double Inset = FMath::Min(RiseSlackCm, 0.5 * FMath::Max(0.0, Bands[c].Y - Bands[c].X));
+					const double Lo = FMath::Min(Path[c], FMath::Max(Bands[c].X + Inset, WishFloor[c]));
+					const double Hi = FMath::Max(Path[c], FMath::Min(Bands[c].Y - Inset, WishCeil[c]));
 					Limits[c] = FVector2D(Lo, FMath::Max(Lo, Hi));
 				}
 				SteadyPath(Path, Seconds, Steady, M.IsClimb(), Limits, Level);
