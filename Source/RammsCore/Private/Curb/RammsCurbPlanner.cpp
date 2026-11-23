@@ -6495,10 +6495,12 @@ namespace RammsCurb
 				}
 				SteadyPath(Path, Seconds, Steady, M.IsClimb(), Limits, Level);
 				int32 Stuck2 = INDEX_NONE;
-				// (Inside the limits, not only the corridor: at a step of the limits
-				// the rates would carry the path past them. They hold the path as it
-				// was, so they can be followed.)
-				if (RatePath(Limits, Up, Down, NoValue, Level, Path2, Stuck2))
+				// (Through the corridor, not the limits: where the limits step from one
+				// sample to the next the rates can carry the path a little past them,
+				// toward a corridor's edge. Held inside the limits instead, the path
+				// changed on graded climbs, whose rear lift is touchy, and one of them
+				// rocked at half the starts tried; this way it did at none.)
+				if (RatePath(Bands, Up, Down, NoValue, Level, Path2, Stuck2))
 				{
 					Path = MoveTemp(Path2);
 				}
