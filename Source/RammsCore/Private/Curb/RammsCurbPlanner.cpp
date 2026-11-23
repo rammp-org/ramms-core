@@ -2917,10 +2917,37 @@ namespace RammsCurb
 		 *  now -- and, on the move, sure to be kept against this one's work),
 		 *  or, on the move, this one's work is over its budget against it.
 		 *  Either way the plan this grid would make is not the one kept, so
-		 *  stopping changes nothing but the time. Sticky. */
+		 *  stopping changes nothing but the time. Or the plan is no longer
+		 *  wanted (GiveUp), or this grid's work is over the planning budget
+		 *  (Ramms.Curb.PlanWorkBudget) with no fallback plan in hand. Sticky,
+		 *  but for a budget stop a found plan takes back (KeepInHand). */
 		bool Stopped() const;
 		/** A grid stopped early: a refusal saying why. */
 		FCurbSchedule& StoppedPlan(FCurbSchedule& Out) const;
+		/** The stop is the planning budget's (not GiveUp's, nor the grid race's):
+		 *  the one stop a plan in hand is not given up for. */
+		mutable bool bBudgetStop = false;
+		/** A fallback search has found its plan: the planning budget no longer
+		 *  stops this grid, so the plan is not refused for the work that found it
+		 *  (or that a search for a better one spent), nor put out without its
+		 *  ground hold and seat path because the budget ran out during them. */
+		mutable bool bPlanInHand = false;
+		/** Called with a fallback plan found, before it is held and put out:
+		 *  whether to go on with it. A budget stop is taken back and the budget
+		 *  no longer applies (bPlanInHand); a grid no longer wanted, or one whose
+		 *  plan the other grid's is kept against, stays stopped, since discarding
+		 *  its plan changes nothing. */
+		bool KeepInHand() const
+		{
+			if (!StoppedWhy.IsEmpty() && !bBudgetStop)
+			{
+				return false;
+			}
+			StoppedWhy.Reset();
+			bBudgetStop = false;
+			bPlanInHand = true;
+			return !Stopped();
+		}
 		/** The tilted plans' attempts made slower (TiltPlan) left for this
 		 *  crossing: each costs a plan, so a crossing every tilt of which fails
 		 *  does not spend MaxSlowTiltRounds on each. */
@@ -3005,6 +3032,9 @@ namespace RammsCurb
 		if (StoppedWhy.IsEmpty() && !F.StoppedWhy.IsEmpty())
 		{
 			StoppedWhy = F.StoppedWhy;
+			// (And whose stop it is: a fork's budget stop read as the race's
+			// would refuse a plan found in that fork.)
+			bBudgetStop = F.bBudgetStop;
 		}
 	}
 
@@ -6495,6 +6525,11 @@ namespace RammsCurb
 				}
 				SteadyPath(Path, Seconds, Steady, M.IsClimb(), Limits, Level);
 				int32 Stuck2 = INDEX_NONE;
+				// (Through the corridor, not the limits: where the limits step from one
+				// sample to the next the rates can carry the path a little past them,
+				// toward a corridor's edge. Held inside the limits instead, the path
+				// changed on graded climbs, whose rear lift is touchy, and one of them
+				// rocked at half the starts tried; this way it did at none.)
 				if (RatePath(Bands, Up, Down, NoValue, Level, Path2, Stuck2))
 				{
 					Path = MoveTemp(Path2);
@@ -9659,7 +9694,9 @@ namespace RammsCurb
 				}
 				Tried.Add(FString::Printf(TEXT("tried %s slower where it failed: %s, floor %.1f cm/s"), *C->Name, IsOk(S) ? TEXT("level") : TEXT("not level"),
 					S.VFloor));
-				if (Stopped())
+				// (A plan found is kept though finding it took the work past the
+				// planning budget: KeepInHand.)
+				if (IsOk(S) ? !KeepInHand() : Stopped())
 				{
 					return StoppedPlan(Out);
 				}
@@ -9694,7 +9731,11 @@ namespace RammsCurb
 		FPlan	   Tilted;
 		FString	   TiltWhy;
 		const bool bTilted = TryTilt(Bases, Tilted, TiltWhy);
-		if (Stopped())
+		// (A tilted plan found is in hand from here: the planning budget stops
+		// neither the search below for a lesser tilt, which ends at the budget
+		// by its work limit instead, nor the hold and the seat path of the plan
+		// put out.)
+		if (bTilted ? !KeepInHand() : Stopped())
 		{
 			return StoppedPlan(Out);
 		}
@@ -9721,7 +9762,11 @@ namespace RammsCurb
 			{
 				bSlowTilt = true;
 				TiltCeilingDeg = bLess ? Most - SlowTiltGainDeg : -1.0;
-				SlowWorkLimit = bAny ? Work + static_cast<int64>(SlowTiltWhenNoneWorkShare * static_cast<double>(Work)) : -1;
+				// (For a lesser tilt than the one in hand, the planning budget is the
+				// search's work limit: past it the search makes no more plans and the
+				// plan in hand is put out, where a budget stop would refuse it.)
+				SlowWorkLimit = bAny ? Work + static_cast<int64>(SlowTiltWhenNoneWorkShare * static_cast<double>(Work))
+									 : (PlanWorkBudget() > 0 ? FMath::Max(Work, PlanWorkBudget()) : -1);
 				FPlan		  Slow;
 				FString		  SlowWhy;
 				const FString FastNote = TiltNote;
@@ -9733,7 +9778,10 @@ namespace RammsCurb
 				bSlowTilt = false;
 				TiltCeilingDeg = -1.0;
 				SlowWorkLimit = -1;
-				if (Stopped())
+				// (A slowed plan found where none was at the plans' speeds is in hand
+				// as well: without this the budget could still refuse it, or cut its
+				// hold and seat path short.)
+				if (bSlowFound ? !KeepInHand() : Stopped())
 				{
 					return StoppedPlan(Out);
 				}
@@ -9819,10 +9867,13 @@ namespace RammsCurb
 		// Over the planning budget once no plan is level at its own speeds (a
 		// level plan found is never given up for it: the fallback searches are
 		// where a refusal spends its time) -- and not once every search has run
-		// (Refused: its own reason says more).
+		// (Refused: its own reason says more), nor with a fallback plan in hand
+		// (bPlanInHand: it would be refused, or lose its hold and seat path, for
+		// work spent after it was found).
 		const int64 Budget = PlanWorkBudget();
-		if (Budget > 0 && Stage != EPlanStage::Level && Stage != EPlanStage::Refused && Work > Budget)
+		if (Budget > 0 && Stage != EPlanStage::Level && Stage != EPlanStage::Refused && !bPlanInHand && Work > Budget)
 		{
+			bBudgetStop = true;
 			StoppedWhy = FString::Printf(TEXT("no plan within the planning budget (%lld instants of the robot evaluated; Ramms.Curb.PlanWorkBudget %lld)"),
 				static_cast<long long>(Work), static_cast<long long>(Budget));
 			return true;

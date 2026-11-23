@@ -270,4 +270,9 @@ namespace RammsRammpGen1Curb
 		Out.Normal.Normalize();
 		return Out;
 	}
+
+	float StepStallSeconds(float CommandedCmS, float ChassisCmS, float Seconds, float Dt)
+	{
+		return CommandedCmS >= 3.0f && ChassisCmS < 0.5f ? Seconds + Dt : 0.0f;
+	}
 } // namespace RammsRammpGen1Curb

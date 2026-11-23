@@ -372,6 +372,20 @@ namespace RammsCurb
 		/** Forget everything: the next Measure only records where the leg is. */
 		void Reset() { *this = FWheelFeed(); }
 
+		/** Start the rates again (a tick too long to measure a turn across)
+		 *  with what has been told of the wheel's link kept: the link does not
+		 *  change, and telling it again takes a lift and a walk. */
+		void ForgetRates()
+		{
+			FWheelFeed Fresh;
+			for (int32 i = 0; i < 4; ++i)
+			{
+				Fresh.LinkMisfit[i] = LinkMisfit[i];
+			}
+			Fresh.LinkTurn = LinkTurn;
+			*this = Fresh;
+		}
+
 		/**
 		 * One tick of Dt, measured at its end: the wheel centre (chassis x and
 		 * z, cm), the turn rate (rad/s) of the link it hangs from over the tick,
@@ -483,9 +497,14 @@ namespace RammsCurb
 		 * of its own leg a tick late: a loaded centre wheel on a cross slope
 		 * rocked the robot from one centre wheel to the other at the tick rate.)
 		 * False for a tick that is no tick (Dt 0 or less).
+		 *
+		 * Cadence: the commands' interval and delay as the controller has
+		 * followed them all along (the base's followers are as old); copies
+		 * begun afresh take it up, or their delay would be the one this
+		 * crossing's first frames show. None: they find their own.
 		 */
 		bool FollowMotors(double Now, double Dt, const FVector2D& Commands, const FVector2D& Measured, const FVector2D& MaxRate,
-			const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext);
+			const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext, const RammsMotion::FCommandInterval* Cadence = nullptr);
 		void ForgetMotors() { bMotorReplicas = false; }
 
 	private:

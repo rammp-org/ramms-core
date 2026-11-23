@@ -148,6 +148,13 @@ namespace RammsMotion
 		/** Hold Value, at rest, with no command. */
 		void Reset(double Value);
 
+		/** Take up a command stream's interval, jitter and delay as another
+		 *  reader of the same stream has them (after Reset, before the first
+		 *  Command): a follower begun in the middle of a stream then runs the
+		 *  delay one that has followed it all along does, rather than the delay
+		 *  its own first gaps show, which it would be slow to slew down from. */
+		void SeedCadence(const FCommandInterval& From) { Cadence = From; }
+
 		/** A command, first seen at time Now (s). */
 		void Command(double NewTarget, double Now);
 

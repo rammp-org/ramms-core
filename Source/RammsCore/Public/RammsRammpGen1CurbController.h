@@ -667,9 +667,11 @@ private:
 	/** The log; Display becomes the phase. */
 	void NoteBlended(ERammsRammpGen1CurbPhase Display, const FString& What);
 
-	void  BeginBlended();
-	void  StepBlended(float Dt);
-	void  StartBlendTouch(ESupport S, float LevelZ);
+	/** SeedCmS: the forward speed the robot has as the crossing takes it over (cm/s; 0 from rest): its speed starts there. */
+	void BeginBlended(float SeedCmS);
+	void StepBlended(float Dt);
+	/** False when the touchdown could not be started: the crossing has been ended (Finish), and the caller must leave it so. */
+	bool  StartBlendTouch(ESupport S, float LevelZ);
 	bool  StepBlendTouch(ESupport S);				   // true the tick it finishes
 	float LowGap(ESupport S, float LevelZ) const;	   // the lower wheel's bottom above LevelZ
 	float CmdHeight(ESupport S) const;				   // its table height at the lift's command
@@ -695,6 +697,10 @@ private:
 	float					 NearZ = 0.0f, FarZ = 0.0f;
 	FVector					 EdgePoint = FVector::ZeroVector;
 	FVector					 EdgeNormal = FVector::ForwardVector; // square to the edge, onto the far level (Along measures along it)
+
+	// A crossing faulted or stopped with the stick held forward: it must come back to centre before it drives the mode
+	// handed back to.
+	bool bCentreOnHandBack = false;
 
 	// The stick and curb assist.
 	FVector							   StickInput = FVector::ZeroVector; // drive.forward, .turn, .strafe while the curb mode has the robot
@@ -734,6 +740,9 @@ private:
 	EBlendSpeed BlendSpeed = EBlendSpeed::Starting;
 	FBlendStop	BlendStop;
 	float		BlendFrontNearCm = 0.0f;
+
+	// Begun on the move and still above what its speed law asks: it slows more firmly until it first is not.
+	bool bBlendSeeded = false;
 
 	// Touchdown.
 	ESupport TouchSupport = ESupport::Drive;

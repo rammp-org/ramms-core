@@ -97,7 +97,7 @@ static TAutoConsoleVariable<int32> CVarRammsCurbKinematicWheelFeed(
 				TEXT("fore/aft rate and the link's turn for where its hips' motion profiles take them on the commands just sent --\n")
 					TEXT("copies of the base's followers run on the commands alone: a setpoint a command interval behind them, within\n")
 						TEXT("the motors' speed and acceleration (where the base runs no follower for a hip, as 1; the copies start each\n")
-							TEXT("crossing with the delay its first frames show, so they match the base's only on evenly timed frames). 2 gives each wheel the speed\n")
+							TEXT("crossing with the commands' delay as the controller has followed it, as the base's have). 2 gives each wheel the speed\n")
 								TEXT("its leg's motion needs most nearly (the lag model has a walk's first tick a good way into its speed, where\n")
 									TEXT("the motor is slow off the mark), but crossings were no quicker or steadier for it, and now and then one\n")
 										TEXT("rolled faster at a landing than with 1: not the default."),
@@ -880,12 +880,9 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 
 bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
 {
-	// (Afresh, but for the rider's setting as the last crossing left it.)
-	const FSeatState Last = SeatState;
+	// (Afresh; the rider's setting as the last crossing left it is kept apart:
+	// bSeatKept.)
 	SeatState = FSeatState();
-	SeatState.bKept = Last.bKept;
-	SeatState.KeptPitchOwn = Last.KeptPitchOwn;
-	FMemory::Memcpy(SeatState.KeptCommands, Last.KeptCommands, sizeof(SeatState.KeptCommands));
 	Model->Seat = RammsCurb::FModelSeat();
 	if (!Seat.IsSet())
 	{
@@ -1001,7 +998,7 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		float		 Now[3] = { 0.0f, 0.0f, 0.0f };
 		const bool	 bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
 			&& !Seat.TiltMotor.IsNone() && Base->GetMotorCommand(Seat.TiltMotor, Now[2]);
-		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && SeatState.bKept, SeatState.KeptPitchOwn, SeatState.KeptCommands, Now, Found);
+		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && bSeatKept, SeatKeptPitchOwn, SeatKeptCommands, Now, Found);
 		SeatState.PitchRef = bTilts ? Found + SeatPitchRad : 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
@@ -1028,9 +1025,9 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		Base->SetMotorCommand(Seat.TiltMotor, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, SeatState.LinkAngle0, Pitch)));
 		// The setting held and the commands as they now stand (read back: a
 		// command is clamped to its motor's range), for the next take-over.
-		SeatState.bKept = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, SeatState.KeptCommands[0])
-			&& Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, SeatState.KeptCommands[1]) && Base->GetMotorCommand(Seat.TiltMotor, SeatState.KeptCommands[2]);
-		SeatState.KeptPitchOwn = SeatState.PitchOwn;
+		bSeatKept = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, SeatKeptCommands[0])
+			&& Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, SeatKeptCommands[1]) && Base->GetMotorCommand(Seat.TiltMotor, SeatKeptCommands[2]);
+		SeatKeptPitchOwn = SeatState.PitchOwn;
 	}
 }
 
@@ -1729,6 +1726,34 @@ bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<c
 	return false;
 }
 
+bool URammsCurbNegotiationController::WheelsStandOnNear(FString& OutReason) const
+{
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		if (!LegState[i].bHasWorld)
+		{
+			continue;
+		}
+		const FVector At = LegState[i].WheelWorld;
+		const double  Near = ActiveTerrain.Near.HeightAt(FVector2D(At.X, At.Y));
+		double		  Surface = 0.0;
+		if (!TraceSurface(At, At.Z, FMath::Min(GroundZ, Near) - 60.0, Surface))
+		{
+			OutReason = FString::Printf(TEXT("nothing under the '%s' wheel; drive back onto solid ground first"),
+				*Legs[i].Name.ToString());
+			return false;
+		}
+		if (FMath::Abs(Surface - Near) > Tuning.MinStepHeight)
+		{
+			OutReason = FString::Printf(TEXT("the robot is standing across a step (the '%s' wheel is over ground "
+											 "%+.1f cm from the surface the rest stand on); drive clear of it first"),
+				*Legs[i].Name.ToString(), Surface - Near);
+			return false;
+		}
+	}
+	return true;
+}
+
 bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile, FString& OutReason)
 {
 	// A per-axle plan replaces any per-wheel one (its lines and tilt).
@@ -1843,28 +1868,9 @@ bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile
 			return false;
 		}
 	}
-	for (int32 i = 0; i < Legs.Num(); ++i)
+	if (!WheelsStandOnNear(OutReason))
 	{
-		if (!LegState[i].bHasWorld)
-		{
-			continue;
-		}
-		const FVector At = LegState[i].WheelWorld;
-		const double  Near = ActiveTerrain.Near.HeightAt(FVector2D(At.X, At.Y));
-		double		  Surface = 0.0;
-		if (!TraceSurface(At, At.Z, FMath::Min(GroundZ, Near) - 60.0, Surface))
-		{
-			OutReason = FString::Printf(TEXT("nothing under the '%s' wheel; drive back onto solid ground first"),
-				*Legs[i].Name.ToString());
-			return false;
-		}
-		if (FMath::Abs(Surface - Near) > Tuning.MinStepHeight)
-		{
-			OutReason = FString::Printf(TEXT("the robot is standing across a step (the '%s' wheel is over ground "
-											 "%+.1f cm from the surface the rest stand on); drive clear of it first"),
-				*Legs[i].Name.ToString(), Surface - Near);
-			return false;
-		}
+		return false;
 	}
 
 	// The far side must be deep enough for the whole robot: seen so already,
@@ -2080,11 +2086,14 @@ bool URammsCurbNegotiationController::PlanPerWheel(const FRammsCurbProfile& Prof
 
 bool URammsCurbNegotiationController::StartReplan(const FRammsCurbProfile& Profile, FString& OutReason)
 {
-	if (IsNegotiating())
+	if (IsNegotiating() || bStopping)
 	{
 		// Measuring for a plan resets what the crossing keeps (its phase, steps,
-		// terrain and edge): a re-plan during one needs a measure of its own.
-		OutReason = TEXT("a re-plan during a crossing is not supported yet");
+		// terrain and edge): a re-plan during one needs a measure of its own. The
+		// same while a stopped crossing is braked to rest: its halt still runs
+		// on that state.
+		OutReason = IsNegotiating() ? TEXT("a re-plan during a crossing is not supported yet")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	RammsCurb::FPlannerInput In;
@@ -2291,6 +2300,17 @@ bool URammsCurbNegotiationController::PreparePerWheel(const FRammsCurbProfile& P
 		{
 			return false;
 		}
+	}
+	else if (!WheelsStandOnNear(OutReason))
+	{
+		// A profile without a terrain stands for level ground under every wheel,
+		// and nothing has looked at the ground to say so. A robot standing across
+		// a step (a retry by hand after a crossing stopped halfway) would be
+		// planned with its wheels on the higher side taken as held in the air,
+		// and the crossing would fault on its first tick ("terrain not as
+		// detected") after the whole plan was made. A detected terrain keeps its
+		// own check above and is not traced again here.
+		return false;
 	}
 	bFarDepthPending = false;
 	FarDepthWhy.Reset();
@@ -3513,9 +3533,15 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 
 bool URammsCurbNegotiationController::CheckFeasibility(FRammsCurbProfile Profile, FString& OutReason)
 {
-	if (IsNegotiating())
+	// Refused, too, while a stopped crossing is still being braked to rest:
+	// planning resolves the legs afresh and clears the crossing's state, which
+	// would take the halt under way with it (its executor no longer ticked, its
+	// load caps and braking limits gone, its fault phase read as idle), and it
+	// plans on the game thread while the wheels are still turning.
+	if (IsNegotiating() || bStopping)
 	{
-		OutReason = TEXT("a manoeuvre is already running");
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	const bool bFeasible = Tuning.Gait == ERammsCurbGait::PerWheel ? PlanPerWheel(Profile, OutReason) : BuildPlan(Profile, OutReason);
@@ -3684,9 +3710,13 @@ bool URammsCurbNegotiationController::MovingSidewaysIntoCrossing(FString& OutWhy
 
 bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile, FString& OutReason)
 {
-	if (IsNegotiating())
+	// Refused, too, while a stopped crossing is still being braked to rest: a
+	// start that was then refused further on would already have ended the
+	// halted executor and cleared the state its braking runs on.
+	if (IsNegotiating() || bStopping)
 	{
-		OutReason = TEXT("a manoeuvre is already running");
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	{
@@ -3877,6 +3907,17 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 
 bool URammsCurbNegotiationController::NegotiateStepAhead(FString& OutReason)
 {
+	// Refused before looking, and without touching Status: mid-crossing the
+	// before-start detection fails (the robot is across the step), and its
+	// reason would replace the running crossing's status -- which the per-axle
+	// gait builds its fault text from -- or a fault's own reason while the
+	// robot brakes to rest.
+	if (IsNegotiating() || bStopping)
+	{
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
+		return false;
+	}
 	FRammsCurbProfile Profile;
 	if (!DetectStepAhead(Profile, OutReason))
 	{
@@ -3900,10 +3941,12 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 		return false;
 	}
 	// Refused before measuring: measuring resolves the legs afresh, which would
-	// reset the crossing under way (its legs' state, its load caps, its report).
-	if (IsNegotiating())
+	// reset the crossing under way (its legs' state, its load caps, its report)
+	// -- or the halt of one still being braked to rest.
+	if (IsNegotiating() || bStopping)
 	{
-		OutReason = TEXT("a manoeuvre is already running");
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	// The profile a detection of this terrain would give, from where the robot
@@ -4225,6 +4268,11 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	bAwaitingPlan = false;
 	bPlanningAtRest = false;
 	bReplanning = false;
+	// A plan still being made is this crossing's: it is not adopted once the
+	// crossing has ended (PollReplan drops it as older than this), where it
+	// would replace the plan lines and figures read back with the crossing
+	// that ran.
+	++PlanGeneration;
 	if (!bGentle)
 	{
 		DriveSpeed = 0.0f;
@@ -4907,7 +4955,7 @@ namespace
 	// two distal links' turn rates (rad/s). False without the commands, the
 	// motors' specs, a simulation clock or a pose.
 	bool FiveBarProfiledMotion(const URammsRobotBaseComponent& Base, const URamms5BarLinkageController* FiveBar, RammsCurb::FWheelFeed& Feed,
-		float Dt, FVector2D& OutLegRate, FVector2D& OutLinkRate)
+		float Dt, const RammsMotion::FCommandInterval& Cadence, FVector2D& OutLegRate, FVector2D& OutLinkRate)
 	{
 		OutLegRate = OutLinkRate = FVector2D::ZeroVector;
 		const FRamms5BarLinkageSpec* Spec = FiveBarSpecOf(FiveBar);
@@ -4929,7 +4977,7 @@ namespace
 		const FVector2D Measured(Base.GetMotorValue(Spec->ProximalMotorA), Base.GetMotorValue(Spec->ProximalMotorB));
 		FVector2D		Hips, Next;
 		if (!Feed.FollowMotors(Now, Dt, FVector2D(CmdA, CmdB), Measured, FVector2D(MotorA.MaxVelocity, MotorB.MaxVelocity),
-				FVector2D(MotorA.MaxAcceleration, MotorB.MaxAcceleration), Hips, Next))
+				FVector2D(MotorA.MaxAcceleration, MotorB.MaxAcceleration), Hips, Next, &Cadence))
 		{
 			return false;
 		}
@@ -4985,8 +5033,9 @@ void URammsCurbNegotiationController::TrackLegRates(float DeltaTime)
 		else
 		{
 			// Nothing to measure a rate over, or a gap too long to trust a turn
-			// across: start the leg's feed again from here.
-			Feed.Reset();
+			// across: start the leg's rates again from here (the link its wheel
+			// hangs from stays told).
+			Feed.ForgetRates();
 		}
 		Feed.Measure(DeltaTime, FVector2D(State.MeasuredX, State.MeasuredZ), Carrier, State.LagRate);
 		// A 5-bar's wheel hangs from one of its two distal links: their
@@ -5036,7 +5085,7 @@ void URammsCurbNegotiationController::PredictLegRates(float DeltaTime)
 			// ...and the leg's own motion over the tick, by its hips' profiles
 			// run on the commands just sent (ramms.Curb.KinematicWheelFeed 2).
 			FVector2D  LegRate, LinkRate;
-			const bool bMotion = ProfileBase && FiveBarProfiledMotion(*ProfileBase, State.FiveBar, Drive->Feeds[i], DeltaTime, LegRate, LinkRate);
+			const bool bMotion = ProfileBase && FiveBarProfiledMotion(*ProfileBase, State.FiveBar, Drive->Feeds[i], DeltaTime, CommandCadence, LegRate, LinkRate);
 			Drive->Feeds[i].PredictMotion(LegRate, LinkRate, bMotion);
 		}
 	}

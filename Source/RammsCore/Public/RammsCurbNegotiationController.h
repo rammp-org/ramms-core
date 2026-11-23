@@ -1191,6 +1191,11 @@ private:
 	 *  BelowZ past the robot itself; false when nothing is there. */
 	bool TraceSurface(const FVector& At, double AboveZ, double BelowZ, double& OutZ) const;
 
+	/** Whether the ground traced under every measured wheel is the active
+	 *  terrain's near surface, within MinStepHeight; false, with why, when
+	 *  nothing is under a wheel or the robot is standing across a step. */
+	bool WheelsStandOnNear(FString& OutReason) const;
+
 	/** The mode to hand the robot to when there is no better choice: the
 	 *  selector's initial mode, or else the first mode that is not this. */
 	FName FallbackModeId() const;
@@ -1631,19 +1636,20 @@ private:
 		 *  own controls had tilted it: the rider's own setting, and their pitch
 		 *  in the world once the base is level. */
 		double PitchOwn = 0.0;
-		/** The rider's setting kept from one crossing to the next (ResolveSeat
-		 *  begins each afresh but for these): the PitchOwn last held, and the
-		 *  seat's motors' commands (arm A, arm B, tilt) as last sent. A
-		 *  take-over that finds those commands still standing -- no stance and
-		 *  none of the seat's own controls has commanded the seat since -- keeps
-		 *  the setting: a crossing leaves the tilt making up for the base's
-		 *  pitch at its last tick, and a retry from there would read that back
-		 *  as the rider's own (RammsCurb::SeatOwnPitchAtTakeOver). */
-		bool   bKept = false;
-		double KeptPitchOwn = 0.0;
-		float  KeptCommands[3] = { 0.0f, 0.0f, 0.0f };
 	};
 	FSeatState SeatState;
+
+	/** The rider's setting kept from one crossing to the next (not SeatState's,
+	 *  which ResolveSeat begins afresh each crossing): the PitchOwn last held,
+	 *  and the seat's motors' commands (arm A, arm B, tilt) as last sent. A
+	 *  take-over that finds those commands still standing -- no stance and
+	 *  none of the seat's own controls has commanded the seat since -- keeps
+	 *  the setting: a crossing leaves the tilt making up for the base's pitch
+	 *  at its last tick, and a retry from there would read that back as the
+	 *  rider's own (RammsCurb::SeatOwnPitchAtTakeOver). */
+	bool   bSeatKept = false;
+	double SeatKeptPitchOwn = 0.0;
+	float  SeatKeptCommands[3] = { 0.0f, 0.0f, 0.0f };
 
 	/** Resolve the seat -- its motors in the registry, its zero pose, its
 	 *  reach at its crossing height -- into SeatState and the model's seat; a

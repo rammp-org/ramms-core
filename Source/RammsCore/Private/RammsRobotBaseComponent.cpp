@@ -27,11 +27,10 @@ URammsRobotBaseComponent::URammsRobotBaseComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 
-	// Found against the lift-drive's omni wheels in PIE, holding a 6.93 rad/s
-	// command: Kp 2.0 tracks it to -8%, Kp 3.0 to +5%, and either side of that
-	// falls away fast (Kp 0.6 reaches 42% of the commanded rate, Kp 4.0
-	// overshoots by a third). A robot whose wheels differ can override these
-	// per motor in its registry row.
+	// Defaults tuned on an omni-wheel base in PIE: the gain sits where the loop
+	// tracks a steady command closely, and falls away quickly either side. A
+	// robot whose wheels differ can override these per motor in its registry
+	// row.
 	DefaultVelocityGains.Kp = 2.5f;
 	DefaultVelocityGains.Ki = 5.0f;
 	DefaultVelocityGains.MaxIntegralTorque = 10.0f;

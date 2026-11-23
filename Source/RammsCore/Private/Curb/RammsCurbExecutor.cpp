@@ -4,6 +4,7 @@
 #include "Curb/RammsCurbLoadShare.h"
 
 #include "Curb/RammsCurbRunStats.h"
+#include "Curb/RammsCurbStick.h"
 #include "Curb/RammsCurbTerrainFit.h"
 #include "HAL/IConsoleManager.h"
 #include "RammsMotionProfile.h"
@@ -555,6 +556,11 @@ namespace RammsCurb
 		bFinishCentreGoal = false;
 		bLoggedCentreLead = false;
 		Diag = FExecDiag();
+		// No hard braking cap applies until a tick has worked one out: left at
+		// the struct's 0, a Halt before the first tick took any command over
+		// EmergencyOverCmS for one over its cap, and braked the whole stop at
+		// twice Deceleration.
+		Diag.Braking = TNumericLimits<double>::Max();
 		Prepare();
 		bRunning = true;
 		Log(FString::Printf(TEXT("per-wheel crossing begins: %s; the level-in from %.1f cm to %.1f (by %.1f at the latest), done at %.1f cm"),
@@ -3109,6 +3115,20 @@ namespace RammsCurb
 						W.Plane = 1;
 						SetState(i, ERammsCurbWheelState::Planting, TEXT("past its window before it was clear"));
 					}
+					else if (bFinishInPlace && W.LandedPastCm >= P.DDown)
+					{
+						// Finishing in place, past its window where it would land
+						// (CanFinishInPlace took it for one that may be set down where
+						// it is) though its centre is not yet: set down here. The robot
+						// is braked to rest, so its centre gets no further, and past its
+						// drop the wheel is no longer aimed at the height that would
+						// make it Clear -- left Lifting it never landed, and the
+						// crossing ended in a fault instead of finishing. Before the
+						// abort below, which would plant it on the near plane.
+						++Counts.InPlaceLandings;
+						W.Plane = 1;
+						SetState(i, ERammsCurbWheelState::Planting, TEXT("finishing in place: set down where it is, before it was clear"));
+					}
 					else if (W.BottomCm <= AbortWithinCm)
 					{
 						// Still near the ground: the robot measured with it (and every
@@ -3765,39 +3785,12 @@ namespace RammsCurb
 					const double Now = SeatMarginWithout(Measure, Short, 0.0);
 					if (Now < Floor)
 					{
-						// (Probed as far as its reach leaves: within a probe of an end
-						// of it, that end is still somewhere to go.)
-						const double ProbeCm = 1.0;
-						const double ForeCm = FMath::Min(ProbeCm, Seat.XRange.Y - SeatCmdX);
-						const double AftCm = FMath::Min(ProbeCm, SeatCmdX - Seat.XRange.X);
-						const double Fore = ForeCm > 1e-3 ? SeatMarginWithout(Measure, Short, ForeCm) : -1e9;
-						const double Aft = AftCm > 1e-3 ? SeatMarginWithout(Measure, Short, -AftCm) : -1e9;
-						const double Dir = Fore > Now + 1e-3 * ForeCm && Fore >= Aft ? 1.0 : (Aft > Now + 1e-3 * AftCm ? -1.0 : 0.0);
-						if (Dir != 0.0)
+						const double Move = SeatServeMove(SeatCmdX, Seat.XRange, Floor, Now, [&](double D) { return SeatMarginWithout(Measure, Short, D); });
+						if (Move != 0.0)
 						{
-							// The least move that way that reaches the floor, or the best
-							// there is, up to the end of its reach.
-							const double Room = Dir > 0.0 ? Seat.XRange.Y - SeatCmdX : SeatCmdX - Seat.XRange.X;
-							double		 Best = Now, BestAt = 0.0;
-							for (double D = FMath::Min(ProbeCm, Room);; D = FMath::Min(D + ProbeCm, Room))
-							{
-								const double Mg = SeatMarginWithout(Measure, Short, Dir * D);
-								if (Mg > Best + 1e-6)
-								{
-									Best = Mg;
-									BestAt = D;
-								}
-								if (Mg >= Floor || D >= Room - 1e-6)
-								{
-									break;
-								}
-							}
-							if (BestAt > 0.0)
-							{
-								bServe = true;
-								ServeWant = SeatCmdX + Dir * BestAt;
-								ServeWant = Dir > 0.0 ? FMath::Max(Want, ServeWant) : FMath::Min(Want, ServeWant);
-							}
+							bServe = true;
+							ServeWant = SeatCmdX + Move;
+							ServeWant = Move > 0.0 ? FMath::Max(Want, ServeWant) : FMath::Min(Want, ServeWant);
 						}
 						if (!bServe)
 						{
@@ -4746,7 +4739,21 @@ namespace RammsCurb
 			Out.LegX[i] = W.CmdX;
 		}
 		UpdateLoadCaps(Measure, Out, Dt);
-		Out.SeatX = bSeatCmd ? SeatCmdX : (Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X); // the seat holds where it is
+		// The seat holds where it is -- eased to rest (ShiftAccelCmS2, where it
+		// has an easing) from the rate its command had: stopped in one tick, a
+		// seat on the move was halted with the rider's mass on it just as the
+		// base braked.
+		if (bSeatCmd && In.Model.Seat.Shifts() && In.Model.Seat.ShiftAccelCmS2 > 0.0 && Dt > 0.0)
+		{
+			const FModelSeat& Seat = In.Model.Seat;
+			SeatCmdRate = StepTowards(SeatCmdRate, 0.0, Seat.ShiftAccelCmS2 * Dt);
+			SeatCmdX = FMath::Clamp(SeatCmdX + SeatCmdRate * Dt, Seat.XRange.X, Seat.XRange.Y);
+		}
+		else
+		{
+			SeatCmdRate = 0.0;
+		}
+		Out.SeatX = bSeatCmd ? SeatCmdX : (Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X);
 		// Every leg on its target: its command there, and the leg where it was
 		// sent -- or short of it by up to its preload on the ground, or stopped
 		// short (a leg stalled against something gets no further). A wheel still
@@ -4827,6 +4834,40 @@ namespace RammsCurb
 	}
 
 	// --- the closed-loop dry run ------------------------------------------------------------
+
+	double SeatServeMove(double X, const FVector2D& Range, double Floor, double Now, TFunctionRef<double(double)> MarginAt)
+	{
+		// (Probed as far as its reach leaves: within a probe of an end of it,
+		// that end is still somewhere to go.)
+		const double ProbeCm = 1.0;
+		const double ForeCm = FMath::Min(ProbeCm, Range.Y - X);
+		const double AftCm = FMath::Min(ProbeCm, X - Range.X);
+		const double Fore = ForeCm > 1e-3 ? MarginAt(ForeCm) : -1e9;
+		const double Aft = AftCm > 1e-3 ? MarginAt(-AftCm) : -1e9;
+		const double Dir = Fore > Now + 1e-3 * ForeCm && Fore >= Aft ? 1.0 : (Aft > Now + 1e-3 * AftCm ? -1.0 : 0.0);
+		if (Dir == 0.0)
+		{
+			return 0.0;
+		}
+		// The least move that way that reaches the floor, or the best there
+		// is, up to the end of its reach.
+		const double Room = Dir > 0.0 ? Range.Y - X : X - Range.X;
+		double		 Best = Now, BestAt = 0.0;
+		for (double D = FMath::Min(ProbeCm, Room);; D = FMath::Min(D + ProbeCm, Room))
+		{
+			const double Mg = MarginAt(Dir * D);
+			if (Mg > Best + 1e-6)
+			{
+				Best = Mg;
+				BestAt = D;
+			}
+			if (Mg >= Floor || D >= Room - 1e-6)
+			{
+				break;
+			}
+		}
+		return Dir * BestAt;
+	}
 
 	double SeatRestAt(double X, double Rate, double Accel, double Dt)
 	{
@@ -5010,6 +5051,8 @@ namespace RammsCurb
 		// Let go for good (FinishInPlaceAtTravelCm): when (s; < 0 not yet), and
 		// when the executor took up finishing in place.
 		double LetGoFrom = -1.0, InPlaceFrom = -1.0;
+		// How long the hold under way has lasted (s; StepHoldSeconds).
+		double HoldFor = 0.0;
 		// A re-plan made, waiting ReplanDelaySeconds to be adopted (as one made off
 		// the game thread does); after its adoption, until when its re-fitted
 		// surfaces' biases are watched against where those truly lie.
@@ -5060,6 +5103,10 @@ namespace RammsCurb
 			else
 			{
 				E.Tick(Meas, Level, Cmd);
+				// The hold's time as the controller counts it (it faults a hold
+				// over HoldTimeoutSeconds; the dry run only reports the longest).
+				HoldFor = StepHoldSeconds(E.GetPhase() == EExecPhase::Hold, bPaused, HoldFor, Dt);
+				Out.MaxHoldSeconds = FMath::Max(Out.MaxHoldSeconds, HoldFor);
 				if (Options.bLoadCaps && Cmd.LegLoadCapN.Num() == N)
 				{
 					// Each wheel's cap by its state; the shares the weight.
