@@ -48,6 +48,13 @@ namespace RammsCurb
 	 *  the chassis with the link at LinkAngle (the inverse of SeatPlatformPitch). */
 	double SeatTiltFor(const FRammsCurbSeat& Seat, double LinkAngle, double LinkAngle0, double PitchRad);
 
+	/** The pitch in the world the platform is held at (rad), a step on from
+	 *  RefRad toward the rider's own OwnRad: by MaxStepRad at most, and never
+	 *  past it. A crossing that begins on a slope takes the seat over at the
+	 *  slope's pitch; the rider is level (at their own setting) once the base
+	 *  is, not held at the slope's for the crossing. */
+	double SeatPitchRefStep(double RefRad, double OwnRad, double MaxStepRad);
+
 	/**
 	 * The fore/aft the pivot can be held at while at height Z (cm, chassis
 	 * frame): the least and most x the mechanism reaches there, scanned at

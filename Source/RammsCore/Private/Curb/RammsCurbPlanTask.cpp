@@ -5,6 +5,8 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogRammsCurbPlan, Log, All);
+
 namespace
 {
 	TAutoConsoleVariable<int32> CVarCurbPlanInStep(TEXT("Ramms.Curb.PlanInStep"), 0,
@@ -36,12 +38,19 @@ namespace RammsCurb
 		bPending = true;
 		LaunchedAt = Started;
 		TakenAt = 0.0;
+		// (Stamped before the in-step wait on purpose: the copy and the hand-off
+		// only.)
 		LastLaunchSeconds = FPlatformTime::Seconds() - Started;
 		if (CVarCurbPlanInStep.GetValueOnAnyThread() != 0)
 		{
 			// (Ramms.Curb.PlanInStep: done before the caller goes on, so the tick
 			// that takes it is the same in every run.)
 			Task.Wait();
+			// Said, so that the variable left on by mistake -- with the physics
+			// running on its own, the robot rolls on with nothing ticking while
+			// the caller is held -- shows in the log.
+			UE_LOG(LogRammsCurbPlan, Log, TEXT("[Curb] Ramms.Curb.PlanInStep is on: the caller was held %.0f ms for the plan (for runs with the physics locked to the frames)"),
+				1000.0 * (FPlatformTime::Seconds() - Started));
 		}
 	}
 

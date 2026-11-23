@@ -3756,6 +3756,10 @@ namespace RammsCurb
 				double		 ServeWant = Want;
 				const double Floor =
 					T.MinLiveStabilityMarginCm + (CVarCurbLiftMarginGuard.GetValueOnAnyThread() != 0 ? MarginReleaseCm : 0.0) + SeatHoldMarginCm;
+				// Where it comes to rest from the rate it has, eased (ShiftAccelCmS2)
+				// where it has an easing: a seat that stays is not stopped in one
+				// tick, half the robot's mass with it.
+				const auto RestAt = [&]() { return SeatRestAt(SeatCmdX, SeatCmdRate, Seat.ShiftAccelCmS2, Dt); };
 				if (Short != 0 && CVarCurbSeatServesBlockedLift.GetValueOnAnyThread() != 0 && Plan.bSeatPlanned && !bFinishInPlace && Phase != EExecPhase::Settle)
 				{
 					const double Now = SeatMarginWithout(Measure, Short, 0.0);
@@ -3797,16 +3801,9 @@ namespace RammsCurb
 						}
 						if (!bServe)
 						{
-							// Nowhere better: it stays, rather than follow the plan away --
-							// brought to rest at its eased rate where it has one
-							// (ShiftAccelCmS2), not in one tick.
+							// Nowhere better: it stays, rather than follow the plan away.
 							bServe = true;
-							ServeWant = SeatCmdX;
-							if (Seat.ShiftAccelCmS2 > 0.0 && Dt > 0.0)
-							{
-								const double Slower = FMath::Max(0.0, FMath::Abs(SeatCmdRate) - Seat.ShiftAccelCmS2 * Dt);
-								ServeWant += FMath::Sign(SeatCmdRate) * Slower * Slower / (2.0 * Seat.ShiftAccelCmS2);
-							}
+							ServeWant = RestAt();
 						}
 					}
 					else if (SeatMarginWithout(Measure, Short, Want - SeatCmdX) < Floor)
@@ -3814,7 +3811,7 @@ namespace RammsCurb
 						// At the margin the seat goes on at, and the plan's seat would
 						// take it back under it: it stays.
 						bServe = true;
-						ServeWant = SeatCmdX;
+						ServeWant = RestAt();
 					}
 				}
 				if (bServe != bSeatServing)
@@ -4830,6 +4827,21 @@ namespace RammsCurb
 	}
 
 	// --- the closed-loop dry run ------------------------------------------------------------
+
+	double SeatRestAt(double X, double Rate, double Accel, double Dt)
+	{
+		if (Accel <= 0.0 || Dt <= 0.0)
+		{
+			return X;
+		}
+		// A tick slower, and from there its stopping distance -- or, in the last
+		// ticks, where that is under one tick's travel, the tick's travel itself:
+		// the easing lands on a target it would pass within the tick, and landed
+		// on the stopping distance alone it shed its last speed half as fast
+		// again as Accel.
+		const double Slower = FMath::Max(0.0, FMath::Abs(Rate) - Accel * Dt);
+		return X + FMath::Sign(Rate) * Slower * FMath::Max(Slower / (2.0 * Accel), Dt);
+	}
 
 	FExecDryRunResult ExecDryRun(const FPlannerInput& In, const FCurbSchedule& Plan, const FExecDryRunOptions& Options)
 	{

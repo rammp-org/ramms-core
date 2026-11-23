@@ -1409,6 +1409,9 @@ private:
 	/** The physics clock at the last tick the wheels were held with no
 	 *  crossing running (-1 otherwise): a reset is seen there too. */
 	double IdleHoldSimTime = -1.0;
+	/** The physics clock at the last tick with no crossing running (-1
+	 *  before one): what the hand-over hold and the curb assist are timed by. */
+	double IdleSimTime = -1.0;
 	/** Latch every wheel where it stands and hold it (bHoldingWheels). */
 	void HoldWheels();
 	/** One tick of holding the wheels latched: on their brakes once the robot
@@ -1619,9 +1622,15 @@ private:
 		/** The 5-bar motor angles last commanded: the solver's hint. */
 		FVector2D CmdAngles = FVector2D::ZeroVector;
 		bool	  bCmd = false;
-		/** The platform's pitch in the world (rad) as the crossing took the
-		 *  seat over, which the tilt holds against the base's pitch. */
+		/** The platform's pitch in the world (rad) the tilt holds against the
+		 *  base's pitch: as the crossing took the seat over, then brought to
+		 *  PitchOwn as the base levels in (StepSeatPitchRef). */
 		double PitchRef = 0.0;
+		/** The platform's pitch against the base (rad) as the crossing took
+		 *  the seat over -- level in the outdoor stance, or wherever the seat's
+		 *  own controls had tilted it: the rider's own setting, and their pitch
+		 *  in the world once the base is level. */
+		double PitchOwn = 0.0;
 	};
 	FSeatState SeatState;
 
@@ -1635,6 +1644,12 @@ private:
 	 *  crossing height, the platform pitched against the base's (filtered)
 	 *  pitch to keep the rider level; nothing on a robot without a seat. */
 	void CommandSeat(double X);
+	/** The rider levelled with the base (ramms.Curb.SeatLevelsRider): once
+	 *  the level-in has begun, the pitch the tilt holds (SeatState.PitchRef)
+	 *  is turned from the one the crossing found -- on a sloping start, the
+	 *  slope's -- to the rider's own (PitchOwn), no faster than the base may
+	 *  turn (TiltRateDegPerSec). DeltaTime of the physics. */
+	void StepSeatPitchRef(float DeltaTime);
 
 	/** The last per-wheel plan (Private/Curb). */
 	TPimplPtr<RammsCurb::FCurbSchedule> Schedule;

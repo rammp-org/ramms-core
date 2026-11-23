@@ -169,6 +169,13 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 		// wheel's angle with it, and nothing held before stands.
 		ResetHoldState();
 	}
+	// The control loops' step: the physics' own where the base keeps a clock
+	// (what its wheels turned over since the last tick), the frame's without
+	// one. With the physics locked to the frames, or slower than the game, the
+	// frame's time is not the time the wheels had, and a speed loop integrated
+	// over it ran with a gain that changed with the frame rate.
+	const bool	bSimClock = UsesBase() && BaseComponent->GetSimulationTime() >= 0.0;
+	const float ControlDt = bSimClock ? static_cast<float>(Dt) : DeltaTime;
 	// Each drive wheel's angle, for holding it still: the backend's reading
 	// while it follows the wheel's rate, else the rate integrated.
 	const bool bCanHold = CanHoldWithTorque();
@@ -384,17 +391,19 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			// The physics clock's step: 0 when it has not advanced, and nor does the brake ramp.
 			ApplyBrakes(static_cast<float>(Dt));
 		}
-		else
+		else if (ControlDt > 0.0f || !bSimClock)
 		{
-			// Update based on control mode
+			// Update based on control mode. (Not on a tick the physics has not
+			// stepped since the last: there is nothing new to control over, and
+			// the commands sent then stand.)
 			switch (ControlMode)
 			{
 				case EDriveControlMode::TorqueControl:
-					UpdateTorqueControl(DeltaTime);
+					UpdateTorqueControl(ControlDt);
 					break;
 
 				case EDriveControlMode::VelocityControl:
-					UpdateVelocityControl(DeltaTime);
+					UpdateVelocityControl(ControlDt);
 					break;
 			}
 		}
@@ -423,7 +432,7 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	bBrakeRampStepped = false;
 
 	// Update odometry
-	UpdateOdometry(DeltaTime);
+	UpdateOdometry(ControlDt);
 
 	// Debug logging
 	if (bEnableDebugLogging || bEnableDebugDisplay)

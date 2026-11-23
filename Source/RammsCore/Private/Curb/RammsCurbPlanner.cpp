@@ -438,6 +438,19 @@ namespace
 		return CVarCurbRiseFromStance.GetValueOnAnyThread() != 0;
 	}
 
+	TAutoConsoleVariable<float> CVarCurbHeightSteadySeconds(TEXT("Ramms.Curb.HeightSteadySeconds"), 1.5f,
+		TEXT("The planned chassis height does not give back a rise, or make up a dip, within this many seconds (the corridor of "
+			 "heights widens for a moment while a pair of wheels is in the air, and the path, drawn to its middle, rose under the "
+			 "lift and came back down before the landing: a bump for the rider): up a curb a rise is kept, held through a dip that "
+			 "short, and down a curb a lowering is, where the corridor and the rise's own ceilings allow; what is still given back "
+			 "that soon is levelled. 0: the path as it was."),
+		ECVF_Default);
+
+	double HeightSteadySeconds()
+	{
+		return FMath::Max(0.0, static_cast<double>(CVarCurbHeightSteadySeconds.GetValueOnAnyThread()));
+	}
+
 	TAutoConsoleVariable<int32> CVarCurbWalkEarly(TEXT("Ramms.Curb.WalkEarly"), 1,
 		TEXT("1 (the default): a centre wheel walks from one planned position to the next over the whole stretch between them, a "
 			 "gentle ramp while the robot drives; 0: it stays where it is and walks as late as it can, at CenterShiftSpeed."),
@@ -793,6 +806,76 @@ namespace RammsCurb
 	{
 		const double D = FMath::Abs(Delta);
 		return D <= 0.0 ? 1.0 : TrapezoidAt(T, D, Rate, Accel) / D;
+	}
+
+	void SteadyPath(TConstArrayView<double> Path, TConstArrayView<double> Seconds, double Window, bool bRisesKept, TConstArrayView<FVector2D> Limits,
+		TArray<double>& Out)
+	{
+		const int32 N = Path.Num();
+		Out.SetNum(N);
+		for (int32 k = 0; k < N; ++k)
+		{
+			Out[k] = Path[k];
+		}
+		if (Window <= 0.0 || N < 3 || Seconds.Num() != N)
+		{
+			return;
+		}
+		// Each sample gets the most any stretch of Window seconds through it
+		// holds at the least: a height the path keeps for that long somewhere
+		// around the sample stays, one it only passes through on the way up and
+		// back is cut to the higher of its two sides. (Sign -1: the same on the
+		// path upside down, which fills the dips.)
+		TArray<double> In, Level;
+		auto		   Cut = [&](double Sign) {
+			  In.SetNum(N);
+			  for (int32 k = 0; k < N; ++k)
+			  {
+				  In[k] = Sign * Out[k];
+			  }
+			  Level.Init(-TNumericLimits<double>::Max(), N);
+			  auto Keep = [&](int32 A, int32 B, double Least) {
+				  for (int32 c = A; c <= B; ++c)
+				  {
+					  Level[c] = FMath::Max(Level[c], Least);
+				  }
+			  };
+			  // (The stretches the path's start cuts short: whole ones, as the ones
+			  // its end cuts short are below.)
+			  double Acc = 0.0, Least = TNumericLimits<double>::Max();
+			  for (int32 B = 0; B < N && Acc < Window - 1e-9; ++B)
+			  {
+				  Least = FMath::Min(Least, In[B]);
+				  Keep(0, B, Least);
+				  Acc += FMath::Max(0.0, Seconds[B]);
+			  }
+			  for (int32 A = 0; A < N; ++A)
+			  {
+				  Acc = 0.0;
+				  Least = TNumericLimits<double>::Max();
+				  int32 B = A;
+				  for (; B < N; ++B)
+				  {
+					  Least = FMath::Min(Least, In[B]);
+					  Acc += FMath::Max(0.0, Seconds[B]);
+					  if (Acc >= Window - 1e-9)
+					  {
+						  break;
+					  }
+				  }
+				  Keep(A, FMath::Min(B, N - 1), Least);
+			  }
+			  for (int32 k = 0; k < N; ++k)
+			  {
+				  Out[k] = Sign * Level[k];
+				  if (Limits.Num() == N)
+				  {
+					  Out[k] = FMath::Clamp(Out[k], Limits[k].X, FMath::Max(Limits[k].X, Limits[k].Y));
+				  }
+			  }
+		};
+		Cut(bRisesKept ? -1.0 : 1.0);
+		Cut(bRisesKept ? 1.0 : -1.0);
 	}
 
 	bool TiltProfile(TConstArrayView<double> SampleSeconds, TConstArrayView<double> SampleS, TConstArrayView<FTiltHold> Holds, double Rate,
@@ -6066,6 +6149,11 @@ namespace RammsCurb
 		Up.Init(0.0, Count);
 		Down.Init(0.0, Count);
 		Wish.SetNum(Count);
+		// (What rising and lowering early keep each sample's wish under and over,
+		// inside its corridor: the steadied path keeps to them too.)
+		TArray<double> WishCeil, WishFloor;
+		WishCeil.Init(TNumericLimits<double>::Max(), Count);
+		WishFloor.Init(-TNumericLimits<double>::Max(), Count);
 		const double BH = FMath::Max(0.1, static_cast<double>(T.BaseHeightSpeed));
 		bool		 bOk = true;
 		auto		 Holds = [&](const FInstantQuery& Q, const FInstantResult& R, double B) {
@@ -6252,6 +6340,7 @@ namespace RammsCurb
 					}
 				}
 				Wish[c] = FMath::Clamp(Need, Bands[c].X, Top);
+				WishCeil[c] = Top;
 			}
 			// A ramp rather than a step: the chassis rises evenly from the
 			// level-in's height to the crossing's over the stretch before the
@@ -6319,6 +6408,7 @@ namespace RammsCurb
 				Need = FMath::Min(Need, Wish[c]);
 				const double Bottom = FMath::Min(0.5 * (Bands[c].X + Bands[c].Y), Bands[c].X + RiseSlackCm);
 				Wish[c] = FMath::Clamp(Need, Bottom, Bands[c].Y);
+				WishFloor[c] = Bottom;
 			}
 			// A ramp, as rising: the chassis lowers evenly from the level-in's
 			// height over the stretch before the first sample that wants the
@@ -6353,6 +6443,44 @@ namespace RammsCurb
 			TArray<double> Path;
 			int32		   Stuck = INDEX_NONE;
 			bPath = RatePath(Bands, Up, Down, NoValue, Wish, Path, Stuck);
+			// Nothing given back at once (Ramms.Curb.HeightSteadySeconds): the
+			// wishes above follow each sample's own corridor, which widens for the
+			// moment a pair of wheels is in the air and narrows again as they come
+			// down, and the path rose into it and fell back -- a few cm up and down
+			// under the rider within a fraction of a second. Up a curb a rise is
+			// kept (it has the lifting wheels clear sooner, and the chassis is on
+			// its way up anyway) and the dip after it filled; down a curb a
+			// lowering is. Each sample stays inside its corridor and what rising or
+			// lowering early kept its wish to (or where the path already was past
+			// that), and the levelled path is run through the rates once more;
+			// where that does not go (it should), the path stays as it was.
+			const double Steady = HeightSteadySeconds();
+			if (bPath && Steady > 0.0)
+			{
+				TArray<double> Seconds, Level, Path2;
+				Seconds.SetNum(Count);
+				for (int32 c = 0; c < Count; ++c)
+				{
+					const int32 k = K0 + c;
+					// (At rest at a planned stop the chassis may move as it likes: a
+					// stop is a window of its own.)
+					Seconds[c] = IsDwell(P, k) ? Steady : Ds / FMath::Max(MinTimingSpeed, FMath::Max(P.V[k], P.V[FMath::Max(0, k - 1)]));
+				}
+				TArray<FVector2D> Limits;
+				Limits.SetNum(Count);
+				for (int32 c = 0; c < Count; ++c)
+				{
+					const double Lo = FMath::Max(Bands[c].X, FMath::Min(WishFloor[c], Path[c]));
+					const double Hi = FMath::Min(FMath::Max(Bands[c].X, Bands[c].Y), FMath::Max(WishCeil[c], Path[c]));
+					Limits[c] = FVector2D(Lo, FMath::Max(Lo, Hi));
+				}
+				SteadyPath(Path, Seconds, Steady, M.IsClimb(), Limits, Level);
+				int32 Stuck2 = INDEX_NONE;
+				if (RatePath(Bands, Up, Down, NoValue, Level, Path2, Stuck2))
+				{
+					Path = MoveTemp(Path2);
+				}
+			}
 			if (bPath)
 			{
 				for (int32 c = 0; c < Count; ++c)

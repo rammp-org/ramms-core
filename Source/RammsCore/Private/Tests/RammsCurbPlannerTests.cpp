@@ -1493,8 +1493,10 @@ bool FRammsCurbPlannerBrakingLead::RunTest(const FString& Parameters)
 			const double Lead = RammsCurb::BrakeLeadSeconds(VUp, RammsCurb::DriveLagSeconds, In.Tuning);
 			TestTrue(FString::Printf(TEXT("%s: %s lifts at least the braking lead ahead (%.2f >= %.2f s at %.1f cm/s)"), *What, PlanLegName[i], W.TLiftMin, Lead, VUp),
 				W.TLiftMin >= Lead - 1e-6);
+			// (Within a sample: the two plans may be kept from different sample
+			// grids, half a sample apart, and each lift begins on its own grid's.)
 			TestTrue(FString::Printf(TEXT("%s: %s no later than without (%.1f <= %.1f)"), *What, PlanLegName[i], W.SLiftStart, Plain.Wheels[i].SLiftStart),
-				W.SLiftStart <= Plain.Wheels[i].SLiftStart + 0.5);
+				W.SLiftStart <= Plain.Wheels[i].SLiftStart + S.SampleCm);
 		}
 		PlanCheckWheels(*this, S, *What);
 		PlanCheckSamples(*this, In, S, *What);
@@ -1791,6 +1793,184 @@ bool FRammsCurbPlannerTouchdownSpeed::RunTest(const FString& Parameters)
 		PlanCheckWheels(*this, Soft, *What);
 		PlanCheckSamples(*this, In, Soft, *What);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerPlanInStep,
+	"Ramms.Curb.Planner.PlanInStep",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerPlanInStep::RunTest(const FString& Parameters)
+{
+	// With Ramms.Curb.PlanInStep a plan is waited for where it is asked: ready
+	// as Launch returns, in every run, and the plan the same input gives
+	// synchronously. Off (the default), Launch returns with the plan under way.
+	IConsoleVariable* InStep = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.PlanInStep"));
+	if (!TestNotNull(TEXT("Ramms.Curb.PlanInStep"), InStep))
+	{
+		return true;
+	}
+	const int32 Was = InStep->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(InStep, Was);
+	};
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Oblique30"), true));
+	const RammsCurb::FCurbSchedule Sync = RammsCurb::PlanCrossing(In);
+	SetTestCVar(InStep, 1);
+	for (int32 Run = 0; Run < 3; ++Run)
+	{
+		RammsCurb::FPlanTask Task;
+		Task.Launch(In);
+		TestTrue(FString::Printf(TEXT("run %d: ready as Launch returns"), Run), Task.IsReady());
+		RammsCurb::FCurbSchedule Got;
+		TestTrue(FString::Printf(TEXT("run %d: taken at once"), Run), Task.Take(Got));
+		TestEqual(FString::Printf(TEXT("run %d: the same floor"), Run), Got.VFloor, Sync.VFloor);
+		TestEqual(FString::Printf(TEXT("run %d: as many samples"), Run), Got.Samples.Num(), Sync.Samples.Num());
+		TestTrue(FString::Printf(TEXT("run %d: the wait is counted as pending time, not as the launch's (%.1f ms pending, %.2f ms launch)"), Run,
+					 1000.0 * Task.PendingSeconds(), 1000.0 * Task.LaunchSeconds()),
+			Task.PendingSeconds() >= Task.LaunchSeconds());
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerSteadyPath,
+	"Ramms.Curb.Planner.SteadyPath",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbPlannerSteadyPath::RunTest(const FString& Parameters)
+{
+	// The planned chassis height takes nothing it gives back at once
+	// (Ramms.Curb.HeightSteadySeconds). First the levelling itself, on paths
+	// of 0.1 s samples and a 1 s window.
+	auto Steady = [](TConstArrayView<double> Path, double Window, bool bRisesKept = false) {
+		TArray<double> Seconds, Out;
+		Seconds.Init(0.1, Path.Num());
+		RammsCurb::SteadyPath(Path, Seconds, Window, bRisesKept, TConstArrayView<FVector2D>(), Out);
+		return Out;
+	};
+	auto Flat = [](std::initializer_list<TPair<int32, double>> Runs) {
+		TArray<double> Path;
+		for (const TPair<int32, double>& Run : Runs)
+		{
+			for (int32 i = 0; i < Run.Key; ++i)
+			{
+				Path.Add(Run.Value);
+			}
+		}
+		return Path;
+	};
+	auto Same = [&](const TCHAR* What, const TArray<double>& Got, const TArray<double>& Want) {
+		bool bSame = Got.Num() == Want.Num();
+		for (int32 k = 0; bSame && k < Got.Num(); ++k)
+		{
+			bSame = FMath::IsNearlyEqual(Got[k], Want[k], 1e-9);
+		}
+		TestTrue(What, bSame);
+	};
+	// A rise given back within the window is cut to the higher of its sides;
+	// one held for the window or longer stays.
+	Same(TEXT("a 0.5 s rise between 10 and 14 is cut to 14"), Steady(Flat({ { 20, 10.0 }, { 5, 17.0 }, { 20, 14.0 } }), 1.0),
+		Flat({ { 20, 10.0 }, { 25, 14.0 } }));
+	Same(TEXT("a 1.5 s rise stays"), Steady(Flat({ { 20, 10.0 }, { 15, 17.0 }, { 20, 14.0 } }), 1.0),
+		Flat({ { 20, 10.0 }, { 15, 17.0 }, { 20, 14.0 } }));
+	// A dip made up within the window is filled to the lower of its sides.
+	Same(TEXT("a 0.5 s dip between 14 and 12 is filled to 12"), Steady(Flat({ { 20, 14.0 }, { 5, 8.0 }, { 20, 12.0 } }), 1.0),
+		Flat({ { 20, 14.0 }, { 25, 12.0 } }));
+	// The ends keep their heights, however short their own stretch; a path that
+	// only rises is left alone; and a window of 0 changes nothing.
+	Same(TEXT("a short stretch at either end stays"), Steady(Flat({ { 3, 12.0 }, { 30, 10.0 }, { 3, 13.0 } }), 1.0),
+		Flat({ { 3, 12.0 }, { 30, 10.0 }, { 3, 13.0 } }));
+	// A rise, a short dip and more rise (the chassis under a climb's rear
+	// lift): with the rises kept the dip is filled up to the rise; without, the
+	// rise is cut down to the dip. Either way the path turns round no more.
+	Same(TEXT("rises kept: the dip after a rise is filled up to it"), Steady(Flat({ { 20, 10.0 }, { 5, 15.0 }, { 8, 14.0 }, { 20, 17.0 } }), 1.0, true),
+		Flat({ { 20, 10.0 }, { 13, 15.0 }, { 20, 17.0 } }));
+	Same(TEXT("rises cut: the rise before a dip is cut down to it"), Steady(Flat({ { 20, 10.0 }, { 5, 15.0 }, { 8, 14.0 }, { 20, 17.0 } }), 1.0, false),
+		Flat({ { 20, 10.0 }, { 13, 14.0 }, { 20, 17.0 } }));
+	Same(TEXT("rises kept: a short rise with nothing to hold it up is cut all the same"), Steady(Flat({ { 20, 10.0 }, { 5, 17.0 }, { 20, 14.0 } }), 1.0, true),
+		Flat({ { 20, 10.0 }, { 25, 14.0 } }));
+	// ...and under a ceiling over the dip (what a halt's wheels could still
+	// reach), it cannot be filled: the rise is cut, as without rises kept.
+	{
+		const TArray<double> Path = Flat({ { 20, 10.0 }, { 5, 15.0 }, { 8, 14.0 }, { 20, 17.0 } });
+		TArray<double>		 Seconds, Out;
+		TArray<FVector2D>	 Limits;
+		Seconds.Init(0.1, Path.Num());
+		Limits.Init(FVector2D(0.0, 100.0), Path.Num());
+		for (int32 k = 25; k < 33; ++k)
+		{
+			Limits[k].Y = 14.0;
+		}
+		RammsCurb::SteadyPath(Path, Seconds, 1.0, true, Limits, Out);
+		Same(TEXT("rises kept, a ceiling over the dip: the rise is cut down to it"), Out, Flat({ { 20, 10.0 }, { 13, 14.0 }, { 20, 17.0 } }));
+	}
+	TArray<double> Ramp;
+	for (int32 k = 0; k < 40; ++k)
+	{
+		Ramp.Add(10.0 + 0.2 * k);
+	}
+	Same(TEXT("a ramp stays"), Steady(Ramp, 1.0), Ramp);
+	Same(TEXT("a window of 0 changes nothing"), Steady(Flat({ { 20, 10.0 }, { 5, 17.0 }, { 20, 14.0 } }), 0.0),
+		Flat({ { 20, 10.0 }, { 5, 17.0 }, { 20, 14.0 } }));
+
+	// Then a plan: with the window the square climb's chassis height turns
+	// round no more often than without it and travels no further in all, stays
+	// in every sample's corridor, and the plan is as fast.
+	IConsoleVariable* Window = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.HeightSteadySeconds"));
+	if (!TestNotNull(TEXT("Ramms.Curb.HeightSteadySeconds"), Window))
+	{
+		return true;
+	}
+	const float Was = Window->GetFloat();
+	ON_SCOPE_EXIT
+	{
+		Window->Set(Was, ECVF_SetByConsole);
+	};
+	const RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	auto						   Measure = [&](const RammsCurb::FCurbSchedule& Plan, int32& OutTurns, double& OutTravel, bool& bInside) {
+		  OutTurns = 0;
+		  OutTravel = 0.0;
+		  bInside = true;
+		  int32 Last = 0;
+		  for (int32 k = 1; k < Plan.Samples.Num(); ++k)
+		  {
+			  const RammsCurb::FScheduleSample& A = Plan.Samples[k - 1];
+			  const RammsCurb::FScheduleSample& B = Plan.Samples[k];
+			  if (B.bApproach)
+			  {
+				  continue;
+			  }
+			  bInside &= B.BLo > B.BHi || (B.B >= B.BLo - 1e-6 && B.B <= B.BHi + 1e-6);
+			  const double Step = B.B - A.B;
+			  const int32  Dir = Step > 0.01 ? 1 : (Step < -0.01 ? -1 : 0);
+			  OutTravel += FMath::Abs(Step);
+			  if (Dir != 0)
+			  {
+				  OutTurns += Last != 0 && Dir != Last ? 1 : 0;
+				  Last = Dir;
+			  }
+		  }
+	};
+	Window->Set(0.0f, ECVF_SetByConsole);
+	const RammsCurb::FCurbSchedule Before = RammsCurb::PlanCrossing(In);
+	Window->Set(1.5f, ECVF_SetByConsole);
+	const RammsCurb::FCurbSchedule After = RammsCurb::PlanCrossing(In);
+	if (!TestTrue(TEXT("both plans are made"), Before.Class != RammsCurb::EPlanClass::Refused && After.Class != RammsCurb::EPlanClass::Refused))
+	{
+		return true;
+	}
+	int32  Turns0 = 0, Turns1 = 0;
+	double Travel0 = 0.0, Travel1 = 0.0;
+	bool   bInside0 = true, bInside1 = true;
+	Measure(Before, Turns0, Travel0, bInside0);
+	Measure(After, Turns1, Travel1, bInside1);
+	AddInfo(FString::Printf(TEXT("the chassis height turns round %d times and travels %.1f cm without the window, %d and %.1f with it"), Turns0,
+		Travel0, Turns1, Travel1));
+	TestTrue(TEXT("no more turns with the window"), Turns1 <= Turns0);
+	TestTrue(TEXT("no more travel with the window"), Travel1 <= Travel0 + 1e-6);
+	TestTrue(TEXT("inside every sample's corridor (where it was without the window)"), bInside1 || !bInside0);
+	TestTrue(FString::Printf(TEXT("as fast (floor %.2f against %.2f cm/s)"), After.VFloor, Before.VFloor), After.VFloor >= Before.VFloor - 0.5);
 	return true;
 }
 
@@ -4189,6 +4369,114 @@ bool FRammsCurbExecutorSeatServesBlockedLift::RunTest(const FString& Parameters)
 		bShown = bShown || (On.bDone && (!Off.bDone || On.Seconds <= Off.Seconds - 0.1));
 	}
 	TestTrue(TEXT("a sag at which the seat sent for the blocked lift makes the crossing quicker, or makes it at all"), bShown);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorSeatServeStays,
+	"Ramms.Curb.Executor.SeatServeStays",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorSeatServeStays::RunTest(const FString& Parameters)
+{
+	// A seat that is to stay where it is (sent for a blocked lift with nowhere
+	// better to go, or at the margin the lift goes on at) is sent toward where
+	// it comes to rest from the rate it has (SeatRestAt), so the executor's
+	// easing brings it to rest: its command's speed never changes by more than
+	// the easing's a tick, it never turns back, and it stops within a tick's
+	// travel of where a steady slowing from that rate would.
+	const double Accel = 60.0, Dt = 0.0625, ShiftRate = 30.0;
+	for (const double Rate0 : { 30.0, 12.0, -20.0, 2.0 })
+	{
+		double X = 5.0, Rate = Rate0;
+		double MostChange = 0.0;
+		bool   bTurned = false;
+		int32  Ticks = 0;
+		for (; Ticks < 200 && Rate != 0.0; ++Ticks)
+		{
+			// (The executor's easing toward what the seat is sent to.)
+			const double Want = RammsCurb::SeatRestAt(X, Rate, Accel, Dt);
+			const double Togo = Want - X;
+			const double Goal = FMath::Sign(Togo) * FMath::Min(ShiftRate, FMath::Sqrt(2.0 * Accel * FMath::Abs(Togo)));
+			const double Eased = Rate + FMath::Clamp(Goal - Rate, -Accel * Dt, Accel * Dt);
+			const double Next = Eased * Togo >= 0.0 && FMath::Abs(Eased * Dt) >= FMath::Abs(Togo) ? Want : X + Eased * Dt;
+			const double NewRate = (Next - X) / Dt;
+			MostChange = FMath::Max(MostChange, FMath::Abs(NewRate - Rate));
+			bTurned |= NewRate * Rate0 < -1e-9;
+			X = Next;
+			Rate = NewRate;
+		}
+		const double Steady = 5.0 + FMath::Sign(Rate0) * Rate0 * Rate0 / (2.0 * Accel);
+		TestTrue(FString::Printf(TEXT("from %+.0f cm/s: at rest (after %d ticks)"), Rate0, Ticks), Rate == 0.0);
+		TestTrue(FString::Printf(TEXT("from %+.0f cm/s: its speed changed by %.2f cm/s a tick at most (the easing's %.2f)"), Rate0, MostChange, Accel * Dt),
+			MostChange <= Accel * Dt + 1e-9);
+		TestFalse(FString::Printf(TEXT("from %+.0f cm/s: never turned back"), Rate0), bTurned);
+		TestTrue(FString::Printf(TEXT("from %+.0f cm/s: stopped at %+.2f cm, a steady slowing's %+.2f"), Rate0, X, Steady),
+			FMath::Abs(X - Steady) <= FMath::Abs(Rate0) * Dt + 1e-9);
+	}
+	// Without an easing it stays where it is.
+	TestEqual(TEXT("no easing: where it is"), RammsCurb::SeatRestAt(5.0, 30.0, 0.0, Dt), 5.0);
+	TestEqual(TEXT("no tick: where it is"), RammsCurb::SeatRestAt(5.0, 30.0, Accel, 0.0), 5.0);
+	TestEqual(TEXT("at rest: where it is"), RammsCurb::SeatRestAt(5.0, 0.0, Accel, Dt), 5.0);
+
+	// And in a crossing (the sagging seat of SeatServesBlockedLift, eased): the
+	// seat is sent for a blocked lift once for each lift blocked and handed
+	// back to its plan once -- not back and forth from tick to tick, as it was
+	// before the serve kept it where the lift goes on.
+	IConsoleVariable* Serve = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.SeatServesBlockedLift"));
+	if (!TestNotNull(TEXT("Ramms.Curb.SeatServesBlockedLift"), Serve))
+	{
+		return true;
+	}
+	const int32 ServeWas = Serve->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(Serve, ServeWas);
+	};
+	SetTestCVar(Serve, 1);
+	RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	In.Tuning.LegSpeed = 60.0f;
+	In.Tuning.LegAcceleration = 800.0f;
+	In.Tuning.CenterShiftSpeed = 45.0f;
+	RammsCurb::FModelSeat& Seat = In.Model.Seat;
+	Seat.bHas = true;
+	Seat.ZeroPivot = FVector2D(0.0, 30.0);
+	Seat.MechanismMassKg = 5.0;
+	Seat.PayloadMassKg = 40.0;
+	Seat.PayloadOffset = FVector2D(0.0, 40.0);
+	Seat.HeightCm = 40.0;
+	Seat.XRange = FVector2D(-20.0, 27.0);
+	Seat.ShiftSpeedCmS = 30.0;
+	Seat.ShiftAccelCmS2 = 60.0;
+	const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, TEXT("Square up, seated, eased"));
+	if (!TestTrue(FString::Printf(TEXT("planned (%s)"), *S.Summary), S.IsValid()) || !TestTrue(TEXT("its seat planned"), S.bSeatPlanned))
+	{
+		return true;
+	}
+	bool bServed = false;
+	for (const double Deg : { 20.0, 30.0, 40.0 })
+	{
+		RammsCurb::FExecDryRunOptions Options;
+		Options.SeatPitchOffDeg = Deg;
+		Options.MaxSeconds = 30.0;
+		const RammsCurb::FExecDryRunResult R = RammsCurb::ExecDryRun(In, S, Options);
+		int32							   Sent = 0, Back = 0;
+		for (const FString& L : R.Log)
+		{
+			Sent += L.Contains(TEXT("for a blocked lift")) ? 1 : 0;
+			Back += L.Contains(TEXT("seat back on its plan")) ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("platform %.0f deg nose-up, eased: %s in %.2f s; the seat sent for a blocked lift %d times, back on its plan %d times, %d lifts blocked"),
+			Deg, R.bDone ? TEXT("crossed") : TEXT("did not cross"), R.Seconds, Sent, Back, R.Counts.LiftsBlocked));
+		bServed |= Sent > 0;
+		TestTrue(FString::Printf(TEXT("%.0f deg: sent for a blocked lift once for each lift blocked at most (%d for %d)"), Deg, Sent, R.Counts.LiftsBlocked),
+			Sent <= FMath::Max(1, R.Counts.LiftsBlocked));
+		TestTrue(FString::Printf(TEXT("%.0f deg: each time handed back once (%d back for %d sent)"), Deg, Back, Sent), Back <= Sent && Back >= Sent - 1);
+		if (R.bDone)
+		{
+			TestFalse(FString::Printf(TEXT("%.0f deg: no fault (%s)"), Deg, *R.FaultWhy), R.bFaulted);
+		}
+	}
+	TestTrue(TEXT("a sag at which the seat was sent for a blocked lift"), bServed);
 	return true;
 }
 

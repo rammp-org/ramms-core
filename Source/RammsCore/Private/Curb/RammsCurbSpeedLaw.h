@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Curb/RammsCurbStick.h"
 #include "RammsCurbNegotiationTypes.h"
+#include "RammsMotionProfile.h"
 
 /**
  * The curb controller's speed law and the leg and wheel rates it drives with,
@@ -48,6 +49,25 @@ namespace RammsCurb
 	/** The carrier fit's ridge ((cm/s)^2 s): the leg motion a gain needs
 	 *  behind it before the fit trusts it, rather than 0. */
 	constexpr float CarrierFitRidge = 4.0f;
+
+	/** How long the choice of the link a wheel hangs from remembers (s): a
+	 *  tick that long ago weighs 1/e of the latest. The link does not change;
+	 *  the memory only lets a first, poor telling be outweighed. */
+	constexpr float CarrierLinkMemorySeconds = 20.0f;
+	/** The turning of the links ((rad/s)^2 s) the choice needs behind it: a
+	 *  fifth of a second at about a quarter of a radian a second. */
+	constexpr float CarrierLinkMinTurn = 0.012f;
+	/** The chosen link's misfit against the carrier's measured turn must be
+	 *  under this share of the same link's taken the other way round. (The two
+	 *  links may turn alike, and then either serves; a link and its opposite
+	 *  never do.) */
+	constexpr float CarrierLinkSenseShare = 0.25f;
+	/** A wheel feed's copies of its leg's motor profiles (FWheelFeed::
+	 *  FollowMotors) begin again where the motors are after this long (s)
+	 *  without a tick, and are stepped no coarser than MotorReplicaStepSeconds
+	 *  (the motors' own are stepped every physics step). */
+	constexpr double MotorReplicaSilenceSeconds = 0.5;
+	constexpr double MotorReplicaStepSeconds = 0.004;
 
 	/** Braking-limited speed with Distance (cm) left to a hard stop. */
 	float BrakingSpeed(float DistanceCm, float Deceleration);
@@ -365,6 +385,97 @@ namespace RammsCurb
 
 		const FCarrierFit& GetFit() const { return Fit; }
 
+		/**
+		 * The links the wheel may hang from, where its leg has two it could
+		 * (a 5-bar's distal links): their directions (rad, in the leg's own
+		 * plane) at the pose measured at the tick's end -- after Measure, every
+		 * tick -- or none (bValid false: a pose the leg's kinematics do not
+		 * solve). Which of the two carries the wheel, and in which sense its
+		 * turn is the carrier's, is told from what was measured: the one whose
+		 * own turn the carrier's has matched best over the ticks with turning
+		 * to tell by (GetCarrierLink).
+		 *
+		 * The fit (FCarrierFit) takes the link's turn as so much per cm the
+		 * leg moves, which a 5-bar's is not: per cm it changes by half again
+		 * with the leg's height and by as much between its two links with its
+		 * fore/aft, and a fit that has forgotten the last walk (a second ago)
+		 * gives a walk's first ticks no turn at all. The link's own direction,
+		 * out of the leg's kinematics, has none of that to learn.
+		 */
+		void MeasureLinks(float Dt, const FVector2D& LinkAngles, bool bValid);
+
+		/** Those links' turn rates (rad/s) over the coming tick, as the servo
+		 *  lag model has the leg move under the commands just sent (after
+		 *  Predict); or none. */
+		void PredictLinks(const FVector2D& ModelLinkRateNext, bool bValid);
+
+		/** The link that carries the wheel: 0 or 1 (the first or the second
+		 *  given to MeasureLinks), OutSense +1 or -1 for how its turn is the
+		 *  carrier's; INDEX_NONE while not yet told. */
+		int32 GetCarrierLink(float& OutSense) const;
+
+		/** The carrier's link is told and its turn over the coming tick was
+		 *  given: GetLinkCarrierRate may be used. */
+		bool HasLinkFeed() const;
+
+		/** The carrier's turn rate (rad/s) over the coming tick by its link's
+		 *  own kinematics: what was measured over the tick just gone, plus
+		 *  the change in the link's turn the model has from that tick to the
+		 *  next. */
+		float GetLinkCarrierRate() const;
+
+		/**
+		 * The leg's motion over the coming tick as its motors' own profiles
+		 * give it (FollowMotors runs them again on the commands they were sent:
+		 * a 5-bar's hips, URammsCurbNegotiationController::PredictLegRates): the wheel
+		 * centre's rates (cm/s, chassis x and z) and its two links' turn rates
+		 * (rad/s); or none. The lag model the other feeds take the change from
+		 * is a first-order lag, and the motors are not: their setpoints run a
+		 * command interval behind the commands along the line through them,
+		 * within a speed and an acceleration. At a walk's first tick the model
+		 * has the leg a good way into its speed and the tick after hardly
+		 * faster, where the motor is slow off the mark and at full speed the
+		 * tick after -- so a walk's start and its stop each sent the wheel a
+		 * tick's worth of the wrong speed, 20 to 30 cm/s of it.
+		 */
+		void PredictMotion(const FVector2D& LegRateNext, const FVector2D& LinkRateNext, bool bValid);
+
+		/** The carrier's link is told and the leg's motion over the coming tick
+		 *  was given: GetMotionLegXRate and GetMotionCarrierRate may be used. */
+		bool HasMotionFeed() const;
+
+		/** The leg's fore/aft rate (cm/s) over the coming tick by its motors'
+		 *  profiles. */
+		float GetMotionLegXRate() const { return static_cast<float>(MotionLegRate.X); }
+
+		/** The carrier's turn rate (rad/s) over the coming tick by them: its
+		 *  link's turn, plus what the carrier turned over the tick just gone
+		 *  that its link's measured turn does not account for (the chassis'
+		 *  own pitching). */
+		float GetMotionCarrierRate() const;
+
+		/**
+		 * The leg's two motors' profiles run again here, on the commands they
+		 * are sent (a 5-bar's hips; rad): a copy of the follower the robot base
+		 * steps for each (RammsMotion::FFollower), given the same commands at
+		 * the same times. Commands are the ones just sent, at simulation time
+		 * Now (s); OutNow is where the two setpoints stand now and OutNext where
+		 * they will a tick (Dt) on. MaxRate and MaxAccel are the motors' own.
+		 *
+		 * The copies start at rest where the motors are (Measured) -- the first
+		 * call, the first after ForgetMotors, and after a silence longer than
+		 * MotorReplicaSilenceSeconds or a clock that ran back -- and from then
+		 * on take nothing measured: what they give is the commands' doing alone.
+		 * (Run from where the hips were measured to be and as fast as they were
+		 * measured to turn, each tick, the wheel's command followed every shake
+		 * of its own leg a tick late: a loaded centre wheel on a cross slope
+		 * rocked the robot from one centre wheel to the other at the tick rate.)
+		 * False for a tick that is no tick (Dt 0 or less).
+		 */
+		bool FollowMotors(double Now, double Dt, const FVector2D& Commands, const FVector2D& Measured, const FVector2D& MaxRate,
+			const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext);
+		void ForgetMotors() { bMotorReplicas = false; }
+
 	private:
 		FCarrierFit Fit;
 		FVector2D	LastXZ = FVector2D::ZeroVector;
@@ -373,6 +484,32 @@ namespace RammsCurb
 		float		MeasuredCarrier = 0.0f;
 		FVector2D	ModelRateLast = FVector2D::ZeroVector;
 		FVector2D	Change = FVector2D::ZeroVector;
+
+		/** The links (MeasureLinks / PredictLinks): their directions at the
+		 *  last tick, the misfit of each taken either way round against the
+		 *  carrier's measured turn (first +, first -, second +, second -) and
+		 *  the turning behind it, and the model's turn rates over the tick just
+		 *  gone and the one to come. */
+		FVector2D LastLinkAngles = FVector2D::ZeroVector;
+		bool	  bHasLastLinks = false;
+		double	  LinkMisfit[4] = { 0.0, 0.0, 0.0, 0.0 };
+		double	  LinkTurn = 0.0;
+		FVector2D ModelLinkRateLast = FVector2D::ZeroVector;
+		FVector2D ModelLinkRateNext = FVector2D::ZeroVector;
+		bool	  bModelLinksLast = false;
+		bool	  bModelLinksNext = false;
+		/** The links' measured turn rates over the tick just gone
+		 *  (MeasureLinks); the leg's motion over the coming tick by its motors'
+		 *  profiles (PredictMotion); the copies of its motors' profiles and
+		 *  the simulation time they stand at (FollowMotors). */
+		FVector2D			   MeasuredLinkRate = FVector2D::ZeroVector;
+		bool				   bMeasuredLinks = false;
+		FVector2D			   MotionLegRate = FVector2D::ZeroVector;
+		FVector2D			   MotionLinkRate = FVector2D::ZeroVector;
+		bool				   bMotionNext = false;
+		RammsMotion::FFollower MotorReplica[2];
+		double				   MotorReplicaTime = 0.0;
+		bool				   bMotorReplicas = false;
 	};
 
 	/** What the controller keeps between ticks to drive by: the stall watch,

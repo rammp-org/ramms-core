@@ -727,6 +727,156 @@ bool FRammsCurbSpeedLawWheelFeed::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawCarrierLink,
+	"Ramms.Curb.SpeedLaw.CarrierLink",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
+{
+	// A leg with two links its wheel could hang from, as a 5-bar's distal
+	// links: both turn as the leg moves, by amounts per cm that change with
+	// where the leg is and differ between the two (here the second's, per cm
+	// fore/aft, half again as much 6 cm aft). The wheel hangs from the
+	// second, and turns the opposite way to it. The leg lifts, rests long
+	// enough for the fit to forget, then walks aft from rest -- a centre wheel
+	// set down on the far side and walked under the chassis.
+	const double Tick = 0.0625, Lag = 0.03;
+	const auto	 LinkA = [](double X, double Z) { return 0.6 - 0.047 * X - 0.0010 * X * Z + 0.030 * Z; };
+	const auto	 LinkB = [](double X, double Z) { return 2.4 - 0.047 * X + 0.0020 * X * X + 0.020 * Z; };
+	const double Sense = -1.0;
+
+	RammsCurb::FWheelFeed Feed;
+	double				  X = 0.0, Z = 0.0, CmdX = 0.0, CmdZ = 0.0, LagX = 0.0, LagZ = 0.0;
+	double				  PrevX = 0.0, PrevZ = 0.0;
+	FVector2D			  ModelRate = FVector2D::ZeroVector;
+	float				  WorstLink = 0.0f, WorstFit = 0.0f;
+	int32				  WalkTicks = 0;
+	bool				  bToldByTheWalk = false;
+	for (int32 k = 0; k < 120; ++k)
+	{
+		const double T = k * Tick;
+		// Measured at the tick's end: where the leg is, how the carrier turned.
+		const float Carrier = k > 0 ? static_cast<float>(Sense * (LinkB(X, Z) - LinkB(PrevX, PrevZ)) / Tick) : 0.0f;
+		Feed.Measure(static_cast<float>(Tick), FVector2D(X, Z), Carrier, ModelRate);
+		Feed.MeasureLinks(static_cast<float>(Tick), FVector2D(LinkA(X, Z), LinkB(X, Z)), true);
+		PrevX = X;
+		PrevZ = Z;
+
+		// This tick's commands: up 8 cm over the first half second, a rest,
+		// then aft at 30 cm/s from 4 s on.
+		const bool bWalk = T >= 4.0 && CmdX > -12.0;
+		CmdZ = FMath::Min(8.0, CmdZ + (T < 0.5 ? 16.0 * Tick : 0.0));
+		CmdX -= bWalk ? 30.0 * Tick : 0.0;
+		const double NextX = RammsCurb::LagStep(static_cast<float>(LagX), static_cast<float>(CmdX), static_cast<float>(Tick), static_cast<float>(Lag));
+		const double NextZ = RammsCurb::LagStep(static_cast<float>(LagZ), static_cast<float>(CmdZ), static_cast<float>(Tick), static_cast<float>(Lag));
+		ModelRate = FVector2D((NextX - LagX) / Tick, (NextZ - LagZ) / Tick);
+		Feed.Predict(ModelRate);
+		Feed.PredictLinks(FVector2D((LinkA(NextX, NextZ) - LinkA(LagX, LagZ)) / Tick, (LinkB(NextX, NextZ) - LinkB(LagX, LagZ)) / Tick), true);
+		LagX = NextX;
+		LagZ = NextZ;
+		if (T >= 4.0 - 1e-9 && !bToldByTheWalk)
+		{
+			// Told from the lift alone, before the walk it is needed for.
+			float		Told = 0.0f;
+			const int32 Link = Feed.GetCarrierLink(Told);
+			TestEqual(TEXT("the wheel's link, told from the lift: the second"), Link, 1);
+			TestEqual(TEXT("and its sense: the opposite"), Told, -1.0f);
+			bToldByTheWalk = true;
+		}
+
+		// The servo over the tick to come, in fine steps.
+		for (int32 s = 0; s < 50; ++s)
+		{
+			X += (CmdX - X) * (1.0 - FMath::Exp(-(Tick / 50.0) / Lag));
+			Z += (CmdZ - Z) * (1.0 - FMath::Exp(-(Tick / 50.0) / Lag));
+		}
+		const float True = static_cast<float>(Sense * (LinkB(X, Z) - LinkB(PrevX, PrevZ)) / Tick);
+		if (bWalk && WalkTicks < 3)
+		{
+			// The walk's first ticks, from rest.
+			++WalkTicks;
+			TestTrue(TEXT("the link feed is on"), Feed.HasLinkFeed());
+			WorstLink = FMath::Max(WorstLink, FMath::Abs(Feed.GetLinkCarrierRate() - True));
+			WorstFit = FMath::Max(WorstFit, FMath::Abs(Feed.GetCarrierRate() - True));
+		}
+	}
+	TestEqual(TEXT("the walk's first ticks were seen"), WalkTicks, 3);
+	TestTrue(FString::Printf(TEXT("the fit, having forgotten, is up to %.2f rad/s off over a walk's first ticks"), WorstFit), WorstFit > 0.5f);
+	TestTrue(FString::Printf(TEXT("the link's own kinematics %.3f rad/s"), WorstLink), WorstLink < 0.1f * WorstFit);
+
+	// The leg's motion over the coming tick given outright (its motors' own
+	// profiles, run by the controller): the leg's rate as given, the carrier's
+	// by the link that was told and its sense.
+	TestFalse(TEXT("no motion given yet"), Feed.HasMotionFeed());
+	Feed.PredictMotion(FVector2D(-12.0, 0.5), FVector2D(0.3, 0.7), true);
+	TestTrue(TEXT("the motion feed is on"), Feed.HasMotionFeed());
+	TestEqual(TEXT("the leg's fore/aft rate as given"), Feed.GetMotionLegXRate(), -12.0f);
+	TestEqual(TEXT("the carrier's: the second link's turn, the opposite way"), Feed.GetMotionCarrierRate(), -0.7f, 2e-3f);
+	Feed.PredictMotion(FVector2D::ZeroVector, FVector2D::ZeroVector, false);
+	TestFalse(TEXT("none given: off again"), Feed.HasMotionFeed());
+	// The motors' own profiles, run again on the commands they are sent
+	// (FollowMotors): two motors commanded along a line at 16 Hz, one at 1
+	// rad/s and one the other way at half that. The copies start where the
+	// motors are and at rest, run behind the commands, and settle to the
+	// commands' rate; and nothing measured after the first tick is in what
+	// they give -- a second feed told the motors are somewhere else, shaking,
+	// gives the same.
+	{
+		RammsCurb::FWheelFeed Told, Shaken;
+		const double		  Step = 0.0625;
+		const FVector2D		  Start(0.4, -0.2), LineRate(1.0, -0.5), MaxRate(3.77, 3.77), MaxAccel(40.0, 40.0);
+		FVector2D			  Now, Next, Now2, Next2;
+		TestFalse(TEXT("no tick: nothing"), Told.FollowMotors(0.0, 0.0, Start, Start, MaxRate, MaxAccel, Now, Next));
+		bool   bSame = true, bBehind = true;
+		double LastRate = 0.0;
+		for (int32 k = 0; k < 40; ++k)
+		{
+			const double	T = 10.0 + Step * k;
+			const FVector2D Command = Start + LineRate * (Step * k);
+			TestTrue(TEXT("a tick: followed"), Told.FollowMotors(T, Step, Command, Start, MaxRate, MaxAccel, Now, Next));
+			const FVector2D Elsewhere = k == 0 ? Start : Command + FVector2D(0.3 * FMath::Sin(7.0 * k), -0.2 * FMath::Cos(5.0 * k));
+			Shaken.FollowMotors(T, Step, Command, Elsewhere, MaxRate, MaxAccel, Now2, Next2);
+			bSame &= Now.Equals(Now2, 1e-12) && Next.Equals(Next2, 1e-12);
+			if (k == 0)
+			{
+				TestTrue(TEXT("the first tick: from where the motors are"), Now.Equals(Start, 1e-9));
+			}
+			// (Never ahead of the commands on a line they keep to.)
+			bBehind &= Next.X <= Command.X + LineRate.X * Step + 1e-6 && Next.Y >= Command.Y + LineRate.Y * Step - 1e-6;
+			LastRate = (Next.X - Now.X) / Step;
+		}
+		TestTrue(TEXT("what the motors are measured to do after the first tick changes nothing"), bSame);
+		TestTrue(TEXT("the setpoints run behind the commands"), bBehind);
+		TestEqual(TEXT("settled: at the commands' rate"), LastRate, 1.0, 0.02);
+		TestEqual(TEXT("settled: the other motor at its own"), (Next.Y - Now.Y) / Step, -0.5, 0.02);
+		TestTrue(TEXT("settled: a command interval or so behind"), Start.X + LineRate.X * Step * 39 - Now.X > 0.5 * Step && Start.X + LineRate.X * Step * 39 - Now.X < 2.5 * Step);
+		// A silence, a clock run back, or ForgetMotors: afresh from where the
+		// motors are.
+		const FVector2D Moved(1.5, 0.9);
+		Told.FollowMotors(10.0 + Step * 40 + 2.0, Step, Moved, Moved, MaxRate, MaxAccel, Now, Next);
+		TestTrue(TEXT("after a silence: from where the motors are"), Now.Equals(Moved, 1e-9) && Next.Equals(Moved, 1e-6));
+		Told.FollowMotors(5.0, Step, Start, Start, MaxRate, MaxAccel, Now, Next);
+		TestTrue(TEXT("the clock run back: from where the motors are"), Now.Equals(Start, 1e-9));
+		Told.FollowMotors(5.0 + Step, Step, Start + LineRate * Step, Moved, MaxRate, MaxAccel, Now, Next);
+		TestFalse(TEXT("the next tick: not from the measurement"), Now.Equals(Moved, 1e-3));
+		Told.ForgetMotors();
+		Told.FollowMotors(5.0 + 2.0 * Step, Step, Moved, Moved, MaxRate, MaxAccel, Now, Next);
+		TestTrue(TEXT("forgotten: from where the motors are"), Now.Equals(Moved, 1e-9));
+	}
+
+	// No links given (a leg without them, a pose its kinematics do not solve):
+	// the fit's, as before.
+	RammsCurb::FWheelFeed Plain;
+	Plain.Measure(static_cast<float>(Tick), FVector2D(0.0, 0.0), 0.0f, FVector2D::ZeroVector);
+	Plain.Measure(static_cast<float>(Tick), FVector2D(1.0, 0.0), 0.5f, FVector2D(16.0, 0.0));
+	Plain.Predict(FVector2D(16.0, 0.0));
+	float Sense0 = 0.0f;
+	TestEqual(TEXT("no links: none told"), Plain.GetCarrierLink(Sense0), static_cast<int32>(INDEX_NONE));
+	TestFalse(TEXT("no links: no link feed"), Plain.HasLinkFeed());
+	TestEqual(TEXT("no links: the link rate asked for is the fit's"), Plain.GetLinkCarrierRate(), Plain.GetCarrierRate());
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSpeedLawCarrierTurn,
 	"Ramms.Curb.SpeedLaw.CarrierTurn",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

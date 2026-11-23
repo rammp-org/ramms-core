@@ -170,4 +170,39 @@ bool FRammsCurbSeatCentreOfMass::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSeatPitchRef, "Ramms.Curb.Seat.PitchRef",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSeatPitchRef::RunTest(const FString& Parameters)
+{
+	// A crossing begun on a road falling 6 deg toward the curb takes the seat
+	// over 6 deg nose-down in the world, the rider's own setting level. From
+	// the level-in on the pitch the tilt holds is turned to the rider's own,
+	// by the step it is given at most, and stays there: level once the base
+	// is, not at the slope's for the crossing.
+	const double Own = 0.0;
+	const double Slope = FMath::DegreesToRadians(-6.0);
+	const double Step = FMath::DegreesToRadians(3.0) * 0.0625; // 3 deg/s over a 1/16 s tick
+	double		 Ref = Own + Slope;
+	TestEqual(TEXT("one tick: a step toward the rider's own"), RammsCurb::SeatPitchRefStep(Ref, Own, Step), Slope + Step, 1e-12);
+	int32 Ticks = 0;
+	for (; Ticks < 1000 && Ref != Own; ++Ticks)
+	{
+		const double Next = RammsCurb::SeatPitchRefStep(Ref, Own, Step);
+		TestTrue(TEXT("never by more than the step"), FMath::Abs(Next - Ref) <= Step + 1e-12);
+		TestTrue(TEXT("never past the rider's own"), Next <= Own + 1e-12);
+		Ref = Next;
+	}
+	TestTrue(FString::Printf(TEXT("6 deg at 3 deg/s: 2 s of ticks (%d)"), Ticks), Ticks == 32 || Ticks == 33);
+	TestEqual(TEXT("there, it stays"), RammsCurb::SeatPitchRefStep(Ref, Own, Step), Own, 0.0);
+	// From the other side (a road rising toward the curb), and to a setting
+	// that is not level (the rider's own tilt): the same.
+	TestEqual(TEXT("nose-up, a step down"), RammsCurb::SeatPitchRefStep(0.1, 0.02, 0.03), 0.07, 1e-12);
+	TestEqual(TEXT("within a step: onto it"), RammsCurb::SeatPitchRefStep(0.04, 0.02, 0.03), 0.02, 1e-12);
+	// No step (the physics has not advanced), or a bad one: where it is.
+	TestEqual(TEXT("no step"), RammsCurb::SeatPitchRefStep(0.1, 0.0, 0.0), 0.1, 0.0);
+	TestEqual(TEXT("a negative step is none"), RammsCurb::SeatPitchRefStep(0.1, 0.0, -1.0), 0.1, 0.0);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
