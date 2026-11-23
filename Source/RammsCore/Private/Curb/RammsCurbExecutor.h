@@ -1320,6 +1320,12 @@ namespace RammsCurb
 		double		MinSpeedCmS = 0.0;
 		int32		Stops = 0;
 		FExecCounts Counts;
+		/** The longest a hold lasted (s), counted as the controller counts it
+		 *  (StepHoldSeconds: kept while the stick pauses it). The controller
+		 *  faults a crossing whose hold outlasts HoldTimeoutSeconds; the dry run
+		 *  runs on, so one that reads done with this over that timeout would
+		 *  not have been. */
+		double MaxHoldSeconds = 0.0;
 		/** The least gap between a lifted wheel's rim and the analytic terrain
 		 *  inside its window (cm); ticks with a wheel on the ground (as
 		 *  simulated) inside its window, or into the terrain. */

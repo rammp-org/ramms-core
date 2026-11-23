@@ -240,6 +240,41 @@ bool FRammsRammpGen1CurbEdgeFrameTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// The stall watch's clock (URammsRammpGen1CurbController::WatchStall faults at Config.StallSeconds): it runs only while
+// the chassis is driven at 3 cm/s or more and moves under 0.5 cm/s, and starts again from 0 the tick either is not so.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbStallTest, "Ramms.Curb.RammpGen1.Stall",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRammsRammpGen1CurbStallTest::RunTest(const FString& Parameters)
+{
+	const float StallSeconds = FRammsRammpGen1CurbConfig().StallSeconds;
+	const float Dt = 0.25f; // exact in binary: the sum below is exact too
+	// Driven at the crawl against a curb's face, not moving: the clock reaches the fault's time, and not a tick early.
+	float Seconds = 0.0f;
+	int32 Ticks = 0;
+	while (Seconds < StallSeconds && Ticks < 1000)
+	{
+		Seconds = RammsRammpGen1Curb::StepStallSeconds(12.0f, 0.1f, Seconds, Dt);
+		++Ticks;
+	}
+	TestEqual(TEXT("held, it reaches the fault's time in that many ticks"), Ticks, FMath::CeilToInt32(StallSeconds / Dt));
+	TestTrue(TEXT("and has counted that long"), Seconds >= StallSeconds);
+	// The thresholds: driven from 3 cm/s, moving under 0.5 cm/s.
+	TestEqual(TEXT("driven at 3 cm/s counts"), RammsRammpGen1Curb::StepStallSeconds(3.0f, 0.0f, 1.0f, Dt), 1.25f);
+	TestEqual(TEXT("driven under 3 cm/s does not"), RammsRammpGen1Curb::StepStallSeconds(2.9f, 0.0f, 1.0f, Dt), 0.0f);
+	TestEqual(TEXT("not driven (held, or a lift moving) does not"), RammsRammpGen1Curb::StepStallSeconds(0.0f, 0.0f, 1.0f, Dt), 0.0f);
+	TestEqual(TEXT("moving just under 0.5 cm/s counts"), RammsRammpGen1Curb::StepStallSeconds(12.0f, 0.49f, 1.0f, Dt), 1.25f);
+	TestEqual(TEXT("moving at 0.5 cm/s does not"), RammsRammpGen1Curb::StepStallSeconds(12.0f, 0.5f, 1.0f, Dt), 0.0f);
+	// Rolled back by the curb (a negative speed) it is still not getting anywhere.
+	TestEqual(TEXT("pushed back counts"), RammsRammpGen1Curb::StepStallSeconds(12.0f, -2.0f, 1.0f, Dt), 1.25f);
+	// One tick of movement starts the clock again: only an unbroken stall faults.
+	Seconds = RammsRammpGen1Curb::StepStallSeconds(12.0f, 0.1f, 2.5f, Dt);
+	Seconds = RammsRammpGen1Curb::StepStallSeconds(12.0f, 5.0f, Seconds, Dt);
+	TestEqual(TEXT("moving again, it starts from 0"), Seconds, 0.0f);
+	Seconds = RammsRammpGen1Curb::StepStallSeconds(12.0f, 0.1f, Seconds, Dt);
+	TestEqual(TEXT("and counts from there"), Seconds, Dt);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsRammpGen1CurbControlsTest, "Ramms.Curb.RammpGen1.Controls",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FRammsRammpGen1CurbControlsTest::RunTest(const FString& Parameters)

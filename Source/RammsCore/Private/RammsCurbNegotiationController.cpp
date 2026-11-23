@@ -1726,6 +1726,34 @@ bool URammsCurbNegotiationController::PlanLift(ERammsCurbAxle Axle, TArrayView<c
 	return false;
 }
 
+bool URammsCurbNegotiationController::WheelsStandOnNear(FString& OutReason) const
+{
+	for (int32 i = 0; i < Legs.Num(); ++i)
+	{
+		if (!LegState[i].bHasWorld)
+		{
+			continue;
+		}
+		const FVector At = LegState[i].WheelWorld;
+		const double  Near = ActiveTerrain.Near.HeightAt(FVector2D(At.X, At.Y));
+		double		  Surface = 0.0;
+		if (!TraceSurface(At, At.Z, FMath::Min(GroundZ, Near) - 60.0, Surface))
+		{
+			OutReason = FString::Printf(TEXT("nothing under the '%s' wheel; drive back onto solid ground first"),
+				*Legs[i].Name.ToString());
+			return false;
+		}
+		if (FMath::Abs(Surface - Near) > Tuning.MinStepHeight)
+		{
+			OutReason = FString::Printf(TEXT("the robot is standing across a step (the '%s' wheel is over ground "
+											 "%+.1f cm from the surface the rest stand on); drive clear of it first"),
+				*Legs[i].Name.ToString(), Surface - Near);
+			return false;
+		}
+	}
+	return true;
+}
+
 bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile, FString& OutReason)
 {
 	// A per-axle plan replaces any per-wheel one (its lines and tilt).
@@ -1840,28 +1868,9 @@ bool URammsCurbNegotiationController::BuildPlan(const FRammsCurbProfile& Profile
 			return false;
 		}
 	}
-	for (int32 i = 0; i < Legs.Num(); ++i)
+	if (!WheelsStandOnNear(OutReason))
 	{
-		if (!LegState[i].bHasWorld)
-		{
-			continue;
-		}
-		const FVector At = LegState[i].WheelWorld;
-		const double  Near = ActiveTerrain.Near.HeightAt(FVector2D(At.X, At.Y));
-		double		  Surface = 0.0;
-		if (!TraceSurface(At, At.Z, FMath::Min(GroundZ, Near) - 60.0, Surface))
-		{
-			OutReason = FString::Printf(TEXT("nothing under the '%s' wheel; drive back onto solid ground first"),
-				*Legs[i].Name.ToString());
-			return false;
-		}
-		if (FMath::Abs(Surface - Near) > Tuning.MinStepHeight)
-		{
-			OutReason = FString::Printf(TEXT("the robot is standing across a step (the '%s' wheel is over ground "
-											 "%+.1f cm from the surface the rest stand on); drive clear of it first"),
-				*Legs[i].Name.ToString(), Surface - Near);
-			return false;
-		}
+		return false;
 	}
 
 	// The far side must be deep enough for the whole robot: seen so already,
@@ -2077,11 +2086,14 @@ bool URammsCurbNegotiationController::PlanPerWheel(const FRammsCurbProfile& Prof
 
 bool URammsCurbNegotiationController::StartReplan(const FRammsCurbProfile& Profile, FString& OutReason)
 {
-	if (IsNegotiating())
+	if (IsNegotiating() || bStopping)
 	{
 		// Measuring for a plan resets what the crossing keeps (its phase, steps,
-		// terrain and edge): a re-plan during one needs a measure of its own.
-		OutReason = TEXT("a re-plan during a crossing is not supported yet");
+		// terrain and edge): a re-plan during one needs a measure of its own. The
+		// same while a stopped crossing is braked to rest: its halt still runs
+		// on that state.
+		OutReason = IsNegotiating() ? TEXT("a re-plan during a crossing is not supported yet")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	RammsCurb::FPlannerInput In;
@@ -2288,6 +2300,17 @@ bool URammsCurbNegotiationController::PreparePerWheel(const FRammsCurbProfile& P
 		{
 			return false;
 		}
+	}
+	else if (!WheelsStandOnNear(OutReason))
+	{
+		// A profile without a terrain stands for level ground under every wheel,
+		// and nothing has looked at the ground to say so. A robot standing across
+		// a step (a retry by hand after a crossing stopped halfway) would be
+		// planned with its wheels on the higher side taken as held in the air,
+		// and the crossing would fault on its first tick ("terrain not as
+		// detected") after the whole plan was made. A detected terrain keeps its
+		// own check above and is not traced again here.
+		return false;
 	}
 	bFarDepthPending = false;
 	FarDepthWhy.Reset();
@@ -3510,9 +3533,15 @@ bool URammsCurbNegotiationController::BuildSteps(const FRammsCurbProfile& Profil
 
 bool URammsCurbNegotiationController::CheckFeasibility(FRammsCurbProfile Profile, FString& OutReason)
 {
-	if (IsNegotiating())
+	// Refused, too, while a stopped crossing is still being braked to rest:
+	// planning resolves the legs afresh and clears the crossing's state, which
+	// would take the halt under way with it (its executor no longer ticked, its
+	// load caps and braking limits gone, its fault phase read as idle), and it
+	// plans on the game thread while the wheels are still turning.
+	if (IsNegotiating() || bStopping)
 	{
-		OutReason = TEXT("a manoeuvre is already running");
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	const bool bFeasible = Tuning.Gait == ERammsCurbGait::PerWheel ? PlanPerWheel(Profile, OutReason) : BuildPlan(Profile, OutReason);
@@ -3681,9 +3710,13 @@ bool URammsCurbNegotiationController::MovingSidewaysIntoCrossing(FString& OutWhy
 
 bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile, FString& OutReason)
 {
-	if (IsNegotiating())
+	// Refused, too, while a stopped crossing is still being braked to rest: a
+	// start that was then refused further on would already have ended the
+	// halted executor and cleared the state its braking runs on.
+	if (IsNegotiating() || bStopping)
 	{
-		OutReason = TEXT("a manoeuvre is already running");
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	{
@@ -3874,6 +3907,17 @@ void URammsCurbNegotiationController::StartCrossingCommon(const FRammsCurbProfil
 
 bool URammsCurbNegotiationController::NegotiateStepAhead(FString& OutReason)
 {
+	// Refused before looking, and without touching Status: mid-crossing the
+	// before-start detection fails (the robot is across the step), and its
+	// reason would replace the running crossing's status -- which the per-axle
+	// gait builds its fault text from -- or a fault's own reason while the
+	// robot brakes to rest.
+	if (IsNegotiating() || bStopping)
+	{
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
+		return false;
+	}
 	FRammsCurbProfile Profile;
 	if (!DetectStepAhead(Profile, OutReason))
 	{
@@ -3897,10 +3941,12 @@ bool URammsCurbNegotiationController::BeginNegotiationOnTerrain(FRammsCurbTerrai
 		return false;
 	}
 	// Refused before measuring: measuring resolves the legs afresh, which would
-	// reset the crossing under way (its legs' state, its load caps, its report).
-	if (IsNegotiating())
+	// reset the crossing under way (its legs' state, its load caps, its report)
+	// -- or the halt of one still being braked to rest.
+	if (IsNegotiating() || bStopping)
 	{
-		OutReason = TEXT("a manoeuvre is already running");
+		OutReason = IsNegotiating() ? TEXT("a manoeuvre is already running")
+									: TEXT("braking to rest after the last crossing: try again once stopped");
 		return false;
 	}
 	// The profile a detection of this terrain would give, from where the robot
@@ -4222,6 +4268,11 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 	bAwaitingPlan = false;
 	bPlanningAtRest = false;
 	bReplanning = false;
+	// A plan still being made is this crossing's: it is not adopted once the
+	// crossing has ended (PollReplan drops it as older than this), where it
+	// would replace the plan lines and figures read back with the crossing
+	// that ran.
+	++PlanGeneration;
 	if (!bGentle)
 	{
 		DriveSpeed = 0.0f;

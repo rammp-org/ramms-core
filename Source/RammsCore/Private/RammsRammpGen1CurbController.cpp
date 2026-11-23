@@ -13,6 +13,7 @@
 #include "GameFramework/Actor.h"
 #include "Misc/ScopeExit.h"
 #include "RammsControlIds.h"
+#include "RammsControlInputResolve.h"
 #include "RammsDriveHandOver.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsMotorSpec.h"
@@ -509,7 +510,7 @@ bool URammsRammpGen1CurbController::WatchStall(float Dt)
 	ChassisAlong = AlongNow;
 	bChassisSpeedValid = true;
 	const float Commanded = CommandedSpeedCmS();
-	StalledSeconds = Commanded >= 3.0f && ChassisSpeedCmS < 0.5f ? StalledSeconds + Dt : 0.0f;
+	StalledSeconds = RammsRammpGen1Curb::StepStallSeconds(Commanded, ChassisSpeedCmS, StalledSeconds, Dt);
 	if (StalledSeconds < Config.StallSeconds)
 	{
 		return true;
@@ -591,6 +592,7 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 		}
 		bStartPending = false;
 		bHoldUntilDown = false;
+		bCentreOnHandBack = false; // this mode's own hand-back has taken it already; any other switch is the operator's
 		StickInput = FVector::ZeroVector;
 		ReleaseWheels();
 	}
@@ -843,6 +845,13 @@ void URammsRammpGen1CurbController::Finish(bool bAborted, const FString& Why)
 		: bCancelling											? EEnd::Cancelled
 																: EEnd::Faulted;
 	PendingEnd = EEnd::None;
+	// Faulted or stopped with the rider's stick still held forward (a crossing only goes on while it is, so at a fault
+	// it is): handed back as it is, the stick would drive the other mode on at once, from wherever the crossing stopped
+	// and toward what stopped it. The hand-back (TickComponent) makes it come back to centre first. Noted here rather
+	// than read from LastEnd there: the hand-back also runs for a mode selected by hand with nothing to run, when
+	// LastEnd is an older crossing's.
+	bCentreOnHandBack = (LastEnd == EEnd::Faulted || LastEnd == EEnd::Stopped) && Stick.bRequired
+		&& StickInput.X > static_cast<double>(RammsControlInput::CentreBand);
 	bRetryable = (LastEnd == EEnd::Faulted || LastEnd == EEnd::Stopped) && !CrossedAny();
 	RetryAt = BodyPos(Config.ChassisBody);
 	WaitWhy.Reset();
@@ -943,10 +952,34 @@ void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick Ti
 		return;
 	}
 	bHoldUntilDown = false;
-	if (!SelectMode(ReturnModeId) && !bHandBackWarned)
+	// A crossing that faulted or stopped with the stick held forward: its forward is not handed on. Not carried across
+	// by the selector (this mode reads it back as 0 from here), and not driven by the stick again until it has been
+	// back to centre (RequireCentre, asked once the other mode has the robot: the bindings held off centre wait).
+	// Without it the mode handed back to would drive on at the stick's full share, toward what stopped the crossing.
+	const bool bCentre = bCentreOnHandBack;
+	if (bCentre)
 	{
-		bHandBackWarned = true;
-		UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: the curb mode cannot hand back to '%s'"), *GetNameSafe(GetOwner()), *ReturnModeId.ToString());
+		StickInput.X = 0.0;
+	}
+	if (!SelectMode(ReturnModeId))
+	{
+		bCentreOnHandBack = bCentre; // still this mode's robot: asked again when the hand-back is made
+		if (!bHandBackWarned)
+		{
+			bHandBackWarned = true;
+			UE_LOG(LogRammsRammpGen1Curb, Warning, TEXT("%s: the curb mode cannot hand back to '%s'"), *GetNameSafe(GetOwner()), *ReturnModeId.ToString());
+		}
+		return;
+	}
+	bCentreOnHandBack = false;
+	if (bCentre)
+	{
+		if (URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
+		{
+			Surface->RequireCentre(RammsControlIds::Drive::Forward());
+		}
+		PhaseLog.Add(TEXT("        the stick held forward as the crossing stopped: drive.forward waits for it to come back to centre"));
+		UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb %s"), *GetNameSafe(GetOwner()), *PhaseLog.Last());
 	}
 }
 
@@ -959,20 +992,38 @@ void URammsRammpGen1CurbController::Begin()
 		Meter = MakePimpl<RammsRammpGen1Curb::FCrossingMeter>();
 	}
 	Meter->Begin(SimNow());
+	// Trying again where the last crossing stopped with nothing across (read before the retry is spent).
+	const bool bRetry = RetryHere();
 	bRetryable = false;
+	bCentreOnHandBack = false;
 	WaitWhy.Reset();
 	HeldSeconds = StalledSeconds = FrontCreepCmS = 0.0f;
 	bChassisSpeedValid = false;
+	// Each lift taken over at its last command (a loaded servo sits short of it: re-commanded where it sags, it
+	// would sag further), else where it stands (rad, cm).
+	float LiftNow[NumLifts] = {};
+	// A retry finds the lifts where the stopped attempt left them -- the chassis at the crossing height, the front omni
+	// wheels perhaps raised -- which is not the stance the rider started in: it keeps the first attempt's starting
+	// commands as what it goes back to. Only while every lift is still where that attempt left it (Finish folded the
+	// rear's trim into its command, so each compares with its own): moved by hand since, or the robot driven off and
+	// back in another stance, where they are now is the stance to return to.
+	bool bRetryKeep = bRetry;
 	for (int32 i = 0; i < NumLifts; ++i)
 	{
-		// Each lift taken over at its last command (a loaded servo sits short of it: re-commanded where it sags, it
-		// would sag further), else where it stands (rad, cm); and that is where a finished crossing puts it back.
-		FLift& L = Lifts[i];
-		if (!Base->GetMotorCommand(L.Motor, StartCmd[i]))
+		if (!Base->GetMotorCommand(Lifts[i].Motor, LiftNow[i]))
 		{
-			StartCmd[i] = Base->GetMotorValue(L.Motor);
+			LiftNow[i] = Base->GetMotorValue(Lifts[i].Motor);
 		}
-		L.Cmd = L.Goal = StartCmd[i];
+		bRetryKeep = bRetryKeep && FMath::IsNearlyEqual(LiftNow[i], Lifts[i].Cmd, 1.0e-3f);
+	}
+	for (int32 i = 0; i < NumLifts; ++i)
+	{
+		FLift& L = Lifts[i];
+		if (!bRetryKeep)
+		{
+			StartCmd[i] = LiftNow[i]; // where a finished crossing puts it back
+		}
+		L.Cmd = L.Goal = LiftNow[i];
 		L.Rate = L.MaxRate;
 	}
 	bFrontUp = FrontOffGround();
@@ -996,22 +1047,45 @@ void URammsRammpGen1CurbController::Begin()
 		Finish(true, TEXT("the curb config's wheel radii must be above 0"));
 		return; // the lifts hold where they stand
 	}
-	HoldWheels();
+	// Rolling needs the powered front omni wheels: with the drive wheels up, nothing else keeps the robot moving.
+	bBlended = Style == ERammsRammpGen1CurbStyle::Blended && bPowered;
+	// Taken over on the move (curb assist starts a crossing while the rider drives at the curb), a crossing that rolls
+	// carries on from the speed the robot has: braked here and started from rest, the drive wheels would lock at that
+	// speed and the speed loops pull it to a stop, a hard jolt for the rider, only to roll on again. Under 2 cm/s it is
+	// at rest, and begins as a crossing asked for at rest does. A stepped crossing brakes as before.
+	const float ForwardCmS = 0.5f * (Base->GetMotorVelocity(Config.DriveLeft) + Base->GetMotorVelocity(Config.DriveRight)) * Config.DriveWheelRadiusCm;
+	const float SeedCmS = bBlended && ForwardCmS > 2.0f ? ForwardCmS : 0.0f;
+	if (SeedCmS > 0.0f)
+	{
+		// Nothing braked or commanded: RollAt commands every wheel on the first step.
+		DriveCmS = 0.0f;
+		bDriveWheels = bDriveFront = bFrontHubsHeld = bDriveApproach = false;
+	}
+	else
+	{
+		HoldWheels();
+	}
 	PhaseLog.Reset();
+	if (bRetryKeep)
+	{
+		PhaseLog.Add(TEXT("        a retry: the lifts go back to where the first attempt found them"));
+	}
 	if (bFrontUp)
 	{
 		PhaseLog.Add(TEXT("        the front omni wheels start up: they stay up until they go down over the edge"));
 	}
+	if (SeedCmS > 0.0f)
+	{
+		PhaseLog.Add(FString::Printf(TEXT("        taken over at %.0f cm/s: it rolls on from that speed"), SeedCmS));
+	}
 	StowArm();
-	// Rolling needs the powered front omni wheels: with the drive wheels up, nothing else keeps the robot moving.
-	bBlended = Style == ERammsRammpGen1CurbStyle::Blended && bPowered;
 	if (Style == ERammsRammpGen1CurbStyle::Blended && !bPowered)
 	{
 		PhaseLog.Add(TEXT("        rolling needs the powered front omni wheels: this crossing stops and steps"));
 	}
 	if (bBlended)
 	{
-		BeginBlended();
+		BeginBlended(SeedCmS);
 		return;
 	}
 	EnterPhase(ERammsRammpGen1CurbPhase::Level);
@@ -1482,7 +1556,7 @@ void URammsRammpGen1CurbController::Step(float Dt)
 
 // --- the rolling crossing (Style Blended) ---------------------------------------------------------
 
-void URammsRammpGen1CurbController::BeginBlended()
+void URammsRammpGen1CurbController::BeginBlended(float SeedCmS)
 {
 	const float H = CrossingHeightCm, Hs = FMath::Abs(StepCm), Lift = Hs + Config.ClearanceCm - H;
 	const float B = bClimb ? -H : Hs - H;
@@ -1501,7 +1575,12 @@ void URammsRammpGen1CurbController::BeginBlended()
 	}
 	bRaised = bDriveFree = bPressed = false;
 	BlendEnd = 0;
-	BlendV = BlendWantCmS = BlendFrontNearCm = 0.0f;
+	BlendWantCmS = BlendFrontNearCm = 0.0f;
+	// From the speed it was taken over at (0 from rest). Begun on the move it may be well above what the speed law asks
+	// this close to the curb: until it first is not, it slows more firmly than a crossing otherwise changes speed
+	// (StepBlended).
+	BlendV = SeedCmS;
+	bBlendSeeded = SeedCmS > 2.0f;
 	BlendSpeed = EBlendSpeed::Starting;
 	BlendStop = FBlendStop();
 	BlendFrontAt = BlendRearOn = -1.0;
@@ -1577,7 +1656,10 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		}
 		if (PF == EPair::Up && LaggingAlong(ESupport::Front) - RF >= 2.0f)
 		{
-			StartBlendTouch(ESupport::Front, FarZ);
+			if (!StartBlendTouch(ESupport::Front, FarZ))
+			{
+				return; // it could not start, and the crossing has ended: nothing below may take it up again
+			}
 			PF = EPair::Lowering;
 			NoteBlended(EPhase::FrontDown, TEXT("front omni wheels over the curb: down on it"));
 		}
@@ -1607,7 +1689,10 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		if (PD == EPair::Up && LaggingAlong(ESupport::Drive) >= 0.65f * RD)
 		{
 			bDriveFree = false; // spinning at its speed, they meet the curb at it
-			StartBlendTouch(ESupport::Drive, FarZ);
+			if (!StartBlendTouch(ESupport::Drive, FarZ))
+			{
+				return; // it could not start, and the crossing has ended: nothing below may take it up again
+			}
 			PD = EPair::Lowering;
 			NoteBlended(EPhase::DriveDown, TEXT("drive wheels over the curb: down on it"));
 		}
@@ -1617,7 +1702,10 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		// The front omni wheels: down to the road once wholly past the edge.
 		if (PF == EPair::Near && LaggingAlong(ESupport::Front) - RF >= 2.0f)
 		{
-			StartBlendTouch(ESupport::Front, FarZ);
+			if (!StartBlendTouch(ESupport::Front, FarZ))
+			{
+				return; // it could not start, and the crossing has ended: nothing below may take it up again
+			}
 			PF = EPair::Lowering;
 			NoteBlended(EPhase::FrontDown, TEXT("front omni wheels past the edge: down to the road"));
 		}
@@ -1648,7 +1736,10 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		if (PD == EPair::Up && Lag >= 0.3f * RD && Lag + BlendV * TimeToTouch(ESupport::Drive, FarZ) >= RD + Config.LandMarginCm)
 		{
 			bDriveFree = false;
-			StartBlendTouch(ESupport::Drive, FarZ);
+			if (!StartBlendTouch(ESupport::Drive, FarZ))
+			{
+				return; // it could not start, and the crossing has ended: nothing below may take it up again
+			}
 			PD = EPair::Lowering;
 			NoteBlended(EPhase::DriveDown, TEXT("drive wheels rolling off the edge: down to the road"));
 		}
@@ -1690,7 +1781,10 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 			Finish(true, Status);
 			return;
 		}
-		StartBlendTouch(ESupport::Rear, FarZ);
+		if (!StartBlendTouch(ESupport::Rear, FarZ))
+		{
+			return; // it could not start, and the crossing has ended: nothing below may take it up again
+		}
 		PR = EPair::Lowering;
 		NoteBlended(EPhase::RearDown, bClimb ? TEXT("rear omni wheels over the curb: down on it") : TEXT("rear omni wheels past the edge: down, the chassis down"));
 	}
@@ -1810,7 +1904,15 @@ void URammsRammpGen1CurbController::StepBlended(float Dt)
 		HeldSeconds = 0.0f;
 	}
 	const float MaxDv = Config.BlendAccelCmS2 * Dt;
-	BlendV += FMath::Clamp(Want - BlendV, -MaxDv, MaxDv);
+	// Begun on the move and still faster than the law asks: down to it at three times that rate. At the usual one, from a
+	// drive mode's top speed it would take more road than curb assist starts a crossing with, and overrun the stops short
+	// of the edge. Only until its speed first meets what is asked: from then on, and in any crossing begun from rest, it
+	// changes speed as it always has.
+	if (bBlendSeeded && BlendV <= Want)
+	{
+		bBlendSeeded = false;
+	}
+	BlendV += FMath::Clamp(Want - BlendV, bBlendSeeded ? -3.0f * MaxDv : -MaxDv, MaxDv);
 	if (BlendEnd == 3 && BlendV <= 0.01f)
 	{
 		BlendV = 0.0f;
@@ -1845,7 +1947,10 @@ void URammsRammpGen1CurbController::RearGateBlended(float LiftCm)
 		// Drawn aft under the chassis, the drive wheels carry less (the front omni wheels take it) and can come off the
 		// ground: down again, once. A stepped crossing sets them down after the translators are aft, so never needs this.
 		bPressed = true;
-		StartBlendTouch(ESupport::Drive, FarZ);
+		if (!StartBlendTouch(ESupport::Drive, FarZ))
+		{
+			return; // it could not start, and the crossing has ended: nothing below may take it up again
+		}
 		PairState[static_cast<int32>(ESupport::Drive)] = EPair::Pressing;
 		NoteBlended(Phase, TEXT("drive wheels down again (") + Why + TEXT(")"));
 	}
@@ -1884,7 +1989,7 @@ void URammsRammpGen1CurbController::RollAt(float SpeedCmS)
 	}
 }
 
-void URammsRammpGen1CurbController::StartBlendTouch(ESupport S, float LevelZ)
+bool URammsRammpGen1CurbController::StartBlendTouch(ESupport S, float LevelZ)
 {
 	FBlendTouch& T = BlendTouch[static_cast<int32>(S)];
 	T.bActive = true;
@@ -1895,8 +2000,13 @@ void URammsRammpGen1CurbController::StartBlendTouch(ESupport S, float LevelZ)
 	const RammsRammpGen1Curb::FSupportTable Table = RammpGen1CurbTable(TableOf(S));
 	if (!StartHeights({ { S, FMath::Max(Table.MinHeight() + 0.01f, T.PlanCm - 4.0f) } }, 0.0f))
 	{
+		// Ended here. The caller is told, so that it does not go on to note the touchdown as begun: that would put the
+		// phase back to a crossing's, and the crossing would roll on with its brakes released after its fault.
+		T.bActive = false;
 		Finish(true, Status);
+		return false;
 	}
+	return true;
 }
 
 bool URammsRammpGen1CurbController::StepBlendTouch(ESupport S)

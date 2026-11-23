@@ -1191,6 +1191,11 @@ private:
 	 *  BelowZ past the robot itself; false when nothing is there. */
 	bool TraceSurface(const FVector& At, double AboveZ, double BelowZ, double& OutZ) const;
 
+	/** Whether the ground traced under every measured wheel is the active
+	 *  terrain's near surface, within MinStepHeight; false, with why, when
+	 *  nothing is under a wheel or the robot is standing across a step. */
+	bool WheelsStandOnNear(FString& OutReason) const;
+
 	/** The mode to hand the robot to when there is no better choice: the
 	 *  selector's initial mode, or else the first mode that is not this. */
 	FName FallbackModeId() const;

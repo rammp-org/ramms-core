@@ -4,6 +4,7 @@
 #include "Curb/RammsCurbLoadShare.h"
 
 #include "Curb/RammsCurbRunStats.h"
+#include "Curb/RammsCurbStick.h"
 #include "Curb/RammsCurbTerrainFit.h"
 #include "HAL/IConsoleManager.h"
 #include "RammsMotionProfile.h"
@@ -555,6 +556,11 @@ namespace RammsCurb
 		bFinishCentreGoal = false;
 		bLoggedCentreLead = false;
 		Diag = FExecDiag();
+		// No hard braking cap applies until a tick has worked one out: left at
+		// the struct's 0, a Halt before the first tick took any command over
+		// EmergencyOverCmS for one over its cap, and braked the whole stop at
+		// twice Deceleration.
+		Diag.Braking = TNumericLimits<double>::Max();
 		Prepare();
 		bRunning = true;
 		Log(FString::Printf(TEXT("per-wheel crossing begins: %s; the level-in from %.1f cm to %.1f (by %.1f at the latest), done at %.1f cm"),
@@ -3109,6 +3115,20 @@ namespace RammsCurb
 						W.Plane = 1;
 						SetState(i, ERammsCurbWheelState::Planting, TEXT("past its window before it was clear"));
 					}
+					else if (bFinishInPlace && W.LandedPastCm >= P.DDown)
+					{
+						// Finishing in place, past its window where it would land
+						// (CanFinishInPlace took it for one that may be set down where
+						// it is) though its centre is not yet: set down here. The robot
+						// is braked to rest, so its centre gets no further, and past its
+						// drop the wheel is no longer aimed at the height that would
+						// make it Clear -- left Lifting it never landed, and the
+						// crossing ended in a fault instead of finishing. Before the
+						// abort below, which would plant it on the near plane.
+						++Counts.InPlaceLandings;
+						W.Plane = 1;
+						SetState(i, ERammsCurbWheelState::Planting, TEXT("finishing in place: set down where it is, before it was clear"));
+					}
 					else if (W.BottomCm <= AbortWithinCm)
 					{
 						// Still near the ground: the robot measured with it (and every
@@ -4719,7 +4739,21 @@ namespace RammsCurb
 			Out.LegX[i] = W.CmdX;
 		}
 		UpdateLoadCaps(Measure, Out, Dt);
-		Out.SeatX = bSeatCmd ? SeatCmdX : (Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X); // the seat holds where it is
+		// The seat holds where it is -- eased to rest (ShiftAccelCmS2, where it
+		// has an easing) from the rate its command had: stopped in one tick, a
+		// seat on the move was halted with the rider's mass on it just as the
+		// base braked.
+		if (bSeatCmd && In.Model.Seat.Shifts() && In.Model.Seat.ShiftAccelCmS2 > 0.0 && Dt > 0.0)
+		{
+			const FModelSeat& Seat = In.Model.Seat;
+			SeatCmdRate = StepTowards(SeatCmdRate, 0.0, Seat.ShiftAccelCmS2 * Dt);
+			SeatCmdX = FMath::Clamp(SeatCmdX + SeatCmdRate * Dt, Seat.XRange.X, Seat.XRange.Y);
+		}
+		else
+		{
+			SeatCmdRate = 0.0;
+		}
+		Out.SeatX = bSeatCmd ? SeatCmdX : (Measure.Seat.bValid ? Measure.Seat.Pivot.X : In.Model.Seat.ZeroPivot.X);
 		// Every leg on its target: its command there, and the leg where it was
 		// sent -- or short of it by up to its preload on the ground, or stopped
 		// short (a leg stalled against something gets no further). A wheel still
@@ -5017,6 +5051,8 @@ namespace RammsCurb
 		// Let go for good (FinishInPlaceAtTravelCm): when (s; < 0 not yet), and
 		// when the executor took up finishing in place.
 		double LetGoFrom = -1.0, InPlaceFrom = -1.0;
+		// How long the hold under way has lasted (s; StepHoldSeconds).
+		double HoldFor = 0.0;
 		// A re-plan made, waiting ReplanDelaySeconds to be adopted (as one made off
 		// the game thread does); after its adoption, until when its re-fitted
 		// surfaces' biases are watched against where those truly lie.
@@ -5067,6 +5103,10 @@ namespace RammsCurb
 			else
 			{
 				E.Tick(Meas, Level, Cmd);
+				// The hold's time as the controller counts it (it faults a hold
+				// over HoldTimeoutSeconds; the dry run only reports the longest).
+				HoldFor = StepHoldSeconds(E.GetPhase() == EExecPhase::Hold, bPaused, HoldFor, Dt);
+				Out.MaxHoldSeconds = FMath::Max(Out.MaxHoldSeconds, HoldFor);
 				if (Options.bLoadCaps && Cmd.LegLoadCapN.Num() == N)
 				{
 					// Each wheel's cap by its state; the shares the weight.

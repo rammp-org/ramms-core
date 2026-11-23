@@ -125,4 +125,9 @@ namespace RammsRammpGen1Curb
 		FVector Normal = FVector::ForwardVector;
 	};
 	FEdgeFrame EdgeFrame(const FVector& Heading, float LeftDistCm, float RightDistCm, float HalfTrackCm);
+
+	/** The stall watch's clock, one tick on: Seconds plus Dt while the chassis is driven at 3 cm/s or more (CommandedCmS)
+	 *  and moves under 0.5 cm/s (ChassisCmS); 0 as soon as either is not so. The controller faults once it reaches its
+	 *  StallSeconds. */
+	float StepStallSeconds(float CommandedCmS, float ChassisCmS, float Seconds, float Dt);
 } // namespace RammsRammpGen1Curb

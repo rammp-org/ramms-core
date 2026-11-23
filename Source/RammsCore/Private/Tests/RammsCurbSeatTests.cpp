@@ -1,11 +1,15 @@
 // Tests for the seat mechanism's kinematics (Private/Curb/RammsCurbSeat) and
 // its place in the robot model's centre of mass.
 //
-// The linkage here is a made-up inverted 5-bar in the proportions of a
-// wheelchair's seat lift -- arm A a long proximal and short distal, arm B two
-// equal links, the platform's pivot 10 cm past the endpoint, the platform
-// level at the zero pose -- and its poses were worked out by hand from that
-// geometry, not read from any robot.
+// The linkage here is a made-up inverted 5-bar in round numbers, in the
+// proportions of a wheelchair's seat lift -- arm A a long proximal and short
+// distal, arm B two equal links, the platform's pivot 10 cm past the endpoint,
+// the platform level at the zero pose. It is no robot's. Its poses were worked
+// out from that geometry apart from the code under test, by intersecting
+// circles: knee A lies on pivot A's proximal circle and DistalLengthA + 10 cm
+// from the platform's pivot, the endpoint DistalLengthA along from knee A
+// toward the pivot, and knee B on pivot B's proximal circle and DistalLengthB
+// from the endpoint, on the side of each arm its elbow bends to.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -23,16 +27,16 @@ namespace
 		FRamms5BarLinkageSpec& L = Seat.Linkage;
 		L.ProximalMotorA = TEXT("seat_a");
 		L.ProximalMotorB = TEXT("seat_b");
-		L.PivotA = FVector2D(2.0, 10.845);
-		L.PivotB = FVector2D(-15.0, 10.845);
-		L.ProximalLengthA = 31.0f;
-		L.DistalLengthA = 17.0f;
-		L.ProximalLengthB = 27.0f;
-		L.DistalLengthB = 27.0f;
-		L.ZeroDirA = -2.9924f; // arm A's proximal points aft and a little down at the zero pose
-		L.AngleSignA = -1.0f;  // a hinge about +Y
-		L.ZeroDirB = 0.7435f;  // arm B's proximal points forward and up
-		L.AngleSignB = 1.0f;   // about -Y
+		L.PivotA = FVector2D(0.0, 10.0);
+		L.PivotB = FVector2D(-18.0, 10.0);
+		L.ProximalLengthA = 30.0f;
+		L.DistalLengthA = 18.0f;
+		L.ProximalLengthB = 26.0f;
+		L.DistalLengthB = 26.0f;
+		L.ZeroDirA = -3.0f;	  // arm A's proximal points aft and a little down at the zero pose
+		L.AngleSignA = -1.0f; // a hinge about +Y
+		L.ZeroDirB = 0.75f;	  // arm B's proximal points forward and up
+		L.AngleSignB = 1.0f;  // about -Y
 		L.bElbowUpA = true;
 		L.bElbowUpB = false;
 		L.bFlipEndpointSide = false;
@@ -43,8 +47,12 @@ namespace
 		return Seat;
 	}
 
+	/** Where the zero pose (both motors at 0) puts the platform's pivot. */
+	const FVector2D KnownZeroPivot(-21.6827, 32.5941);
+
 	/** Motor angles (A, B, tilt) and where they put the platform's pivot, the
-	 *  platform level over the chassis in every one. */
+	 *  platform level over the chassis in every one. The pivots but the zero
+	 *  pose's are picked round and the angles solved for them. */
 	struct FKnownPose
 	{
 		const TCHAR* Name;
@@ -53,12 +61,12 @@ namespace
 		FVector2D	 Pivot;
 	};
 	const FKnownPose KnownPoses[] = {
-		{ TEXT("zero"), FVector2D(0.0, 0.0), 0.0, FVector2D(-16.5, 30.345) },
-		{ TEXT("high"), FVector2D(1.3690, 0.0626), 0.1793, FVector2D(-1.0, 65.845) },
-		{ TEXT("forward"), FVector2D(1.4167, -0.7273), -1.2370, FVector2D(19.5, 36.845) },
-		{ TEXT("middle"), FVector2D(0.5525, -0.6489), -0.7704, FVector2D(-1.0, 31.845) },
-		{ TEXT("aft"), FVector2D(0.4103, 0.2843), 0.4688, FVector2D(-28.0, 45.845) },
-		{ TEXT("climb"), FVector2D(1.1402, -0.7337), -1.1384, FVector2D(12.0, 35.845) },
+		{ TEXT("zero"), FVector2D(0.0, 0.0), 0.0, KnownZeroPivot },
+		{ TEXT("high"), FVector2D(1.0932, -0.0133), -0.1294, FVector2D(-6.0, 60.0) },
+		{ TEXT("forward"), FVector2D(1.3010, -0.6772), -1.2625, FVector2D(16.0, 38.0) },
+		{ TEXT("middle"), FVector2D(0.4608, -0.6600), -0.7739, FVector2D(-4.0, 33.0) },
+		{ TEXT("aft"), FVector2D(0.3564, 0.3558), 0.4587, FVector2D(-34.0, 44.0) },
+		{ TEXT("climb"), FVector2D(1.0751, -0.7037), -1.1771, FVector2D(10.0, 37.0) },
 	};
 } // namespace
 
@@ -112,19 +120,21 @@ bool FRammsCurbSeatSolve::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("%s: the solved pose lands"), K.Name), (Pose.Pivot - K.Pivot).Size() < 1e-3);
 		Hint = Angles;
 	}
-	// Out of reach: 80 cm up is more than the links span.
+	// Out of reach: 80 cm up is more than the links span (arm A straight up
+	// with the pivot past it ends 68 cm up).
 	FVector2D Angles;
 	TestFalse(TEXT("an unreachable pivot is refused"), RammsCurb::SeatSolve(Seat, FVector2D(0.0, 80.0), FVector2D::ZeroVector, Angles));
-	// The fore/aft reach at the zero height spans the known fore and aft poses'
-	// stretch at least (they sit 1.5 and 6.5 cm higher, within the same reach).
+	// The fore/aft reach at the zero pose's height: a span of fore/aft about
+	// the zero pose, with no motor range to bound it.
 	bool			bValid = false;
-	const FVector2D Reach = RammsCurb::SeatReachX(Seat, 30.345, FVector2D::ZeroVector, FVector2D(1.0, 0.0), FVector2D(1.0, 0.0), bValid);
+	const FVector2D Reach = RammsCurb::SeatReachX(Seat, KnownZeroPivot.Y, FVector2D::ZeroVector, FVector2D(1.0, 0.0), FVector2D(1.0, 0.0), bValid);
 	TestTrue(TEXT("the reach at the zero height is found"), bValid);
-	TestTrue(FString::Printf(TEXT("the reach spans the zero pose: %.1f..%.1f"), Reach.X, Reach.Y), Reach.X <= -16.5 && Reach.Y >= -16.5);
+	TestTrue(FString::Printf(TEXT("the reach spans the zero pose: %.1f..%.1f"), Reach.X, Reach.Y), Reach.X <= KnownZeroPivot.X && Reach.Y >= KnownZeroPivot.X);
 	TestTrue(TEXT("the reach is a span"), Reach.Y - Reach.X > 20.0);
 	// Bounded by motor ranges: motor A held to [0, 0.3] shortens the forward
-	// reach (the middle pose, 15 cm ahead, already needs 0.55).
-	const FVector2D Bounded = RammsCurb::SeatReachX(Seat, 30.345, FVector2D::ZeroVector, FVector2D(0.0, 0.3), FVector2D(1.0, 0.0), bValid);
+	// reach (the middle pose, 18 cm ahead and at nearly this height, already
+	// needs 0.46; 0.3 is reached about 13 cm ahead).
+	const FVector2D Bounded = RammsCurb::SeatReachX(Seat, KnownZeroPivot.Y, FVector2D::ZeroVector, FVector2D(0.0, 0.3), FVector2D(1.0, 0.0), bValid);
 	TestTrue(FString::Printf(TEXT("a motor range bounds the reach: %.1f..%.1f within %.1f..%.1f"), Bounded.X, Bounded.Y, Reach.X, Reach.Y),
 		bValid && Bounded.Y < Reach.Y && Bounded.X >= Reach.X - 1e-9);
 	return true;
@@ -143,7 +153,7 @@ bool FRammsCurbSeatCentreOfMass::RunTest(const FString& Parameters)
 	Model.MassKg = 200.0;
 	Model.CenterOfMass = FVector(0.0, 0.0, 20.0);
 	Model.Seat.bHas = true;
-	Model.Seat.ZeroPivot = FVector2D(-16.5, 30.345);
+	Model.Seat.ZeroPivot = KnownZeroPivot;
 	Model.Seat.MechanismMassKg = 18.0;
 	Model.Seat.PayloadMassKg = 90.0;
 	Model.Seat.PayloadOffset = FVector2D(0.0, 40.0);
