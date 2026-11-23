@@ -46,6 +46,13 @@ namespace RammsCurb
 				 "landed a run's measured margin on the live floor itself). 0: MinLiveStabilityMarginCm, as before."),
 			ECVF_Default);
 
+		TAutoConsoleVariable<int32> CVarCurbSeatServesBlockedLift(TEXT("Ramms.Curb.SeatServesBlockedLift"), 1,
+			TEXT("1 (the default): while a wheel's lift is refused because the robot, measured with it up, would stand too little inside "
+				 "its wheels, the seat is sent for where that leaves the margin the lift needs (and no further back than it is) rather "
+				 "than on along its plan. The plan's seat goes by the travel and has the wheel up by then: followed, it took the mass "
+				 "back off the wheels that would carry the robot while it crept to the wheel's deadline, and at rest there nothing "
+				 "changed any more (a hold, then a fault). 0: the seat follows its plan whatever is blocked."),
+			ECVF_Default);
 		TAutoConsoleVariable<float> CVarCurbAttitudeIntegralGapCm(TEXT("Ramms.Curb.AttitudeIntegralGapCm"), 0.5f,
 			TEXT("The attitude loop's integral is held while a wheel counted as carrying (planted or loading) stands more than this "
 				 "(cm) off its surface: the stance is not the one the loop trims, and the integral wound up on a wheel lifted by a "
@@ -484,6 +491,7 @@ namespace RammsCurb
 		bSeatCmd = false;
 		SeatCmdRate = 0.0;
 		bSeatHeld = false;
+		bSeatServing = false;
 		SeatPlanLogged = 1.0e9;
 		// The centre wheels' log line from this run's start (kept from the last
 		// run it would wait out that run's whole travel first).
@@ -630,6 +638,7 @@ namespace RammsCurb
 			}
 			W.bBlocked = false;
 			W.BlockedWhy.Reset();
+			W.BlockedMarginSet = 0;
 			W.bDriftLogged = false;
 		}
 		bReplanAsk = false;
@@ -1563,6 +1572,25 @@ namespace RammsCurb
 		return R.Support >= 3 ? R.DynamicCm : -1e9;
 	}
 
+	double FExecutor::SeatMarginWithout(const FExecMeasure& Measure, uint32 Without, double DeltaX) const
+	{
+		TArray<FVector2D, TInlineAllocator<MaxPlanLegs>>	  XZ;
+		TArray<FMeasuredWheel, TInlineAllocator<MaxPlanLegs>> Ws;
+		MeasuredWheels(Measure, Without, 0, XZ, Ws);
+		// The seat as it is measured (a pivot behind its command, a platform
+		// pitched by its linkage's sag: what the lift's permit reads), moved.
+		FMeasuredSeat Seat = Measure.Seat;
+		if (!Seat.bValid)
+		{
+			Seat.bValid = true;
+			Seat.Pivot = FVector2D(SeatCmdX, In.Model.Seat.HeightCm);
+			Seat.PitchRad = 0.0;
+		}
+		Seat.Pivot.X += DeltaX;
+		const FPoseMargin R = MeasuredMargin(In.Model, Measure.Frame, XZ, Ws, Seat, Measure.Forward, MarginAccelOf(In), MarginDecelOf(In));
+		return R.Support >= 3 ? R.DynamicCm : -1e9;
+	}
+
 	bool FExecutor::LoadShares(const FExecMeasure& Measure, uint32 Without, uint32 With, TArray<double, TInlineAllocator<MaxPlanLegs>>& OutShares) const
 	{
 		const int32 N = Wheels.Num();
@@ -1762,8 +1790,12 @@ namespace RammsCurb
 		}
 	}
 
-	bool FExecutor::LiftPermit(int32 Leg, const FExecMeasure& Measure, const FLevelState& Level, FString& OutWhy) const
+	bool FExecutor::LiftPermit(int32 Leg, const FExecMeasure& Measure, const FLevelState& Level, FString& OutWhy, uint32* OutMarginSet) const
 	{
+		if (OutMarginSet)
+		{
+			*OutMarginSet = 0;
+		}
 		const FWheelPlan&		P = Plan.Wheels[Leg];
 		const FRammsCurbTuning& T = In.Tuning;
 		if (bOperatorPaused || bFinishInPlace)
@@ -1830,6 +1862,10 @@ namespace RammsCurb
 				OutWhy = FString::Printf(TEXT("'%s' is %.1f cm off its planned fore/aft %.1f, and with it up the robot would stand %.2f cm "
 											  "inside its wheels (MinStabilityMargin %.1f)"),
 					*In.Legs[C].Name.ToString(), Measure.Legs[C].XZ.X - Here.X[Side], Here.X[Side], Margin, T.MinStabilityMargin);
+				if (OutMarginSet && Margin < T.MinLiveStabilityMarginCm + (CVarCurbLiftMarginGuard.GetValueOnAnyThread() != 0 ? MarginReleaseCm : 0.0))
+				{
+					*OutMarginSet = Set;
+				}
 				return false;
 			}
 		}
@@ -1840,6 +1876,10 @@ namespace RammsCurb
 		{
 			OutWhy = FString::Printf(TEXT("with it up the robot would stand %.2f cm inside its wheels (MinLiveStabilityMarginCm %.1f, %.2f to lift)"), Margin,
 				T.MinLiveStabilityMarginCm, LiveFloor);
+			if (OutMarginSet)
+			{
+				*OutMarginSet = Set;
+			}
 			return false;
 		}
 		// The chassis where it is sent (its steady offset, the preloads' and the
@@ -2997,7 +3037,8 @@ namespace RammsCurb
 						break;
 					}
 					FString Why;
-					if (LiftPermit(i, Measure, Level, Why))
+					uint32	MarginSet = 0;
+					if (LiftPermit(i, Measure, Level, Why, &MarginSet))
 					{
 						if (W.bBlocked)
 						{
@@ -3005,6 +3046,7 @@ namespace RammsCurb
 						}
 						W.bBlocked = false;
 						W.BlockedWhy.Reset();
+						W.BlockedMarginSet = 0;
 						++(bOnPosition || bOnTick ? Counts.LiftsOnPosition : Counts.LiftsOnTime);
 						SetState(i, ERammsCurbWheelState::Lifting,
 							bOnPosition	  ? FString::Printf(TEXT("on the plan's position (%.1f)"), P.SLiftStart)
@@ -3024,6 +3066,7 @@ namespace RammsCurb
 						// lifts it).
 						W.bBlocked = false;
 						W.BlockedWhy.Reset();
+						W.BlockedMarginSet = 0;
 					}
 					else
 					{
@@ -3033,6 +3076,13 @@ namespace RammsCurb
 						}
 						W.bBlocked = true;
 						W.BlockedWhy = Why;
+						// (Kept while it stays blocked: refused next for another reason
+						// -- the stick let go, a centre wheel off its plan with the
+						// margin over the live floor -- the seat does not go back for it.)
+						if (MarginSet != 0)
+						{
+							W.BlockedMarginSet = MarginSet;
+						}
 					}
 					break;
 				}
@@ -3691,6 +3741,95 @@ namespace RammsCurb
 				Want = In.Finish.SeatX;
 			}
 			Want = FMath::Clamp(Want, Seat.XRange.X, Seat.XRange.Y);
+			// A lift blocked on the margin the robot would stand with
+			// (Ramms.Curb.SeatServesBlockedLift): the seat goes for where that
+			// margin is the lift's, the nearest such place on the side that
+			// raises it, and no further the other way than it is. The plan's seat
+			// here is for the plan's support set, which has the wheel up by now.
+			{
+				uint32 Short = 0;
+				for (const FExecWheel& Wh : Wheels)
+				{
+					Short |= Wh.bBlocked && Wh.State == ERammsCurbWheelState::Planted ? Wh.BlockedMarginSet : 0u;
+				}
+				bool		 bServe = false;
+				double		 ServeWant = Want;
+				const double Floor =
+					T.MinLiveStabilityMarginCm + (CVarCurbLiftMarginGuard.GetValueOnAnyThread() != 0 ? MarginReleaseCm : 0.0) + SeatHoldMarginCm;
+				if (Short != 0 && CVarCurbSeatServesBlockedLift.GetValueOnAnyThread() != 0 && Plan.bSeatPlanned && !bFinishInPlace && Phase != EExecPhase::Settle)
+				{
+					const double Now = SeatMarginWithout(Measure, Short, 0.0);
+					if (Now < Floor)
+					{
+						// (Probed as far as its reach leaves: within a probe of an end
+						// of it, that end is still somewhere to go.)
+						const double ProbeCm = 1.0;
+						const double ForeCm = FMath::Min(ProbeCm, Seat.XRange.Y - SeatCmdX);
+						const double AftCm = FMath::Min(ProbeCm, SeatCmdX - Seat.XRange.X);
+						const double Fore = ForeCm > 1e-3 ? SeatMarginWithout(Measure, Short, ForeCm) : -1e9;
+						const double Aft = AftCm > 1e-3 ? SeatMarginWithout(Measure, Short, -AftCm) : -1e9;
+						const double Dir = Fore > Now + 1e-3 * ForeCm && Fore >= Aft ? 1.0 : (Aft > Now + 1e-3 * AftCm ? -1.0 : 0.0);
+						if (Dir != 0.0)
+						{
+							// The least move that way that reaches the floor, or the best
+							// there is, up to the end of its reach.
+							const double Room = Dir > 0.0 ? Seat.XRange.Y - SeatCmdX : SeatCmdX - Seat.XRange.X;
+							double		 Best = Now, BestAt = 0.0;
+							for (double D = FMath::Min(ProbeCm, Room);; D = FMath::Min(D + ProbeCm, Room))
+							{
+								const double Mg = SeatMarginWithout(Measure, Short, Dir * D);
+								if (Mg > Best + 1e-6)
+								{
+									Best = Mg;
+									BestAt = D;
+								}
+								if (Mg >= Floor || D >= Room - 1e-6)
+								{
+									break;
+								}
+							}
+							if (BestAt > 0.0)
+							{
+								bServe = true;
+								ServeWant = SeatCmdX + Dir * BestAt;
+								ServeWant = Dir > 0.0 ? FMath::Max(Want, ServeWant) : FMath::Min(Want, ServeWant);
+							}
+						}
+						if (!bServe)
+						{
+							// Nowhere better: it stays, rather than follow the plan away --
+							// brought to rest at its eased rate where it has one
+							// (ShiftAccelCmS2), not in one tick.
+							bServe = true;
+							ServeWant = SeatCmdX;
+							if (Seat.ShiftAccelCmS2 > 0.0 && Dt > 0.0)
+							{
+								const double Slower = FMath::Max(0.0, FMath::Abs(SeatCmdRate) - Seat.ShiftAccelCmS2 * Dt);
+								ServeWant += FMath::Sign(SeatCmdRate) * Slower * Slower / (2.0 * Seat.ShiftAccelCmS2);
+							}
+						}
+					}
+					else if (SeatMarginWithout(Measure, Short, Want - SeatCmdX) < Floor)
+					{
+						// At the margin the seat goes on at, and the plan's seat would
+						// take it back under it: it stays.
+						bServe = true;
+						ServeWant = SeatCmdX;
+					}
+				}
+				if (bServe != bSeatServing)
+				{
+					bSeatServing = bServe;
+					Log(bServe ? FString::Printf(TEXT("seat sent to %+.1f cm (the plan's %+.1f) for a blocked lift: with it up the robot would stand %.2f cm inside its "
+													  "wheels (%.2f for the seat to go on)"),
+									 ServeWant, Want, SeatMarginWithout(Measure, Short, 0.0), Floor)
+							   : FString::Printf(TEXT("seat back on its plan at %+.1f cm (toward %+.1f)"), SeatCmdX, Want));
+				}
+				if (bServe)
+				{
+					Want = FMath::Clamp(ServeWant, Seat.XRange.X, Seat.XRange.Y);
+				}
+			}
 			// And only where the wheels now carrying the robot keep it inside the
 			// live margin with the seat there: the plan's seat is for the plan's
 			// support set, and a wheel still being set down (the level-in's
@@ -4799,6 +4938,7 @@ namespace RammsCurb
 			  Meas.bSpeedValid = true;
 			  Meas.Seat.bValid = bSeat;
 			  Meas.Seat.Pivot = FVector2D(SeatSimX, In.Model.Seat.HeightCm);
+			  Meas.Seat.PitchRad = FMath::DegreesToRadians(Options.SeatPitchOffDeg);
 			  Meas.Legs.SetNum(N);
 			  Meas.Probes.Reset();
 			  for (int32 i = 0; i < N; ++i)

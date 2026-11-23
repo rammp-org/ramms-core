@@ -582,6 +582,11 @@ namespace RammsCurb
 		/** Its lift is blocked, and why (logged once per reason). */
 		bool	bBlocked = false;
 		FString BlockedWhy;
+		/** Blocked on the margin the robot would stand with: the wheels that
+		 *  would then be off the ground (a mask; 0: not blocked on that). The
+		 *  seat is sent for where that set leaves the margin
+		 *  (Ramms.Curb.SeatServesBlockedLift). */
+		uint32 BlockedMarginSet = 0;
 		/** When its state last changed (s since Begin), and how long it has
 		 *  been Loading (s). */
 		double Since = 0.0;
@@ -956,7 +961,7 @@ namespace RammsCurb
 		 *  window; LegSpeed for a lift not eased. */
 		double EasedLiftSpeed(int32 Leg, double TargetZ) const;
 		/** Whether leg Leg may lift now, and if not why. */
-		bool LiftPermit(int32 Leg, const FExecMeasure& Measure, const FLevelState& Level, FString& OutWhy) const;
+		bool LiftPermit(int32 Leg, const FExecMeasure& Measure, const FLevelState& Level, FString& OutWhy, uint32* OutMarginSet = nullptr) const;
 		/** The measured margin with Without (bit per leg) off the ground too, and
 		 *  With (bit per leg) on it. */
 		double MarginWithout(const FExecMeasure& Measure, uint32 Without, uint32 With = 0) const;
@@ -984,6 +989,9 @@ namespace RammsCurb
 		 *  robot with the seat's pivot held at SeatX (its crossing height, the
 		 *  platform's measured pitch); -1e9 with fewer than three. */
 		double SeatMargin(const FExecMeasure& Measure, double SeatX) const;
+		/** The margin measured with the Without wheels off the ground and the
+		 *  seat's pivot DeltaX cm forward of where it is measured. */
+		double SeatMarginWithout(const FExecMeasure& Measure, uint32 Without, double DeltaX) const;
 		/** The least margin (cm) the plan's poses keep from now until wheel Leg
 		 *  has taken load -- the predicted airborne interval -- with it up, and
 		 *  every wheel landing late (up where the plan has it down by now) still
@@ -1108,6 +1116,8 @@ namespace RammsCurb
 		 *  sent the wheels now carrying the robot would leave it under the live
 		 *  margin (logged on the change). */
 		bool bSeatHeld = false;
+		/** The seat sent off its plan for a lift blocked on the margin. */
+		bool bSeatServing = false;
 		/** Until when (Elapsed, s) the chassis' steady offset is still being
 		 *  taken after the level-in: its move may still be settling as the
 		 *  attitude first reads level. */
@@ -1503,6 +1513,10 @@ namespace RammsCurb
 		/** The executor works out the load caps (FExecutor::SetLoadCaps); the
 		 *  kinematic robot takes no notice of them. */
 		bool bLoadCaps = false;
+		/** The seat's platform measures this far (deg) nose-up of where it is
+		 *  held -- a linkage sagged under its load -- so the rider's mass
+		 *  stands aft of where the plan has it. */
+		double SeatPitchOffDeg = 0.0;
 	};
 
 	/**

@@ -4099,6 +4099,99 @@ bool FRammsCurbPlannerDefaultGaitPerWheel::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbExecutorSeatServesBlockedLift,
+	"Ramms.Curb.Executor.SeatServesBlockedLift",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbExecutorSeatServesBlockedLift::RunTest(const FString& Parameters)
+{
+	// A seat whose platform sags nose-up under its load stands the rider's
+	// mass aft of where the plan has it, and a corner's lift that is due with
+	// the seat forward is refused on the margin the robot would stand with.
+	// Left to its plan (Ramms.Curb.SeatServesBlockedLift 0) the seat goes on
+	// back aft with the travel -- the plan has the wheel up by then -- while
+	// the robot creeps to the wheel's deadline and rests there, where nothing
+	// changes any more. Sent for the blocked lift (1, the default) the seat
+	// brings the mass over the wheels that will carry it until the lift may
+	// begin, and the crossing is made.
+	IConsoleVariable* Serve = IConsoleManager::Get().FindConsoleVariable(TEXT("Ramms.Curb.SeatServesBlockedLift"));
+	if (!TestNotNull(TEXT("Ramms.Curb.SeatServesBlockedLift"), Serve))
+	{
+		return true;
+	}
+	const int32 ServeWas = Serve->GetInt();
+	ON_SCOPE_EXIT
+	{
+		SetTestCVar(Serve, ServeWas);
+	};
+	RammsCurb::FPlannerInput In = PlanOn(PlanScenario(TEXT("Square"), true));
+	In.Tuning.LegSpeed = 60.0f;
+	In.Tuning.LegAcceleration = 800.0f;
+	In.Tuning.CenterShiftSpeed = 45.0f;
+	RammsCurb::FModelSeat& Seat = In.Model.Seat;
+	Seat.bHas = true;
+	Seat.ZeroPivot = FVector2D(0.0, 30.0);
+	Seat.MechanismMassKg = 5.0;
+	Seat.PayloadMassKg = 40.0;
+	Seat.PayloadOffset = FVector2D(0.0, 40.0);
+	Seat.HeightCm = 40.0;
+	Seat.XRange = FVector2D(-20.0, 27.0);
+	Seat.ShiftSpeedCmS = 30.0;
+	const RammsCurb::FCurbSchedule S = PlanAndLog(*this, In, TEXT("Square up, seated"));
+	if (!TestTrue(FString::Printf(TEXT("planned (%s)"), *S.Summary), S.IsValid()) || !TestTrue(TEXT("its seat planned"), S.bSeatPlanned))
+	{
+		return true;
+	}
+	const auto Run = [&](int32 On, double PitchOffDeg) {
+		SetTestCVar(Serve, On);
+		RammsCurb::FExecDryRunOptions Options;
+		Options.SeatPitchOffDeg = PitchOffDeg;
+		Options.MaxSeconds = 30.0;
+		return RammsCurb::ExecDryRun(In, S, Options);
+	};
+	const auto Served = [](const RammsCurb::FExecDryRunResult& R) {
+		return R.Log.ContainsByPredicate([](const FString& L) { return L.Contains(TEXT("for a blocked lift")); });
+	};
+	// As planned (no sag): nothing blocked on the margin, nothing for the seat
+	// to serve, and the two runs are the same run.
+	{
+		const RammsCurb::FExecDryRunResult Off = Run(0, 0.0), On = Run(1, 0.0);
+		TestTrue(TEXT("no sag: crossed either way"), Off.bDone && On.bDone);
+		TestFalse(TEXT("no sag: the seat never left its plan"), Served(On));
+		TestEqual(TEXT("no sag: the same run"), On.Seconds, Off.Seconds);
+	}
+	// The more it sags the longer the lift waits: served, the crossing is made
+	// wherever it is made left to its plan and takes no longer, and at the
+	// deepest sags it is the quicker (or the only one made).
+	bool bShown = false;
+	for (const double Deg : { 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0 })
+	{
+		const RammsCurb::FExecDryRunResult Off = Run(0, Deg), On = Run(1, Deg);
+		AddInfo(FString::Printf(TEXT("platform %.0f deg nose-up: left to its plan %s in %.2f s (%d lifts blocked, %d holds, least margin %.2f cm); "
+									 "served %s in %.2f s (%d lifts blocked, %d holds, least margin %.2f cm)%s"),
+			Deg, Off.bDone ? TEXT("crossed") : TEXT("did not cross"), Off.Seconds, Off.Counts.LiftsBlocked, Off.Counts.Holds, Off.MinMarginCm,
+			On.bDone ? TEXT("crossed") : TEXT("did not cross"), On.Seconds, On.Counts.LiftsBlocked, On.Counts.Holds, On.MinMarginCm,
+			Served(On) ? TEXT("; the seat sent for a blocked lift") : TEXT("")));
+		TestTrue(FString::Printf(TEXT("%.0f deg: served, it crosses wherever it crossed left to its plan"), Deg), On.bDone || !Off.bDone);
+		if (Off.Counts.LiftsBlocked > 0 || !Off.bDone)
+		{
+			TestTrue(FString::Printf(TEXT("%.0f deg: a lift blocked on the margin, the seat sent for it"), Deg), Served(On));
+		}
+		if (On.bDone)
+		{
+			TestFalse(FString::Printf(TEXT("%.0f deg: served, no fault (%s)"), Deg, *On.FaultWhy), On.bFaulted);
+			TestEqual(FString::Printf(TEXT("%.0f deg: served, no wheel on the ground inside its window"), Deg), On.KeepOffViolations, 0);
+		}
+		if (On.bDone && Off.bDone)
+		{
+			TestTrue(FString::Printf(TEXT("%.0f deg: served, no longer (%.2f s against %.2f)"), Deg, On.Seconds, Off.Seconds), On.Seconds <= Off.Seconds + 0.03);
+		}
+		bShown = bShown || (On.bDone && (!Off.bDone || On.Seconds <= Off.Seconds - 0.1));
+	}
+	TestTrue(TEXT("a sag at which the seat sent for the blocked lift makes the crossing quicker, or makes it at all"), bShown);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbPlannerSeatHome,
 	"Ramms.Curb.Planner.SeatHome",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
