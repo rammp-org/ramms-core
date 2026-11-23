@@ -864,6 +864,51 @@ bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
 		Told.FollowMotors(5.0 + 2.0 * Step, Step, Moved, Moved, MaxRate, MaxAccel, Now, Next);
 		TestTrue(TEXT("forgotten: from where the motors are"), Now.Equals(Moved, 1e-9));
 	}
+	// Copies begun in the middle of a command stream, at a frame twice as long
+	// as the rest (a crossing's first frames, the plan taken): given the
+	// stream's cadence as its long-lived reader has it, they run with a motor's
+	// own follower, as old as the stream; left to find their own, they take
+	// the long frame for the interval and run a good way behind it.
+	{
+		const double				  Step = 0.0625, MaxRate = 3.77, MaxAccel = 40.0;
+		RammsMotion::FFollower		  Motor;
+		RammsMotion::FCommandInterval Cadence;
+		RammsCurb::FWheelFeed		  Seeded, Unseeded;
+		Motor.Reset(0.0);
+		double	   T = 0.0, Last = 0.0;
+		FVector2D  NowS = FVector2D::ZeroVector, NextS = FVector2D::ZeroVector, NowU = FVector2D::ZeroVector, NextU = FVector2D::ZeroVector;
+		const auto RunMotor = [&](double To) {
+			const int32 Steps = FMath::Max(1, FMath::CeilToInt32((To - Last) / 0.002));
+			for (int32 i = 0; i < Steps; ++i)
+			{
+				Motor.Step(Last + (To - Last) * i / Steps, (To - Last) / Steps, MaxRate, MaxAccel);
+			}
+		};
+		for (int32 k = 0; k < 60; ++k)
+		{
+			const double Gap = k == 0 ? 0.0 : (k == 41 ? 2.0 * Step : Step);
+			T += Gap;
+			if (k > 0)
+			{
+				RunMotor(T);
+				Cadence.Add(Gap);
+				Cadence.Advance(Gap);
+			}
+			Last = T;
+			const FVector2D Command(T, -0.5 * T), Stands(Motor.Setpoint, -0.5 * Motor.Setpoint);
+			Motor.Command(Command.X, T);
+			if (k >= 40)
+			{
+				Seeded.FollowMotors(T, Step, Command, Stands, FVector2D(MaxRate, MaxRate), FVector2D(MaxAccel, MaxAccel), NowS, NextS, &Cadence);
+				Unseeded.FollowMotors(T, Step, Command, Stands, FVector2D(MaxRate, MaxRate), FVector2D(MaxAccel, MaxAccel), NowU, NextU);
+			}
+		}
+		const double OffSeeded = FMath::Abs(NowS.X - Motor.Setpoint), OffUnseeded = FMath::Abs(NowU.X - Motor.Setpoint);
+		AddInfo(FString::Printf(TEXT("copies begun at a long frame, 19 ticks on: %.4f rad off the motor's follower with the stream's cadence, %.4f without"),
+			OffSeeded, OffUnseeded));
+		TestTrue(TEXT("with the stream's cadence: with the motor's own follower"), OffSeeded < 0.01);
+		TestTrue(TEXT("without: a good way off it"), OffUnseeded > 0.02 && OffUnseeded > 3.0 * OffSeeded);
+	}
 
 	// A real 5-bar (the default linkage, its hips either side of the wheel),
 	// by the same kinematics the controller gives the feed (FiveBarLinksAt).

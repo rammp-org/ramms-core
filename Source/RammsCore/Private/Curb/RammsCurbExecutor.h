@@ -1542,4 +1542,12 @@ namespace RammsCurb
 	 *  rest, rather than its command stopping in one tick with half the
 	 *  robot's mass on it. Without an easing (Accel or Dt 0 or less): X. */
 	double SeatRestAt(double X, double Rate, double Accel, double Dt);
+
+	/** How far (cm, + forward; 0: nowhere better) a seat at X, within Range
+	 *  (X aft end, Y forward end), is sent for a lift blocked on the margin:
+	 *  toward the side that raises the margin (MarginAt(offset from X); Now is
+	 *  MarginAt(0)), the least move that reaches Floor, or the best there is
+	 *  up to the end of its reach. Within a probe (1 cm) of an end of its
+	 *  reach, that end is still somewhere to go. */
+	double SeatServeMove(double X, const FVector2D& Range, double Floor, double Now, TFunctionRef<double(double)> MarginAt);
 } // namespace RammsCurb

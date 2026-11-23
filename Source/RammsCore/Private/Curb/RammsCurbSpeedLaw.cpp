@@ -395,7 +395,7 @@ namespace RammsCurb
 	}
 
 	bool FWheelFeed::FollowMotors(double Now, double Dt, const FVector2D& Commands, const FVector2D& Measured, const FVector2D& MaxRate,
-		const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext)
+		const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext, const RammsMotion::FCommandInterval* Cadence)
 	{
 		OutNow = OutNext = Measured;
 		if (Dt <= 0.0)
@@ -423,6 +423,10 @@ namespace RammsCurb
 			{
 				Follower = RammsMotion::FFollower();
 				Follower.Reset(Measured[m]);
+				if (Cadence)
+				{
+					Follower.SeedCadence(*Cadence);
+				}
 			}
 			else
 			{

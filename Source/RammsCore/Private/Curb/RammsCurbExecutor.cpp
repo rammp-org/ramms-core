@@ -3765,39 +3765,12 @@ namespace RammsCurb
 					const double Now = SeatMarginWithout(Measure, Short, 0.0);
 					if (Now < Floor)
 					{
-						// (Probed as far as its reach leaves: within a probe of an end
-						// of it, that end is still somewhere to go.)
-						const double ProbeCm = 1.0;
-						const double ForeCm = FMath::Min(ProbeCm, Seat.XRange.Y - SeatCmdX);
-						const double AftCm = FMath::Min(ProbeCm, SeatCmdX - Seat.XRange.X);
-						const double Fore = ForeCm > 1e-3 ? SeatMarginWithout(Measure, Short, ForeCm) : -1e9;
-						const double Aft = AftCm > 1e-3 ? SeatMarginWithout(Measure, Short, -AftCm) : -1e9;
-						const double Dir = Fore > Now + 1e-3 * ForeCm && Fore >= Aft ? 1.0 : (Aft > Now + 1e-3 * AftCm ? -1.0 : 0.0);
-						if (Dir != 0.0)
+						const double Move = SeatServeMove(SeatCmdX, Seat.XRange, Floor, Now, [&](double D) { return SeatMarginWithout(Measure, Short, D); });
+						if (Move != 0.0)
 						{
-							// The least move that way that reaches the floor, or the best
-							// there is, up to the end of its reach.
-							const double Room = Dir > 0.0 ? Seat.XRange.Y - SeatCmdX : SeatCmdX - Seat.XRange.X;
-							double		 Best = Now, BestAt = 0.0;
-							for (double D = FMath::Min(ProbeCm, Room);; D = FMath::Min(D + ProbeCm, Room))
-							{
-								const double Mg = SeatMarginWithout(Measure, Short, Dir * D);
-								if (Mg > Best + 1e-6)
-								{
-									Best = Mg;
-									BestAt = D;
-								}
-								if (Mg >= Floor || D >= Room - 1e-6)
-								{
-									break;
-								}
-							}
-							if (BestAt > 0.0)
-							{
-								bServe = true;
-								ServeWant = SeatCmdX + Dir * BestAt;
-								ServeWant = Dir > 0.0 ? FMath::Max(Want, ServeWant) : FMath::Min(Want, ServeWant);
-							}
+							bServe = true;
+							ServeWant = SeatCmdX + Move;
+							ServeWant = Move > 0.0 ? FMath::Max(Want, ServeWant) : FMath::Min(Want, ServeWant);
 						}
 						if (!bServe)
 						{
@@ -4827,6 +4800,40 @@ namespace RammsCurb
 	}
 
 	// --- the closed-loop dry run ------------------------------------------------------------
+
+	double SeatServeMove(double X, const FVector2D& Range, double Floor, double Now, TFunctionRef<double(double)> MarginAt)
+	{
+		// (Probed as far as its reach leaves: within a probe of an end of it,
+		// that end is still somewhere to go.)
+		const double ProbeCm = 1.0;
+		const double ForeCm = FMath::Min(ProbeCm, Range.Y - X);
+		const double AftCm = FMath::Min(ProbeCm, X - Range.X);
+		const double Fore = ForeCm > 1e-3 ? MarginAt(ForeCm) : -1e9;
+		const double Aft = AftCm > 1e-3 ? MarginAt(-AftCm) : -1e9;
+		const double Dir = Fore > Now + 1e-3 * ForeCm && Fore >= Aft ? 1.0 : (Aft > Now + 1e-3 * AftCm ? -1.0 : 0.0);
+		if (Dir == 0.0)
+		{
+			return 0.0;
+		}
+		// The least move that way that reaches the floor, or the best there
+		// is, up to the end of its reach.
+		const double Room = Dir > 0.0 ? Range.Y - X : X - Range.X;
+		double		 Best = Now, BestAt = 0.0;
+		for (double D = FMath::Min(ProbeCm, Room);; D = FMath::Min(D + ProbeCm, Room))
+		{
+			const double Mg = MarginAt(Dir * D);
+			if (Mg > Best + 1e-6)
+			{
+				Best = Mg;
+				BestAt = D;
+			}
+			if (Mg >= Floor || D >= Room - 1e-6)
+			{
+				break;
+			}
+		}
+		return Dir * BestAt;
+	}
 
 	double SeatRestAt(double X, double Rate, double Accel, double Dt)
 	{

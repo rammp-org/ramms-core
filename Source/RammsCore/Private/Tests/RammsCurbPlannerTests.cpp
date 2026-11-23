@@ -4468,6 +4468,27 @@ bool FRammsCurbExecutorSeatServeStays::RunTest(const FString& Parameters)
 	TestEqual(TEXT("no tick: where it is"), RammsCurb::SeatRestAt(5.0, 30.0, Accel, 0.0), 5.0);
 	TestEqual(TEXT("at rest: where it is"), RammsCurb::SeatRestAt(5.0, 0.0, Accel, Dt), 5.0);
 
+	// Where the seat is sent for a blocked lift (SeatServeMove), on margins
+	// that rise 0.5 cm per cm forward from 1.0 where the seat is, the lift's
+	// floor at 3.0 and a reach of -20..27 cm.
+	{
+		const FVector2D Reach(-20.0, 27.0);
+		const auto		Rising = [](double D) { return 1.0 + 0.5 * D; };
+		const auto		Falling = [](double D) { return 1.0 - 0.5 * D; };
+		const auto		Flat = [](double) { return 1.0; };
+		TestEqual(TEXT("the least whole probe that reaches the floor"), RammsCurb::SeatServeMove(0.0, Reach, 3.0, 1.0, Rising), 4.0, 1e-9);
+		TestEqual(TEXT("aft where aft raises it"), RammsCurb::SeatServeMove(0.0, Reach, 3.0, 1.0, Falling), -4.0, 1e-9);
+		TestEqual(TEXT("nowhere better: no move"), RammsCurb::SeatServeMove(0.0, Reach, 3.0, 1.0, Flat), 0.0, 0.0);
+		// The floor out of reach: the best there is, the end of the reach.
+		TestEqual(TEXT("the floor out of reach: to the end"), RammsCurb::SeatServeMove(24.5, Reach, 3.0, 1.0, Rising), 2.5, 1e-9);
+		// Within a probe of the end: that end is still somewhere to go (a probe
+		// of a whole centimetre from there fell outside the reach, and the seat
+		// was told it had nowhere better).
+		TestEqual(TEXT("0.4 cm from the forward end: to the end"), RammsCurb::SeatServeMove(26.6, Reach, 3.0, 1.0, Rising), 0.4, 1e-9);
+		TestEqual(TEXT("0.4 cm from the aft end: to the end"), RammsCurb::SeatServeMove(-19.6, Reach, 3.0, 1.0, Falling), -0.4, 1e-9);
+		TestEqual(TEXT("at the end, the margin better past it: no move"), RammsCurb::SeatServeMove(27.0, Reach, 3.0, 1.0, Rising), 0.0, 0.0);
+	}
+
 	// And in a crossing (the sagging seat of SeatServesBlockedLift, eased): the
 	// seat is sent for a blocked lift once for each lift blocked and handed
 	// back to its plan once -- not back and forth from tick to tick, as it was

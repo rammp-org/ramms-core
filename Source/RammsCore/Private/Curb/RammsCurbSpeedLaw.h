@@ -483,9 +483,14 @@ namespace RammsCurb
 		 * of its own leg a tick late: a loaded centre wheel on a cross slope
 		 * rocked the robot from one centre wheel to the other at the tick rate.)
 		 * False for a tick that is no tick (Dt 0 or less).
+		 *
+		 * Cadence: the commands' interval and delay as the controller has
+		 * followed them all along (the base's followers are as old); copies
+		 * begun afresh take it up, or their delay would be the one this
+		 * crossing's first frames show. None: they find their own.
 		 */
 		bool FollowMotors(double Now, double Dt, const FVector2D& Commands, const FVector2D& Measured, const FVector2D& MaxRate,
-			const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext);
+			const FVector2D& MaxAccel, FVector2D& OutNow, FVector2D& OutNext, const RammsMotion::FCommandInterval* Cadence = nullptr);
 		void ForgetMotors() { bMotorReplicas = false; }
 
 	private:

@@ -97,7 +97,7 @@ static TAutoConsoleVariable<int32> CVarRammsCurbKinematicWheelFeed(
 				TEXT("fore/aft rate and the link's turn for where its hips' motion profiles take them on the commands just sent --\n")
 					TEXT("copies of the base's followers run on the commands alone: a setpoint a command interval behind them, within\n")
 						TEXT("the motors' speed and acceleration (where the base runs no follower for a hip, as 1; the copies start each\n")
-							TEXT("crossing with the delay its first frames show, so they match the base's only on evenly timed frames). 2 gives each wheel the speed\n")
+							TEXT("crossing with the commands' delay as the controller has followed it, as the base's have). 2 gives each wheel the speed\n")
 								TEXT("its leg's motion needs most nearly (the lag model has a walk's first tick a good way into its speed, where\n")
 									TEXT("the motor is slow off the mark), but crossings were no quicker or steadier for it, and now and then one\n")
 										TEXT("rolled faster at a landing than with 1: not the default."),
@@ -4907,7 +4907,7 @@ namespace
 	// two distal links' turn rates (rad/s). False without the commands, the
 	// motors' specs, a simulation clock or a pose.
 	bool FiveBarProfiledMotion(const URammsRobotBaseComponent& Base, const URamms5BarLinkageController* FiveBar, RammsCurb::FWheelFeed& Feed,
-		float Dt, FVector2D& OutLegRate, FVector2D& OutLinkRate)
+		float Dt, const RammsMotion::FCommandInterval& Cadence, FVector2D& OutLegRate, FVector2D& OutLinkRate)
 	{
 		OutLegRate = OutLinkRate = FVector2D::ZeroVector;
 		const FRamms5BarLinkageSpec* Spec = FiveBarSpecOf(FiveBar);
@@ -4929,7 +4929,7 @@ namespace
 		const FVector2D Measured(Base.GetMotorValue(Spec->ProximalMotorA), Base.GetMotorValue(Spec->ProximalMotorB));
 		FVector2D		Hips, Next;
 		if (!Feed.FollowMotors(Now, Dt, FVector2D(CmdA, CmdB), Measured, FVector2D(MotorA.MaxVelocity, MotorB.MaxVelocity),
-				FVector2D(MotorA.MaxAcceleration, MotorB.MaxAcceleration), Hips, Next))
+				FVector2D(MotorA.MaxAcceleration, MotorB.MaxAcceleration), Hips, Next, &Cadence))
 		{
 			return false;
 		}
@@ -5036,7 +5036,7 @@ void URammsCurbNegotiationController::PredictLegRates(float DeltaTime)
 			// ...and the leg's own motion over the tick, by its hips' profiles
 			// run on the commands just sent (ramms.Curb.KinematicWheelFeed 2).
 			FVector2D  LegRate, LinkRate;
-			const bool bMotion = ProfileBase && FiveBarProfiledMotion(*ProfileBase, State.FiveBar, Drive->Feeds[i], DeltaTime, LegRate, LinkRate);
+			const bool bMotion = ProfileBase && FiveBarProfiledMotion(*ProfileBase, State.FiveBar, Drive->Feeds[i], DeltaTime, CommandCadence, LegRate, LinkRate);
 			Drive->Feeds[i].PredictMotion(LegRate, LinkRate, bMotion);
 		}
 	}
