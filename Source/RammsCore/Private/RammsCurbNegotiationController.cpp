@@ -880,12 +880,9 @@ bool URammsCurbNegotiationController::ResolveLegs(FString& OutReason)
 
 bool URammsCurbNegotiationController::ResolveSeat(FString& OutReason)
 {
-	// (Afresh, but for the rider's setting as the last crossing left it.)
-	const FSeatState Last = SeatState;
+	// (Afresh; the rider's setting as the last crossing left it is kept apart:
+	// bSeatKept.)
 	SeatState = FSeatState();
-	SeatState.bKept = Last.bKept;
-	SeatState.KeptPitchOwn = Last.KeptPitchOwn;
-	FMemory::Memcpy(SeatState.KeptCommands, Last.KeptCommands, sizeof(SeatState.KeptCommands));
 	Model->Seat = RammsCurb::FModelSeat();
 	if (!Seat.IsSet())
 	{
@@ -1001,7 +998,7 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		float		 Now[3] = { 0.0f, 0.0f, 0.0f };
 		const bool	 bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
 			&& !Seat.TiltMotor.IsNone() && Base->GetMotorCommand(Seat.TiltMotor, Now[2]);
-		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && SeatState.bKept, SeatState.KeptPitchOwn, SeatState.KeptCommands, Now, Found);
+		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && bSeatKept, SeatKeptPitchOwn, SeatKeptCommands, Now, Found);
 		SeatState.PitchRef = bTilts ? Found + SeatPitchRad : 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
@@ -1028,9 +1025,9 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		Base->SetMotorCommand(Seat.TiltMotor, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, SeatState.LinkAngle0, Pitch)));
 		// The setting held and the commands as they now stand (read back: a
 		// command is clamped to its motor's range), for the next take-over.
-		SeatState.bKept = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, SeatState.KeptCommands[0])
-			&& Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, SeatState.KeptCommands[1]) && Base->GetMotorCommand(Seat.TiltMotor, SeatState.KeptCommands[2]);
-		SeatState.KeptPitchOwn = SeatState.PitchOwn;
+		bSeatKept = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, SeatKeptCommands[0])
+			&& Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, SeatKeptCommands[1]) && Base->GetMotorCommand(Seat.TiltMotor, SeatKeptCommands[2]);
+		SeatKeptPitchOwn = SeatState.PitchOwn;
 	}
 }
 
@@ -4985,8 +4982,9 @@ void URammsCurbNegotiationController::TrackLegRates(float DeltaTime)
 		else
 		{
 			// Nothing to measure a rate over, or a gap too long to trust a turn
-			// across: start the leg's feed again from here.
-			Feed.Reset();
+			// across: start the leg's rates again from here (the link its wheel
+			// hangs from stays told).
+			Feed.ForgetRates();
 		}
 		Feed.Measure(DeltaTime, FVector2D(State.MeasuredX, State.MeasuredZ), Carrier, State.LagRate);
 		// A 5-bar's wheel hangs from one of its two distal links: their

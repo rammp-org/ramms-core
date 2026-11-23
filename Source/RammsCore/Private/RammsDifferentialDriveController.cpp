@@ -176,6 +176,12 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 	// over it ran with a gain that changed with the frame rate.
 	const bool	bSimClock = UsesBase() && BaseComponent->GetSimulationTime() >= 0.0;
 	const float ControlDt = bSimClock ? static_cast<float>(Dt) : DeltaTime;
+	// (The loops' own step no longer than a frame's may be: the physics' clock
+	// runs on through a hitch or a paused world, and a speed error integrated
+	// over the whole gap in one step would be a kick. The odometry and the
+	// brakes take the time that passed.)
+	constexpr float MaxLoopStepSeconds = 0.4f; // what the engine holds a frame's DeltaTime to
+	const float		LoopDt = bSimClock ? FMath::Min(ControlDt, MaxLoopStepSeconds) : DeltaTime;
 	// Each drive wheel's angle, for holding it still: the backend's reading
 	// while it follows the wheel's rate, else the rate integrated.
 	const bool bCanHold = CanHoldWithTorque();
@@ -399,11 +405,11 @@ void URammsDifferentialDriveController::TickComponent(float DeltaTime, ELevelTic
 			switch (ControlMode)
 			{
 				case EDriveControlMode::TorqueControl:
-					UpdateTorqueControl(ControlDt);
+					UpdateTorqueControl(LoopDt);
 					break;
 
 				case EDriveControlMode::VelocityControl:
-					UpdateVelocityControl(ControlDt);
+					UpdateVelocityControl(LoopDt);
 					break;
 			}
 		}

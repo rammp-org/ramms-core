@@ -2021,6 +2021,53 @@ bool FRammsCurbPlannerSteadyPath::RunTest(const FString& Parameters)
 	TestTrue(TEXT("the window takes something out of the square climb's height"), Turns1 < Turns0 || Travel1 < Travel0 - 0.1);
 	TestTrue(TEXT("inside every sample's corridor (where it was without the window)"), bInside1 || !bInside0);
 	TestTrue(FString::Printf(TEXT("as fast (floor %.2f against %.2f cm/s)"), After.VFloor, Before.VFloor), After.VFloor >= Before.VFloor - 0.5);
+
+	// Up the curb and down it: the levelled height is no nearer its corridor's
+	// edge than the slack rising early keeps (2 cm), or than the corridor's
+	// middle where it is narrower than twice that -- but for where the path
+	// already was at least as near without the window (compared where the two
+	// plans have a sample at the same travel). And the descent's height turns
+	// round no more often for the window, nor travels further.
+	for (const bool bClimb : { true, false })
+	{
+		const RammsCurb::FPlannerInput Way = PlanOn(PlanScenario(TEXT("Square"), bClimb));
+		SetTestCVar(Window, 0.0f);
+		const RammsCurb::FCurbSchedule Raw = RammsCurb::PlanCrossing(Way);
+		SetTestCVar(Window, 1.5f);
+		const RammsCurb::FCurbSchedule Levelled = RammsCurb::PlanCrossing(Way);
+		const TCHAR*				   What = bClimb ? TEXT("climb") : TEXT("descent");
+		if (!TestTrue(FString::Printf(TEXT("%s: both plans are made"), What), Raw.Class != RammsCurb::EPlanClass::Refused && Levelled.Class != RammsCurb::EPlanClass::Refused))
+		{
+			continue;
+		}
+		int32  T0 = 0, T1 = 0;
+		double D0 = 0.0, D1 = 0.0;
+		bool   bIn0 = true, bIn1 = true;
+		Measure(Raw, T0, D0, bIn0);
+		Measure(Levelled, T1, D1, bIn1);
+		TestTrue(FString::Printf(TEXT("%s: no more turns with the window (%d against %d)"), What, T1, T0), T1 <= T0);
+		TestTrue(FString::Printf(TEXT("%s: no more travel with the window (%.1f against %.1f cm)"), What, D1, D0), D1 <= D0 + 1e-6);
+		int32 Nearer = 0, Compared = 0;
+		for (const RammsCurb::FScheduleSample& L : Levelled.Samples)
+		{
+			if (L.bApproach || L.BLo > L.BHi)
+			{
+				continue;
+			}
+			const RammsCurb::FScheduleSample* R = Raw.Samples.FindByPredicate([&](const RammsCurb::FScheduleSample& S) { return FMath::IsNearlyEqual(S.S, L.S, 1e-6); });
+			if (!R || R->bApproach || !FMath::IsNearlyEqual(R->BLo, L.BLo, 1e-6) || !FMath::IsNearlyEqual(R->BHi, L.BHi, 1e-6))
+			{
+				continue;
+			}
+			++Compared;
+			const double Inset = FMath::Min(2.0, 0.5 * (FMath::Min(L.BHi, L.BLo + 80.0) - L.BLo));
+			const bool	 bLow = L.B < L.BLo + Inset - 1e-6 && L.B < R->B - 1e-6;
+			const bool	 bHigh = L.B > FMath::Min(L.BHi, L.BLo + 80.0) - Inset + 1e-6 && L.B > R->B + 1e-6;
+			Nearer += bLow || bHigh ? 1 : 0;
+		}
+		TestTrue(FString::Printf(TEXT("%s: samples compared (%d)"), What, Compared), Compared > 20);
+		TestEqual(FString::Printf(TEXT("%s: samples the window moved nearer their corridor's edge than its slack"), What), Nearer, 0);
+	}
 	return true;
 }
 

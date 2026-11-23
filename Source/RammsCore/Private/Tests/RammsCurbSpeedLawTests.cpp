@@ -965,6 +965,13 @@ bool FRammsCurbSpeedLawCarrierLink::RunTest(const FString& Parameters)
 				TestTrue(*FString::Printf(TEXT("%s: every pose solved"), *What), bSolved);
 				TestFalse(*FString::Printf(TEXT("%s: never the wrong link or sense"), *What), bWrong);
 				TestTrue(*FString::Printf(TEXT("%s: the wheel's link told once it has walked"), *What), Told == TrueLink && ToldSense == TrueSense);
+				// A tick too long to measure a turn across starts the rates again,
+				// the link still told; a feed begun again has it to tell anew.
+				Real.ForgetRates();
+				TestTrue(*FString::Printf(TEXT("%s: the link stays told over a long tick"), *What), Real.GetCarrierLink(ToldSense) == TrueLink && ToldSense == TrueSense);
+				TestFalse(*FString::Printf(TEXT("%s: no link feed until rates are measured again"), *What), Real.HasLinkFeed());
+				Real.Reset();
+				TestEqual(*FString::Printf(TEXT("%s: begun again, not told"), *What), Real.GetCarrierLink(ToldSense), static_cast<int32>(INDEX_NONE));
 				if (StanceX == 0.0)
 				{
 					TestFalse(*FString::Printf(TEXT("%s: a lift alone does not tell the links apart"), *What), bToldByLiftAlone);

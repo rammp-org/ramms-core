@@ -372,6 +372,20 @@ namespace RammsCurb
 		/** Forget everything: the next Measure only records where the leg is. */
 		void Reset() { *this = FWheelFeed(); }
 
+		/** Start the rates again (a tick too long to measure a turn across)
+		 *  with what has been told of the wheel's link kept: the link does not
+		 *  change, and telling it again takes a lift and a walk. */
+		void ForgetRates()
+		{
+			FWheelFeed Fresh;
+			for (int32 i = 0; i < 4; ++i)
+			{
+				Fresh.LinkMisfit[i] = LinkMisfit[i];
+			}
+			Fresh.LinkTurn = LinkTurn;
+			*this = Fresh;
+		}
+
 		/**
 		 * One tick of Dt, measured at its end: the wheel centre (chassis x and
 		 * z, cm), the turn rate (rad/s) of the link it hangs from over the tick,
