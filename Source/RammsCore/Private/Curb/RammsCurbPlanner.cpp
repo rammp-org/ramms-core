@@ -9209,10 +9209,18 @@ namespace RammsCurb
 					Best = Kept;
 					bChoreographed = true;
 				}
-				else if (IsOk(Kept))
+				else if (IsOk(Kept) && !HandOff())
 				{
 					Tried.Add(FString::Printf(TEXT("%s level but its floor %.1f cm/s is under %.2f of %s's %.1f: not kept"), *Kept.Name,
 						Kept.VFloor, PlantedWalkFloorShare(), *Best.Name, Best.VFloor));
+				}
+				else if (IsOk(Kept))
+				{
+					// (With the hand-off the floor's share is not what chooses: it was
+					// not kept for the hand-off, and the line that says why is logged
+					// where that is decided.)
+					Tried.Add(FString::Printf(TEXT("%s level (floor %.1f cm/s; %s: %.1f): not kept for the hand-off"), *Kept.Name, Kept.VFloor, *Best.Name,
+						Best.VFloor));
 				}
 			}
 			// Up a curb (Ramms.Curb.ChoreographyUp) the walk as down one -- where
