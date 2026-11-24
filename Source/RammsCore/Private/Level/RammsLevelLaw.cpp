@@ -41,6 +41,35 @@ namespace RammsLevel
 			State.bLoopOpen = false;
 		}
 
+		/** The base's wanted attitude W: the rider's (FState::Tilt) less the
+		 *  part of its pitch that the seat holds. */
+		FVector2D BaseWanted(const FState& State)
+		{
+			return State.Tilt.Get() - FVector2D(State.SeatShare.Get().X, 0.0);
+		}
+
+		/** The seat's trim has gone into the seat's own command, or is gone:
+		 *  the seat holds none of the rider's wanted pitch now. */
+		void ZeroSeat(FState& State)
+		{
+			State.SeatTrim.Zero();
+			State.SeatShare.Reset(FVector2D::ZeroVector);
+		}
+
+		/**
+		 * The wanted attitudes start again from where things stand: the BASE's
+		 * at Deg, at rest, and the rider's at that with the trim the seat
+		 * already carries -- which is where the rider is -- so that nothing is
+		 * asked to move, the seat included. What the seat carries is all share
+		 * from here (it is walked to where it belongs on the tilt policy).
+		 */
+		void StartWantedFrom(FState& State, const FVector2D& Deg)
+		{
+			const FVector2D Share(State.SeatTrim.Get(), 0.0);
+			State.SeatShare.Reset(Share);
+			State.Tilt.Reset(Deg + Share);
+		}
+
 		/** A leg, or a point, every number of which is one. */
 		bool IsFinite(const FLegReach& Leg)
 		{
@@ -67,18 +96,19 @@ namespace RammsLevel
 				State.Attitude.Seed(In.AttitudeDeg);
 				State.Ground.Seed(In.AttitudeDeg + AchievedDeg);
 				State.Terrain.Seed(In.AttitudeDeg + AchievedDeg);
+				State.SeatGround.Seed(In.AttitudeDeg + AchievedDeg);
 			}
 			if (State.Attitude.IsSeeded())
 			{
-				State.Tilt.Reset(State.Attitude.Get());
-				State.Loop.StartFrom(State.CorrectionDeg, State.Tilt.Get(), State.Terrain.Get(), Tuning);
+				StartWantedFrom(State, State.Attitude.Get());
+				State.Loop.StartFrom(State.CorrectionDeg, BaseWanted(State), State.Terrain.Get(), Tuning);
 			}
 			else
 			{
 				// No attitude has ever been read (a plane adopted blind): there
 				// is nothing to start the loop from. The resume that follows
 				// the first reading does it.
-				State.Tilt.Reset(Tuning.LevelReferenceDeg);
+				StartWantedFrom(State, Tuning.LevelReferenceDeg);
 				State.Loop.Reset();
 			}
 			State.Quiet.Reset();
@@ -363,8 +393,21 @@ namespace RammsLevel
 		}
 		const bool bValid = bLegsValid && In.bAttitudeValid && LawImpl::IsFinite(In.AttitudeDeg);
 
+		// The seat: whether its trim runs, and the room it has either way about
+		// where the rider has it (a seat described with numbers that are not
+		// numbers is no seat).
+		const bool	 bSeatRuns = In.bSeat && Tuning.bSeatCoversTransients && FMath::IsFinite(In.SeatPreferenceDeg) && FMath::IsFinite(In.SeatTrimLowDeg) && FMath::IsFinite(In.SeatTrimHighDeg);
+		const double SeatMaxDeg = FMath::Max(0.0, Tuning.SeatTrimMaxDeg);
+		const double SeatLowDeg = bSeatRuns ? FMath::Max(-SeatMaxDeg, FMath::Min(0.0, In.SeatTrimLowDeg)) : -SeatMaxDeg;
+		const double SeatHighDeg = bSeatRuns ? FMath::Min(SeatMaxDeg, FMath::Max(0.0, In.SeatTrimHighDeg)) : SeatMaxDeg;
+
 		// What the last step left, for "is anything moving" further down.
 		const FVector2D PrevGroundDeg = State.PrevGroundDeg;
+		// ... and for what the seat is to cover: where the ground as the seat
+		// hears it, and the correction, stood.
+		const bool	 bSeatGroundBefore = State.SeatGround.IsSeeded();
+		const double SeatGroundBefore = State.SeatGround.Get().X;
+		const double CorrectionBefore = State.CorrectionDeg.X;
 
 		// The offsets a hand-back left on the legs, where it says.
 		bool bResumeDz = In.bResume && In.bResumeHasPlane && In.ResumeDz.Num() == NumLegs && NumLegs > 0;
@@ -405,6 +448,7 @@ namespace RammsLevel
 			const double	ExplainedDeg = BaselineTurnDeg(Sensed, State.PrevBaseZ);
 			const FVector2D SeenDeg = State.Ground.Tick(Filtered + AchievedDeg, In.SpeedCmS, TurnDegPerCm, ExplainedDeg, Dt);
 			State.Terrain.Tick(SeenDeg - AchievedDeg, AchievedDeg, Dt, Tuning.TerrainFilterSeconds);
+			State.SeatGround.Tick(SeenDeg, Dt, Tuning.SeatFilterSeconds);
 			State.LossSeconds = 0.0;
 		}
 		else
@@ -461,18 +505,18 @@ namespace RammsLevel
 				State.CorrectionDeg = In.ResumePlaneDeg;
 				State.RideCm = 0.0;
 				State.HeightRateCmS = 0.0;
-				State.SeatTrim.Zero();
+				LawImpl::ZeroSeat(State);
 				LawImpl::ColdResume(State, In, AchievedDeg, bValid, Tuning);
 				bWantedSet = true;
 				bAdopted = true;
 				break;
 			case EAction::Fold:
 				LawImpl::ZeroCorrection(State, NumLegs);
-				State.SeatTrim.Zero();
+				LawImpl::ZeroSeat(State);
 				break;
 			case EAction::Clear:
 				LawImpl::ZeroCorrection(State, NumLegs);
-				State.SeatTrim.Zero();
+				LawImpl::ZeroSeat(State);
 				bCleared = true;
 				break;
 			case EAction::BeginRelease:
@@ -541,14 +585,18 @@ namespace RammsLevel
 				// consulted meanwhile: its integral is from before, and would
 				// ask again for what was just ramped out. Go on from the
 				// correction as it stands, as a resume does.
-				State.Tilt.Reset(LoopAttitudeDeg);
-				State.Loop.StartFrom(State.CorrectionDeg, State.Tilt.Get(), GroundDeg, Tuning);
+				LawImpl::StartWantedFrom(State, LoopAttitudeDeg);
+				State.Loop.StartFrom(State.CorrectionDeg, LawImpl::BaseWanted(State), GroundDeg, Tuning);
 				State.bLoopOpen = false;
 				State.bSaturated = false;
 				State.bRateLimited = false;
 				bWantedSet = true;
 			}
+			// Where the base is wanted, and how much of the rider's wanted pitch
+			// the seat is to hold on top of that. A release gives the base back
+			// to its stance and the seat back to the rider.
 			FVector2D GoalDeg = GroundDeg;
+			double	  ShareGoalDeg = 0.0;
 			// Standing still with nothing left to walk and nothing moving the
 			// stance: all that is between here and a rest is the settle time.
 			bool bAboutToRest = false;
@@ -560,13 +608,25 @@ namespace RammsLevel
 				GoalDeg = Goal.GoalDeg;
 				State.bShort = Goal.ShortDeg > (State.bShort ? AtReachOffDeg : AtReachOnDeg);
 				State.GoalLimit = Goal.Limit;
+				if (bSeatRuns)
+				{
+					// The pitch the rider prefers; and what the legs must leave
+					// the base tilted by, taken back out at the seat.
+					ShareGoalDeg = FMath::Clamp(In.SeatPreferenceDeg - (GoalDeg.X - Ref.X), SeatLowDeg, SeatHighDeg);
+				}
+			}
+			const FVector2D ShareGoal(ShareGoalDeg, 0.0);
+			const FVector2D RiderGoalDeg = GoalDeg + ShareGoal;
+			if (bActive)
+			{
 				// No rest while something moves the stance under the offsets:
 				// nothing would be written, and the base would go with it. Nor
 				// while an offset is still on its way to the allocation's (a
 				// lifted leg being let down at its own pace): it would be left
 				// where the rest found it.
-				const bool bMayRest = State.Tilt.IsNear(GoalDeg) && !bBaselinesMoving && !State.bLegsBehind;
-				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, bMayRest, Dt, Tuning);
+				// (Nor while the seat is still on its way.)
+				const bool bMayRest = State.Tilt.IsNear(RiderGoalDeg) && State.SeatShare.IsNear(ShareGoal) && !State.SeatTrim.IsBehind() && !bBaselinesMoving && !State.bLegsBehind;
+				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - LawImpl::BaseWanted(State)).Size(), In.bStick, bMayRest, Dt, Tuning);
 				bAboutToRest = bMayRest && !In.bStick && In.SpeedCmS < QuietSpeedCmS;
 			}
 			// At rest nothing is written, so the servos simply hold; and a step
@@ -580,16 +640,21 @@ namespace RammsLevel
 					// legs the base rocks onto other wheels by itself, and the
 					// walk waits for that to be over (it comes to rest within
 					// the policy's acceleration, and goes on from there).
+					// (The rider's wanted attitude is what the policy is about;
+					// the seat's share of its pitch moves on the same limits,
+					// and the base's is the one less the other.)
 					if (In.bStanceChanging)
 					{
 						State.Tilt.Brake(Dt, Tuning.TiltAccelDegPerSec2);
+						State.SeatShare.Brake(Dt, Tuning.TiltAccelDegPerSec2);
 					}
 					else
 					{
-						State.Tilt.Tick(GoalDeg, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
+						State.Tilt.Tick(RiderGoalDeg, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
+						State.SeatShare.Tick(ShareGoal, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
 					}
 				}
-				const FVector2D WantedNow = State.Tilt.Get();
+				const FVector2D WantedNow = LawImpl::BaseWanted(State);
 
 				// The integral only trims while levelling, on a stance that can
 				// be levelled, and not while the legs are already going as fast
@@ -644,7 +709,7 @@ namespace RammsLevel
 					State.ReleaseSeconds += In.bStanceChanging ? 0.0 : Dt;
 					// ("Reached" as IsNear has it: the ground's attitude is an
 					// estimate that never stands quite still.)
-					if (State.Tilt.IsNear(GroundDeg) || State.ReleaseSeconds > ReleaseMaxSeconds)
+					if ((State.Tilt.IsNear(RiderGoalDeg) && State.SeatShare.IsNear(ShareGoal)) || State.ReleaseSeconds > ReleaseMaxSeconds)
 					{
 						State.bReleaseOpen = true;
 					}
@@ -683,10 +748,16 @@ namespace RammsLevel
 				LawImpl::KeepAllocation(State, Alloc);
 				bWrite = true;
 			}
+			if (Dt > 0.0)
+			{
+				// What the seat holds of the rider's wanted pitch goes back out
+				// with the correction, on the same limits.
+				State.SeatShare.Tick(FVector2D::ZeroVector, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
+			}
 			if (bValid)
 			{
 				// Nothing is being steered to: the error reads zero.
-				State.Tilt.Reset(AttitudeDeg);
+				State.Tilt.Reset(AttitudeDeg + FVector2D(State.SeatShare.Get().X, 0.0));
 			}
 		}
 
@@ -703,13 +774,42 @@ namespace RammsLevel
 		// written); elsewhere it runs, or runs out.
 		if (Now != EState::Holding && !bQuiet && (State.Attitude.IsSeeded() || State.SeatTrim.Get() != 0.0))
 		{
-			const bool	 bRun = In.bSeat && Tuning.bSeatCoversTransients && bActive && bValid;
-			const double BasePitchDeg = State.Attitude.IsSeeded() ? AttitudeDeg.X - Ref.X : 0.0;
-			State.SeatTrim.Tick(BasePitchDeg, bRun, Dt, Tuning);
+			// The cover runs while the loop does (levelling, and a release while
+			// it is still walked). It answers where the base's pitch will be,
+			// against where it is wanted, when the seat's command lands a
+			// command interval from now: the ground as the gate lets it be read
+			// (the body's own pitching left out), less the plane the legs'
+			// joints have made and what the legs were told to add to it this
+			// tick, which they will have done by then. A seat sent after the
+			// error as it stands answers again what the legs have just been
+			// sent after: and a knock on a robot on the move, which passes the
+			// gate as ground and sends the legs after it, would be answered
+			// twice over (the dry run's knocks at a crawl and at a walk: a tenth
+			// more swing at the rider; with the legs' step taken off, no more
+			// than with no seat at all).
+			const bool bCover = bSeatRuns && bClosed && bValid && State.SeatGround.IsSeeded();
+			double	   AnswerDeg = 0.0;
+			if (bCover)
+			{
+				const double GroundNow = State.SeatGround.Get().X;
+				const double WantedPitch = LawImpl::BaseWanted(State).X;
+				AnswerDeg = GroundNow - AchievedDeg.X - WantedPitch;
+				if (bSeatGroundBefore && !bWantedSet && Dt > 0.0)
+				{
+					// (Against the wanted attitude as it stands: while that is
+					// walked the legs are told to follow it, and with their step
+					// taken off here the seat has no part in the walk at all. The
+					// rider is then a command interval behind their wanted
+					// attitude, as the base is behind its own. The ground's step
+					// is left out unless asked for: FSeatCoverTuning::GroundAhead.)
+					AnswerDeg += State.SeatTrim.Cover.GroundAhead * (GroundNow - SeatGroundBefore) - (State.CorrectionDeg.X - CorrectionBefore);
+				}
+			}
+			State.SeatTrim.Tick(bHasOffsets ? State.SeatShare.Get().X : 0.0, AnswerDeg, bCover, SeatLowDeg, SeatHighDeg, Dt, Tuning);
 		}
 
 		// ---- 5. The speed scale ----
-		const FVector2D WantedDeg = State.Tilt.Get();
+		const FVector2D WantedDeg = LawImpl::BaseWanted(State);
 		const double	TiltDeg = State.Attitude.IsSeeded() ? Inclination(AttitudeDeg) : 0.0;
 		const double	OffReferenceDeg = State.Attitude.IsSeeded() ? Inclination(AttitudeDeg - Ref) : 0.0;
 		const double	ErrorDeg = bHasOffsets && State.Attitude.IsSeeded() ? (AttitudeDeg - WantedDeg).Size() : 0.0;
@@ -781,6 +881,8 @@ namespace RammsLevel
 		Out.AppliedDeg = State.CorrectionDeg;
 		Out.RideCm = State.RideCm;
 		Out.SeatTrimDeg = State.SeatTrim.Get();
+		Out.SeatShareDeg = State.SeatShare.Get().X;
+		Out.RiderWantedDeg = State.Tilt.Get();
 		Out.SpeedScale = State.SpeedScale.Get();
 
 		Out.TiltDeg = TiltDeg;

@@ -21,6 +21,17 @@
  * WHAT ONE STEP DOES, in this order. State is FState; "A", "G", "W", "C",
  * "e" as RammsLevelLoop.h; Ref is Tuning.LevelReferenceDeg.
  *
+ * THE RIDER AND THE BASE. On a robot whose seat tilts (In.bSeat, with
+ * Tuning.bSeatCoversTransients: "the seat runs") the rider's pitch is the
+ * base's plus the seat's, and the two are wanted separately: "R" is the
+ * RIDER's wanted attitude (State.Tilt), "D" the part of its pitch that the
+ * seat holds (State.SeatShare: the pitch the rider prefers, and what a slope
+ * past the legs' reach leaves the base tilted by, taken back out), and the
+ * base's is W = R - (D, 0). R is what the tilt policy is about: it, and D,
+ * move within its rate and acceleration; the base's W is the one less the
+ * other, and may turn faster than either while the seat turns the other way.
+ * With no seat that runs, D is 0 and W is R: one wanted attitude, as before.
+ *
  * 0. HOUSEKEEPING. Dt is clamped to [0, MaxStepSeconds]. A leg count that
  *    differs from the last step's (the first step included) counts as
  *    bColdReset. The attitude is VALID when In.bAttitudeValid and
@@ -38,7 +49,9 @@
  *    step that took time), Dt): the ground as far as it can have turned
  *    (FGroundGate); G = Terrain.Tick(S - c, c, Dt, TerrainFilterSeconds),
  *    the low-pass of S; LossSeconds = 0. When not: all hold and
- *    LossSeconds += Dt. The LOOP's attitude, "A'" below, is S - c: the
+ *    LossSeconds += Dt. When valid the seat hears the same reading through
+ *    its own low-pass: SeatGround.Tick(S, Dt, SeatFilterSeconds). The LOOP's
+ *    attitude, "A'" below, is S - c: the
  *    attitude less what only the body can have done to it (a knock, braking,
  *    a rock onto a leg set down). It is A whenever the gate lets the reading
  *    through, which is always but in those. The rest at standstill, the seat
@@ -61,18 +74,22 @@
  *    StartFromAttitude  C = 0, Loop.Reset, Ride = 0, LastDz = 0; then as
  *                       ColdResume.
  *    ColdResume         when valid, the filters are seeded from this step's
- *                       readings (A := In.AttitudeDeg, S := G := A +
- *                       MeasuredCorrection(Legs)); W := A at rest
- *                       (Tilt.Reset); Loop.StartFrom(C, W, G); Quiet and
+ *                       readings (A := In.AttitudeDeg, S := G := SeatGround :=
+ *                       A + MeasuredCorrection(Legs)); W := A at rest, by
+ *                       D := the seat's trim as it stands and R := A + (D, 0),
+ *                       both at rest: the rider is wanted where they are, and
+ *                       what the seat carries is walked from there;
+ *                       Loop.StartFrom(C, W, G); Quiet and
  *                       Divergence reset; the support memory cleared;
  *                       bSaturated, bRateLimited, bReleaseOpen false. C, Ride
  *                       and the seat trim stay as they are, so nothing steps.
  *                       With no attitude ever read (a plane adopted blind) W
  *                       is the reference and the loop is reset; the resume
  *                       that follows the first reading sets them.
- *    Adopt              C := In.ResumePlaneDeg, Ride = 0, SeatTrim.Zero (a fold
- *                       came before, and the trim stayed in the seat's
- *                       baseline: on the same step, even); then as ColdResume;
+ *    Adopt              C := In.ResumePlaneDeg, Ride = 0, the seat's trim and
+ *                       D zero (a fold came before, and the trim stayed in the
+ *                       seat's own command: on the same step, even); then as
+ *                       ColdResume;
  *                       LastDz := Allocate(Legs, Points, C, Tuning, 0, 0).Dz.
  *                       In.Legs must be the legs AFTER the shell's rebase, so
  *                       that these are the offsets already on the motors --
@@ -85,11 +102,11 @@
  *                       (The plan words this "C and I are set to the plane";
  *                       the integral here is the plane less the feed-forward,
  *                       which is what makes the next C_raw the plane.)
- *    Fold               C = 0, Loop.Reset, Ride = 0, LastDz = 0, SeatTrim.Zero:
- *                       the shell has put (or now puts) them into the
- *                       baselines, and nothing moves.
- *    Clear              the same zeroing, with SeatTrim.Zero; this step's
- *                       outputs are exact zeros and bWrite is true.
+ *    Fold               C = 0, Loop.Reset, Ride = 0, LastDz = 0, the seat's
+ *                       trim and D zero: the shell has put (or now puts) them
+ *                       into the baselines, and nothing moves.
+ *    Clear              the same zeroing; this step's outputs are exact zeros
+ *                       and bWrite is true.
  *    BeginRelease       ReleaseSeconds = 0, bReleaseOpen = false, Quiet reset.
  *    Freeze, None       nothing.
  *
@@ -98,7 +115,8 @@
  *    ACTIVE, and RELEASING while valid and not bReleaseOpen (closed loop):
  *    0. On the first such step after an open-loop one (a release taken back
  *       part way through its ramp; a release that lost its attitude and has
- *       it again): W := A' at rest and Loop.StartFrom(C, W, G), as a resume,
+ *       it again): W := A' at rest (D and R as a resume sets them) and
+ *       Loop.StartFrom(C, W, G), as a resume,
  *       and W starts moving on the next step. The loop was not consulted
  *       during the ramp, and its integral from before would ask again for
  *       what was ramped out. Active also clears bReleaseOpen.
@@ -109,9 +127,18 @@
  *       also says how much of the correction that would hold the reference
  *       the legs must leave, and why: bShort is set once that is over
  *       AtReachOnDeg and until it is back under AtReachOffDeg. Releasing, G
- *       itself: the attitude of the baseline stance on this ground.
+ *       itself: the attitude of the baseline stance on this ground. That is
+ *       the BASE's goal. The seat's share has one too: Active with a seat
+ *       that runs, DGoal = clamp(In.SeatPreferenceDeg - (Goal.X - Ref.X),
+ *       the seat's room) -- the pitch the rider prefers, less what the legs
+ *       must leave the base tilted by -- and 0 otherwise (a release gives the
+ *       seat back with the base). The seat's room is In.SeatTrimLowDeg ..
+ *       In.SeatTrimHighDeg within +-SeatTrimMaxDeg. The RIDER's goal is
+ *       Goal + (DGoal, 0): on the reference with their preference, but for
+ *       what neither the legs nor the seat can take out.
  *    c. Active only: Quiet.Tick(In.SpeedCmS, |A - W|, In.bStick,
- *       Tilt.IsNear(Goal) and the baselines standing still, Dt). While
+ *       R and D near their goals, the seat's trim not held back by its rate,
+ *       and the baselines standing still, Dt). While
  *       quiet, d to h are skipped: W, the integral, C and Ride hold, Dz =
  *       LastDz and bWrite is false. The same on a step with Dt 0.
  *       Nor is there a rest while an offset is still on its way to the
@@ -125,12 +152,15 @@
  *       ramped under a resting base would carry it off level with nothing
  *       written, so there is no rest while one moves, and one that moves
  *       ends a rest.
- *    d. W = Tilt.Tick(Goal, Dt, TiltRateDegPerSec, TiltAccelDegPerSec2) --
+ *    d. R = Tilt.Tick(the rider's goal, Dt, TiltRateDegPerSec,
+ *       TiltAccelDegPerSec2) and D = SeatShare.Tick(DGoal, the same), and
+ *       W = R - (D, 0) --
  *       but on a step whose action set W (StartFromAttitude, ColdResume,
  *       Adopt), when W stays where it was put and starts moving on the next
  *       step: this step's C_raw is then exactly the correction already
  *       applied, and the offsets do not move at all. And but while
- *       In.bStanceChanging, when W = Tilt.Brake(Dt, TiltAccelDegPerSec2): it
+ *       In.bStanceChanging, when both are braked (Tilt.Brake,
+ *       SeatShare.Brake, TiltAccelDegPerSec2): W
  *       comes to rest where it can and waits. A drive mode's stance change
  *       rocks the base onto other wheels by itself; walked on top of that,
  *       the rider is turned by both at once, and the base stalls against the
@@ -193,7 +223,7 @@
  *    h. Active: Divergence.Tick(|A - W|, A, MeasuredCorrection(Legs),
  *       Alloc.Fraction >= 1, Dt) (not while quiet). Releasing: ReleaseSeconds += Dt
  *       (not while In.bStanceChanging keeps the walk waiting), and bReleaseOpen becomes
- *       true once Tilt.IsNear(G) or ReleaseSeconds > ReleaseMaxSeconds:
+ *       true once R is near G and D near 0, or ReleaseSeconds > ReleaseMaxSeconds:
  *       what is left of C is then the integral's trim, which no ground
  *       explains, and it is ramped out open loop.
  *
@@ -204,8 +234,9 @@
  *       plane rate, Tuning, ...): the correction goes out within the tilt
  *       policy's rate and acceleration, starting and stopping gently, the
  *       loop not consulted. Allocate as g (no back-calculation, and C is not
- *       cut to the share that fits), then g2; bWrite true. W := A at rest
- *       when valid, so the error reads zero. With Dt 0, or legs that are not
+ *       cut to the share that fits), then g2; bWrite true. D goes on to 0 on
+ *       the tilt policy (SeatShare.Tick), and W := A at rest when valid
+ *       (R := A + (D, 0)), so the error reads zero. With Dt 0, or legs that are not
  *       numbers, the offsets hold. FOutputs::bOpenLoop says a step was one
  *       of these.
  *
@@ -214,11 +245,35 @@
  *    OFF, YIELDED, SUSPENDED, FAULTED latched: Dz all zero; bWrite false but
  *    on a step whose action was Clear.
  *
- * 4. SEAT TRIM: SeatTrim.Tick(A.X - Ref.X, bRun, Dt, Tuning), bRun = In.bSeat
- *    and bSeatCoversTransients and the state Active and valid. In every other
- *    state it runs out to zero at its rate, but Holding, where it holds; and
- *    it holds while quiet, when nothing is written. (A release therefore
- *    takes the trim out too, and waits for it.)
+ * 4. SEAT TRIM (FSeatTrim): the share D, plus a COVER of what the base's pitch
+ *    is off its wanted by while the legs catch the ground up. The cover runs
+ *    with a seat that runs, a valid attitude and the loop closed (Active, and
+ *    a release still being walked), and answers
+ *
+ *      Answer = SeatGround.X - c.X - W.X  -  (C.X - C.X before this step)
+ *               + GroundAhead (SeatGround.X - SeatGround.X before this step)
+ *
+ *    where c is MeasuredCorrection (step 1) and the two steps are left out
+ *    on a step with Dt 0 or whose action set W. In words: where the base's
+ *    pitch will be, against where it is wanted, when the seat's command lands
+ *    a command interval from now. The first three terms are the error as the
+ *    loop steers by it (A' - W: the ground as the gate lets it be read, so a
+ *    knock or a braking pitch is not answered), heard through the seat's own
+ *    low-pass. The next is what the legs were told to add to their plane this
+ *    step, which they will have done by then: without it the seat answers
+ *    again what the legs have just been sent after, and a knock on a robot on
+ *    the move (which passes the gate as ground) is answered twice over. (While W is
+ *    walked the legs' step is the walk's, so the seat stands still through a
+ *    walk and the rider follows their wanted attitude a command interval
+ *    late, as the base follows its own.) The last,
+ *    off unless FSeatTrim::Cover.GroundAhead says, takes the ground to go on
+ *    turning as it did this step (FSeatCoverTuning says what that buys and
+ *    costs). The trim is then FSeatTrim's: D less Deadband(Answer), within the
+ *    seat's room, at no more than SeatTrimRateDegPerSec.
+ *    With no cover (open loop, no attitude, a seat that does not run) the trim
+ *    is D alone, which is on its way to 0. In Holding it holds, and it holds
+ *    while quiet, when nothing is written; with no offsets it is 0. (A
+ *    release therefore takes the trim out too, and waits for it.)
  *
  * 5. SPEED SCALE. In Active, Releasing and Faulted not yet latched:
  *    SpeedScale.Tick (FSpeedScale) with the error |A - W|, bPastReach as the
@@ -290,8 +345,19 @@ namespace RammsLevel
 		 *  yet; no start from nothing; and the wanted attitude waits where it
 		 *  is. */
 		bool bStanceChanging = false;
-		/** The robot has a seat tilt for the trim. */
+		/** The robot has a seat whose tilt can take a trim now. */
 		bool bSeat = false;
+		/** With bSeat (and Tuning.bSeatCoversTransients): the pitch the rider
+		 *  prefers over the reference (deg, nose up), to be held in the seat
+		 *  over a base that stays on the reference. On a robot whose seat
+		 *  cannot hold it, leave 0 and put the preference in
+		 *  Tuning.LevelReferenceDeg (SplitPreference does both). */
+		double SeatPreferenceDeg = 0.0;
+		/** With bSeat: how far the seat can be trimmed from where the rider
+		 *  has it (deg): down to Low (0 or less), up to High (0 or more). The
+		 *  trim is kept within these and within Tuning.SeatTrimMaxDeg. */
+		double SeatTrimLowDeg = -1.0e6;
+		double SeatTrimHighDeg = 1.0e6;
 		/** Take the legs' bSupport and BaselineClearanceCm as given instead of
 		 *  working them out (a plant that knows better; a test's wrong set). */
 		bool bSupportGiven = false;
@@ -351,8 +417,16 @@ namespace RammsLevel
 		FVector2D AppliedDeg = FVector2D::ZeroVector;
 		/** The ride-height shift (cm, positive raises the chassis). */
 		double RideCm = 0.0;
-		/** The seat trim (deg, positive nose up against the chassis). */
+		/** The seat trim (deg, positive nose up against the chassis), and the
+		 *  part of it that is the rider's wanted pitch held in the seat (the
+		 *  share: the preference, and a slope past the legs' reach taken
+		 *  back out); the rest is the cover of what the base is behind by. */
 		double SeatTrimDeg = 0.0;
+		double SeatShareDeg = 0.0;
+		/** The attitude the RIDER is wanted at (deg): W with the seat's share
+		 *  added to its pitch. W itself on a robot with no seat. This is what
+		 *  moves within the tilt policy. */
+		FVector2D RiderWantedDeg = FVector2D::ZeroVector;
 		/** The drive-speed scale (MinSpeedScale..1): the share of the speed
 		 *  the rider asks that the drive should give (FSpeedScale). */
 		double SpeedScale = 1.0;
@@ -396,7 +470,15 @@ namespace RammsLevel
 		FAttitudeFilter	 Attitude;
 		FGroundGate		 Ground;
 		FTerrainEstimate Terrain;
-		FTiltTarget		 Tilt;
+		/** The ground as the gate lets it be read, low-passed for the seat
+		 *  (Tuning.SeatFilterSeconds): what its cover goes by. */
+		FAttitudeFilter SeatGround;
+		/** The RIDER's wanted attitude: what moves within the tilt policy.
+		 *  The base's, W, is this less the seat's share of its pitch. */
+		FTiltTarget Tilt;
+		/** The part of the rider's wanted pitch the seat holds (deg, in X; Y
+		 *  is not used), moved within the tilt policy too. */
+		FTiltTarget		 SeatShare;
 		FLevelLoop		 Loop;
 		FSeatTrim		 SeatTrim;
 		FSpeedScale		 SpeedScale;
@@ -456,6 +538,34 @@ namespace RammsLevel
 
 		void Reset() { *this = FState(); }
 	};
+
+	/** Where the rider's preferred tilt is held. */
+	struct FPreferenceSplit
+	{
+		/** The part that goes into what "level" means for the BASE (deg;
+		 *  pitch, roll): added to the tuning's LevelReferenceDeg. */
+		FVector2D BaseDeg = FVector2D::ZeroVector;
+		/** The pitch that is held in the seat (deg): FInputs::SeatPreferenceDeg. */
+		double SeatDeg = 0.0;
+	};
+
+	/**
+	 * The rider's preferred tilt (deg; pitch, roll), split between the base
+	 * and the seat. With a seat that can take a trim (bSeat) and the trim
+	 * switched on, the pitch is the seat's: the base stays on its reference
+	 * and keeps its legs' reach for the ground. The roll is always the
+	 * base's (a seat has no roll axis), and so is the pitch on a robot whose
+	 * seat cannot hold it. The level assist's component and the dry run both
+	 * split with this, so that they cannot differ.
+	 */
+	inline FPreferenceSplit SplitPreference(const FVector2D& PreferenceDeg, bool bSeat, bool bSeatCoversTransients)
+	{
+		FPreferenceSplit Out;
+		const bool		 bInSeat = bSeat && bSeatCoversTransients;
+		Out.BaseDeg = FVector2D(bInSeat ? 0.0 : PreferenceDeg.X, PreferenceDeg.Y);
+		Out.SeatDeg = bInSeat ? PreferenceDeg.X : 0.0;
+		return Out;
+	}
 
 	struct FLaw
 	{

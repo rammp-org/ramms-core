@@ -60,8 +60,13 @@ namespace RammsLevel
 	 *  in TravelMargin; and what TravelMargin returns when none is. */
 	constexpr double TravelMarginMinMoveCm = 0.01;
 	constexpr double NoTravelMarginCm = 1.0e6;
-	/** The seat trim ignores a base pitch smaller than this (deg). */
-	constexpr double SeatTrimDeadbandDeg = 0.2;
+	/** The seat's cover ignores a pitch error of the base smaller than this
+	 *  (deg). Small: nothing the seat does comes back to what it answers (the
+	 *  seat does not move the base), so the band is not there to keep a loop
+	 *  from hunting, only to keep the last hundredths of a reading off the
+	 *  seat's motor. (The legs' own band is three times as wide: of what they
+	 *  leave, the seat takes most.) */
+	constexpr double SeatTrimDeadbandDeg = 0.05;
 	/** The speed scale falls no faster than this (per s). */
 	constexpr double SpeedScaleFallPerSec = 2.0;
 	/** At rest: the chassis slower than this (cm/s). */
@@ -211,8 +216,11 @@ namespace RammsLevel
 		double FaultSeconds = 1.5;
 		double MeasurementLossSeconds = 0.5;
 
-		/** The seat trim (FSeatTrim): whether it runs, its limit (deg), rate
-		 *  (deg/s) and the low-pass of the pitch it answers (s). */
+		/** The seat trim (FSeatTrim), on a robot whose seat tilts: whether it
+		 *  runs (the rider's fore/aft preference and what is past the legs'
+		 *  reach held in the seat, what the base is behind by covered by it),
+		 *  its limit either way (deg), its rate (deg/s) and the low-pass of
+		 *  the ground reading its cover goes by (s). */
 		bool   bSeatCoversTransients = true;
 		double SeatTrimMaxDeg = 8.0;
 		double SeatTrimRateDegPerSec = 10.0;
@@ -308,6 +316,32 @@ namespace RammsLevel
 		/** Slower than this (cm/s) the robot is not being driven anywhere:
 		 *  the speed its stick asks for is not worked out from it. */
 		double MinSpeedCmS = 2.0;
+	};
+
+	/**
+	 * The seat cover's own figure (FLaw::Step's step 4). Not part of FTuning,
+	 * as FGroundTuning is not: FTuning mirrors the reflected tuning member for
+	 * member.
+	 */
+	struct FSeatCoverTuning
+	{
+		/** How much of the ground's last turn the seat is sent ahead by: the
+		 *  share of what the ground (as the seat hears it) turned this tick
+		 *  that it is taken to turn again while the seat's command is on its
+		 *  way. 0: none -- the seat goes by the ground as read. 1: all of it.
+		 *
+		 *  At 1 the seat leads the legs through a grade break, and takes a
+		 *  third off what the breaks leave at the rider (the dry run's seams,
+		 *  RammsLevelDryRunTests); but a knock on a robot on the move reads as
+		 *  ground turning too, so the seat is sent after it (some 5 to 8
+		 *  percent more swing at the rider there), and what noise the
+		 *  attitude has goes to the seat twice (0.2 deg of it at a walk: the
+		 *  rider's attitude 0.37 deg wide against 0.29, and 0.26 with no seat
+		 *  trim). At 0 no transient measured is worse for the seat, and the
+		 *  breaks are a fifth better. Left at 0 until a simulator, whose
+		 *  ground is never as still as the dry run's, says the rest is worth
+		 *  having. */
+		double GroundAhead = 0.0;
 	};
 
 	/**

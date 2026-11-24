@@ -1040,8 +1040,9 @@ bool FRammsLevelWantedTiltNoW::RunTest(const FString& Parameters)
 
 // ---- the seat trim ----
 
-// Catches: the trim's sign (the seat pitching with the base), or the
-// deadband's 0.2 deg not left to the legs.
+// Catches: the cover's sign (the seat pitching with the base), the deadband
+// left out or as wide as it once was, the share left out of the trim or added
+// with the wrong sign, and a cover that runs when told not to.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelSeatTrimCancels,
 	"Ramms.Level.SeatTrim.CancelsBasePitch",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1051,29 +1052,50 @@ bool FRammsLevelSeatTrimCancels::RunTest(const FString& Parameters)
 	using namespace RammsLevelLoopTests;
 	const FTuning Tuning;
 	const double  Dt = 1.0 / 60.0;
-	const double  Pitches[] = { 3.0, -3.0 };
-	for (const double Pitch : Pitches)
+	const double  NoLimit = 1.0e6;
+	const double  Errors[] = { 3.0, -3.0 };
+	for (const double Error : Errors)
 	{
+		// The base 3 deg off where it is wanted, nothing held in the seat.
 		FSeatTrim Trim;
 		for (int32 i = 0; i < 60; ++i)
 		{
-			Trim.Tick(Pitch, true, Dt, Tuning);
+			Trim.Tick(0.0, Error, true, -NoLimit, NoLimit, Dt, Tuning);
 		}
-		// The rider is left with the deadband's 0.2 deg, no more.
-		Near(*this, FString::Printf(TEXT("base at %.0f deg: the seat the other way, less the deadband"), Pitch), Trim.Get(), Pitch > 0.0 ? -2.8 : 2.8, 1e-9);
-		Near(*this, TEXT("base and trim together: the deadband"), FMath::Abs(Pitch + Trim.Get()), SeatTrimDeadbandDeg, 1e-9);
+		// The rider is left with the deadband, no more.
+		Near(*this, FString::Printf(TEXT("base %.0f deg off: the seat the other way, less the deadband"), Error), Trim.Get(), -(Error - FMath::Sign(Error) * SeatTrimDeadbandDeg), 1e-9);
+		Near(*this, TEXT("base and trim together: the deadband"), FMath::Abs(Error + Trim.Get()), SeatTrimDeadbandDeg, 1e-9);
+		TestTrue(TEXT("the deadband is a small one"), SeatTrimDeadbandDeg <= 0.1);
+
+		// The same with 2 deg of the rider's wanted pitch held in the seat:
+		// the share is added, whole and as it is.
+		FSeatTrim Held;
+		for (int32 i = 0; i < 60; ++i)
+		{
+			Held.Tick(2.0, Error, true, -NoLimit, NoLimit, Dt, Tuning);
+		}
+		Near(*this, TEXT("with a share: the share and the cover together"), Held.Get(), 2.0 + Trim.Get(), 1e-9);
+
+		// Told not to cover: the share alone, whatever the base does.
+		FSeatTrim Bare;
+		for (int32 i = 0; i < 60; ++i)
+		{
+			Bare.Tick(2.0, Error, false, -NoLimit, NoLimit, Dt, Tuning);
+		}
+		Near(*this, TEXT("not covering: the share alone"), Bare.Get(), 2.0, 1e-12);
 	}
 	FSeatTrim Small;
 	for (int32 i = 0; i < 60; ++i)
 	{
-		Small.Tick(0.15, true, Dt, Tuning);
+		Small.Tick(0.0, 0.5 * SeatTrimDeadbandDeg, true, -NoLimit, NoLimit, Dt, Tuning);
 	}
 	Near(*this, TEXT("inside the deadband: no trim"), Small.Get(), 0.0, 1e-12);
 	return true;
 }
 
-// Catches: the rate limit left off (the trim jumping to its target) or the
-// clamp at SeatTrimMaxDeg left off.
+// Catches: the rate limit left off (the trim jumping to its target), the
+// clamp at SeatTrimMaxDeg left off, the seat's own room not kept (either
+// side), and "behind" not said while the rate holds the trim back.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelSeatTrimRateClamp,
 	"Ramms.Level.SeatTrim.RateAndClampHold",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1083,23 +1105,48 @@ bool FRammsLevelSeatTrimRateClamp::RunTest(const FString& Parameters)
 	using namespace RammsLevelLoopTests;
 	const FTuning Tuning; // 8 deg, 10 deg/s
 	const double  Dt = 1.0 / 60.0;
+	const double  NoLimit = 1.0e6;
 	FSeatTrim	  Trim;
 	double		  Fastest = 0.0;
 	double		  Was = 0.0;
+	bool		  bBehindOnTheWay = true;
 	for (int32 i = 0; i < 120; ++i)
 	{
-		const double Now = Trim.Tick(20.0, true, Dt, Tuning);
+		const double Now = Trim.Tick(0.0, 20.0, true, -NoLimit, NoLimit, Dt, Tuning);
 		Fastest = FMath::Max(Fastest, FMath::Abs(Now - Was) / Dt);
+		bBehindOnTheWay = bBehindOnTheWay && (i >= 40 || Trim.IsBehind());
 		Was = Now;
 	}
-	Near(*this, TEXT("a 20 deg base: the trim moves at its rate, no faster"), Fastest, Tuning.SeatTrimRateDegPerSec, 1e-9);
+	Near(*this, TEXT("a base 20 deg off: the trim moves at its rate, no faster"), Fastest, Tuning.SeatTrimRateDegPerSec, 1e-9);
 	Near(*this, TEXT("and stops at its limit"), Trim.Get(), -Tuning.SeatTrimMaxDeg, 1e-12);
-	Near(*this, TEXT("no time: the trim it had"), Trim.Tick(0.0, false, 0.0, Tuning), -Tuning.SeatTrimMaxDeg, 1e-12);
+	TestTrue(TEXT("behind its target while the rate held it"), bBehindOnTheWay);
+	TestFalse(TEXT("... and not once it is there"), Trim.IsBehind());
+	Near(*this, TEXT("no time: the trim it had"), Trim.Tick(0.0, 0.0, false, -NoLimit, NoLimit, 0.0, Tuning), -Tuning.SeatTrimMaxDeg, 1e-12);
+
+	// A share past the limit is cut to it, the other way too.
+	FSeatTrim Share;
+	for (int32 i = 0; i < 120; ++i)
+	{
+		Share.Tick(20.0, 0.0, false, -NoLimit, NoLimit, Dt, Tuning);
+	}
+	Near(*this, TEXT("a share of 20 deg: held at the limit"), Share.Get(), Tuning.SeatTrimMaxDeg, 1e-12);
+
+	// The seat's own room, where that is the nearer: 1.5 deg down, 0.5 up.
+	FSeatTrim Down;
+	FSeatTrim Up;
+	for (int32 i = 0; i < 120; ++i)
+	{
+		Down.Tick(0.0, 20.0, true, -1.5, 0.5, Dt, Tuning);
+		Up.Tick(0.0, -20.0, true, -1.5, 0.5, Dt, Tuning);
+	}
+	Near(*this, TEXT("the seat's own room, nose down"), Down.Get(), -1.5, 1e-12);
+	Near(*this, TEXT("the seat's own room, nose up"), Up.Get(), 0.5, 1e-12);
 	return true;
 }
 
-// Catches: the trim holding when the base is level again or when it is told
-// not to run; the filter stopped while not running; Zero moving the filter.
+// Catches: the cover holding when the base is back where it is wanted or when
+// it is told not to run, and a trim that does not start from nothing after
+// Zero.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelSeatTrimDecays,
 	"Ramms.Level.SeatTrim.DecaysAsBaseLevels",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1109,54 +1156,52 @@ bool FRammsLevelSeatTrimDecays::RunTest(const FString& Parameters)
 	using namespace RammsLevelLoopTests;
 	const FTuning Tuning;
 	const double  Dt = 1.0 / 60.0;
+	const double  NoLimit = 1.0e6;
+	const double  Covered = 3.0 - SeatTrimDeadbandDeg;
 	{
-		// The legs bring the base from 3 deg to level over a second.
+		// The legs bring the base from 3 deg off to where it is wanted over a second.
 		FSeatTrim Trim;
 		for (int32 i = 0; i < 60; ++i)
 		{
-			Trim.Tick(3.0, true, Dt, Tuning);
+			Trim.Tick(0.0, 3.0, true, -NoLimit, NoLimit, Dt, Tuning);
 		}
 		double Largest = 0.0;
 		for (int32 i = 0; i < 120; ++i)
 		{
-			const double Pitch = FMath::Max(0.0, 3.0 - 3.0 * (i + 1) / 60.0);
-			const double Now = Trim.Tick(Pitch, true, Dt, Tuning);
-			// Never the wrong way: the seat does not pitch past the reference
-			// by more than the filter's lag behind a 3 deg/s base.
-			Largest = FMath::Max(Largest, FMath::Abs(Pitch + Now));
+			const double Error = FMath::Max(0.0, 3.0 - 3.0 * (i + 1) / 60.0);
+			const double Now = Trim.Tick(0.0, Error, true, -NoLimit, NoLimit, Dt, Tuning);
+			// The cover goes as the error does: the two together are never
+			// more than the deadband.
+			Largest = FMath::Max(Largest, FMath::Abs(Error + Now));
 		}
-		Near(*this, TEXT("base level again: the trim is gone, exactly"), Trim.Get(), 0.0, 1e-12);
-		TestTrue(FString::Printf(TEXT("the rider within half a degree on the way (%.3f deg)"), Largest), Largest < 0.5);
+		Near(*this, TEXT("base where it is wanted again: the cover is gone, exactly"), Trim.Get(), 0.0, 1e-12);
+		TestTrue(FString::Printf(TEXT("the rider within the deadband on the way (%.3f deg)"), Largest), Largest <= SeatTrimDeadbandDeg + 1e-9);
 	}
 	{
-		// Told not to run with the base still tilted: it runs out at its rate.
+		// Told not to cover with the base still off: it runs out at its rate.
 		FSeatTrim Trim;
 		for (int32 i = 0; i < 60; ++i)
 		{
-			Trim.Tick(3.0, true, Dt, Tuning);
+			Trim.Tick(0.0, 3.0, true, -NoLimit, NoLimit, Dt, Tuning);
 		}
-		Near(*this, TEXT("one tick of running out"), Trim.Tick(3.0, false, Dt, Tuning), -2.8 + Tuning.SeatTrimRateDegPerSec * Dt, 1e-9);
+		Near(*this, TEXT("one tick of running out"), Trim.Tick(0.0, 3.0, false, -NoLimit, NoLimit, Dt, Tuning), -Covered + Tuning.SeatTrimRateDegPerSec * Dt, 1e-9);
 		for (int32 i = 0; i < 30; ++i)
 		{
-			Trim.Tick(3.0, false, Dt, Tuning);
+			Trim.Tick(0.0, 3.0, false, -NoLimit, NoLimit, Dt, Tuning);
 		}
-		Near(*this, TEXT("not running: zero"), Trim.Get(), 0.0, 1e-12);
-		// The base has meanwhile gone to -3: the filter followed it, so the
-		// trim sets off the right way at once.
+		Near(*this, TEXT("not covering: zero"), Trim.Get(), 0.0, 1e-12);
+		// The base has meanwhile gone to 3 deg off the other way: the cover
+		// sets off against that at once.
+		TestTrue(TEXT("covering again: against the error as it now is"), Trim.Tick(0.0, -3.0, true, -NoLimit, NoLimit, Dt, Tuning) > 0.0);
 		for (int32 i = 0; i < 60; ++i)
 		{
-			Trim.Tick(-3.0, false, Dt, Tuning);
-		}
-		TestTrue(TEXT("running again: towards the pitch as it now is"), Trim.Tick(-3.0, true, Dt, Tuning) > 0.0);
-		for (int32 i = 0; i < 60; ++i)
-		{
-			Trim.Tick(-3.0, true, Dt, Tuning);
+			Trim.Tick(0.0, -3.0, true, -NoLimit, NoLimit, Dt, Tuning);
 		}
 		// Folded into the seat's own command: zero with no motion, and from
 		// there it is rate-limited as ever.
 		Trim.Zero();
 		Near(*this, TEXT("Zero: zero"), Trim.Get(), 0.0, 1e-12);
-		Near(*this, TEXT("after Zero: back out at its rate, the filter kept"), Trim.Tick(-3.0, true, Dt, Tuning), Tuning.SeatTrimRateDegPerSec * Dt, 1e-9);
+		Near(*this, TEXT("after Zero: back out at its rate"), Trim.Tick(0.0, -3.0, true, -NoLimit, NoLimit, Dt, Tuning), Tuning.SeatTrimRateDegPerSec * Dt, 1e-9);
 	}
 	return true;
 }

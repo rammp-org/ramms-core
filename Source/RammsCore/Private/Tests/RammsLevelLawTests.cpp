@@ -919,10 +919,15 @@ bool FRammsLevelLawHousekeeping::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Catches: the seat trim's sign or the level reference left out of it, a trim
-// that runs out while the attitude is missing (it holds with the offsets), a
-// trim that ramps out after a fold (it went into the seat's own command with
-// the offsets, at once), and one carried over an adopt.
+// Catches: a seat that races the tilt policy when the switch is thrown (the
+// rider is moved by the wanted attitude, the seat only covers what the base is
+// behind it by); the cover's sign; a cover that runs out while the attitude is
+// missing (it holds with the offsets); a trim that ramps out after a fold (it
+// went into the seat's own command with the offsets, at once) or is carried
+// over an adopt; the rider's fore/aft preference put into the base's wanted
+// attitude, or moved faster than the tilt policy; what is past the legs' reach
+// left at the rider, or taken out past the seat's room; a release that ends
+// with the seat still trimmed; and any of it on a robot with no seat.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawSeatTrim,
 	"Ramms.Level.Law.SeatTrimThroughTheLaw",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -937,20 +942,62 @@ bool FRammsLevelLawSeatTrim::RunTest(const FString& Parameters)
 		Toy.In.SpeedCmS = 40.0;
 		Toy.In.bStick = true;
 	};
+	// The fastest the rider's wanted attitude moved over some frames (deg/s).
+	const auto RunWatching = [](FToy& Toy, double Seconds, double& InOutMostRate, double& InOutMostTrim) {
+		FOutputs	Out;
+		const int32 Frames = FMath::Max(1, FMath::RoundToInt32(Seconds / Frame));
+		for (int32 Index = 0; Index < Frames; ++Index)
+		{
+			const FVector2D Was = Toy.State.Tilt.Get();
+			Out = Toy.Step(Frame);
+			// (Where it is walked: not on a step that set it afresh, nor while a
+			// correction is ramped out open loop, when it is the attitude as read.)
+			if (!Out.bOpenLoop && Out.Action == EAction::None && (Out.State == EState::Active || Out.State == EState::Releasing))
+			{
+				InOutMostRate = FMath::Max(InOutMostRate, (Out.RiderWantedDeg - Was).Size() / Frame);
+			}
+			InOutMostTrim = FMath::Max(InOutMostTrim, FMath::Abs(Out.SeatTrimDeg));
+		}
+		return Out;
+	};
 
-	// Switched on nose up by 6 deg. The base is walked level at 3 deg/s; the
-	// seat answers at once, nose DOWN, at its own 10 deg/s.
+	// Switched on nose up by 6 deg. The rider is walked level at 3 deg/s with
+	// the base; the seat has no part in it but to cover what the base is
+	// behind its wanted attitude by, which on legs that keep up is next to
+	// nothing.
 	{
 		FToy Toy(12.0);
 		MakeToy(Toy);
 		FOutputs Out = Toy.Step(Frame);
-		TestNearlyEqual(TEXT("The first frame: one frame of the trim's rate, nose down"), Out.SeatTrimDeg, -Toy.Tuning.SeatTrimRateDegPerSec * Frame, 1.0e-9);
-		Out = Toy.Run(0.5 - Frame);
-		// Half a second in the base has come back half a degree; the trim is
-		// still on its rate, 5 of the 5.3 or so it is after.
-		TestTrue(TEXT("Half a second in: about 5 deg nose down"), Out.SeatTrimDeg <= -4.6 && Out.SeatTrimDeg >= -5.2);
-		const double BasePitchDeg = Toy.Attitude().X;
-		TestTrue(TEXT("... no more than the base's pitch less the trim's deadband"), -Out.SeatTrimDeg <= BasePitchDeg - SeatTrimDeadbandDeg + 0.3);
+		TestTrue(TEXT("The first frame: the rider is wanted where they are"), (Out.RiderWantedDeg - FVector2D(6.0, 0.0)).Size() <= 1.0e-9 && (Out.WantedDeg - Out.RiderWantedDeg).Size() == 0.0);
+		TestTrue(TEXT("... and the seat is not moved"), Out.SeatTrimDeg == 0.0 && Out.SeatShareDeg == 0.0);
+		double MostRate = 0.0;
+		double MostTrim = 0.0;
+		Out = RunWatching(Toy, 8.0, MostRate, MostTrim);
+		TestTrue(FString::Printf(TEXT("Walked level: the rider's wanted attitude within the tilt policy (%.3f deg/s)"), MostRate), MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6 && MostRate >= 2.5);
+		TestTrue(FString::Printf(TEXT("... the seat not moving on the way (%.3f deg)"), MostTrim), MostTrim <= 0.05);
+		TestTrue(TEXT("Level: the base"), Inclination(Toy.Attitude()) <= 0.2);
+		TestTrue(TEXT("Level: no trim left but the cover of the loop's own deadband"), FMath::Abs(Out.SeatTrimDeg) <= 0.15 && Out.SeatShareDeg == 0.0);
+	}
+
+	// Legs too slow for the ground: it steps 4 deg nose up under a levelled
+	// base whose legs turn the plane at 1 deg/s. The seat answers nose DOWN,
+	// at its own 10 deg/s, and gives the cover back as the legs catch up.
+	{
+		FToy Toy(12.0);
+		MakeToy(Toy);
+		Toy.GroundDeg = FVector2D::ZeroVector;
+		Toy.Tuning.MaxCorrectionRateDegPerSec = 1.0;
+		Toy.Run(2.0);
+		Toy.GroundDeg = FVector2D(4.0, 0.0);
+		FOutputs	 Out = Toy.Step(Frame);
+		const double First = Out.SeatTrimDeg;
+		TestTrue(TEXT("The ground steps: the seat sets off nose down, at its rate"), First < 0.0 && First >= -Toy.Tuning.SeatTrimRateDegPerSec * Frame - 1.0e-9);
+		Out = Toy.Run(0.75);
+		// Three quarters of a second in the legs have taken out under a degree.
+		const double BaseOff = Toy.Attitude().X - Out.WantedDeg.X;
+		TestTrue(FString::Printf(TEXT("... and covers what the legs owe (base %.2f deg off, trim %.2f)"), BaseOff, Out.SeatTrimDeg), BaseOff >= 2.5 && FMath::Abs(Out.SeatTrimDeg + BaseOff) <= 0.5);
+		TestTrue(TEXT("... all of it cover: the seat holds none of the rider's wanted pitch"), Out.SeatShareDeg == 0.0 && Out.RiderWantedDeg.Equals(Out.WantedDeg, 0.0));
 
 		// The attitude is lost: the trim holds where it is, with the offsets.
 		const double HeldDeg = Out.SeatTrimDeg;
@@ -962,59 +1009,141 @@ bool FRammsLevelLawSeatTrim::RunTest(const FString& Parameters)
 			TestTrue(TEXT("Holding: the trim holds"), Out.SeatTrimDeg == HeldDeg);
 		}
 		Toy.bReadable = true;
+		// Read again: the base is wanted where it is and the rider where they
+		// are, the seat's trim with them, so that nothing steps; what the
+		// seat carries is the rider's to be walked from.
+		Out = Toy.Step(Frame);
+		ExpectAction(*this, TEXT("attitude back"), Out, EAction::ColdResume);
+		TestTrue(TEXT("Read again: the base is wanted where it is"), (Out.WantedDeg - Toy.Attitude()).Size() <= 1.0e-9);
+		TestTrue(TEXT("... the seat's trim as it was held"), FMath::Abs(Out.SeatTrimDeg - HeldDeg) <= 1.0e-9 && FMath::Abs(Out.SeatShareDeg - HeldDeg) <= 1.0e-9);
+		TestTrue(TEXT("... and the rider wanted where they are, trim and all"), FMath::Abs(Out.RiderWantedDeg.X - (Toy.Attitude().X + HeldDeg)) <= 1.0e-9);
 
-		// Levelled: the legs have taken the pitch out, so the trim has gone.
-		Out = Toy.Run(8.0);
+		// Levelled: the legs have taken the pitch out, so the cover has gone.
+		Out = Toy.Run(10.0);
 		TestTrue(TEXT("Level: the base"), Inclination(Toy.Attitude()) <= 0.2);
-		TestTrue(TEXT("Level: no trim left"), FMath::Abs(Out.SeatTrimDeg) <= 0.05);
+		TestTrue(TEXT("Level: no trim left but the cover of the loop's own deadband"), FMath::Abs(Out.SeatTrimDeg) <= 0.15);
 	}
 
-	// A take-over while the trim is out: it goes into the seat's own command
-	// with the offsets, so it is zero at once, not ramped; and the hand-back
-	// starts it from zero again.
+	// The rider's fore/aft preference is the seat's: the base's wanted attitude
+	// stays on the reference. A take-over while it is out: it goes into the
+	// seat's own command with the offsets, so it is zero at once, not ramped;
+	// and the hand-back starts it from zero again, on the tilt policy.
 	{
 		FToy Toy(12.0);
 		MakeToy(Toy);
-		FOutputs Out = Toy.Run(0.5);
-		TestTrue(TEXT("Before the take-over: the trim is out"), Out.SeatTrimDeg <= -4.0);
+		Toy.In.SeatPreferenceDeg = 3.0;
+		double	 MostRate = 0.0;
+		double	 MostTrim = 0.0;
+		FOutputs Out = RunWatching(Toy, 8.0, MostRate, MostTrim);
+		TestTrue(TEXT("A preference of 3 deg: the seat holds it"), FMath::Abs(Out.SeatShareDeg - 3.0) <= 1.0e-6 && FMath::Abs(Out.SeatTrimDeg - 3.0) <= 0.15);
+		TestTrue(TEXT("... the rider wanted at it"), FMath::Abs(Out.RiderWantedDeg.X - 3.0) <= 1.0e-6);
+		TestTrue(TEXT("... the base wanted level, and level"), FMath::Abs(Out.WantedDeg.X) <= 1.0e-6 && Inclination(Toy.Attitude()) <= 0.2);
+		TestTrue(FString::Printf(TEXT("... reached within the tilt policy (%.3f deg/s)"), MostRate), MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6);
+
+		// Changed to 2 deg the other way: 5 deg of travel, at the policy's rate.
+		Toy.In.SeatPreferenceDeg = -2.0;
+		MostRate = 0.0;
+		Out = RunWatching(Toy, 1.0, MostRate, MostTrim);
+		TestTrue(TEXT("Changed: a second in, still on the way"), Out.RiderWantedDeg.X > -1.9 && Out.RiderWantedDeg.X < 2.5);
+		Out = RunWatching(Toy, 3.0, MostRate, MostTrim);
+		TestTrue(TEXT("... there"), FMath::Abs(Out.RiderWantedDeg.X + 2.0) <= 1.0e-6 && FMath::Abs(Out.SeatTrimDeg + 2.0) <= 0.15);
+		TestTrue(FString::Printf(TEXT("... within the tilt policy (%.3f deg/s)"), MostRate), MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6 && MostRate >= 2.5);
+		TestTrue(TEXT("... the base's wanted attitude never moved"), FMath::Abs(Out.WantedDeg.X) <= 1.0e-6);
+
 		Toy.In.bYield = true;
 		Toy.In.Mode = EMode::Taken;
 		Out = Toy.Step(Frame);
 		ExpectAction(*this, TEXT("take-over"), Out, EAction::Fold);
-		TestTrue(TEXT("Folded: the trim is zero on that step"), Out.SeatTrimDeg == 0.0);
+		TestTrue(TEXT("Folded: the trim is zero on that step"), Out.SeatTrimDeg == 0.0 && Out.SeatShareDeg == 0.0);
 		Out = Toy.Run(0.5);
 		TestTrue(TEXT("... and stays zero while the taker has the seat"), Out.SeatTrimDeg == 0.0);
 
 		Toy.HandBack(-30.0);
 		Out = Toy.Step(Frame);
 		ExpectAction(*this, TEXT("hand-back"), Out, EAction::Adopt);
-		// The base is still some 5 deg nose up, as the taker held it.
-		TestTrue(TEXT("Adopted: the trim starts again from zero, a frame of its rate at most"),
-			Out.SeatTrimDeg < 0.0 && Out.SeatTrimDeg >= -Toy.Tuning.SeatTrimRateDegPerSec * Frame - 1.0e-9);
+		TestTrue(TEXT("Adopted: the trim starts again from zero"), Out.SeatTrimDeg == 0.0 && Out.SeatShareDeg == 0.0);
+		Out = Toy.Step(Frame);
+		TestTrue(TEXT("... and sets off for the preference no faster than the tilt policy"),
+			Out.SeatShareDeg < 0.0 && Out.SeatShareDeg >= -Toy.Tuning.TiltAccelDegPerSec2 * Frame * Frame - 1.0e-9);
 	}
 
-	// "Level" is the reference: a base standing on it wants no trim. And with
-	// no seat, or the trim switched off, there is none.
+	// A slope past the legs' reach: the base is wanted tilted by what they
+	// cannot take out, and the seat takes that back out for the rider -- as
+	// far as its own room goes.
+	for (const double RoomDeg : { 1.0e6, 1.0 })
+	{
+		FToy Toy(5.0);
+		MakeToy(Toy);
+		Toy.In.SeatTrimLowDeg = -RoomDeg;
+		const FOutputs Out = Toy.Run(10.0);
+		const double   Excess = Out.WantedDeg.X;
+		TestTrue(FString::Printf(TEXT("Past reach: the base is wanted nose up by what the legs must leave (%.2f deg)"), Excess), Excess >= 1.5 && Excess <= 5.0 + 1.0e-9);
+		const double Taken = FMath::Min(Excess, RoomDeg);
+		TestNearlyEqual(TEXT("... the seat holds it for the rider, within its room"), Out.SeatShareDeg, -Taken, 1.0e-6);
+		TestNearlyEqual(TEXT("... the rider is wanted on the reference but for what the seat cannot take"), Out.RiderWantedDeg.X, Excess - Taken, 1.0e-6);
+		TestTrue(TEXT("... and the trim is that share (the base is where it is wanted)"), FMath::Abs(Out.SeatTrimDeg - Out.SeatShareDeg) <= 0.2);
+	}
+
+	// Switched off with the seat holding a preference: the release walks the
+	// rider back to the stance's attitude and the seat back to nothing, and
+	// only then is it off.
 	{
 		FToy Toy(12.0);
 		MakeToy(Toy);
-		Toy.GroundDeg = FVector2D(2.0, 0.0);
-		Toy.Tuning.LevelReferenceDeg = FVector2D(2.0, 0.0);
-		double MostTrim = 0.0;
-		for (int32 Index = 0; Index < 32; ++Index)
-		{
-			MostTrim = FMath::Max(MostTrim, FMath::Abs(Toy.Step(Frame).SeatTrimDeg));
-		}
-		TestTrue(TEXT("Standing on the reference: no trim"), MostTrim == 0.0);
+		Toy.In.SeatPreferenceDeg = 3.0;
+		Toy.Run(8.0);
+		Toy.In.bEnable = false;
+		double	 MostRate = 0.0;
+		double	 MostTrim = 0.0;
+		FOutputs Out = RunWatching(Toy, 0.5, MostRate, MostTrim);
+		ExpectState(*this, TEXT("switched off, half a second in"), Out, EState::Releasing);
+		TestTrue(TEXT("... the seat still on its way out"), Out.SeatTrimDeg > 0.5);
+		Out = RunWatching(Toy, 12.0, MostRate, MostTrim);
+		ExpectState(*this, TEXT("released"), Out, EState::Off);
+		TestTrue(TEXT("Off: the seat's trim exactly zero"), Out.SeatTrimDeg == 0.0 && Out.SeatShareDeg == 0.0);
+		TestTrue(FString::Printf(TEXT("... the rider walked back within the tilt policy (%.3f deg/s)"), MostRate), MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6);
+	}
 
-		FToy NoSeat(12.0);
-		MakeToy(NoSeat);
-		NoSeat.In.bSeat = false;
-		TestTrue(TEXT("No seat: no trim"), NoSeat.Run(1.0).SeatTrimDeg == 0.0);
-		FToy Off(12.0);
-		MakeToy(Off);
-		Off.Tuning.bSeatCoversTransients = false;
-		TestTrue(TEXT("Switched off in the tuning: no trim"), Off.Run(1.0).SeatTrimDeg == 0.0);
+	// Switched off with the attitude gone: the correction is ramped out open
+	// loop, and what the seat holds goes out with it.
+	{
+		FToy Toy(12.0);
+		MakeToy(Toy);
+		Toy.In.SeatPreferenceDeg = 3.0;
+		Toy.Run(8.0);
+		Toy.bReadable = false;
+		Toy.In.bEnable = false;
+		FOutputs Out = Toy.Run(0.5);
+		ExpectState(*this, TEXT("switched off blind, half a second in"), Out, EState::Releasing);
+		TestTrue(TEXT("... ramping out open loop, the seat still on its way"), Out.bOpenLoop && Out.SeatTrimDeg > 0.5 && Out.SeatTrimDeg < 3.0);
+		Out = Toy.Run(12.0);
+		ExpectState(*this, TEXT("released blind"), Out, EState::Off);
+		TestTrue(TEXT("Off: the seat's trim exactly zero"), Out.SeatTrimDeg == 0.0 && Out.SeatShareDeg == 0.0);
+	}
+
+	// With no seat, or the trim switched off, there is none of it: no trim,
+	// no share, and the rider's wanted attitude is the base's.
+	for (const int32 Which : { 0, 1 })
+	{
+		FToy Toy(5.0);
+		MakeToy(Toy);
+		Toy.In.SeatPreferenceDeg = 3.0;
+		if (Which == 0)
+		{
+			Toy.In.bSeat = false;
+		}
+		else
+		{
+			Toy.Tuning.bSeatCoversTransients = false;
+		}
+		const TCHAR* Name = Which == 0 ? TEXT("No seat") : TEXT("Switched off in the tuning");
+		bool		 bNone = true;
+		for (int32 Index = 0; Index < 96; ++Index)
+		{
+			const FOutputs Out = Toy.Step(Frame);
+			bNone = bNone && Out.SeatTrimDeg == 0.0 && Out.SeatShareDeg == 0.0 && (Out.RiderWantedDeg - Out.WantedDeg).Size() == 0.0;
+		}
+		TestTrue(FString::Printf(TEXT("%s: no trim, no share, the rider's wanted attitude the base's"), Name), bNone);
 	}
 	return true;
 }

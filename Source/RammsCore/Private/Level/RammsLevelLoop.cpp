@@ -433,25 +433,20 @@ namespace RammsLevel
 		return FromDeg + Step;
 	}
 
-	double FSeatTrim::Tick(double BasePitchDeg, bool bRun, double Dt, const FTuning& Tuning)
+	double FSeatTrim::Tick(double ShareDeg, double AnswerDeg, bool bCover, double LowDeg, double HighDeg, double Dt, const FTuning& Tuning)
 	{
-		if (!bSeeded)
-		{
-			Filtered = BasePitchDeg;
-			bSeeded = true;
-		}
 		if (Dt <= 0.0)
 		{
 			return Trim;
 		}
-		// The filter runs whether or not the trim does, so the trim starts
-		// from the pitch as it is, not as it was when it last ran.
-		Filtered += (BasePitchDeg - Filtered) * LoopFilterShare(Dt, Tuning.SeatFilterSeconds);
-
-		// Nose up at the base is answered nose down at the seat.
+		// A base nose up of where it is wanted is answered nose down at the seat.
 		const double MaxTrim = FMath::Max(0.0, Tuning.SeatTrimMaxDeg);
-		const double Target = bRun ? FMath::Clamp(-Deadband(Filtered, SeatTrimDeadbandDeg), -MaxTrim, MaxTrim) : 0.0;
+		const double Low = FMath::Max(-MaxTrim, FMath::Min(0.0, LowDeg));
+		const double High = FMath::Min(MaxTrim, FMath::Max(0.0, HighDeg));
+		const double CoverDeg = bCover ? -Deadband(AnswerDeg, SeatTrimDeadbandDeg) : 0.0;
+		const double Target = FMath::Clamp(ShareDeg + CoverDeg, Low, High);
 		const double MaxStep = FMath::Max(0.0, Tuning.SeatTrimRateDegPerSec) * Dt;
+		bBehind = FMath::Abs(Target - Trim) > MaxStep + 1.0e-12;
 		Trim += FMath::Clamp(Target - Trim, -MaxStep, MaxStep);
 		return Trim;
 	}

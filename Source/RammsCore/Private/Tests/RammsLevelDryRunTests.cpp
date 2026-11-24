@@ -3379,4 +3379,625 @@ bool FRammsLevelDryRunRideHeight::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace RammsLevelDryRunTests
+{
+	/** How far the seat's tilt runs behind its command in the seat cases (s):
+	 *  a quick servo, and one three times as slow. */
+	const double SeatLags[2] = { 0.03, 0.1 };
+
+	/** The rider between two times, from a trace: their pitch's peak-to-peak
+	 *  (deg), their attitude's largest rate over 0.3 s (deg/s), the most they
+	 *  were off what they asked for (deg), and how far the seat's tilt moved
+	 *  (deg, peak-to-peak). */
+	struct FRiderSwing
+	{
+		double RangeDeg = 0.0;
+		double RateDegPerSec = 0.0;
+		double PeakOffDeg = 0.0;
+		double SeatRangeDeg = 0.0;
+		int32  Frames = 0;
+	};
+
+	FRiderSwing RiderBetween(const FResult& Result, double FromSeconds, double ToSeconds, double TickSeconds)
+	{
+		FRiderSwing Out;
+		double		Low = 0.0;
+		double		High = 0.0;
+		double		SeatLow = 0.0;
+		double		SeatHigh = 0.0;
+		const int32 Window = FMath::Max(1, FMath::RoundToInt32(0.3 / TickSeconds));
+		for (int32 Index = 0; Index < Result.Trace.Num(); ++Index)
+		{
+			const FSample& Sample = Result.Trace[Index];
+			if (Sample.Seconds < FromSeconds || Sample.Seconds > ToSeconds)
+			{
+				continue;
+			}
+			Low = Out.Frames > 0 ? FMath::Min(Low, Sample.RiderDeg.X) : Sample.RiderDeg.X;
+			High = Out.Frames > 0 ? FMath::Max(High, Sample.RiderDeg.X) : Sample.RiderDeg.X;
+			SeatLow = Out.Frames > 0 ? FMath::Min(SeatLow, Sample.SeatDeg) : Sample.SeatDeg;
+			SeatHigh = Out.Frames > 0 ? FMath::Max(SeatHigh, Sample.SeatDeg) : Sample.SeatDeg;
+			Out.PeakOffDeg = FMath::Max(Out.PeakOffDeg, Inclination(Sample.RiderDeg - Sample.RiderReferenceDeg));
+			if (Index >= Window)
+			{
+				Out.RateDegPerSec = FMath::Max(Out.RateDegPerSec, (Sample.RiderDeg - Result.Trace[Index - Window].RiderDeg).Size() / (Window * TickSeconds));
+			}
+			++Out.Frames;
+		}
+		Out.RangeDeg = High - Low;
+		Out.SeatRangeDeg = SeatHigh - SeatLow;
+		return Out;
+	}
+
+	/** The rider through a stretch of a course (cm of travel), as RiderBetween. */
+	FRiderSwing RiderOver(const FResult& Result, double FromCm, double ToCm, double TickSeconds)
+	{
+		double From = -1.0;
+		double To = -1.0;
+		for (const FSample& Sample : Result.Trace)
+		{
+			if (Sample.TravelCm >= FromCm && Sample.TravelCm <= ToCm)
+			{
+				From = From < 0.0 ? Sample.Seconds : From;
+				To = Sample.Seconds;
+			}
+		}
+		return From < 0.0 ? FRiderSwing() : RiderBetween(Result, From, To, TickSeconds);
+	}
+
+	/** The same run with the seat's trim switched off in the tuning: the
+	 *  rider then rides the base, and a preference is the base's to hold. */
+	FOptions WithoutSeat(const FOptions& Options)
+	{
+		FOptions Out = Options;
+		Out.Tuning.bSeatCoversTransients = false;
+		return Out;
+	}
+} // namespace RammsLevelDryRunTests
+
+// Catches: a seat that answers what the BODY does. A base being braked, or
+// knocked, pitches for a few tenths of a second and comes back by itself; a
+// seat sent against that pitch arrives, a command interval and its own lag
+// later, as the base is already on its way back, and the rider is swung the
+// other way on top (the trap the legs fell into). The seat must leave both
+// alone: the rider's swing with the seat no larger than the base's own. (A
+// knock on a robot at cruising speed cannot be told from ground, by the seat
+// any more than by the legs: there it is held to a twentieth more swing.)
+// The same with the seat sent ahead by the ground's last turn
+// (FSeatCoverTuning::GroundAhead), which is what that costs.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSeatStopAndKnock,
+	"Ramms.Level.DryRun.SeatLeavesAStopAndAKnockToPass",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSeatStopAndKnock::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FKit& Kit : { SixWheel(), QuickOnFour() })
+	{
+		if (!TestTrue(FString::Printf(TEXT("%s: (the robot has a seat)"), Kit.Name), Kit.Robot.bSeat))
+		{
+			continue;
+		}
+		for (const double SeatLag : SeatLags)
+		{
+			for (const int32 Rate : { 0, 2 })
+			{
+				const auto Say = [&](const FString& Case, const FString& What) {
+					return FString::Printf(TEXT("%s, seat lag %.2f s, %s, %s: %s"), Kit.Name, SeatLag, FrameNames[Rate], *Case, *What);
+				};
+				// The hard stop of StopFromSpeed, on the flat and on a grade.
+				for (const double GradeDeg : { 0.0, Kit.GradeDeg })
+				{
+					FOptions Options = MakeOptions(Kit, Rate);
+					Options.SpeedCmS = 60.0;
+					Options.DriveLagSeconds = 0.1;
+					Options.PitchPerAccelDeg = BodyPitchPerAccel;
+					Options.SeatLagSeconds = SeatLag;
+					Options.MaxSeconds = 9.0;
+					Options.bKeepTrace = true;
+					Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, 0.0));
+					FOptions OffOptions = Options;
+					OffOptions.bEnabledAtStart = false;
+					const FResult	  Result = DryRun::Run(Kit.Robot, Plane(GradeDeg, 0.0), Options);
+					const FRiderSwing With = RiderBetween(Result, 5.0, 8.0, Options.FrameSeconds);
+					const FRiderSwing Without = RiderBetween(DryRun::Run(Kit.Robot, Plane(GradeDeg, 0.0), WithoutSeat(Options)), 5.0, 8.0, Options.FrameSeconds);
+					const FRiderSwing Off = RiderBetween(DryRun::Run(Kit.Robot, Plane(GradeDeg, 0.0), OffOptions), 5.0, 8.0, Options.FrameSeconds);
+					const FString	  Case = FString::Printf(TEXT("stop from 60 cm/s on %.0f deg"), GradeDeg);
+					AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | %s | %s | rider swing %.2f deg at %.1f deg/s, the seat moving %.2f deg; with no seat trim %.2f at %.1f; switched off %.2f at %.1f"), Kit.Name, SeatLag,
+						*Case, FrameNames[Rate], With.RangeDeg, With.RateDegPerSec, With.SeatRangeDeg, Without.RangeDeg, Without.RateDegPerSec, Off.RangeDeg, Off.RateDegPerSec));
+					ExpectSound(*this, Kit, Rate, Result);
+					TestTrue(Say(Case, TEXT("(the stop knocks the rider over a degree)")), Without.RangeDeg >= 1.0);
+					TestTrue(Say(Case, FString::Printf(TEXT("the rider swung no further for the seat (%.2f against %.2f deg)"), With.RangeDeg, Without.RangeDeg)), With.RangeDeg <= Without.RangeDeg + 0.05);
+					TestTrue(Say(Case, FString::Printf(TEXT("... nor faster (%.1f against %.1f deg/s)"), With.RateDegPerSec, Without.RateDegPerSec)), With.RateDegPerSec <= Without.RateDegPerSec + 0.3);
+					TestTrue(Say(Case, FString::Printf(TEXT("the seat is not sent after the stop's pitch (%.2f deg)"), With.SeatRangeDeg)), With.SeatRangeDeg <= 0.15);
+					TestTrue(Say(Case, TEXT("the rider level after it")), Result.SteadyRiderResidualDeg <= 0.3);
+
+					// Sent ahead by the ground's last turn: a stop is still left
+					// alone (the gate gives the reading up while the base brakes).
+					FOptions AheadOptions = Options;
+					AheadOptions.SeatCover.GroundAhead = 1.0;
+					const FRiderSwing Ahead = RiderBetween(DryRun::Run(Kit.Robot, Plane(GradeDeg, 0.0), AheadOptions), 5.0, 8.0, Options.FrameSeconds);
+					AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | %s, the seat sent ahead | %s | rider swing %.2f deg at %.1f deg/s, the seat moving %.2f deg"), Kit.Name, SeatLag, *Case, FrameNames[Rate], Ahead.RangeDeg,
+						Ahead.RateDegPerSec, Ahead.SeatRangeDeg));
+					TestTrue(Say(Case, FString::Printf(TEXT("sent ahead: the rider swung no further (%.2f against %.2f deg)"), Ahead.RangeDeg, Without.RangeDeg)), Ahead.RangeDeg <= Without.RangeDeg + 0.05);
+				}
+				// The knock of KnockStandingAndOnTheMove: standing, crawling,
+				// cruising.
+				for (const double Speed : { 0.0, 10.0, 40.0 })
+				{
+					FOptions Options = MakeOptions(Kit, Rate);
+					Options.SpeedCmS = Speed;
+					Options.SeatLagSeconds = SeatLag;
+					Options.MaxSeconds = 8.0;
+					Options.bKeepTrace = true;
+					FDryEvent Kick = MakeEvent(3.0, EEvent::AttitudeKick, 0.15);
+					Kick.PlaneDeg = FVector2D(-1.5, 0.0);
+					Options.Events.Add(Kick);
+					const FResult	  Result = DryRun::Run(Kit.Robot, Plane(0.0, 0.0), Options);
+					const FRiderSwing With = RiderBetween(Result, 3.0, 6.0, Options.FrameSeconds);
+					const FRiderSwing Without = RiderBetween(DryRun::Run(Kit.Robot, Plane(0.0, 0.0), WithoutSeat(Options)), 3.0, 6.0, Options.FrameSeconds);
+					const FString	  Case = FString::Printf(TEXT("a 1.5 deg knock at %.0f cm/s"), Speed);
+					AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | %s | %s | rider swing %.2f deg at %.1f deg/s, the seat moving %.2f deg; with no seat trim %.2f at %.1f"), Kit.Name, SeatLag, *Case, FrameNames[Rate],
+						With.RangeDeg, With.RateDegPerSec, With.SeatRangeDeg, Without.RangeDeg, Without.RateDegPerSec));
+					ExpectSound(*this, Kit, Rate, Result);
+					TestTrue(Say(Case, FString::Printf(TEXT("... nor faster (%.1f against %.1f deg/s)"), With.RateDegPerSec, Without.RateDegPerSec)), With.RateDegPerSec <= Without.RateDegPerSec + 0.3);
+					FOptions AheadOptions = Options;
+					AheadOptions.SeatCover.GroundAhead = 1.0;
+					const FRiderSwing Ahead = RiderBetween(DryRun::Run(Kit.Robot, Plane(0.0, 0.0), AheadOptions), 3.0, 6.0, Options.FrameSeconds);
+					AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | %s, the seat sent ahead | %s | rider swing %.2f deg at %.1f deg/s, the seat moving %.2f deg"), Kit.Name, SeatLag, *Case, FrameNames[Rate], Ahead.RangeDeg,
+						Ahead.RateDegPerSec, Ahead.SeatRangeDeg));
+					if (Speed < 20.0)
+					{
+						TestTrue(Say(Case, FString::Printf(TEXT("the rider swung no further for the seat (%.2f against %.2f deg)"), With.RangeDeg, Without.RangeDeg)), With.RangeDeg <= Without.RangeDeg + 0.05);
+						TestTrue(Say(Case, FString::Printf(TEXT("the seat is not sent after the knock (%.2f deg)"), With.SeatRangeDeg)), With.SeatRangeDeg <= 0.15);
+					}
+					else
+					{
+						TestTrue(Say(Case, FString::Printf(TEXT("the rider swung hardly further for the seat (%.2f against %.2f deg)"), With.RangeDeg, Without.RangeDeg)), With.RangeDeg <= 1.05 * Without.RangeDeg);
+					}
+					if (Speed > 0.0)
+					{
+						// What being sent ahead costs: a knock on the move reads
+						// as the ground turning, and the seat goes after it.
+						TestTrue(Say(Case, FString::Printf(TEXT("sent ahead: the rider swung at most an eighth further (%.2f against %.2f deg)"), Ahead.RangeDeg, Without.RangeDeg)), Ahead.RangeDeg <= 1.125 * Without.RangeDeg);
+					}
+					else
+					{
+						TestTrue(Say(Case, FString::Printf(TEXT("sent ahead: a knock standing is still left alone (%.2f against %.2f deg)"), Ahead.RangeDeg, Without.RangeDeg)), Ahead.RangeDeg <= Without.RangeDeg + 0.05);
+					}
+				}
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: a seat that levels the rider at its own rate when the switch is
+// thrown (every deliberate change of the rider's attitude is the tilt
+// policy's: 3 deg/s, not the seat's 10), a seat that moves at all for a walk
+// of the wanted attitude (the legs are told to follow it; the seat has no part
+// in it), a seat left tilted after the switch is thrown back, and a seat sent
+// after the sensor's noise on a robot that stands (the reading of a standing
+// robot is let move no faster than ground can).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSeatSwitch,
+	"Ramms.Level.DryRun.SeatLeavesTheSwitchToTheTiltPolicy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSeatSwitch::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FKit Kit = SixWheel();
+	for (const FVector2D& Preferred : { FVector2D::ZeroVector, FVector2D(3.0, -2.0), FVector2D(-3.0, 2.0) })
+	{
+		for (const int32 Rate : { 0, 2 })
+		{
+			// Parked nose up on the grade; switched on, and off again.
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.bEnabledAtStart = false;
+			Options.PreferenceDeg = Preferred;
+			Options.MaxSeconds = 26.0;
+			Options.bKeepTrace = true;
+			Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+			Options.Events.Add(MakeEvent(14.0, EEvent::Disable));
+			const FResult Result = DryRun::Run(Kit.Robot, Plane(Kit.GradeDeg, 0.0), Options);
+			const FString Case = FString::Printf(TEXT("parked on %.0f deg, prefers (%.0f, %.0f)"), Kit.GradeDeg, Preferred.X, Preferred.Y);
+			Report(*this, Kit, *Case, Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			const auto	   Say = [&](const TCHAR* What) { return FString::Printf(TEXT("%s, %s, %s: %s"), Kit.Name, *Case, FrameNames[Rate], What); };
+			const FSample* Levelled = SampleAt(Result, 13.9);
+			if (!TestTrue(Say(TEXT("a trace")), Levelled != nullptr))
+			{
+				continue;
+			}
+			const FRiderSwing On = RiderBetween(Result, 1.0, 13.9, Options.FrameSeconds);
+			const FRiderSwing Back = RiderBetween(Result, 14.0, 26.0, Options.FrameSeconds);
+			AddInfo(FString::Printf(TEXT("%s | %s | %s | switched on: rider turned at %.2f deg/s at most, ends (%.2f, %.2f) with the base at (%.2f, %.2f) and the seat at %.2f; switched off: %.2f deg/s, the seat left at %.4f"),
+				Kit.Name, *Case, FrameNames[Rate], On.RateDegPerSec, Levelled->RiderDeg.X, Levelled->RiderDeg.Y, Levelled->TrueAttitudeDeg.X, Levelled->TrueAttitudeDeg.Y, Levelled->SeatDeg, Back.RateDegPerSec,
+				Result.Trace.Last().SeatDeg));
+			TestTrue(Say(TEXT("switched on: the rider turned within the tilt policy")), On.RateDegPerSec <= 3.5);
+			TestTrue(Say(TEXT("... to what they asked for")), Inclination(Levelled->RiderDeg - Preferred) <= 0.3);
+			// The pitch they prefer is the seat's; the base is level in pitch
+			// and holds the roll.
+			TestEqual(Say(TEXT("... the base's pitch level")), Levelled->TrueAttitudeDeg.X, 0.0, 0.3);
+			TestEqual(Say(TEXT("... the base's roll the preferred one")), Levelled->TrueAttitudeDeg.Y, Preferred.Y, 0.3);
+			TestEqual(Say(TEXT("... the seat holding the preferred pitch")), Levelled->SeatDeg, Preferred.X, 0.2);
+			if (Preferred.IsZero())
+			{
+				// With no preference the seat has no part in a switch at all.
+				TestTrue(Say(TEXT("... and the seat hardly moved on the way")), On.SeatRangeDeg <= 0.1 && Back.SeatRangeDeg <= 0.1);
+			}
+			TestTrue(Say(TEXT("switched off: the rider turned within the tilt policy")), Back.RateDegPerSec <= 3.5);
+			TestEqual(Say(TEXT("... off")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Off));
+			TestTrue(Say(TEXT("... every offset exactly zero")), Result.FinalMaxOffsetCm == 0.0);
+			TestTrue(Say(TEXT("... the seat's trim exactly zero")), Result.Trace.Last().Out.SeatTrimDeg == 0.0);
+			TestTrue(Say(TEXT("... and the seat back where the rider has it")), FMath::Abs(Result.Trace.Last().SeatDeg) <= 1.0e-3);
+		}
+	}
+
+	// A noisy, biased sensor on a grade: the seat is not sent after the noise.
+	for (const int32 Rate : { 0, 2 })
+	{
+		FOptions Options = MakeOptions(Kit, Rate);
+		Options.NoiseDeg = 0.2;
+		Options.BiasDeg = FVector2D(0.5, -0.5);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 12.0;
+		Options.bKeepTrace = true;
+		const FResult	  Result = DryRun::Run(Kit.Robot, Plane(Kit.GradeDeg, 0.0), Options);
+		const FRiderSwing Late = RiderBetween(Result, 8.0, 12.0, Options.FrameSeconds);
+		AddInfo(FString::Printf(TEXT("%s | parked on a grade, 0.2 deg of noise | %s | the seat moving %.3f deg over the last 4 s"), Kit.Name, FrameNames[Rate], Late.SeatRangeDeg));
+		ExpectSound(*this, Kit, Rate, Result);
+		TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("noise: the seat does not chatter with the sensor (%.3f deg)"), Late.SeatRangeDeg)), Late.SeatRangeDeg <= 0.05);
+	}
+
+	// The same sensor on the move, on flat ground: there the reading passes for
+	// ground (the ground could be turning that fast), the legs are sent after
+	// it, and so is the seat. What that does to the rider, with the seat as it
+	// is and with it sent ahead by the ground's last turn (which takes the
+	// noise twice over): reported, and held to bounds.
+	for (const int32 Rate : { 0, 2 })
+	{
+		FOptions Options = MakeOptions(Kit, Rate);
+		Options.NoiseDeg = 0.2;
+		Options.MaxSeconds = 12.0;
+		Options.bKeepTrace = true;
+		FOptions AheadOptions = Options;
+		AheadOptions.SeatCover.GroundAhead = 1.0;
+		const FResult	  Result = DryRun::Run(Kit.Robot, Plane(0.0, 0.0), Options);
+		const FRiderSwing With = RiderBetween(Result, 6.0, 12.0, Options.FrameSeconds);
+		const FRiderSwing Without = RiderBetween(DryRun::Run(Kit.Robot, Plane(0.0, 0.0), WithoutSeat(Options)), 6.0, 12.0, Options.FrameSeconds);
+		const FRiderSwing Ahead = RiderBetween(DryRun::Run(Kit.Robot, Plane(0.0, 0.0), AheadOptions), 6.0, 12.0, Options.FrameSeconds);
+		AddInfo(FString::Printf(TEXT("%s | flat at 40 cm/s, 0.2 deg of noise | %s | rider within %.2f deg at %.2f deg/s, the seat moving %.2f deg; with no seat trim %.2f at %.2f; the seat sent ahead %.2f at %.2f, moving %.2f"), Kit.Name,
+			FrameNames[Rate], With.RangeDeg, With.RateDegPerSec, With.SeatRangeDeg, Without.RangeDeg, Without.RateDegPerSec, Ahead.RangeDeg, Ahead.RateDegPerSec, Ahead.SeatRangeDeg));
+		ExpectSound(*this, Kit, Rate, Result);
+		TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("noise on the move: the rider no worse off for the seat (%.2f against %.2f deg)"), With.RangeDeg, Without.RangeDeg)), With.RangeDeg <= Without.RangeDeg + 0.1);
+		TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("noise on the move: the seat sent ahead moves more for it (%.2f against %.2f deg)"), Ahead.SeatRangeDeg, With.SeatRangeDeg)), Ahead.SeatRangeDeg >= With.SeatRangeDeg);
+	}
+	return true;
+}
+
+// Catches: the rider's fore/aft preference spent out of the legs' reach (the
+// base tilted to it) on a robot whose seat could hold it; the lateral one put
+// in the seat, which has no such axis; a change of the preference that steps
+// the rider or moves them faster than the tilt policy; and, on a robot with
+// no seat, the pitch preference lost.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSeatPreference,
+	"Ramms.Level.DryRun.SeatHoldsTheForeAftPreference",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSeatPreference::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FKit Kit = SixWheel();
+	// Leaning forward on an up-grade is what costs the legs most when the
+	// base holds it: the grade and the preference add up.
+	const FVector2D First(-3.0, 2.0);
+	const FVector2D Second(2.0, -1.0);
+	for (const int32 Rate : { 0, 2 })
+	{
+		FOptions Options = MakeOptions(Kit, Rate);
+		Options.SpeedCmS = 0.0;
+		Options.PreferenceDeg = First;
+		Options.MaxSeconds = 24.0;
+		Options.bKeepTrace = true;
+		FDryEvent Change = MakeEvent(12.0, EEvent::SetPreference);
+		Change.PlaneDeg = Second;
+		Options.Events.Add(Change);
+		FOptions PlainOptions = Options;
+		PlainOptions.PreferenceDeg = FVector2D(0.0, First.Y);
+		PlainOptions.Events.Reset();
+		PlainOptions.MaxSeconds = 11.5;
+		FOptions BaseOptions = WithoutSeat(Options);
+		BaseOptions.Events.Reset();
+		BaseOptions.MaxSeconds = 11.5;
+		const FGround Course = Plane(Kit.GradeDeg, 0.0);
+		const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+		const FResult Plain = DryRun::Run(Kit.Robot, Course, PlainOptions);
+		const FResult InBase = DryRun::Run(Kit.Robot, Course, BaseOptions);
+		Report(*this, Kit, TEXT("a preference held in the seat, then changed"), Rate, Result);
+		ExpectSound(*this, Kit, Rate, Result);
+		const FSample* Before = SampleAt(Result, 11.5);
+		const FSample* After = Result.Trace.Num() > 0 ? &Result.Trace.Last() : nullptr;
+		const FSample* PlainEnd = Plain.Trace.Num() > 0 ? &Plain.Trace.Last() : nullptr;
+		const FSample* BaseEnd = InBase.Trace.Num() > 0 ? &InBase.Trace.Last() : nullptr;
+		if (!TestTrue(Label(Kit, Rate, TEXT("traces")), Before && After && PlainEnd && BaseEnd))
+		{
+			continue;
+		}
+		const FRiderSwing Changing = RiderBetween(Result, 12.0, 24.0, Options.FrameSeconds);
+		AddInfo(FString::Printf(TEXT("%s | prefers (%.0f, %.0f) on a %.0f deg grade | %s | rider (%.2f, %.2f), base (%.2f, %.2f), seat %.2f, reach left %.2f (%.2f with no fore/aft preference, %.2f with the base holding it); changed to (%.0f, %.0f): rider (%.2f, %.2f) at %.2f deg/s at most, base (%.2f, %.2f), seat %.2f"),
+			Kit.Name, First.X, First.Y, Kit.GradeDeg, FrameNames[Rate], Before->RiderDeg.X, Before->RiderDeg.Y, Before->TrueAttitudeDeg.X, Before->TrueAttitudeDeg.Y, Before->SeatDeg, Before->Out.ReachLeft,
+			PlainEnd->Out.ReachLeft, BaseEnd->Out.ReachLeft, Second.X, Second.Y, After->RiderDeg.X, After->RiderDeg.Y, Changing.RateDegPerSec, After->TrueAttitudeDeg.X, After->TrueAttitudeDeg.Y, After->SeatDeg));
+		TestTrue(Label(Kit, Rate, TEXT("the rider at what they asked for")), Inclination(Before->RiderDeg - First) <= 0.3);
+		TestEqual(Label(Kit, Rate, TEXT("the base level fore and aft")), Before->TrueAttitudeDeg.X, 0.0, 0.3);
+		TestEqual(Label(Kit, Rate, TEXT("the base holding the lateral preference")), Before->TrueAttitudeDeg.Y, First.Y, 0.3);
+		TestEqual(Label(Kit, Rate, TEXT("the seat holding the fore/aft preference")), Before->SeatDeg, First.X, 0.2);
+		// What it is for: the legs' reach is not spent on it.
+		TestEqual(Label(Kit, Rate, TEXT("the fore/aft preference costs the legs no reach")), Before->Out.ReachLeft, PlainEnd->Out.ReachLeft, 0.02);
+		TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("(held by the base it would: reach left %.2f against %.2f)"), BaseEnd->Out.ReachLeft, Before->Out.ReachLeft)),
+			BaseEnd->Out.ReachLeft <= Before->Out.ReachLeft - 0.1);
+		TestTrue(Label(Kit, Rate, TEXT("(with the seat's trim off the base holds it, and the rider is where they asked all the same)")),
+			FMath::Abs(BaseEnd->TrueAttitudeDeg.X - First.X) <= 0.3 && Inclination(BaseEnd->RiderDeg - First) <= 0.3 && BaseEnd->SeatDeg == 0.0);
+
+		TestTrue(Label(Kit, Rate, TEXT("changed: the rider at the new preference")), Inclination(After->RiderDeg - Second) <= 0.3);
+		TestEqual(Label(Kit, Rate, TEXT("... the base still level fore and aft")), After->TrueAttitudeDeg.X, 0.0, 0.3);
+		TestEqual(Label(Kit, Rate, TEXT("... the seat at the new fore/aft preference")), After->SeatDeg, Second.X, 0.2);
+		TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("... moved within the tilt policy (%.2f deg/s)"), Changing.RateDegPerSec)), Changing.RateDegPerSec <= 3.5);
+		// (5 deg of pitch and 3 of roll together: 5.8 deg at 3 deg/s.)
+		TestTrue(Label(Kit, Rate, TEXT("... and it did move")), Changing.RateDegPerSec >= 2.0);
+	}
+
+	// A robot with no seat: both go into the base, as before.
+	const FKit Pairs = DrivePairs();
+	for (const int32 Rate : { 0, 2 })
+	{
+		const FVector2D Preferred = PreferredTilt(Pairs);
+		FOptions		Options = MakeOptions(Pairs, Rate);
+		Options.PreferenceDeg = Preferred;
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 10.0;
+		Options.bKeepTrace = true;
+		const FResult Result = DryRun::Run(Pairs.Robot, Plane(Pairs.GradeDeg, 0.0), Options);
+		ExpectSound(*this, Pairs, Rate, Result);
+		if (TestTrue(Label(Pairs, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+		{
+			const FSample& End = Result.Trace.Last();
+			TestTrue(Label(Pairs, Rate, TEXT("no seat: the base holds the whole preference")), (End.TrueAttitudeDeg - Preferred).Size() <= 0.3);
+			TestTrue(Label(Pairs, Rate, TEXT("... and there is no trim")), Result.MaxSeatDeg == 0.0 && End.Out.SeatTrimDeg == 0.0);
+		}
+	}
+	return true;
+}
+
+// Catches: a slope past the legs' reach left at the rider when the seat could
+// take it out; the seat taking it out at its own rate rather than as the base
+// is let go (the two must cancel at the rider); a trim past its limit or the
+// seat's own range; and a seat left tilted when the slope is behind.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSeatPastReach,
+	"Ramms.Level.DryRun.SeatTakesOutWhatIsPastTheLegsReach",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSeatPastReach::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	// As RideHeightBuysReachPastTheRaisedWheels: nose up, the raised front
+	// pair's clearance gives this robot 8.26 deg, so 10 deg leaves the base
+	// about 1.7 deg nose up.
+	const FKit Kit = QuickOnFour();
+	for (const double SeatLag : SeatLags)
+	{
+		for (const int32 Rate : { 0, 2 })
+		{
+			const auto Say = [&](const TCHAR* What) { return FString::Printf(TEXT("%s, seat lag %.2f s, %s: %s"), Kit.Name, SeatLag, FrameNames[Rate], What); };
+			{
+				// Parked on it, the switch thrown; then a take-over and its hand-back.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.bEnabledAtStart = false;
+				Options.SeatLagSeconds = SeatLag;
+				Options.MaxSeconds = 30.0;
+				Options.bKeepTrace = true;
+				Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+				Options.Events.Add(MakeEvent(14.0, EEvent::FoldAdopt, 3.0));
+				const FResult  Result = DryRun::Run(Kit.Robot, Plane(10.0, 0.0), Options);
+				const FSample* Held = SampleAt(Result, 13.9);
+				Report(*this, Kit, TEXT("parked 10 deg nose up, past reach"), Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				if (!TestTrue(Say(TEXT("a trace")), Held != nullptr))
+				{
+					continue;
+				}
+				const FRiderSwing Whole = RiderBetween(Result, 1.0, 30.0, Options.FrameSeconds);
+				const FSample&	  End = Result.Trace.Last();
+				AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | parked 10 deg nose up | %s | base left %.2f deg nose up, seat %.2f, rider %.2f off; through the switch, a take-over and its hand-back the rider turned at %.2f deg/s at most; at the end base %.2f, seat %.2f, rider %.2f off"),
+					Kit.Name, SeatLag, FrameNames[Rate], Held->TrueAttitudeDeg.X, Held->SeatDeg, Inclination(Held->RiderDeg), Whole.RateDegPerSec, End.TrueAttitudeDeg.X, End.SeatDeg, Inclination(End.RiderDeg)));
+				TestTrue(Say(TEXT("the legs leave the base over a degree nose up")), Held->TrueAttitudeDeg.X >= 1.4);
+				TestTrue(Say(TEXT("the rider is level all the same")), Inclination(Held->RiderDeg) <= 0.3);
+				TestEqual(Say(TEXT("the seat holds what the legs left")), Held->SeatDeg, -Held->TrueAttitudeDeg.X, 0.2);
+				// (A seat three times as slow as the legs is a little out of step
+				// with them while both are walked: held to the rider's own limit.)
+				TestTrue(Say(TEXT("the rider turned within the tilt policy throughout")), Whole.RateDegPerSec <= (SeatLag <= 0.05 ? 3.5 : RiderRateLimitDegPerSec));
+				// The take-over took the trim into the seat's own command (no
+				// step), brought the rider to their own setting, and the
+				// hand-back's levelling took the slope out of the seat again.
+				TestEqual(Say(TEXT("a take-over was folded for, and handed back")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Active));
+				TestTrue(Say(TEXT("after the hand-back: the rider level again")), Inclination(End.RiderDeg) <= 0.3);
+				TestEqual(Say(TEXT("... the seat holding what the legs leave")), End.SeatDeg, -End.TrueAttitudeDeg.X, 0.2);
+			}
+			{
+				// Driven up a 10 deg ramp at a walk and onto its landing.
+				const FVector2D Knots[2] = { { 150.0, 0.0 }, { 650.0, Rise(500.0, 10.0) } };
+				FOptions		Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 30.0;
+				Options.SeatLagSeconds = SeatLag;
+				Options.DistanceCm = 1000.0;
+				Options.MaxSeconds = 90.0;
+				Options.bKeepTrace = true;
+				const FResult	  Result = DryRun::Run(Kit.Robot, Profile(MakeArrayView(Knots)), Options);
+				const FResult	  NoSeat = DryRun::Run(Kit.Robot, Profile(MakeArrayView(Knots)), WithoutSeat(Options));
+				const FRiderSwing OnRamp = RiderOver(Result, 420.0, 640.0, Options.FrameSeconds);
+				const FRiderSwing Was = RiderOver(NoSeat, 420.0, 640.0, Options.FrameSeconds);
+				const FRiderSwing Whole = RiderOver(Result, 0.0, 1000.0, Options.FrameSeconds);
+				const FRiderSwing WholeWas = RiderOver(NoSeat, 0.0, 1000.0, Options.FrameSeconds);
+				Report(*this, Kit, TEXT("a 10 deg ramp, past reach"), Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | a 10 deg ramp at 30 cm/s | %s | on the ramp the rider %.2f deg off at most (%.2f with no seat trim); over the course %.2f deg at %.2f deg/s (%.2f at %.2f); at the end seat %.3f, rider %.2f off"),
+					Kit.Name, SeatLag, FrameNames[Rate], OnRamp.PeakOffDeg, Was.PeakOffDeg, Whole.PeakOffDeg, Whole.RateDegPerSec, WholeWas.PeakOffDeg, WholeWas.RateDegPerSec, Result.Trace.Num() > 0 ? Result.Trace.Last().SeatDeg : 0.0,
+					Result.FinalRiderTiltDeg));
+				TestTrue(Say(TEXT("(with no seat trim the ramp leaves the rider over a degree off)")), Was.PeakOffDeg >= 1.4);
+				TestTrue(Say(TEXT("the ramp: the rider level on it")), OnRamp.PeakOffDeg <= 0.5);
+				TestTrue(Say(TEXT("the course: the rider no further off than with no seat trim")), Whole.PeakOffDeg <= WholeWas.PeakOffDeg + 0.1);
+				TestTrue(Say(TEXT("the course: the rider turned no faster than with no seat trim")), Whole.RateDegPerSec <= WholeWas.RateDegPerSec + 0.2);
+				TestTrue(Say(TEXT("the landing: the rider level")), Result.SteadyRiderResidualDeg <= 0.3);
+				// (All but its cover of what the legs' own deadband leaves.)
+				TestTrue(Say(TEXT("the landing: the seat given back")), Result.Trace.Num() > 0 && FMath::Abs(Result.Trace.Last().SeatDeg) <= Kit.Tuning.DeadbandDeg);
+			}
+		}
+	}
+
+	// The trim's limits: the tuning's, and the seat's own range.
+	for (const int32 Limit : { 0, 1 })
+	{
+		FOptions Options = MakeOptions(Kit, 0);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 12.0;
+		Options.bKeepTrace = true;
+		Options.Tuning.SeatTrimMaxDeg = Limit == 0 ? 1.0 : 8.0;
+		Options.SeatRoomDeg = Limit == 0 ? 1.0e6 : 0.5;
+		const double   Most = Limit == 0 ? 1.0 : 0.5;
+		const FResult  Result = DryRun::Run(Kit.Robot, Plane(10.0, 0.0), Options);
+		const TCHAR*   Name = Limit == 0 ? TEXT("a 1 deg trim limit") : TEXT("a seat with half a degree of range");
+		const FSample* End = Result.Trace.Num() > 0 ? &Result.Trace.Last() : nullptr;
+		ExpectSound(*this, Kit, 0, Result);
+		if (TestTrue(Label(Kit, 0, Name), End != nullptr))
+		{
+			AddInfo(FString::Printf(TEXT("%s | parked 10 deg nose up, %s | base %.2f, seat %.2f, rider %.2f off"), Kit.Name, Name, End->TrueAttitudeDeg.X, End->SeatDeg, Inclination(End->RiderDeg)));
+			TestTrue(Label(Kit, 0, *FString::Printf(TEXT("%s: the seat never past it"), Name)), Result.MaxSeatDeg <= Most + 1.0e-6);
+			TestEqual(Label(Kit, 0, *FString::Printf(TEXT("%s: the seat on it"), Name)), End->SeatDeg, -Most, 0.02);
+			TestEqual(Label(Kit, 0, *FString::Printf(TEXT("%s: the rider left with the rest"), Name)), End->RiderDeg.X, End->TrueAttitudeDeg.X - Most, 0.02);
+		}
+	}
+	return true;
+}
+
+// Catches: a seat that does not earn its keep at a seam. Where the legs cannot
+// turn the plane as fast as the ground turns under them the base is left
+// behind its wanted attitude; that error is the seat's to take out while the
+// legs catch up, and to give back as they do. And a seat that makes any seam
+// of the speed cap's courses worse for the rider than leaving the seat alone,
+// or that takes less off the seams when it is sent ahead by the ground's last
+// turn than when it is not.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSeatCover,
+	"Ramms.Level.DryRun.SeatCoversLegsThatCannotKeepUp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSeatCover::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const TArray<FReachCourse> Courses = ReachCourses();
+	// Legs that turn the plane at 4 deg/s, over the 12 deg crest: the drive is
+	// held to the speed at which the slope's end turns the ground as fast as
+	// they can follow, and the crest turns it twice as far.
+	{
+		FKit Slow = QuickOnFour();
+		Slow.Name = TEXT("quick on four, a slow plane");
+		Slow.Tuning.MaxCorrectionRateDegPerSec = 4.0;
+		const FReachCourse& Crest = Courses[0];
+		for (const double SeatLag : SeatLags)
+		{
+			for (const int32 Rate : { 0, 2 })
+			{
+				FOptions Options = MakeOptions(Slow, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.SeatLagSeconds = SeatLag;
+				Options.DistanceCm = Crest.DistanceCm;
+				Options.MaxSeconds = 120.0;
+				Options.PitchPerAccelDeg = BodyPitchPerAccel;
+				Options.bKeepTrace = true;
+				Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, 60.0));
+				const FResult	  Result = DryRun::Run(Slow.Robot, Crest.Ground, Options);
+				const FResult	  NoSeat = DryRun::Run(Slow.Robot, Crest.Ground, WithoutSeat(Options));
+				const FRiderSwing With = RiderOver(Result, 630.0, 650.0 + OnFourSpanCm + 150.0, Options.FrameSeconds);
+				const FRiderSwing Without = RiderOver(NoSeat, 630.0, 650.0 + OnFourSpanCm + 150.0, Options.FrameSeconds);
+				Report(*this, Slow, TEXT("12 deg crest, the plane at 4 deg/s"), Rate, Result);
+				ExpectSound(*this, Slow, Rate, Result);
+				AddInfo(FString::Printf(TEXT("%s | seat lag %.2f s | the crest | %s | rider %.2f deg off at %.1f deg/s, the seat moving %.2f deg; with no seat trim %.2f at %.1f"), Slow.Name, SeatLag, FrameNames[Rate], With.PeakOffDeg,
+					With.RateDegPerSec, With.SeatRangeDeg, Without.PeakOffDeg, Without.RateDegPerSec));
+				const auto Say = [&](const FString& What) { return FString::Printf(TEXT("%s, seat lag %.2f s, %s: %s"), Slow.Name, SeatLag, FrameNames[Rate], *What); };
+				TestTrue(Say(FString::Printf(TEXT("(the legs are left behind at the crest: %.2f deg with no seat trim)"), Without.PeakOffDeg)), Without.PeakOffDeg >= 1.2);
+				TestTrue(Say(FString::Printf(TEXT("the seat takes out a third and more of what the legs owe (%.2f against %.2f deg)"), With.PeakOffDeg, Without.PeakOffDeg)), With.PeakOffDeg <= 0.7 * Without.PeakOffDeg);
+				TestTrue(Say(FString::Printf(TEXT("... and the rider is turned no faster for it (%.1f against %.1f deg/s)"), With.RateDegPerSec, Without.RateDegPerSec)), With.RateDegPerSec <= Without.RateDegPerSec + 0.2);
+				TestTrue(Say(TEXT("the seat given back once the legs have caught up")), Result.Trace.Num() > 0 && FMath::Abs(Result.Trace.Last().SeatDeg) <= Slow.Tuning.DeadbandDeg && Result.FinalRiderTiltDeg <= 0.2);
+			}
+		}
+	}
+
+	// The speed cap's courses as they are: no seam worse for the seat, quick
+	// or slow. And what sending the seat ahead by the ground's last turn buys
+	// there (FSeatCoverTuning::GroundAhead).
+	const FKit Kit = QuickOnFour();
+	double	   SumWithout = 0.0;
+	double	   SumWith = 0.0;
+	double	   SumAhead = 0.0;
+	for (const FReachCourse& Course : Courses)
+	{
+		for (const double Speed : { 60.0, 120.0 })
+		{
+			for (const int32 Rate : { 0, 2 })
+			{
+				for (const double SeatLag : SeatLags)
+				{
+					FOptions Options = MakeOptions(Kit, Rate);
+					Options.SpeedCmS = 0.0;
+					Options.SeatLagSeconds = SeatLag;
+					Options.DistanceCm = Course.DistanceCm;
+					Options.MaxSeconds = 90.0;
+					Options.PitchPerAccelDeg = BodyPitchPerAccel;
+					Options.bKeepTrace = true;
+					Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, Speed));
+					FOptions AheadOptions = Options;
+					AheadOptions.SeatCover.GroundAhead = 1.0;
+					const FResult Result = DryRun::Run(Kit.Robot, Course.Ground, Options);
+					const FResult NoSeat = DryRun::Run(Kit.Robot, Course.Ground, WithoutSeat(Options));
+					const FResult Sent = DryRun::Run(Kit.Robot, Course.Ground, AheadOptions);
+					ExpectSound(*this, Kit, Rate, Result);
+					ExpectSound(*this, Kit, Rate, Sent);
+					for (const FSeam& Seam : Course.Seams)
+					{
+						const double	  From = Seam.AtCm - 20.0;
+						const double	  To = Seam.AtCm + Seam.LengthCm + OnFourSpanCm + 100.0;
+						const FRiderSwing With = RiderOver(Result, From, To, Options.FrameSeconds);
+						const FRiderSwing Without = RiderOver(NoSeat, From, To, Options.FrameSeconds);
+						const FRiderSwing Ahead = RiderOver(Sent, From, To, Options.FrameSeconds);
+						AddInfo(FString::Printf(TEXT("%s at %.0f cm/s | %s | seat lag %.2f s | %s | rider %.2f deg off at %.1f deg/s, the seat moving %.2f deg; with no seat trim %.2f at %.1f; the seat sent ahead %.2f at %.1f"), Course.Name,
+							Speed, Seam.Name, SeatLag, FrameNames[Rate], With.PeakOffDeg, With.RateDegPerSec, With.SeatRangeDeg, Without.PeakOffDeg, Without.RateDegPerSec, Ahead.PeakOffDeg, Ahead.RateDegPerSec));
+						const auto Say = [&](const FString& What) {
+							return FString::Printf(TEXT("%s at %.0f cm/s, %s, seat lag %.2f s, %s: %s"), Course.Name, Speed, Seam.Name, SeatLag, FrameNames[Rate], *What);
+						};
+						// (A seat three times as slow as the legs comes a little
+						// late to the end of a turn: a tenth more rate at most.)
+						const double RateSlack = SeatLag <= 0.05 ? 0.3 : 0.3 + 0.1 * Without.RateDegPerSec;
+						TestTrue(Say(FString::Printf(TEXT("the rider no further off for the seat (%.2f against %.2f deg)"), With.PeakOffDeg, Without.PeakOffDeg)), With.PeakOffDeg <= Without.PeakOffDeg + 0.1);
+						TestTrue(Say(FString::Printf(TEXT("the rider turned no faster for the seat (%.1f against %.1f deg/s)"), With.RateDegPerSec, Without.RateDegPerSec)), With.RateDegPerSec <= Without.RateDegPerSec + RateSlack);
+						TestTrue(Say(FString::Printf(TEXT("sent ahead: the rider no further off (%.2f against %.2f deg)"), Ahead.PeakOffDeg, Without.PeakOffDeg)), Ahead.PeakOffDeg <= Without.PeakOffDeg + 0.1);
+						SumWithout += Without.PeakOffDeg;
+						SumWith += With.PeakOffDeg;
+						SumAhead += Ahead.PeakOffDeg;
+					}
+				}
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("every seam, both speeds, both rates, both seats: the rider's peaks add up to %.1f deg with no seat trim, %.1f with it, %.1f with the seat sent ahead"), SumWithout, SumWith, SumAhead));
+	TestTrue(FString::Printf(TEXT("over all the seams the seat takes a tenth and more off the rider's peaks (%.1f against %.1f deg)"), SumWith, SumWithout), SumWith <= 0.9 * SumWithout);
+	TestTrue(FString::Printf(TEXT("sent ahead it takes more (%.1f against %.1f deg)"), SumAhead, SumWith), SumAhead <= 0.9 * SumWith);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

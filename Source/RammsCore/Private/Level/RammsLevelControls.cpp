@@ -53,6 +53,16 @@ namespace RammsLevel
 		return FName("level.pref.roll");
 	}
 
+	FName SeatTrimControlId()
+	{
+		return FName("level.seat_trim");
+	}
+
+	FName RiderTiltControlId()
+	{
+		return FName("level.rider_tilt");
+	}
+
 	FVector2D ClampPreference(const FVector2D& PreferenceDeg, const FVector2D& MaxPreferenceDeg)
 	{
 		const FVector2D Finite(FMath::IsFinite(PreferenceDeg.X) ? PreferenceDeg.X : 0.0, FMath::IsFinite(PreferenceDeg.Y) ? PreferenceDeg.Y : 0.0);
@@ -102,7 +112,7 @@ namespace RammsLevel
 		return Out;
 	}
 
-	void DescribeControls(FRammsControlSurface& OutSurface, bool bOn, const FVector2D& MaxPreferenceDeg)
+	void DescribeControls(FRammsControlSurface& OutSurface, bool bOn, const FVector2D& MaxPreferenceDeg, bool bSeat)
 	{
 		const FName Group = RammsControlIds::Groups::Drive();
 		// After the drive mode's own controls in the group.
@@ -180,6 +190,13 @@ namespace RammsLevel
 		Value(TiltControlId(), NSLOCTEXT("Ramms", "LevelTilt", "Base tilt"), ERammsControlUnits::Degrees, FVector2D(0.0, 45.0), 0.0f);
 		Value(ReachControlId(), NSLOCTEXT("Ramms", "LevelReach", "Levelling reach left"), ERammsControlUnits::None, FVector2D(0.0, 1.0), 1.0f);
 		Value(SpeedScaleControlId(), NSLOCTEXT("Ramms", "LevelSpeedScale", "Level speed limit"), ERammsControlUnits::None, FVector2D(0.0, 1.0), 1.0f);
+		if (bSeat)
+		{
+			// Where the seat holds part of the rider's attitude, "Base tilt" is
+			// not the rider's: say theirs too, and what the seat adds.
+			Value(RiderTiltControlId(), NSLOCTEXT("Ramms", "LevelRiderTilt", "Rider tilt"), ERammsControlUnits::Degrees, FVector2D(0.0, 45.0), 0.0f);
+			Value(SeatTrimControlId(), NSLOCTEXT("Ramms", "LevelSeatTrim", "Level seat trim, back (+) or forward"), ERammsControlUnits::Degrees, FVector2D(-45.0, 45.0), 0.0f);
+		}
 	}
 
 	const TCHAR* ReachLimitWords(EReachLimit Limit)
@@ -217,13 +234,20 @@ namespace RammsLevel
 				return TEXT("Level, at rest");
 			case EStatus::AtReach:
 			{
-				// The base is held off level on purpose: say by how much once
-				// it is a degree or more, and what stops the legs.
+				// The base is held off level on purpose: say by how much the
+				// rider is, once that is a degree or more, and what stops the
+				// legs. Where a seat makes the base's tilt up for the rider,
+				// say that instead: they are level, and owed why the seat moved.
 				OutSeverity = ESeverity::Attention;
-				FString Line = TEXT("At the end of levelling reach");
-				if (Facts.OffReferenceDeg >= 0.95)
+				FString		 Line = TEXT("At the end of levelling reach");
+				const double RiderOffDeg = Facts.RiderOffDeg >= 0.0 ? Facts.RiderOffDeg : Facts.OffReferenceDeg;
+				if (RiderOffDeg >= 0.95)
 				{
-					Line += FString::Printf(TEXT(", %.0f deg off"), Facts.OffReferenceDeg);
+					Line += FString::Printf(TEXT(", %.0f deg off"), RiderOffDeg);
+				}
+				else if (Facts.RiderOffDeg >= 0.0 && Facts.OffReferenceDeg >= 0.95)
+				{
+					Line += FString::Printf(TEXT(", the seat making up %.0f deg"), Facts.OffReferenceDeg);
 				}
 				if (Facts.ReachLimit != EReachLimit::None)
 				{

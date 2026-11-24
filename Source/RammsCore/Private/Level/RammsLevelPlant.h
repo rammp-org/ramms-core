@@ -43,8 +43,36 @@ namespace RammsLevel
 		 *  claims on the base. */
 		virtual void LevelledMotorIds(TArray<FName>& OutIds) const = 0;
 
-		/** The robot has a seat tilt the law's seat trim could move. */
+		/** The robot has a seat tilt the law's seat trim can move: its motor
+		 *  is among the levelled ones. */
 		virtual bool HasSeat() const = 0;
+
+		/** The seat's tilt motor, where HasSeat; none otherwise. (It is
+		 *  levelled, but it is no leg: a drive mode that drives it has not
+		 *  taken the legs.) */
+		virtual FName SeatMotorId() const = 0;
+
+		/**
+		 * Where the seat stands, as of the last MeasureLegs: the pitch its own
+		 * commands hold the platform at against the chassis (deg, nose up:
+		 * the rider's own setting, with no trim), and how far the trim may
+		 * take it from there, down to OutLowDeg (0 or less) and up to
+		 * OutHighDeg (0 or more), by the platform's own range and its motor's.
+		 * False when there is no seat, or it cannot take a trim now (nothing
+		 * commands its tilt yet; its linkage does not close): the law is then
+		 * told there is none, and any trim on it is taken off.
+		 */
+		virtual bool SeatTrimRange(double& OutOwnDeg, double& OutLowDeg, double& OutHighDeg) = 0;
+
+		/** Put the law's seat trim (deg, nose up against the chassis) on the
+		 *  seat's tilt motor, as an offset over the seat's own command. */
+		virtual void ApplySeatTrim(double TrimDeg) = 0;
+
+		/** The seat trim (deg) that folds have put into the seat tilt's own
+		 *  command and that is in it still: 0 once anything has commanded the
+		 *  tilt since, or the fold was undone. What a taker must take off the
+		 *  pitch it reads back to have the rider's own setting. */
+		virtual double FoldedSeatTrimDeg() const = 0;
 
 		/**
 		 * The legs now, in a fixed order: each one's place, its height at its
@@ -66,8 +94,8 @@ namespace RammsLevel
 		virtual void ApplyOffsets(TConstArrayView<double> Dz) = 0;
 
 		/**
-		 * A leg that has a baseline does not carry the offset ApplyOffsets last
-		 * put on it: its motors were let go (which clears a motor's offset) and
+		 * A leg that has a baseline (or the seat) does not carry the offset
+		 * ApplyOffsets (ApplySeatTrim) last put on it: its motors were let go (which clears a motor's offset) and
 		 * have been commanded again since, or something else cleared it. As of
 		 * the last MeasureLegs. The offsets must then be applied again before
 		 * the base next tells the motors, or that leg is told its command bare.

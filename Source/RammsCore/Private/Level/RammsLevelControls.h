@@ -43,10 +43,21 @@ namespace RammsLevel
 	 *  drive to keep (its floor..1), read-only. */
 	FName SpeedScaleControlId();
 	/** level.pref.pitch, level.pref.roll: the tilt the rider prefers to be
-	 *  held at (deg; positive nose up, positive with the +Y side up), added to
-	 *  the level reference. */
+	 *  held at (deg; positive nose up, positive with the +Y side up), over
+	 *  the level reference. The roll, and on a robot with no seat to hold it
+	 *  the pitch, is added to what level means for the base; the pitch is held
+	 *  in the seat where there is one (SplitPreference). */
 	FName PreferencePitchControlId();
 	FName PreferenceRollControlId();
+	/** level.seat_trim: what levelling adds to the seat's own tilt (deg, nose
+	 *  up against the chassis), read-only: the rider's fore/aft preference,
+	 *  a slope past the legs' reach taken back out, and the cover of what the
+	 *  base is behind by. Only on a robot whose seat tilts. */
+	FName SeatTrimControlId();
+	/** level.rider_tilt: the rider's total tilt (deg), read-only: the base's
+	 *  attitude with the seat's own pitch and the trim on it, as level.tilt
+	 *  is the base's. Only on a robot whose seat tilts. */
+	FName RiderTiltControlId();
 
 	/** A preference within what the tuning allows, per axis (a negative limit
 	 *  counts as 0; a preference that is not a number as 0). */
@@ -54,17 +65,18 @@ namespace RammsLevel
 
 	/**
 	 * The law's tuning from the reflected one: every member by its own name,
-	 * and the level reference the reflected one's plus the rider's preference
-	 * (clamped by MaxPreferenceDeg). That sum is the only place the preference
-	 * enters the law, so a change of it moves the rider as any change of the
-	 * wanted attitude does: on the tilt policy's rate and acceleration.
+	 * and the level reference the reflected one's plus PreferenceDeg (clamped
+	 * by MaxPreferenceDeg): the part of the rider's preference that the BASE
+	 * holds (all of it on a robot with no seat; SplitPreference). A change of
+	 * it moves the rider as any change of the wanted attitude does: on the
+	 * tilt policy's rate and acceleration.
 	 */
 	FTuning MakeTuning(const FRammsLevelTuning& Tuning, const FVector2D& PreferenceDeg);
 
 	/** The controls (group Drive): the switch showing bOn, the status, the
-	 *  read-only values, and the two preference sliders within
-	 *  +-MaxPreferenceDeg. */
-	void DescribeControls(FRammsControlSurface& OutSurface, bool bOn, const FVector2D& MaxPreferenceDeg);
+	 *  read-only values (the seat's two with bSeat), and the two preference
+	 *  sliders within +-MaxPreferenceDeg. */
+	void DescribeControls(FRammsControlSurface& OutSurface, bool bOn, const FVector2D& MaxPreferenceDeg, bool bSeat = false);
 
 	/** What the status line is made from. */
 	struct FStatusFacts
@@ -72,6 +84,10 @@ namespace RammsLevel
 		EStatus Status = EStatus::Off;
 		/** How far the base is off the level reference (deg). */
 		double OffReferenceDeg = 0.0;
+		/** With a seat that holds part of the rider's attitude: how far the
+		 *  RIDER is off what they asked for (deg). Under 0: no such seat, and
+		 *  the rider is where the base is. */
+		double RiderOffDeg = -1.0;
 		/** The robot cannot be levelled at all, and why (plain words; empty:
 		 *  it can). */
 		FString CannotLevel;

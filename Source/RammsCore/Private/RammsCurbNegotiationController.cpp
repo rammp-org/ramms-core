@@ -1006,10 +1006,21 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		// pitch read back is only where the rider is now.)
 		const bool	 bTilts = Start.bValid && !Seat.TiltMotor.IsNone();
 		const double Found = bTilts ? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) : 0.0;
-		float		 Now[3] = { 0.0f, 0.0f, 0.0f };
-		const bool	 bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
+		// A level assist that was levelling folded its seat trim into the tilt's
+		// command as this crossing took the legs: the command then holds the
+		// rider's own setting AND that trim (their preference, a slope past the
+		// legs' reach made up). The setting is the one without it; where the
+		// rider is now (the reference the level-in starts from, below) is the
+		// one with it, so nothing steps.
+		const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+		const double							FoldedTrim = bTilts && LevelAssist ? FMath::DegreesToRadians(static_cast<double>(LevelAssist->GetFoldedSeatTrimDeg())) : 0.0;
+		float									Now[3] = { 0.0f, 0.0f, 0.0f };
+		const bool								bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
 			&& !Seat.TiltMotor.IsNone() && Base->GetMotorCommand(Seat.TiltMotor, Now[2]);
-		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && bSeatKept, SeatKeptPitchOwn, SeatKeptCommands, Now, Found);
+		// (Less the trim, the tilt may well be commanded as the last crossing
+		// left it: the kept setting is then the rider's.)
+		Now[2] = static_cast<float>(RammsCurb::SeatTiltLessTrim(Seat, Now[2], FoldedTrim));
+		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && bSeatKept, SeatKeptPitchOwn, SeatKeptCommands, Now, Found - FoldedTrim);
 		SeatState.PitchRef = bTilts ? Found + SeatPitchRad : 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);

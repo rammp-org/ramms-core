@@ -420,35 +420,61 @@ namespace RammsLevel
 
 	/**
 	 * The seat's trim (deg; positive pitches the seat nose up against the
-	 * chassis): what the base's pitch is off the reference, taken out at the
-	 * seat while the legs catch up. The legs bring the base to W, so the trim
-	 * decays by itself; it covers the lag at a grade break, the enable ramp
-	 * and the pitch left past reach. Roll has no seat axis.
+	 * chassis): what the level assist adds to the seat's own tilt, on a robot
+	 * whose seat tilts. It has two parts.
 	 *
-	 *   F      = low-pass(BasePitchDeg, SeatFilterSeconds)   (as FAttitudeFilter)
-	 *   target = bRun ? clamp(-Deadband(F, SeatTrimDeadbandDeg), +-SeatTrimMaxDeg) : 0
+	 * The SHARE is the part of the rider's wanted pitch that is held in the
+	 * seat rather than in the base: the pitch the rider prefers, and the tilt
+	 * a slope past the legs' reach leaves the base with, taken back out. It
+	 * is a deliberate change of the rider's attitude, so the law moves it
+	 * within the tilt policy (FLaw::Step) and gives it here.
+	 *
+	 * The COVER is of the base's pitch error while the legs catch the ground
+	 * up: AnswerDeg, how far nose up of where it is wanted the base will be,
+	 * by the ground's doing, when the seat's command lands (the law works it
+	 * out: FLaw::Step, step 4). The seat takes it out, and the legs, bringing
+	 * the base to where it is wanted, take the cover away again by
+	 * themselves. Roll has no seat axis.
+	 *
+	 *   cover  = bCover ? -Deadband(AnswerDeg, SeatTrimDeadbandDeg) : 0
+	 *   target = clamp(ShareDeg + cover, max(LowDeg, -SeatTrimMaxDeg),
+	 *                                    min(HighDeg, SeatTrimMaxDeg))
 	 *   trim moves to target by at most SeatTrimRateDegPerSec Dt
 	 *
-	 * BasePitchDeg is the filtered attitude's pitch less the reference's (a
-	 * choice: the seat holds the reference, not the horizontal). The filter
-	 * runs whether or not bRun. Turning the trim into a seat joint command is
-	 * the plant's.
+	 * LowDeg (0 or less) and HighDeg (0 or more) are the seat's own room about
+	 * where the rider has it. A rate of 0 holds the trim where it is. Turning
+	 * the trim into a seat joint command is the plant's.
 	 */
 	class FSeatTrim
 	{
 	public:
-		void Reset() { *this = FSeatTrim(); }
+		/** The cover's own tuning (the law reads it; a test or the dry run
+		 *  may change it). */
+		FSeatCoverTuning Cover;
+
+		/** Forget (the tuning stays). */
+		void Reset()
+		{
+			const FSeatCoverTuning Kept = Cover;
+			*this = FSeatTrim();
+			Cover = Kept;
+		}
 		/** The trim has become part of the seat's own command (a fold): it is
-		 *  zero now, with no motion. The filter keeps its value. */
-		void Zero() { Trim = 0.0; }
+		 *  zero now, with no motion. */
+		void Zero()
+		{
+			Trim = 0.0;
+			bBehind = false;
+		}
 		/** One tick; returns the trim (deg). */
-		double Tick(double BasePitchDeg, bool bRun, double Dt, const FTuning& Tuning);
+		double Tick(double ShareDeg, double AnswerDeg, bool bCover, double LowDeg, double HighDeg, double Dt, const FTuning& Tuning);
 		double Get() const { return Trim; }
+		/** The last tick's rate held the trim short of its target. */
+		bool IsBehind() const { return bBehind; }
 
 	private:
-		double Filtered = 0.0;
-		bool   bSeeded = false;
 		double Trim = 0.0;
+		bool   bBehind = false;
 	};
 
 	/** What the drive-speed cap is told each tick. */

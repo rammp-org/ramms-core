@@ -110,6 +110,13 @@ namespace RammsLevel
 		 *  selector is changing the stance (both for the status). */
 		bool bModeNotLevelled = false;
 		bool bStanceChanging = false;
+		/** The seat as the last tick found it: whether its tilt can take a
+		 *  trim, the pitch its own commands hold it at against the chassis
+		 *  (deg), and the pitch of the rider's preference it is asked to hold
+		 *  (deg; 0 where the base holds it). */
+		bool   bSeat = false;
+		double SeatOwnDeg = 0.0;
+		double SeatPreferenceDeg = 0.0;
 	};
 } // namespace RammsLevel
 
@@ -380,7 +387,6 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 	using namespace RammsLevel;
 	FAssistRuntime& R = *Runtime;
 	AActor*			Owner = GetOwner();
-	R.LawTuning = MakeTuning(Tuning, R.PreferenceDeg);
 
 	FInputs In;
 	// --- the chassis ---
@@ -418,10 +424,26 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 		R.Legs = R.LastLegs;
 		In.bAttitudeValid = false;
 	}
+	// --- the seat, and where the rider's preference is held ---
+	// A seat whose tilt can take a trim holds the pitch the rider prefers; the
+	// base then stays on its own reference and keeps its legs' reach for the
+	// ground. The roll, and the pitch where no seat can hold it, are the
+	// base's: part of what level means for it.
+	double SeatLowDeg = 0.0;
+	double SeatHighDeg = 0.0;
+	R.SeatOwnDeg = 0.0;
+	R.bSeat = R.Plant->HasSeat() && R.Plant->SeatTrimRange(R.SeatOwnDeg, SeatLowDeg, SeatHighDeg);
+	const FPreferenceSplit Preference = SplitPreference(GetPreferenceDeg(), R.bSeat, Tuning.bSeatCoversTransients);
+	R.SeatPreferenceDeg = Preference.SeatDeg;
+	R.LawTuning = MakeTuning(Tuning, Preference.BaseDeg);
+	In.bSeat = R.bSeat;
+	In.SeatPreferenceDeg = Preference.SeatDeg;
+	In.SeatTrimLowDeg = SeatLowDeg;
+	In.SeatTrimHighDeg = SeatHighDeg;
+
 	R.Plant->ClearancePoints(R.LawTuning, R.Points);
 	In.Legs = R.Legs;
 	In.Points = R.Points;
-	In.bSeat = R.Plant->HasSeat();
 
 	// --- the rider's stick: off centre wakes a robot at rest ---
 	if (const URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
@@ -468,8 +490,11 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 		// where it is (the law's rules).
 		In.bStanceChanging = Selector && Selector->IsSwitchingMode();
 		R.bStanceChanging = In.bStanceChanging;
+		// (The leg motors: a mode that drives the seat's tilt has not taken
+		// the legs.)
 		TArray<FName> Levelled;
 		R.Plant->LevelledMotorIds(Levelled);
+		Levelled.Remove(R.Plant->SeatMotorId());
 		bool bAnyActive = false;
 		for (UActorComponent* Component : Owner->GetComponents())
 		{
@@ -562,6 +587,10 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 		// which clears it, and are commanded again): put back before the base
 		// tells the leg its new command, which would otherwise go out bare.
 		R.Plant->ApplyOffsets(Out.Dz);
+		if (R.bSeat)
+		{
+			R.Plant->ApplySeatTrim(Out.SeatTrimDeg);
+		}
 	}
 	if (!Out.bClaim && R.bClaimed && !(bYield && R.bFoldedMotors))
 	{
@@ -598,7 +627,6 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 			}
 		}
 	}
-	// Out.SeatTrimDeg is worked out and not yet put on the seat.
 	R.Last = Out;
 }
 
@@ -653,7 +681,7 @@ bool URammsLevelAssistComponent::AdoptPose(const FRammsDriveStance* NextStance, 
 	{
 		return false;
 	}
-	R.LawTuning = MakeTuning(Tuning, R.PreferenceDeg);
+	// (The tuning as the last tick made it: the preference where it was held.)
 	R.Plant->ClearancePoints(R.LawTuning, R.Points);
 	bool bAdopted = false;
 	for (int32 Round = 0; Round < AdoptRounds; ++Round)
@@ -746,9 +774,7 @@ FVector2D URammsLevelAssistComponent::GetTargetAttitudeDeg() const
 
 float URammsLevelAssistComponent::GetFoldedSeatTrimDeg() const
 {
-	// The seat's tilt motor is not levelled yet, so no trim is ever folded
-	// into its command.
-	return 0.0f;
+	return Runtime->Plant ? static_cast<float>(Runtime->Plant->FoldedSeatTrimDeg()) : 0.0f;
 }
 
 void URammsLevelAssistComponent::SetAssistEnabled(bool bEnabled)
@@ -794,6 +820,12 @@ FString URammsLevelAssistComponent::GetStatusLine(ERammsControlTextSeverity& Out
 	RammsLevel::FStatusFacts		  Facts;
 	Facts.Status = R.Last.Status;
 	Facts.OffReferenceDeg = RammsLevel::Inclination(R.Last.AttitudeDeg - R.LawTuning.LevelReferenceDeg);
+	if (R.bSeat && Tuning.bSeatCoversTransients)
+	{
+		// The rider against what they asked for: the base against its
+		// reference, with the seat's trim against the pitch it is to hold.
+		Facts.RiderOffDeg = RammsLevel::Inclination(R.Last.AttitudeDeg - R.LawTuning.LevelReferenceDeg + FVector2D(R.Last.SeatTrimDeg - R.SeatPreferenceDeg, 0.0));
+	}
 	Facts.CannotLevel = R.CannotLevel;
 	Facts.bOn = R.bSwitch;
 	Facts.bModeNotLevelled = R.bModeNotLevelled;
@@ -811,7 +843,12 @@ int32 URammsLevelAssistComponent::GetControlOrder() const
 
 void URammsLevelAssistComponent::DescribeControls(FRammsControlSurface& OutSurface) const
 {
-	RammsLevel::DescribeControls(OutSurface, Runtime->bSwitch, Tuning.MaxPreferenceDeg);
+	// (By the robot's description, not the plant: the controls are described
+	// before the first tick finds the robot.)
+	const AActor*						   Owner = GetOwner();
+	const URammsCurbNegotiationController* Curb = Owner ? Owner->FindComponentByClass<URammsCurbNegotiationController>() : nullptr;
+	const bool							   bSeat = Curb && Curb->Seat.IsSet() && !Curb->Seat.TiltMotor.IsNone();
+	RammsLevel::DescribeControls(OutSurface, Runtime->bSwitch, Tuning.MaxPreferenceDeg, bSeat);
 }
 
 bool URammsLevelAssistComponent::ApplyControl(FName Id, float Value)
@@ -877,6 +914,18 @@ bool URammsLevelAssistComponent::ReadControl(FName Id, float& OutValue) const
 	if (Id == RammsLevel::SpeedScaleControlId())
 	{
 		OutValue = static_cast<float>(R.Last.SpeedScale);
+		return true;
+	}
+	if (Id == RammsLevel::SeatTrimControlId())
+	{
+		OutValue = static_cast<float>(R.Last.SeatTrimDeg);
+		return true;
+	}
+	if (Id == RammsLevel::RiderTiltControlId())
+	{
+		// The base's attitude with what the seat pitches the rider by on it:
+		// its own setting and the trim.
+		OutValue = static_cast<float>(RammsLevel::Inclination(R.Last.AttitudeDeg + FVector2D(R.SeatOwnDeg + R.Last.SeatTrimDeg, 0.0)));
 		return true;
 	}
 	if (Id == RammsLevel::PreferencePitchControlId())

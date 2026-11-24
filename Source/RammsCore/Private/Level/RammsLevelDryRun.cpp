@@ -455,8 +455,13 @@ namespace RammsLevel::DryRun
 		{
 			return Result;
 		}
-		// A copy: an event may change what level means on the way (EEvent::SetReference).
-		FTuning		 Tuning = Options.Tuning;
+		// A copy: an event may change what level means on the way
+		// (EEvent::SetReference, EEvent::SetPreference). Its reference is the
+		// BASE's: the options' with the part of the preference the base holds.
+		FTuning	  Tuning = Options.Tuning;
+		FVector2D Reference = Options.Tuning.LevelReferenceDeg;
+		FVector2D Preference = Options.PreferenceDeg;
+		Tuning.LevelReferenceDeg = Reference + SplitPreference(Preference, Robot.bSeat, Tuning.bSeatCoversTransients).BaseDeg;
 		const double FrameSeconds = FMath::Max(Options.FrameSeconds, 1.0e-3);
 		const double Tick = FMath::Clamp(Options.PhysicsStepSeconds, 1.0e-4, FrameSeconds);
 		const int32	 PoseEvery = FMath::Max(1, FMath::RoundToInt32(Options.PoseStepSeconds / Tick));
@@ -536,6 +541,15 @@ namespace RammsLevel::DryRun
 		// The body's own pitch under the drive's acceleration (deg, nose up).
 		double		 BodyPitch = 0.0;
 		const double BodyShare = Options.BodyLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.BodyLagSeconds) : 1.0;
+		// The seat's tilt (deg, nose up against the chassis): its own command
+		// (zero: the rider has it level; a taker's to move), the law's trim on
+		// top, and the joint behind a follower and a lag, as a leg's.
+		double				   SeatBaseline = 0.0;
+		double				   SeatOffset = 0.0;
+		double				   SeatJoint = 0.0;
+		RammsMotion::FFollower SeatFollower;
+		SeatFollower.Reset(0.0);
+		const double SeatLagShare = Options.SeatLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.SeatLagSeconds) : 1.0;
 
 		FRestPose Pose;
 		PlaceBottoms();
@@ -572,6 +586,7 @@ namespace RammsLevel::DryRun
 
 		FState Law;
 		Law.Ground.Tuning = Options.Ground;
+		Law.SeatTrim.Cover = Options.SeatCover;
 		FRandomStream Random(Options.Seed);
 		FVector2D	  LastReading = FVector2D::ZeroVector;
 		bool		  bHaveReading = false;
@@ -580,6 +595,8 @@ namespace RammsLevel::DryRun
 		const int32		  ExpectedFrames = FMath::Max(1, FMath::CeilToInt32(FMath::Max(0.0, Options.MaxSeconds) / FrameSeconds) + 2);
 		TArray<double>	  Times;
 		TArray<FVector2D> TrueDeg;
+		TArray<FVector2D> RiderDeg;
+		TArray<double>	  RiderOffDeg;
 		TArray<FVector2D> WantedDeg;
 		TArray<bool>	  bWantedPlanned;
 		TArray<bool>	  bWantedSet;
@@ -588,6 +605,8 @@ namespace RammsLevel::DryRun
 		TArray<int32>	  EventFrames;
 		Times.Reserve(ExpectedFrames);
 		TrueDeg.Reserve(ExpectedFrames);
+		RiderDeg.Reserve(ExpectedFrames);
+		RiderOffDeg.Reserve(ExpectedFrames);
 		WantedDeg.Reserve(ExpectedFrames);
 		bWantedPlanned.Reserve(ExpectedFrames);
 		bWantedSet.Reserve(ExpectedFrames);
@@ -616,6 +635,7 @@ namespace RammsLevel::DryRun
 			{
 				// ======== one frame ========
 				bool	  bBaselineMoved = false;
+				bool	  bSeatMoved = false;
 				bool	  bYield = false;
 				bool	  bResume = false;
 				bool	  bResumePlane = false;
@@ -732,7 +752,10 @@ namespace RammsLevel::DryRun
 							ReleaseUntil = Time + Event.Seconds;
 							break;
 						case EEvent::SetReference:
-							Tuning.LevelReferenceDeg = Event.PlaneDeg;
+							Reference = Event.PlaneDeg;
+							break;
+						case EEvent::SetPreference:
+							Preference = Event.PlaneDeg;
 							break;
 						case EEvent::StanceChanging:
 							ChangingUntil = FMath::Max(ChangingUntil, Time + Event.Seconds);
@@ -762,6 +785,20 @@ namespace RammsLevel::DryRun
 						Ramps.RemoveAt(RampIndex);
 					}
 				}
+
+				// A taker brings the rider to their own setting: what a fold
+				// left in the seat's own command goes back out of it, at the
+				// tilt policy's rate.
+				if (bTaken && SeatBaseline != 0.0)
+				{
+					const double Most = FMath::Max(0.0, Tuning.TiltRateDegPerSec) * FrameSeconds;
+					SeatBaseline -= FMath::Clamp(SeatBaseline, -Most, Most);
+					bSeatMoved = true;
+				}
+
+				// Where the rider's preference is held: as the component splits it.
+				const FPreferenceSplit Split = SplitPreference(Preference, Robot.bSeat, Tuning.bSeatCoversTransients);
+				Tuning.LevelReferenceDeg = Reference + Split.BaseDeg;
 
 				// The sensor.
 				const FVector2D TrueNow = Pose.AttitudeDeg + Kick + FVector2D(BodyPitch, 0.0);
@@ -804,6 +841,10 @@ namespace RammsLevel::DryRun
 				In.SpeedCmS = FMath::Abs(Speed);
 				In.bStick = SpeedCommand != 0.0;
 				In.bSeat = Robot.bSeat;
+				In.SeatPreferenceDeg = Split.SeatDeg;
+				// (Its room is about where the rider has it: its own command.)
+				In.SeatTrimLowDeg = FMath::Min(0.0, -Options.SeatRoomDeg - SeatBaseline);
+				In.SeatTrimHighDeg = FMath::Max(0.0, Options.SeatRoomDeg - SeatBaseline);
 				In.bEnable = bEnable;
 				In.Mode = bTaken ? EMode::Taken : (Time < ReleaseUntil - TimeHair ? EMode::Release : EMode::Allowed);
 				In.bYield = bYield;
@@ -822,6 +863,9 @@ namespace RammsLevel::DryRun
 						Baseline[Index] += Offset[Index];
 						Offset[Index] = 0.0;
 					}
+					// ... and the seat's trim into the seat's own command.
+					SeatBaseline += SeatOffset;
+					SeatOffset = 0.0;
 				}
 				if (Out.bWrite && Out.Dz.Num() == NumLegs)
 				{
@@ -837,6 +881,17 @@ namespace RammsLevel::DryRun
 						Followers[Index].Command(Baseline[Index] + Offset[Index], Time);
 					}
 				}
+				if (Robot.bSeat)
+				{
+					if (Out.bWrite)
+					{
+						SeatOffset = Out.SeatTrimDeg;
+					}
+					if (Out.bWrite || bSeatMoved)
+					{
+						SeatFollower.Command(SeatBaseline + SeatOffset, Time);
+					}
+				}
 				SpeedScale = Out.SpeedScale;
 
 				// ---- the frame's record ----
@@ -846,7 +901,16 @@ namespace RammsLevel::DryRun
 				}
 				Times.Add(Time);
 				TrueDeg.Add(TrueNow);
-				WantedDeg.Add(Out.WantedDeg);
+				// The rider: the chassis with the seat's tilt, against what
+				// they asked for (the whole preference, wherever it is held).
+				const FVector2D RiderNow = TrueNow + FVector2D(SeatJoint, 0.0);
+				const FVector2D RiderReference = Reference + Preference;
+				RiderDeg.Add(RiderNow);
+				RiderOffDeg.Add(Inclination(RiderNow - RiderReference));
+				Result.PeakRiderTiltDeg = FMath::Max(Result.PeakRiderTiltDeg, RiderOffDeg.Last());
+				Result.FinalRiderTiltDeg = RiderOffDeg.Last();
+				Result.MaxSeatDeg = FMath::Max(Result.MaxSeatDeg, FMath::Abs(SeatJoint));
+				WantedDeg.Add(Out.RiderWantedDeg);
 				bWantedPlanned.Add((Out.State == EState::Active || Out.State == EState::Releasing) && !Out.bOpenLoop);
 				bWantedSet.Add(Out.Action == EAction::StartFromAttitude || Out.Action == EAction::Adopt || Out.Action == EAction::ColdResume);
 				bWrote.Add(Out.bWrite);
@@ -892,6 +956,9 @@ namespace RammsLevel::DryRun
 					Sample.TravelCm = Travel;
 					Sample.SpeedCmS = Speed;
 					Sample.TrueAttitudeDeg = TrueNow;
+					Sample.RiderDeg = RiderNow;
+					Sample.RiderReferenceDeg = RiderReference;
+					Sample.SeatDeg = SeatJoint;
 					Sample.Out = Out;
 					Sample.BaselineZ = Baseline;
 					for (int32 Index = 0; Index < NumLegs; ++Index)
@@ -927,6 +994,10 @@ namespace RammsLevel::DryRun
 				const double	 Setpoint = Followers[Index].Step(Time, Tick, Leg.MaxRateCmS, Leg.MaxAccelCmS2);
 				Joint[Index] += (Setpoint + SagCm[Index] - Joint[Index]) * ServoShare;
 				Joint[Index] = FMath::Clamp(Joint[Index], Leg.MinZ, Leg.MaxZ);
+			}
+			if (Robot.bSeat)
+			{
+				SeatJoint += (SeatFollower.Step(Time, Tick, Options.SeatMaxRateDegPerSec, 0.0) - SeatJoint) * SeatLagShare;
 			}
 			if (KickSeconds > 0.0)
 			{
@@ -1003,6 +1074,7 @@ namespace RammsLevel::DryRun
 		{
 			const FVector2D Rate = (TrueDeg[Index] - TrueDeg[Index - Window]) / WindowSeconds;
 			Result.MaxTrueRateDegPerSec = FMath::Max(Result.MaxTrueRateDegPerSec, Rate.Size());
+			Result.MaxRiderRateDegPerSec = FMath::Max(Result.MaxRiderRateDegPerSec, (RiderDeg[Index] - RiderDeg[Index - Window]).Size() / WindowSeconds);
 			if (Index >= 2 * Window)
 			{
 				const FVector2D Before = (TrueDeg[Index - Window] - TrueDeg[Index - 2 * Window]) / WindowSeconds;
@@ -1030,6 +1102,7 @@ namespace RammsLevel::DryRun
 		{
 			const double From = Times.Last() - Options.SteadySeconds;
 			double		 Sum = 0.0;
+			double		 RiderSum = 0.0;
 			int32		 Count = 0;
 			FVector2D	 Low = TrueDeg.Last();
 			FVector2D	 High = TrueDeg.Last();
@@ -1043,6 +1116,7 @@ namespace RammsLevel::DryRun
 			for (int32 Index = NumFrames - 1; Index >= 0 && Times[Index] >= From - TimeHair; --Index)
 			{
 				Sum += Inclination(TrueDeg[Index] - Tuning.LevelReferenceDeg);
+				RiderSum += RiderOffDeg[Index];
 				++Count;
 				Low = FVector2D(FMath::Min(Low.X, TrueDeg[Index].X), FMath::Min(Low.Y, TrueDeg[Index].Y));
 				High = FVector2D(FMath::Max(High.X, TrueDeg[Index].X), FMath::Max(High.Y, TrueDeg[Index].Y));
@@ -1055,6 +1129,7 @@ namespace RammsLevel::DryRun
 				Result.SteadyWrites += bWrote[Index] ? 1 : 0;
 			}
 			Result.SteadyResidualDeg = Count > 0 ? Sum / Count : 0.0;
+			Result.SteadyRiderResidualDeg = Count > 0 ? RiderSum / Count : 0.0;
 			Result.SteadyTiltRangeDeg = FMath::Max(High.X - Low.X, High.Y - Low.Y);
 			for (int32 LegIndex = 0; LegIndex < NumLegs; ++LegIndex)
 			{

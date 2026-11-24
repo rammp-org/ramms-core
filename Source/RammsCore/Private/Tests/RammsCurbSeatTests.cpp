@@ -236,4 +236,47 @@ bool FRammsCurbSeatPitchRef::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a level assist's folded seat trim taken off the tilt's command with the wrong sign for the motor's sense
+// (the rider's own setting then read 2 trims off), and a retry after a stopped crossing no longer finding the seat as
+// that crossing left it because a trim was folded on top.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSeatTiltLessTrim, "Ramms.Curb.Seat.TiltLessTrim",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCurbSeatTiltLessTrim::RunTest(const FString& Parameters)
+{
+	for (const float Sign : { -1.0f, 1.0f })
+	{
+		FRammsCurbSeat Seat = MakeSeat();
+		Seat.TiltAngleSign = Sign;
+		const RammsCurb::FSeatPose Zero = RammsCurb::SeatForward(Seat, FVector2D::ZeroVector);
+		const RammsCurb::FSeatPose Pose = RammsCurb::SeatForward(Seat, FVector2D(0.2, -0.1));
+		if (!TestTrue(TEXT("the poses close"), Zero.bValid && Pose.bValid))
+		{
+			return false;
+		}
+		// The rider's own setting, 4 deg nose down; a trim of 3 deg nose up folded into the tilt's command on top.
+		const double Own = FMath::DegreesToRadians(-4.0);
+		const double Trim = FMath::DegreesToRadians(3.0);
+		const double Commanded = RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, Zero.LinkAngle, Own + Trim);
+		const double Less = RammsCurb::SeatTiltLessTrim(Seat, Commanded, Trim);
+		TestEqual(FString::Printf(TEXT("sign %+.0f: the command without the trim holds the rider's own setting"), Sign),
+			RammsCurb::SeatPlatformPitch(Seat, Pose.LinkAngle, Zero.LinkAngle, Less), Own, 1e-12);
+		TestEqual(FString::Printf(TEXT("sign %+.0f: no trim, no change"), Sign), RammsCurb::SeatTiltLessTrim(Seat, Commanded, 0.0), Commanded, 0.0);
+
+		// A crossing stopped part way left the seat commanded to Left, holding Held as the rider's own; a level assist
+		// then trimmed the seat and folded the trim into the tilt as the retry took the legs. Less that trim the seat
+		// is still as the crossing left it, and the setting kept is the rider's.
+		const float	 Left[3] = { 0.2f, -0.1f, static_cast<float>(RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, Zero.LinkAngle, FMath::DegreesToRadians(-9.0))) };
+		const double Held = Own;
+		const float	 Folded[3] = { Left[0], Left[1], static_cast<float>(Left[2] + (RammsCurb::SeatTiltFor(Seat, 0.0, 0.0, Trim) - RammsCurb::SeatTiltFor(Seat, 0.0, 0.0, 0.0))) };
+		const double ReadBack = RammsCurb::SeatPlatformPitch(Seat, Pose.LinkAngle, Zero.LinkAngle, Folded[2]);
+		TestEqual(FString::Printf(TEXT("sign %+.0f: (with the trim folded in, the seat no longer reads as the crossing left it)"), Sign),
+			RammsCurb::SeatOwnPitchAtTakeOver(true, Held, Left, Folded, ReadBack), ReadBack, 0.0);
+		const float Now[3] = { Folded[0], Folded[1], static_cast<float>(RammsCurb::SeatTiltLessTrim(Seat, Folded[2], Trim)) };
+		TestEqual(FString::Printf(TEXT("sign %+.0f: less the trim it does, and the kept setting is the rider's"), Sign),
+			RammsCurb::SeatOwnPitchAtTakeOver(true, Held, Left, Now, ReadBack - Trim), Held, 0.0);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

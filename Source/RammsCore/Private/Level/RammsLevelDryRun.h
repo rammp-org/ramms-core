@@ -38,6 +38,14 @@
  *    with the load shared evenly), following with the servo lag. A leg's
  *    share is the sum over its touching wheels of the least-norm loads that
  *    balance the centre of mass (clipped at 0 and renormalised).
+ *  - The seat, on a robot that has one (FRobot::bSeat): the law's trim is
+ *    given once per frame, as a leg's command is, to a follower stepped here
+ *    within SeatMaxRateDegPerSec, and the seat's tilt follows that with a
+ *    first-order lag (SeatLagSeconds). The RIDER's attitude is the chassis'
+ *    true attitude with the seat's tilt added to its pitch. A take-over's
+ *    fold puts the trim into the seat's own command, which the taker then
+ *    walks back to zero at the tilt policy's rate (as a crossing brings the
+ *    rider to their own setting).
  *  - Pose, every PoseStepSeconds: SolveRest over the wheels' true bottoms.
  *    Floating wheels, three-point stances and rocking come out of that; the
  *    attitude is NOT a fit through the wheels. A kick (below) is added to
@@ -256,7 +264,10 @@ namespace RammsLevel::DryRun
 		/** For Seconds the law is told a drive mode's stance is being changed
 		 *  (FInputs::bStanceChanging): a mode switch under way, whose stages
 		 *  are StanceRamp events in that time. */
-		StanceChanging
+		StanceChanging,
+		/** The rider's preferred tilt becomes PlaneDeg (deg; pitch, roll):
+		 *  FOptions::PreferenceDeg from here on. */
+		SetPreference
 	};
 
 	struct FDryEvent
@@ -306,6 +317,20 @@ namespace RammsLevel::DryRun
 		double	  NoiseDeg = 0.0;
 		bool	  bDelayOneFrame = false;
 		int32	  Seed = 1;
+		/** The seat's tilt, on a robot that has one: its servo's lag behind
+		 *  its setpoint (s), how fast it turns (deg/s; 0: no limit), and how
+		 *  far either way it can be trimmed from where the rider has it (deg). */
+		double SeatLagSeconds = 0.03;
+		double SeatMaxRateDegPerSec = 20.0;
+		double SeatRoomDeg = 1.0e6;
+		/** What the seat's cover goes by (FSeatTrim::Cover). */
+		FSeatCoverTuning SeatCover;
+		/** The rider's preferred tilt (deg; pitch, roll), over
+		 *  Tuning.LevelReferenceDeg. Held as the level assist's component
+		 *  holds it (SplitPreference): on a robot with a seat, with the
+		 *  tuning's seat trim on, the pitch in the seat and the roll in the
+		 *  base's reference; on any other, both in the base's reference. */
+		FVector2D PreferenceDeg = FVector2D::ZeroVector;
 		/** The switch is on from the first frame. */
 		bool bEnabledAtStart = true;
 		/** The run ends when the origin has travelled DistanceCm (0: no such
@@ -332,6 +357,13 @@ namespace RammsLevel::DryRun
 		double	  TravelCm = 0.0;
 		double	  SpeedCmS = 0.0;
 		FVector2D TrueAttitudeDeg = FVector2D::ZeroVector;
+		/** The rider's true attitude (the chassis' with the seat's tilt added
+		 *  to its pitch), the attitude the rider asked for (the reference with
+		 *  the whole preference), and the seat's tilt (deg, nose up against
+		 *  the chassis). */
+		FVector2D RiderDeg = FVector2D::ZeroVector;
+		FVector2D RiderReferenceDeg = FVector2D::ZeroVector;
+		double	  SeatDeg = 0.0;
 		/** The law's outputs of the frame. */
 		FOutputs Out;
 		/** Each leg's baseline and command (baseline + offset) (cm). */
@@ -344,8 +376,12 @@ namespace RammsLevel::DryRun
 
 	/**
 	 * What a run measured. "True" is the plant's attitude, not the sensor's;
-	 * "off level" is Inclination(true - Tuning.LevelReferenceDeg). Rates and
-	 * accelerations of attitudes are Euclidean over pitch and roll.
+	 * "off level" is Inclination(true - the base's reference): the tuning's
+	 * LevelReferenceDeg with the part of the preference the base holds. The
+	 * RIDER's figures are of the chassis' true attitude with the seat's tilt
+	 * added to its pitch, against the reference with the whole preference; on
+	 * a robot with no seat they are the base's. Rates and accelerations of
+	 * attitudes are Euclidean over pitch and roll.
 	 */
 	struct FResult
 	{
@@ -369,10 +405,11 @@ namespace RammsLevel::DryRun
 		 *  that is how long the legs took to catch the ground up; on a course
 		 *  that starts on a slope it is the walk to level. */
 		double LongestOffLevelSeconds = 0.0;
-		/** The wanted attitude W: its largest rate (deg/s) and acceleration
+		/** The RIDER's wanted attitude (FOutputs::RiderWantedDeg: W itself on
+		 *  a robot with no seat): its largest rate (deg/s) and acceleration
 		 *  (deg/s^2), frame to frame, over frames where the law was Active or
-		 *  Releasing on both sides, not ramping out open loop (W is then the
-		 *  measured attitude), and no action reset W between them. */
+		 *  Releasing on both sides, not ramping out open loop (it is then the
+		 *  measured attitude), and no action reset it between them. */
 		double MaxWantedRateDegPerSec = 0.0;
 		double MaxWantedAccelDegPerSec2 = 0.0;
 		/** The true attitude: its largest rate over any 0.3 s (deg/s), and
@@ -380,6 +417,15 @@ namespace RammsLevel::DryRun
 		 *  second (deg/s^2). Kicks are in it. */
 		double MaxTrueRateDegPerSec = 0.0;
 		double MaxTrueAccelDegPerSec2 = 0.0;
+		/** The rider: off what they asked for, the mean over the last
+		 *  SteadySeconds, the most over the whole run and the last frame's
+		 *  (deg); their attitude's largest rate over any 0.3 s (deg/s); and
+		 *  the most the seat was tilted (deg). */
+		double SteadyRiderResidualDeg = 0.0;
+		double PeakRiderTiltDeg = 0.0;
+		double FinalRiderTiltDeg = 0.0;
+		double MaxRiderRateDegPerSec = 0.0;
+		double MaxSeatDeg = 0.0;
 
 		/** The largest change of any leg's command (baseline + offset, cm)
 		 *  from one frame to the next; the same over the frames of a fold and

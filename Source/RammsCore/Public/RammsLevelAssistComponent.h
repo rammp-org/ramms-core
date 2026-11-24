@@ -43,6 +43,25 @@ namespace RammsLevel
  * change of the preference moves the rider as switching on does: within the
  * tilt policy's rate and acceleration.
  *
+ * The seat: on a robot whose seat tilts (the curb controller describes one
+ * with a tilt motor) and with Tuning.bSeatCoversTransients, the LEGS level the
+ * base and the SEAT does the rest of the rider's pitch, as a trim: an offset
+ * over the seat's own tilt command, which the seat's controller, a drive
+ * stance and a crossing go on writing (seat.tilt stays the rider's own
+ * setting against the chassis). The trim is three things. The pitch the rider
+ * prefers (level.pref.pitch) is held there, over a base that stays level, so
+ * that it costs the legs no reach; the roll they prefer stays the base's (a
+ * seat has no roll axis). What a slope past the legs' reach leaves the base
+ * tilted by is taken back out there. And what the base is behind its wanted
+ * attitude by, while the legs catch the ground up, is covered there. The
+ * first two are changes of the rider's attitude and move within the tilt
+ * policy; the cover moves at Tuning.SeatTrimRateDegPerSec; all of it stays
+ * within Tuning.SeatTrimMaxDeg and the seat's own range. What the body does
+ * by itself (a knock, braking) is not answered: a seat sent after it arrives
+ * as the base comes back. level.tilt is the base's tilt; level.rider_tilt the
+ * rider's, with the seat's own setting and the trim; level.seat_trim the
+ * trim. On a robot with no such seat the whole preference is the base's.
+ *
  * Where it levels: in the drive modes of EnabledModeIds (empty: every mode)
  * that are not in DisabledModeIds. A mode it does not level in that takes the
  * leg motors for itself (the curb mode) gets them at once, the offsets folded
@@ -88,8 +107,6 @@ namespace RammsLevel
  * otherwise (a wheel the stance carries off the ground kept clear of a slope
  * rising ahead), and brought back when it is no longer needed.
  *
- * Not yet, with its seam in place: the seat trim is worked out but the seat's
- * tilt motor is not moved.
  */
 /**
  * Keeps the rider level on sloping ground by adding one rigid plane of offsets to the legs' commands (see the
@@ -167,12 +184,16 @@ public:
 	/** Offsets may be on the legs now. */
 	bool IsLevelling() const;
 
-	/** The attitude the rider is being moved to and held at (deg; pitch,
-	 *  roll): the law's wanted attitude. */
+	/** The attitude the BASE is being moved to and held at (deg; pitch,
+	 *  roll): the law's wanted attitude. (The rider's differs by the pitch
+	 *  the seat holds, on a robot whose seat tilts.) */
 	FVector2D GetTargetAttitudeDeg() const;
 
-	/** The seat trim (deg) the last YieldTo folded into the seat tilt's
-	 *  command; 0 while the seat's tilt is not levelled. */
+	/** The seat trim (deg, nose up against the chassis) that a YieldTo folded
+	 *  into the seat tilt's own command and that is in it still: what a taker
+	 *  takes off the pitch it reads back to have the rider's own setting. 0
+	 *  once anything has commanded the tilt since, after a hand-back that
+	 *  undid the fold, and on a robot with no seat. */
 	float GetFoldedSeatTrimDeg() const;
 
 	/** The switch (level.assist). Refused, staying off, on a robot that cannot

@@ -2,6 +2,7 @@
 
 #include "Level/RammsLevelPlant.h"
 
+#include "Curb/RammsCurbSeat.h"
 #include "GameFramework/Actor.h"
 #include "Ramms4BarKinematics.h"
 #include "Ramms5BarKinematics.h"
@@ -28,8 +29,19 @@
  * angles that put the wheel at (baseline height + dz) and at the baseline
  * height, both solved the same way, so that dz = 0 is exactly no offset.
  *
- * SEAM for later: the seat's tilt motor is not among the levelled motors yet
- * (the law works out a seat trim; nothing here applies it).
+ * THE SEAT. Where the curb controller describes a seat with a tilt motor (a
+ * position motor of the registry), that motor is levelled too: the law's seat
+ * trim goes on it as an offset over the seat's own tilt command, which the
+ * seat's controller, a drive stance and a crossing go on writing. The trim is
+ * a platform pitch; the tilt motor's angle for it is the difference between
+ * the angles that hold the platform at the rider's own pitch with and without
+ * the trim (RammsCurb::SeatTiltFor), both at the same link angle, so that no
+ * trim is exactly no offset. (The link is taken as commanded for both: what
+ * the seat's loaded linkage sags by is the seat controller's to make up, as
+ * it does, and not something to step the seat by when the switch is thrown.)
+ * A fold puts the trim into the tilt's own command with the legs' offsets, and
+ * how much of it is in that command still is kept for the taker
+ * (FoldedSeatTrimDeg).
  */
 namespace RammsLevel
 {
@@ -120,6 +132,10 @@ namespace RammsLevel
 			virtual bool Resolve(FString& OutWhy) override;
 			virtual void LevelledMotorIds(TArray<FName>& OutIds) const override;
 			virtual bool HasSeat() const override;
+			virtual FName  SeatMotorId() const override;
+			virtual bool   SeatTrimRange(double& OutOwnDeg, double& OutLowDeg, double& OutHighDeg) override;
+			virtual void   ApplySeatTrim(double TrimDeg) override;
+			virtual double FoldedSeatTrimDeg() const override;
 			virtual bool MeasureLegs(FPlantLegs& OutLegs) override;
 			virtual void ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const override;
 			virtual void ApplyOffsets(TConstArrayView<double> Dz) override;
@@ -155,6 +171,37 @@ namespace RammsLevel
 			TArray<FPlantMotor>									  Motors;
 			TArray<FPlantLeg>									  Legs;
 			bool												  bFoldRemembered = false;
+
+			// ---- the seat ----
+			/** The seat's tilt motor among Motors; INDEX_NONE: no seat. */
+			int32 SeatMotor = INDEX_NONE;
+			/** The link angle the platform is level at (the seat's zero pose). */
+			double SeatLinkAngle0 = 0.0;
+			/** As the last SeatTrimRange found it: the link angle at the seat's
+			 *  commands and the rider's own pitch (rad), and that it can take a
+			 *  trim. */
+			double SeatLinkAngle = 0.0;
+			double SeatOwnRad = 0.0;
+			bool   bSeatReady = false;
+			/** The trim folds have put into the tilt's own command (rad of
+			 *  platform pitch), and that command as the last fold left it: the
+			 *  trim is in it for as long as it is still that. */
+			double SeatFoldedRad = 0.0;
+			float  SeatFoldedCommand = 0.0f;
+			bool   bSeatFolded = false;
+			/** What was in the command already when the last Fold began (rad):
+			 *  what is in it again once that fold is undone. */
+			double SeatUnfoldRad = 0.0;
+
+			/** The tilt motor's sense as a platform pitch: +1 or -1. */
+			double SeatSign() const;
+			/** The trim that is in the seat tilt's command now (rad): what folds
+			 *  put there, for as long as nothing has commanded the tilt since. */
+			double SeatFoldedNowRad() const;
+			/** Note what a fold put into the seat tilt's command: the offset it
+			 *  carried before (OffsetBefore), on top of what was in the command
+			 *  already (InCommandRad). */
+			void NoteSeatFold(double InCommandRad, float OffsetBefore);
 		};
 
 		int32 FLegPlant::AddMotor(FName Id, FString& OutWhy)
@@ -248,6 +295,22 @@ namespace RammsLevel
 				}
 				Legs.Add(Leg);
 			}
+			// The seat's tilt, where the robot has one that an offset can go
+			// on. One that cannot be levelled is no reason not to level the
+			// legs: the robot then simply has no seat trim.
+			SeatMotor = INDEX_NONE;
+			bSeatReady = false;
+			bSeatFolded = false;
+			if (CurbPtr->Seat.IsSet() && !CurbPtr->Seat.TiltMotor.IsNone())
+			{
+				FString					   SeatWhy;
+				const RammsCurb::FSeatPose Zero = RammsCurb::SeatForward(CurbPtr->Seat, FVector2D::ZeroVector);
+				if (Zero.bValid)
+				{
+					SeatMotor = AddMotor(CurbPtr->Seat.TiltMotor, SeatWhy);
+					SeatLinkAngle0 = Zero.LinkAngle;
+				}
+			}
 			return true;
 		}
 
@@ -261,8 +324,120 @@ namespace RammsLevel
 
 		bool FLegPlant::HasSeat() const
 		{
+			return SeatMotor != INDEX_NONE && Curb.IsValid();
+		}
+
+		FName FLegPlant::SeatMotorId() const
+		{
+			return Motors.IsValidIndex(SeatMotor) ? Motors[SeatMotor].Id : FName();
+		}
+
+		double FLegPlant::SeatSign() const
+		{
 			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
-			return CurbPtr && CurbPtr->Seat.IsSet() && !CurbPtr->Seat.TiltMotor.IsNone();
+			return CurbPtr && CurbPtr->Seat.TiltAngleSign < 0.0f ? -1.0 : 1.0;
+		}
+
+		bool FLegPlant::SeatTrimRange(double& OutOwnDeg, double& OutLowDeg, double& OutHighDeg)
+		{
+			OutOwnDeg = OutLowDeg = OutHighDeg = 0.0;
+			bSeatReady = false;
+			URammsRobotBaseComponent*			   BasePtr = Base.Get();
+			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
+			const UObject*						   LayerPtr = Layer.Get();
+			if (!BasePtr || !CurbPtr || !Motors.IsValidIndex(SeatMotor))
+			{
+				return false;
+			}
+			const FRammsCurbSeat& Seat = CurbPtr->Seat;
+			const FPlantMotor&	  Tilt = Motors[SeatMotor];
+			// The link as the seat's 5-bar is commanded (where nothing has
+			// commanded it, as it stands).
+			const auto Commanded = [BasePtr](FName Motor) {
+				float Value = 0.0f;
+				return static_cast<double>(BasePtr->GetMotorCommand(Motor, Value) ? Value : BasePtr->GetMotorValue(Motor));
+			};
+			const RammsCurb::FSeatPose Pose = RammsCurb::SeatForward(Seat, FVector2D(Commanded(Seat.Linkage.ProximalMotorA), Commanded(Seat.Linkage.ProximalMotorB)));
+			if (!Tilt.bNow || !Pose.bValid)
+			{
+				// Nothing commands the tilt (an offset left waiting would be
+				// added to whatever next does), or the linkage does not close.
+				if (LayerPtr && BasePtr->GetMotorCommandOffset(Tilt.Id) != 0.0f)
+				{
+					BasePtr->SetMotorCommandOffset(Tilt.Id, 0.0f, LayerPtr);
+					RememberOffsets();
+				}
+				return false;
+			}
+			SeatLinkAngle = Pose.LinkAngle;
+			SeatOwnRad = RammsCurb::SeatPlatformPitch(Seat, SeatLinkAngle, SeatLinkAngle0, Tilt.NowBaseline);
+			// The platform's own range about the chassis ...
+			const double MaxRad = FMath::DegreesToRadians(FMath::Max(0.0, static_cast<double>(Seat.MaxPitchDeg)));
+			double		 LowRad = -MaxRad - SeatOwnRad;
+			double		 HighRad = MaxRad - SeatOwnRad;
+			// ... and its motor's, where its row sets one.
+			if (Tilt.Range.X < Tilt.Range.Y)
+			{
+				const double Sign = SeatSign();
+				const double ToLow = (Tilt.Range.X - Tilt.NowBaseline) * Sign;
+				const double ToHigh = (Tilt.Range.Y - Tilt.NowBaseline) * Sign;
+				LowRad = FMath::Max(LowRad, FMath::Min(ToLow, ToHigh));
+				HighRad = FMath::Min(HighRad, FMath::Max(ToLow, ToHigh));
+			}
+			OutOwnDeg = FMath::RadiansToDegrees(SeatOwnRad);
+			OutLowDeg = FMath::RadiansToDegrees(FMath::Min(0.0, LowRad));
+			OutHighDeg = FMath::RadiansToDegrees(FMath::Max(0.0, HighRad));
+			bSeatReady = true;
+			return true;
+		}
+
+		void FLegPlant::ApplySeatTrim(double TrimDeg)
+		{
+			URammsRobotBaseComponent*			   BasePtr = Base.Get();
+			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
+			const UObject*						   LayerPtr = Layer.Get();
+			if (!BasePtr || !CurbPtr || !LayerPtr || !Motors.IsValidIndex(SeatMotor) || !bSeatReady || !FMath::IsFinite(TrimDeg))
+			{
+				return;
+			}
+			// Both solved the same way, at the same link angle: no trim asked
+			// is exactly no offset given.
+			const FRammsCurbSeat& Seat = CurbPtr->Seat;
+			const double		  With = RammsCurb::SeatTiltFor(Seat, SeatLinkAngle, SeatLinkAngle0, SeatOwnRad + FMath::DegreesToRadians(TrimDeg));
+			const double		  Without = RammsCurb::SeatTiltFor(Seat, SeatLinkAngle, SeatLinkAngle0, SeatOwnRad);
+			BasePtr->SetMotorCommandOffset(Motors[SeatMotor].Id, static_cast<float>(With - Without), LayerPtr);
+			RememberOffsets();
+		}
+
+		void FLegPlant::NoteSeatFold(double InCommandRad, float OffsetBefore)
+		{
+			const URammsRobotBaseComponent* BasePtr = Base.Get();
+			if (!BasePtr || !Motors.IsValidIndex(SeatMotor))
+			{
+				return;
+			}
+			// (A fold on top of one whose trim is in the command still adds to it.)
+			SeatFoldedRad = InCommandRad + static_cast<double>(OffsetBefore) * SeatSign();
+			bSeatFolded = BasePtr->GetMotorCommand(Motors[SeatMotor].Id, SeatFoldedCommand);
+		}
+
+		double FLegPlant::SeatFoldedNowRad() const
+		{
+			const URammsRobotBaseComponent* BasePtr = Base.Get();
+			float							Command = 0.0f;
+			// In the command for as long as the command is, to the bit, the one
+			// the fold left: anything that has commanded the tilt since (a
+			// crossing, the seat's own controls, a stance) has written its own.
+			if (!bSeatFolded || !BasePtr || !Motors.IsValidIndex(SeatMotor) || !BasePtr->GetMotorCommand(Motors[SeatMotor].Id, Command) || !SameBits(Command, SeatFoldedCommand))
+			{
+				return 0.0;
+			}
+			return SeatFoldedRad;
+		}
+
+		double FLegPlant::FoldedSeatTrimDeg() const
+		{
+			return FMath::RadiansToDegrees(SeatFoldedNowRad());
 		}
 
 		bool FLegPlant::WithinRange(const FPlantMotor& Motor, double Angle) const
@@ -585,6 +760,10 @@ namespace RammsLevel
 				return false;
 			}
 			bool bLost = false;
+			if (bSeatReady && Motors.IsValidIndex(SeatMotor))
+			{
+				bLost |= !SameBits(BasePtr->GetMotorCommandOffset(Motors[SeatMotor].Id), Motors[SeatMotor].LeftOffset);
+			}
 			for (FPlantLeg& Leg : Legs)
 			{
 				if (!Leg.bHasBaseline)
@@ -632,6 +811,10 @@ namespace RammsLevel
 			{
 				return;
 			}
+			// (What the seat's tilt carries before it is folded, and what an
+			// earlier fold left in its command, for FoldedSeatTrimDeg.)
+			SeatUnfoldRad = SeatFoldedNowRad();
+			const float SeatOffsetBefore = Motors.IsValidIndex(SeatMotor) ? BasePtr->GetMotorCommandOffset(Motors[SeatMotor].Id) : 0.0f;
 			for (FPlantMotor& Motor : Motors)
 			{
 				Motor.bFolded = false;
@@ -650,6 +833,10 @@ namespace RammsLevel
 				}
 			}
 			bFoldRemembered = true;
+			if (Motors.IsValidIndex(SeatMotor) && Motors[SeatMotor].bFolded)
+			{
+				NoteSeatFold(SeatUnfoldRad, SeatOffsetBefore);
+			}
 			RememberOffsets();
 			SyncBaselineHolders();
 		}
@@ -697,6 +884,11 @@ namespace RammsLevel
 				Motor.bFolded = false;
 			}
 			bFoldRemembered = false;
+			// (The seat's trim of that fold is an offset again; what an earlier
+			// fold had put into the command is in it still.)
+			SeatFoldedRad = SeatUnfoldRad;
+			bSeatFolded = SeatUnfoldRad != 0.0 && Motors.IsValidIndex(SeatMotor) && BasePtr->GetMotorCommand(Motors[SeatMotor].Id, SeatFoldedCommand);
+			SeatUnfoldRad = 0.0;
 			RememberOffsets();
 			SyncBaselineHolders();
 			return true;
@@ -916,6 +1108,7 @@ namespace RammsLevel
 			{
 				return;
 			}
+			const double SeatInCommandRad = SeatFoldedNowRad();
 			for (FPlantMotor& Motor : Motors)
 			{
 				if (BasePtr->GetMotorCommandOffset(Motor.Id) == 0.0f)
@@ -926,11 +1119,18 @@ namespace RammsLevel
 				// read this command as where the motor is, so the offset goes
 				// into it. Rewritten: the new command is an absolute one, and
 				// the offset on top of it would be an error.
-				const bool bUntouched = Motor.bNow && Motor.bPrev && SameBits(Motor.NowBaseline, Motor.PrevBaseline);
-				float	   Effective = 0.0f;
+				const bool	bUntouched = Motor.bNow && Motor.bPrev && SameBits(Motor.NowBaseline, Motor.PrevBaseline);
+				const float Offset = BasePtr->GetMotorCommandOffset(Motor.Id);
+				float		Effective = 0.0f;
 				if (bUntouched && BasePtr->GetMotorEffectiveCommand(Motor.Id, Effective) && BasePtr->RebaseMotorCommand(Motor.Id, Effective, LayerPtr))
 				{
 					++OutFolded;
+					if (Motors.IsValidIndex(SeatMotor) && &Motor == &Motors[SeatMotor])
+					{
+						// The seat's trim went into its command: whoever took
+						// the seat is owed how much.
+						NoteSeatFold(SeatInCommandRad, Offset);
+					}
 				}
 				else
 				{
