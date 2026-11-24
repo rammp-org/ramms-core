@@ -537,6 +537,9 @@ namespace RammsLevel::DryRun
 		bool		  bEnable = Options.bEnabledAtStart;
 		bool		  bTaken = false;
 		double		  TakenUntil = 0.0;
+		bool		  bTakenCold = false;
+		double		  TakenRampSeconds = 0.0;
+		double		  ChangingUntil = -1.0;
 		double		  WrongUntil = -1.0;
 		uint32		  WrongMask = 0;
 		double		  LossUntil = -1.0;
@@ -607,33 +610,46 @@ namespace RammsLevel::DryRun
 				bool	  bBaselineMoved = false;
 				bool	  bYield = false;
 				bool	  bResume = false;
-				FVector2D ResumePlaneDeg = FVector2D::ZeroVector;
+				bool	  bResumePlane = false;
+				FAdoption Adoption;
 
 				// The hand-back of a take-over that has run its time: the
-				// plane the folded baselines carry is taken back out of them
-				// and given to the law as offsets.
+				// plane by which the pose the taker left differs from the
+				// stance is taken back out of the baselines and given to the
+				// law as its correction (or nothing is, a cold hand-back);
+				// and the drive mode's stance ramp begins.
 				if (bTaken && Time >= TakenUntil - TimeHair)
 				{
-					TArray<FVector2D, TInlineAllocator<8>> LegXY;
-					FLegValues							   Carried;
-					FMask								   Roll;
-					FLawLegs							   Legs;
+					FLawLegs   Legs;
+					FLegValues StanceZ;
 					MakeLegs(Legs);
 					for (int32 Index = 0; Index < NumLegs; ++Index)
 					{
-						LegXY.Add(Robot.Legs[Index].XY);
-						Carried.Add(Baseline[Index] - Robot.Legs[Index].StanceZ);
-						Roll.Add(Robot.Legs[Index].bRoll);
-						Legs[Index].bSupport = Standing[Index];
+						StanceZ.Add(Robot.Legs[Index].StanceZ);
 					}
-					double	   HeightCm = 0.0;
-					FLegValues Rebase;
-					FitPlane(LegXY, Carried, Standing, Roll, ResumePlaneDeg, HeightCm);
-					RigidOffsets(Legs, ResumePlaneDeg, Rebase);
-					for (int32 Index = 0; Index < NumLegs; ++Index)
+					if (!bTakenCold && PlanAdoption(Legs, StanceZ, Robot.Points, Tuning, Adoption))
 					{
-						Baseline[Index] -= Rebase[Index];
-						Offset[Index] = Rebase[Index];
+						for (int32 Index = 0; Index < NumLegs; ++Index)
+						{
+							Baseline[Index] = Adoption.BaseZ[Index];
+							Offset[Index] = Adoption.Dz[Index];
+						}
+						bResumePlane = true;
+					}
+					if (TakenRampSeconds > 0.0)
+					{
+						for (int32 Index = 0; Index < NumLegs; ++Index)
+						{
+							FRamp Ramp;
+							Ramp.Leg = Index;
+							Ramp.LeftCm = StanceZ[Index] - Baseline[Index];
+							Ramp.RateCmS = FMath::Abs(Ramp.LeftCm) / TakenRampSeconds;
+							if (Ramp.LeftCm != 0.0)
+							{
+								Ramps.Add(Ramp);
+							}
+						}
+						ChangingUntil = FMath::Max(ChangingUntil, Time + TakenRampSeconds);
 					}
 					bTaken = false;
 					bResume = true;
@@ -697,6 +713,8 @@ namespace RammsLevel::DryRun
 								bTaken = true;
 								bYield = true;
 								TakenUntil = Time + FMath::Max(Event.Seconds, FrameSeconds);
+								bTakenCold = Event.bCold;
+								TakenRampSeconds = Event.RampSeconds;
 							}
 							break;
 						case EEvent::AttitudeLoss:
@@ -707,6 +725,9 @@ namespace RammsLevel::DryRun
 							break;
 						case EEvent::SetReference:
 							Tuning.LevelReferenceDeg = Event.PlaneDeg;
+							break;
+						case EEvent::StanceChanging:
+							ChangingUntil = FMath::Max(ChangingUntil, Time + Event.Seconds);
 							break;
 						default:
 							break;
@@ -779,8 +800,10 @@ namespace RammsLevel::DryRun
 				In.Mode = bTaken ? EMode::Taken : (Time < ReleaseUntil - TimeHair ? EMode::Release : EMode::Allowed);
 				In.bYield = bYield;
 				In.bResume = bResume;
-				In.bResumeHasPlane = bResume;
-				In.ResumePlaneDeg = ResumePlaneDeg;
+				In.bResumeHasPlane = bResumePlane;
+				In.ResumePlaneDeg = Adoption.PlaneDeg;
+				In.ResumeDz = Adoption.Dz;
+				In.bStanceChanging = Time < ChangingUntil - TimeHair;
 				const FOutputs Out = FLaw::Step(In, FrameSeconds, Tuning, Law);
 
 				// The shell's part: fold, write, push.

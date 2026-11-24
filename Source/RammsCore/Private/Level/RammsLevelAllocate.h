@@ -267,6 +267,56 @@ namespace RammsLevel
 	FAllocation Allocate(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg,
 		const FTuning& Tuning, double PrevRideCm, double MaxRideStepCm);
 
+	/** What a hand-back takes back out of the legs' commands (PlanAdoption). */
+	struct FAdoption
+	{
+		/** The plane taken out (deg): the correction levelling goes on with. */
+		FVector2D PlaneDeg = FVector2D::ZeroVector;
+		/** Each leg's baseline height once the plane is out of it (cm), and the
+		 *  offset that leaves on the leg (cm, positive retracts): the pose's
+		 *  height less that baseline. The two together are the pose: nothing
+		 *  is told to move. */
+		FLegValues BaseZ;
+		FLegValues Dz;
+	};
+
+	/**
+	 * A controller that took the legs (a curb crossing) hands them back in a
+	 * pose of its own, and a drive mode's stance ramp is about to take them to
+	 * that mode's stance. Left alone the ramp would turn the base to the
+	 * ground's attitude, for levelling to turn it back. So the part of the pose
+	 * that IS levelling -- the plane by which it differs from the stance -- is
+	 * taken back out of the commands and given to the law as its correction
+	 * (FInputs::ResumePlaneDeg), and the ramp is left only what the plane does
+	 * not explain: a ride height, a wheel carried up or set down.
+	 *
+	 * Legs are the legs with BaseZ the pose as the motors are told it (no
+	 * offsets on); StanceZ each leg's height in the stance they are about to
+	 * be taken to (cm, the legs' order).
+	 *
+	 *  1. Who stands in the stance: SupportMask of the legs at StanceZ, no
+	 *     memory. The base's attitude there is set by those legs, so
+	 *  2. the plane is FitPlane's through BaseZ - StanceZ over them (each
+	 *     leg's bRoll honoured), within Tuning.MaxCorrectionDeg per axis.
+	 *  3. The offsets are the ones the law's own allocation gives that plane
+	 *     on the baselines they leave (Allocate with no ride shift, the legs
+	 *     through SupportMask with no memory, as FLaw::Step does on the step it
+	 *     adopts): Dz, and BaseZ = pose - Dz, kept inside the leg's travel.
+	 *     Found by AdoptPasses rounds of that, the first from the plane taken
+	 *     about the legs that stand in the stance (so that a leg the stance
+	 *     carries off the ground starts from a baseline that keeps it off the
+	 *     ground). A plane the legs' travel does not allow whole is cut to the
+	 *     share that fits; the rest stays in the baselines for the ramp.
+	 *
+	 * A leg the plane would put past its travel (a raised leg already on its
+	 * retract stop, asked to come further up) keeps what it can: its Dz then
+	 * differs from the allocation's, and the law catches it up at the legs'
+	 * own rate (FInputs::ResumeDz). False, with Out empty, when there is no
+	 * leg, StanceZ is not the legs' length, or no leg stands in the stance.
+	 */
+	bool PlanAdoption(TConstArrayView<FLegReach> Legs, TConstArrayView<double> StanceZ, TConstArrayView<FClearancePoint> Points, const FTuning& Tuning,
+		FAdoption& Out);
+
 	/**
 	 * The least travel (cm, 0 or more) a support leg has left, to its true
 	 * limit (no margin), in the direction its offset moved it: MaxZ - (BaseZ +

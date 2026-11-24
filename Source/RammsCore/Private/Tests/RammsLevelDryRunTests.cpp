@@ -9,8 +9,10 @@
 // sensor, joints that sag, and a base wired backwards; and the same grade
 // breaks with the sensor a frame late, and at two and three times the pace;
 // a hard stop from speed and a knock, against the same with the switch off;
-// a stance ramped under a base at rest; and a slope past what the clearance
-// of wheels carried off the ground allows.
+// a stance ramped under a base at rest; a slope past what the clearance
+// of wheels carried off the ground allows; a taker's hand-back to a stance
+// its pose is centimetres off; and a drive mode switched on a slope, into the
+// mode that is levelled and out of it.
 //
 // Two made-up robots, each at 16, 30 and 60 frames a second: the six-wheeled
 // robot of the curb's tests (four corner legs and two centre legs, all
@@ -2750,6 +2752,270 @@ bool FRammsLevelDryRunRaisedClearance::RunTest(const FString& Parameters)
 			TestTrue(Label(Kit, Rate, TEXT("6 deg: level")), Result.FinalTiltDeg <= 0.3);
 			TestEqual(Label(Kit, Rate, TEXT("6 deg: at rest, and nothing to say")), static_cast<int32>(Last.Out.Status), static_cast<int32>(EStatus::Settled));
 			TestEqual(Label(Kit, Rate, TEXT("6 deg: level.reach is what is left of the raised wheels' clearance")), Last.Out.ReachLeft, 1.0 - FMath::Tan(FMath::DegreesToRadians(6.0)) * 67.5 / 9.8, 0.06);
+		}
+	}
+	return true;
+}
+
+namespace RammsLevelDryRunTests
+{
+	/** How far the centre pair comes down, and the front pair goes up, when
+	 *  the two-stance robot changes from its corner stance to its centre one
+	 *  (cm, as baselines move: positive retracts). */
+	constexpr double CentreDownCm = -4.3;
+	constexpr double FrontUpCm = 12.0;
+
+	/**
+	 * The quick-legged six-wheeler in one of two made-up drive stances, as a
+	 * robot that changes the wheels it stands on with its drive mode has
+	 * them. On its corners: the centre pair carried 4 cm clear. On its
+	 * centre and rear legs: the front pair carried 12 cm clear, 0.3 cm short
+	 * of its retract stop, and the centre pair 0.3 cm below the corners' line
+	 * (so that the robot sits back onto centre and rear the moment the centre
+	 * pair is down, a rock of 0.4 deg that is the stance's own). The same
+	 * robot either way: only where it starts differs.
+	 */
+	FKit TwoStances(bool bOnCentres)
+	{
+		FKit Kit = QuickLegs();
+		Kit.Name = bOnCentres ? TEXT("on centre and rear") : TEXT("on its corners");
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			Kit.Robot.Legs[Index].MaxZ = -17.7;
+			Kit.Robot.Legs[Index].StanceZ = bOnCentres ? -30.0 + FrontUpCm : -30.0;
+			Kit.Robot.Legs[Index + 2].StanceZ = bOnCentres ? -30.3 : -30.3 - CentreDownCm;
+		}
+		return Kit;
+	}
+
+	/** The slopes the hand-over cases are parked on (deg; pitch, roll). */
+	struct FParkedSlope
+	{
+		const TCHAR* Name;
+		FVector2D	 Deg;
+	};
+	const FParkedSlope ParkedSlopes[4] = { { TEXT("nose up"), FVector2D(5.0, 0.0) }, { TEXT("nose down"), FVector2D(-5.0, 0.0) }, { TEXT("cross"), FVector2D(0.0, 5.0) },
+		{ TEXT("nose down and across"), FVector2D(-4.0, -3.0) } };
+
+	/** The largest change of any leg's command from one frame to the next
+	 *  between two times (cm). */
+	double MostLegStepBetween(const FResult& Result, double FromSeconds, double ToSeconds)
+	{
+		double Most = 0.0;
+		for (int32 Index = 1; Index < Result.Trace.Num(); ++Index)
+		{
+			const FSample& Now = Result.Trace[Index];
+			if (Now.Seconds < FromSeconds || Now.Seconds > ToSeconds)
+			{
+				continue;
+			}
+			for (int32 Leg = 0; Leg < Now.CommandZ.Num(); ++Leg)
+			{
+				Most = FMath::Max(Most, FMath::Abs(Now.CommandZ[Leg] - Result.Trace[Index - 1].CommandZ[Leg]));
+			}
+		}
+		return Most;
+	}
+} // namespace RammsLevelDryRunTests
+
+// Catches: a hand-back after a take-over that starts levelling again from
+// nothing. The taker leaves the base level on the slope in a pose of its own
+// (here 3 cm lower than the stance has it); the drive mode's stance ramp then
+// turns the base to the ground's attitude, and levelling turns it back: the
+// rider is taken a degree and more off level for seconds. With the pose's
+// plane taken back out of the baselines the ramp is left a ride height to
+// change, and the base stays level through it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunHandBack,
+	"Ramms.Level.DryRun.HandBackToAStance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunHandBack::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FKit Kit = TwoStances(/*bOnCentres=*/true);
+	for (const FParkedSlope& Slope : ParkedSlopes)
+	{
+		const FGround Course = Plane(Slope.Deg.X, Slope.Deg.Y);
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			// Parked and level. At 6 s a take-over: for four seconds the taker
+			// has the legs, and draws the four that stand 3 cm up (the base
+			// 3 cm down). At 10 s it hands back, and the drive mode's stance
+			// ramp takes two seconds to put the stance back.
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 20.0;
+			Options.bKeepTrace = true;
+			FDryEvent Taken = MakeEvent(6.0, EEvent::FoldAdopt, 4.0);
+			Taken.RampSeconds = 2.0;
+			Options.Events.Add(Taken);
+			for (int32 Leg = 2; Leg < 6; ++Leg)
+			{
+				Options.Events.Add(MakeEvent(6.5, EEvent::StanceRamp, 1.5, 3.0, Leg));
+			}
+			FOptions ColdOptions = Options;
+			ColdOptions.Events[0].bCold = true;
+			const FResult Cold = DryRun::Run(Kit.Robot, Course, ColdOptions);
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, Slope.Name, Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			if (!TestTrue(Label(Kit, Rate, TEXT("traces")), Result.Trace.Num() > 0 && Cold.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const auto Say = [&](const TCHAR* What) { return FString::Printf(TEXT("%s, %s, %s: %s"), Kit.Name, Slope.Name, FrameNames[Rate], What); };
+
+			const double Before = PeakTiltBetween(Result, Kit.Tuning, 5.0, 9.9);
+			const double Peak = PeakTiltBetween(Result, Kit.Tuning, 10.0, 20.0);
+			const double ColdPeak = PeakTiltBetween(Cold, Kit.Tuning, 10.0, 20.0);
+			const FSwing Swing = SwingBetween(Result, 10.0, 20.0, Options.FrameSeconds);
+			const FSwing ColdSwing = SwingBetween(Cold, 10.0, 20.0, Options.FrameSeconds);
+			const double Step = MostLegStepBetween(Result, 10.0 - 0.5 * Options.FrameSeconds, 10.0 + 1.5 * Options.FrameSeconds);
+			// The plane the legs carried before the take-over, the one the
+			// hand-back gave the law, and the pose it was handed.
+			FVector2D CarriedDeg = FVector2D::ZeroVector;
+			FVector2D AdoptedDeg = FVector2D::ZeroVector;
+			bool	  bAdopted = false;
+			double	  LowestCm = 0.0;
+			for (const FSample& Sample : Result.Trace)
+			{
+				if (Sample.Seconds < 6.0 - 0.5 * Options.FrameSeconds)
+				{
+					CarriedDeg = Sample.Out.AppliedDeg;
+				}
+				if (Sample.Out.Action == EAction::Adopt)
+				{
+					AdoptedDeg = Sample.Out.AppliedDeg;
+					bAdopted = true;
+					LowestCm = Sample.CommandZ[4] - Kit.Robot.Legs[4].StanceZ + Sample.CommandZ[5] - Kit.Robot.Legs[5].StanceZ + Sample.CommandZ[2] - Kit.Robot.Legs[2].StanceZ + Sample.CommandZ[3]
+						- Kit.Robot.Legs[3].StanceZ;
+					LowestCm /= 4.0;
+				}
+			}
+			AddInfo(FString::Printf(TEXT("%s | hand-back onto %s | %s | level to %.2f deg before; through the hand-back %.2f deg at most, %.2f deg/s (starting again from nothing: %.2f deg, %.2f deg/s); plane adopted (%.2f, %.2f); largest leg step at the hand-back %.3f cm"),
+				Kit.Name, Slope.Name, FrameNames[Rate], Before, Peak, Swing.RateDegPerSec, ColdPeak, ColdSwing.RateDegPerSec, AdoptedDeg.X, AdoptedDeg.Y, Step));
+			TestTrue(Say(TEXT("level before the hand-back, in the taker's pose")), Before <= 0.3);
+			TestTrue(Say(TEXT("(the pose handed back has the standing legs centimetres off the stance)")), bAdopted && LowestCm >= 2.5);
+			// (The slope's, and the stance's own lean over it: the centre pair
+			// stands 0.3 cm below the rear pair's line.)
+			TestTrue(Say(TEXT("the plane adopted is the one the legs carried before the take-over")), (AdoptedDeg - CarriedDeg).Size() <= 0.1 && (CarriedDeg - Slope.Deg).Size() <= 0.6);
+			TestTrue(Say(*FString::Printf(TEXT("the base stays level through the hand-back and the stance ramp (%.2f deg)"), Peak)), Peak <= 0.5);
+			TestTrue(Say(TEXT("... and is not turned faster than the tilt policy")), Swing.RateDegPerSec <= 3.5);
+			// (The stance ramp begins on the same frame: 3 cm in 2 s is what a
+			// standing leg's command may move by.)
+			TestTrue(Say(*FString::Printf(TEXT("no leg is stepped by the hand-back (%.3f cm)"), Step)), Step <= 1.5 * Options.FrameSeconds + 0.02);
+			// Starting again from nothing: a degree or more wherever the
+			// stance ramp turns the nose up or the +Y side up (the raised pair
+			// then meets its stop); the easy way it is a few tenths, and no
+			// case to tell the two hand-backs apart by.
+			if (Slope.Deg.X > 0.0 || Slope.Deg.Y > 0.0)
+			{
+				TestTrue(Say(*FString::Printf(TEXT("(starting again from nothing takes the base %.2f deg off level)"), ColdPeak)), ColdPeak >= 1.0);
+			}
+			// The stance ramp did its part: the baselines are the stance's again.
+			const FSample& Last = Result.Trace.Last();
+			double		   OffStance = 0.0;
+			for (int32 Leg = 0; Leg < Kit.Robot.Legs.Num(); ++Leg)
+			{
+				OffStance = FMath::Max(OffStance, FMath::Abs(Last.BaselineZ[Leg] - Kit.Robot.Legs[Leg].StanceZ));
+			}
+			TestTrue(Say(TEXT("the stance ramp ends on the stance")), OffStance <= 1.0e-6);
+			TestTrue(Say(TEXT("level and at rest at the end")), Result.FinalTiltDeg <= 0.3 && Result.FinalStatus == EStatus::Settled);
+		}
+	}
+	return true;
+}
+
+// Catches: the wanted attitude walked on top of a drive mode's stance change.
+// Switching, parked on a slope, into the mode it levels in: the centre pair
+// comes down and the robot sits back onto it (the stance's own rock) while
+// the levelling that began with the switch is turning the base the other
+// way; the base stalls, and catches up faster than the tilt policy allows.
+// And out of it: the base is given back to the ground while the stance
+// changes under it. Either way the stance changes first, or the walk waits.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunModeSwitch,
+	"Ramms.Level.DryRun.ModeSwitchOnASlope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunModeSwitch::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FParkedSlope& Slope : ParkedSlopes)
+	{
+		const FGround Course = Plane(Slope.Deg.X, Slope.Deg.Y);
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			const auto Say = [&](const TCHAR* Which, const TCHAR* What) { return FString::Printf(TEXT("%s, %s, %s: %s"), Which, Slope.Name, FrameNames[Rate], What); };
+			{
+				// Into the mode it levels in, 3 s in: the centre pair down in
+				// the first second, the front pair up in the next.
+				const FKit Kit = TwoStances(/*bOnCentres=*/false);
+				FOptions   Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.MaxSeconds = 14.0;
+				Options.bKeepTrace = true;
+				Options.Events.Add(MakeEvent(0.0, EEvent::ModeRelease, 3.0));
+				Options.Events.Add(MakeEvent(3.0, EEvent::StanceChanging, 2.0));
+				for (int32 Side = 0; Side < 2; ++Side)
+				{
+					Options.Events.Add(MakeEvent(3.0, EEvent::StanceRamp, 1.0, CentreDownCm, 2 + Side));
+					Options.Events.Add(MakeEvent(4.0, EEvent::StanceRamp, 1.0, FrontUpCm, Side));
+				}
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				const FResult Off = DryRun::Run(Kit.Robot, Course, OffOptions);
+				const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+				Report(*this, Kit, TEXT("switch into the levelled mode"), Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				const FSwing Swing = SwingBetween(Result, 3.0, 14.0, Options.FrameSeconds);
+				const FSwing OffSwing = SwingBetween(Off, 3.0, 14.0, Options.FrameSeconds);
+				const double Started = FirstTimeIn(Result, EState::Active, 0.0);
+				AddInfo(FString::Printf(TEXT("into the levelled mode | %s | %s | base turned at %.2f deg/s at most over 0.3 s (the stance change alone, switched off: %.2f); levelling began %.2f s in; ends %.2f deg off level"),
+					Slope.Name, FrameNames[Rate], Swing.RateDegPerSec, OffSwing.RateDegPerSec, Started, Result.FinalTiltDeg));
+				TestTrue(Say(TEXT("in"), TEXT("(the stance change rocks the base by itself)")), OffSwing.RateDegPerSec >= 0.5 && OffSwing.RateDegPerSec <= 2.5);
+				TestTrue(Say(TEXT("in"), *FString::Printf(TEXT("the base is turned within the tilt policy (%.2f deg/s)"), Swing.RateDegPerSec)), Swing.RateDegPerSec <= 3.5);
+				TestTrue(Say(TEXT("in"), TEXT("levelling begins once the stance has arrived, and no later")), Started >= 5.0 - 1.0e-6 && Started <= 5.0 + 2.0 * Options.FrameSeconds);
+				TestTrue(Say(TEXT("in"), TEXT("level and at rest at the end")), Result.FinalTiltDeg <= 0.3 && Result.FinalStatus == EStatus::Settled);
+				// Not left on the edge of the loop's deadband by what the walk
+				// wound into the integral (0.10 to 0.15 deg at 16 fps).
+				TestTrue(Say(TEXT("in"), *FString::Printf(TEXT("the rest is on level, not on the deadband's edge (%.3f deg)"), Result.FinalTiltDeg)), Result.FinalTiltDeg <= 0.08);
+				TestEqual(Say(TEXT("in"), TEXT("on centre and rear")), Result.Trace.Num() > 0 ? Result.Trace.Last().Touching : 0, 4);
+			}
+			{
+				// Out of it, 8 s in and level: the front pair down in the first
+				// second, the centre pair up in the next.
+				const FKit Kit = TwoStances(/*bOnCentres=*/true);
+				FOptions   Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.MaxSeconds = 18.0;
+				Options.bKeepTrace = true;
+				Options.Events.Add(MakeEvent(8.0, EEvent::ModeRelease, 100.0));
+				Options.Events.Add(MakeEvent(8.0, EEvent::StanceChanging, 2.0));
+				for (int32 Side = 0; Side < 2; ++Side)
+				{
+					Options.Events.Add(MakeEvent(8.0, EEvent::StanceRamp, 1.0, -FrontUpCm, Side));
+					Options.Events.Add(MakeEvent(9.0, EEvent::StanceRamp, 1.0, -CentreDownCm, 2 + Side));
+				}
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				const FResult Off = DryRun::Run(Kit.Robot, Course, OffOptions);
+				const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+				Report(*this, Kit, TEXT("switch out of the levelled mode"), Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				const FSwing Swing = SwingBetween(Result, 8.0, 18.0, Options.FrameSeconds);
+				const FSwing OffSwing = SwingBetween(Off, 8.0, 18.0, Options.FrameSeconds);
+				const double During = PeakTiltBetween(Result, Kit.Tuning, 8.0, 10.0);
+				AddInfo(FString::Printf(TEXT("out of the levelled mode | %s | %s | base turned at %.2f deg/s at most over 0.3 s (the stance change alone, switched off: %.2f); %.2f deg off level at most while the stance changed; given back %.2f s after the switch"),
+					Slope.Name, FrameNames[Rate], Swing.RateDegPerSec, OffSwing.RateDegPerSec, During, FirstTimeIn(Result, EState::Suspended, 8.0) - 8.0));
+				TestTrue(Say(TEXT("out"), TEXT("level before the switch")), PeakTiltBetween(Result, Kit.Tuning, 7.0, 7.9) <= 0.3);
+				TestTrue(Say(TEXT("out"), *FString::Printf(TEXT("the base is turned within the tilt policy (%.2f deg/s)"), Swing.RateDegPerSec)), Swing.RateDegPerSec <= 3.5);
+				TestTrue(Say(TEXT("out"), *FString::Printf(TEXT("the base is held level while the stance changes (%.2f deg)"), During)), During <= 0.6);
+				TestEqual(Say(TEXT("out"), TEXT("waiting at the end")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Suspended));
+				TestTrue(Say(TEXT("out"), TEXT("... every offset exactly zero, on the ground's attitude")), Result.FinalMaxOffsetCm == 0.0 && FMath::Abs(Result.FinalTiltDeg - Off.FinalTiltDeg) <= 0.02);
+				TestEqual(Say(TEXT("out"), TEXT("on its corners")), Result.Trace.Num() > 0 ? Result.Trace.Last().Touching : 0, 4);
+			}
 		}
 	}
 	return true;

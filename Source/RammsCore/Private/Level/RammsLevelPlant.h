@@ -91,14 +91,41 @@ namespace RammsLevel
 		/** The remembered fold is no longer of use (the taker moved on). */
 		virtual void ForgetFold() = 0;
 
+		// ---- adopting a pose after a take-over ----
+		// A taker hands the legs back in a pose of its own. The part of that
+		// pose that is levelling (PlanAdoption: the plane by which it differs
+		// from the stance the legs go to next) is taken back out of the
+		// baselines and becomes the offsets, the motors told nothing; the three
+		// below are the plant's part of that. When any of them cannot, the
+		// level assist starts again from nothing on the pose as it stands.
+
 		/**
-		 * Adopt: take a plane back out of the baselines after a take-over, so
-		 * that levelling goes on from the pose the taker left with no motion
-		 * (against NextStance, the stance the legs are about to be ramped to;
-		 * null: against the baselines remembered at the fold). False when the
-		 * plant cannot: the level assist then starts again cold.
+		 * Each leg's height (cm; the legs of the last MeasureLegs, in its
+		 * order) in Stance, the stance a drive mode's ramp is about to take
+		 * the legs to. A leg the stance does not name is where its baseline
+		 * has it: the ramp will not move it. False when the stance cannot be
+		 * turned into heights, or will not be applied at all.
 		 */
-		virtual bool Adopt(const FRammsDriveStance* NextStance, FVector2D& OutPlaneDeg) = 0;
+		virtual bool StanceHeights(const FRammsDriveStance& Stance, FLegValues& OutZ) const = 0;
+
+		/** Each leg's height (cm, as StanceHeights) at the baselines the last
+		 *  Fold remembered: where the legs were commanded before the taker had
+		 *  them. False when no fold is remembered, or a motor had no baseline. */
+		virtual bool FoldedHeights(FLegValues& OutZ) const = 0;
+
+		/**
+		 * Each leg's baseline moved to the height BaseZ[i] (cm; the legs of
+		 * the last MeasureLegs, in its order), its motors told nothing: what
+		 * they are told stays, as the new baseline plus an offset
+		 * (URammsRobotBaseComponent::RebaseMotorCommand). OutDz is the height
+		 * offset that leaves on each leg (cm, positive retracts): where it is
+		 * told to be less where its baseline now has it. A leg whose joints
+		 * cannot make its height keeps the baseline it had. Whoever holds a
+		 * target of its own is told (SyncBaselineHolders). False, with
+		 * nothing changed, when no baseline can be moved (the offset layer is
+		 * not held; a leg nothing commands).
+		 */
+		virtual bool RebaseLegs(TConstArrayView<double> BaseZ, FLegValues& OutDz) = 0;
 
 		/**
 		 * The backstop for a take-over nobody announced: each motor whose

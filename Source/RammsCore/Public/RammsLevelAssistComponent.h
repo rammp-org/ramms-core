@@ -14,8 +14,9 @@ class URammsRobotBaseComponent;
 struct FRammsDriveStance;
 namespace RammsLevel
 {
+	struct FAdoption;
 	struct FAssistRuntime;
-}
+} // namespace RammsLevel
 
 /*
  * (Design notes, kept out of the class doc comment, which becomes a tooltip.)
@@ -60,11 +61,23 @@ namespace RammsLevel
  * tick, and the base's behind it, out of the group before physics. What such
  * a writer commands in its own tick is told a frame late, with its offset.
  *
+ * A drive mode switch: levelling is not begun, and a release does not begin
+ * to give the base back, while the mode selector is still changing the stance
+ * (URammsDriveModeSelector::IsSwitchingMode): the stance change rocks the base
+ * onto other wheels by itself, and the rider is turned by one thing at a time.
+ *
+ * A curb crossing: the curb controller yields before it reads a command and
+ * hands back (ResumeFrom) with the stance of the drive mode it hands the robot
+ * to. The crossing leaves the base level in a pose of its own; the plane by
+ * which that pose differs from the stance is taken back out of the legs'
+ * commands and carried on as the offsets, the motors told nothing, so that the
+ * selector's stance ramp is left only a ride height to change and the base
+ * stays level through it.
+ *
  * Not yet, each with its seam in place: the speed scale is worked out and
  * shown (level.speed_scale) but no drive mode is asked to slow; the seat trim
  * is worked out but the seat's tilt motor is not moved; the ride height stays
- * the stance's; after a curb crossing levelling starts again cold rather than
- * carrying on from the pose the crossing left.
+ * the stance's.
  */
 /**
  * Keeps the rider level on sloping ground by adding one rigid plane of offsets to the legs' commands (see the
@@ -119,10 +132,23 @@ public:
 	void YieldTo(const UObject* Taker);
 
 	/**
-	 * Taker gives the legs back. With no NextStance, and nothing written since
-	 * its YieldTo (a take-over refused before it began), everything is put
-	 * back exactly as it was. Otherwise levelling starts again from the pose
-	 * as it stands (cold: adopting the pose against NextStance comes later).
+	 * Taker gives the legs back. Call before the drive mode it hands the robot
+	 * to is selected: the mode selector's stance ramp starts each leg from the
+	 * command this leaves it.
+	 *
+	 * With no NextStance, and nothing written since its YieldTo (a take-over
+	 * refused before it began), everything is put back exactly as it was.
+	 * Otherwise levelling goes on from the pose Taker left, no motor told
+	 * anything: the plane by which the pose differs from NextStance (the
+	 * stance the legs are about to be ramped to; with none, from the commands
+	 * as they were before Taker had them) is taken back out of the legs'
+	 * commands and becomes the offsets. Where that cannot be done levelling
+	 * starts again from nothing on the pose as it stands. A level assist that
+	 * is switched off does nothing at all.
+	 *
+	 * Taker is whoever called YieldTo -- or, with a NextStance, a drive mode
+	 * that has the legs without having called it (its mode picked by hand: the
+	 * level assist's own tick stood by for it).
 	 */
 	void ResumeFrom(const UObject* Taker, const FRammsDriveStance* NextStance);
 
@@ -179,8 +205,15 @@ private:
 	void ReleaseMotors();
 
 	/** One step of the law over Dt, the motors' part of what it answers
-	 *  carried out. bYield / bResume: a taker's call, made now. */
-	void StepLaw(double Dt, bool bYield, bool bResume);
+	 *  carried out. bYield / bResume: a taker's call, made now; Adoption: the
+	 *  plane a hand-back took back out of the legs' commands (AdoptPose). */
+	void StepLaw(double Dt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption = nullptr);
+
+	/** A hand-back's plane, taken back out of the legs' commands: against
+	 *  NextStance, or with none against the commands the last fold remembered.
+	 *  False, with nothing changed, when there is none to take (switched off,
+	 *  not standing by, the legs' offsets not held) or it cannot be worked out. */
+	bool AdoptPose(const FRammsDriveStance* NextStance, RammsLevel::FAdoption& OutAdoption);
 
 	UPROPERTY(Transient)
 	mutable TObjectPtr<URammsRobotBaseComponent> BaseComponent = nullptr;

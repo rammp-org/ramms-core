@@ -3511,6 +3511,32 @@ bool URammsCurbNegotiationController::CheckFeasibility(FRammsCurbProfile Profile
 
 // --- running -------------------------------------------------------------------
 
+void URammsCurbNegotiationController::HandLegsBackFor(FName NextModeId)
+{
+	URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+	if (!LevelAssist)
+	{
+		return;
+	}
+	// Against the stance the selector is about to ramp the legs to. A mode with no stance of its own leaves them as
+	// they are: an empty stance says so (a null one would say "nothing was begun", which is a refusal's).
+	FRammsDriveStance	   Stance;
+	const IRammsDriveMode* Next = FindDriveMode(NextModeId);
+	if (!Next || !Next->GetRequiredStance(Stance))
+	{
+		Stance = FRammsDriveStance();
+	}
+	LevelAssist->ResumeFrom(this, &Stance);
+}
+
+void URammsCurbNegotiationController::HandBackTo(FName NextModeId)
+{
+	// (A hand-back already made for this switch -- Finish makes it early, to read the stance change's time after it
+	// -- is not made twice: the level assist takes the legs back from whoever has them, once.)
+	HandLegsBackFor(NextModeId);
+	SetActiveModeThroughSelector(NextModeId);
+}
+
 void URammsCurbNegotiationController::SetActiveModeThroughSelector(FName ModeId)
 {
 	AActor* Owner = GetOwner();
@@ -4267,6 +4293,10 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 		}
 		if (!Next.IsNone())
 		{
+			// The legs back to the level assist first, where the robot has one that is levelling: it takes the pose's
+			// plane back out of the legs' commands, so how long the stance change must take, and where the selector
+			// starts each leg's ramp from, are read after it.
+			HandLegsBackFor(Next);
 			// The selector ramps the legs to that mode's stance no faster than the
 			// base may turn (GetStanceChangeMinSeconds).
 			const float	  Ramp = GetStanceChangeMinSeconds();
@@ -4289,7 +4319,7 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			}
 			{
 				TGuardValue<bool> Own(bOwnHandBack, true); // a refusal at rest hands back and may still be tried again
-				SetActiveModeThroughSelector(Next);
+				HandBackTo(Next);
 			}
 			// The fallback wheels kept from rolling free until that mode has the
 			// robot (ramms.Curb.HandOverOmniHold).
@@ -5826,7 +5856,20 @@ FVector2D URammsCurbNegotiationController::GroundAttitudeDeg(const FRammsCurbPla
 
 float URammsCurbNegotiationController::GetStanceChangeMinSeconds() const
 {
-	if (!bDriveModeActive || !bStanceAttitudeKnown || !ActiveTerrain.bValid)
+	if (!bDriveModeActive)
+	{
+		return 0.0f;
+	}
+	if (const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this); LevelAssist && LevelAssist->IsLevelling())
+	{
+		// The level assist has the legs back and is levelling: the stance ramp no longer turns the base to the ground's
+		// attitude (the assist carries the pose's plane on, and moves the rider itself, within its own tilt policy).
+		// What a stage must leave time for is the turn from the attitude the base has to the one the assist holds it
+		// at: none, straight after a hand-back. (Measured this tick only while a crossing is being stepped.)
+		const double Turn = LastSimTime >= 0.0 ? (LevelAssist->GetTargetAttitudeDeg() - FVector2D(MeasuredPitchDeg, MeasuredRollDeg)).Size() : 0.0;
+		return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(Turn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
+	}
+	if (!bStanceAttitudeKnown || !ActiveTerrain.bValid)
 	{
 		return 0.0f;
 	}
@@ -7282,7 +7325,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 			{
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': selected with no crossing to run; back to '%s'"),
 					*GetNameSafe(GetOwner()), *Next.ToString());
-				SetActiveModeThroughSelector(Next);
+				HandBackTo(Next);
 			}
 		}
 	}

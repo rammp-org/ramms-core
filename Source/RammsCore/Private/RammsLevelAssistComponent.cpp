@@ -3,6 +3,7 @@
 #include "RammsLevelAssistComponent.h"
 
 #include "GameFramework/Actor.h"
+#include "Level/RammsLevelAllocate.h"
 #include "Level/RammsLevelAttitude.h"
 #include "Level/RammsLevelControls.h"
 #include "Level/RammsLevelLaw.h"
@@ -28,6 +29,11 @@ namespace RammsLevel
 	constexpr double PoseJumpCm = 50.0;
 	/** The rider's stick counts as off centre past this share of its travel. */
 	constexpr float StickMovedFraction = 0.05f;
+	/** A hand-back's plane is taken out of the legs' commands in this many
+	 *  rounds: the second is over the legs as the first left them (a wheel's
+	 *  place fore and aft moves with its baseline, by a centimetre on a leg
+	 *  that swings), so that the offsets left are the law's own to a hair. */
+	constexpr int32 AdoptRounds = 2;
 
 	/** A component ticking in Group may be made a prerequisite of a tick that
 	 *  must itself start before physics: one in a later group may not. */
@@ -97,8 +103,10 @@ namespace RammsLevel
 		bool	bHasPosition = false;
 		double	SpeedCmS = 0.0;
 		bool	bColdReset = false;
-		/** The active drive mode is one it does not level in (the status). */
+		/** The active drive mode is one it does not level in; the mode
+		 *  selector is changing the stance (both for the status). */
 		bool bModeNotLevelled = false;
+		bool bStanceChanging = false;
 	};
 } // namespace RammsLevel
 
@@ -364,7 +372,7 @@ void URammsLevelAssistComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	}
 }
 
-void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume)
+void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption)
 {
 	using namespace RammsLevel;
 	FAssistRuntime& R = *Runtime;
@@ -452,8 +460,10 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume)
 		const URammsDriveModeSelector* Selector = Owner->FindComponentByClass<URammsDriveModeSelector>();
 		const FName					   SelectedId = Selector ? Selector->GetActiveModeId() : NAME_None;
 		// A drive mode switch under way is ramping the stance, or about to:
-		// no rest until it is done.
+		// no rest until it is done, no start, and the wanted attitude waits
+		// where it is (the law's rules).
 		In.bStanceChanging = Selector && Selector->IsSwitchingMode();
+		R.bStanceChanging = In.bStanceChanging;
 		TArray<FName> Levelled;
 		R.Plant->LevelledMotorIds(Levelled);
 		bool bAnyActive = false;
@@ -497,7 +507,14 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume)
 	In.bEnable = R.bSwitch && R.CannotLevel.IsEmpty();
 	In.bYield = bYield;
 	In.bResume = bResume;
-	// (Adopting a pose against a stance comes later: a resume has no plane.)
+	if (bResume && Adoption)
+	{
+		// The plane is out of the baselines already (AdoptPose), which the
+		// legs measured above show.
+		In.bResumeHasPlane = true;
+		In.ResumePlaneDeg = Adoption->PlaneDeg;
+		In.ResumeDz = Adoption->Dz;
+	}
 
 	const FOutputs Out = FLaw::Step(In, Dt, R.LawTuning, R.Law);
 
@@ -581,12 +598,74 @@ void URammsLevelAssistComponent::YieldTo(const UObject* Taker)
 	StepLaw(0.0, true, false);
 }
 
+bool URammsLevelAssistComponent::AdoptPose(const FRammsDriveStance* NextStance, RammsLevel::FAdoption& OutAdoption)
+{
+	using namespace RammsLevel;
+	FAssistRuntime& R = *Runtime;
+	// Only a level assist that is on, holds the legs' offsets and stands by
+	// has a plane in the commands to take back. (Switched off meanwhile, the
+	// plane stays where the fold put it: the commands are the taker's.)
+	if (!R.Plant || !R.bClaimed || !R.bSwitch || !R.CannotLevel.IsEmpty() || R.Law.Arbiter.GetState() != EState::Yielded)
+	{
+		return false;
+	}
+	// The pose as the motors are told it (standing by, no leg has an offset:
+	// its baseline is what it is told), and where the legs go from here.
+	FPlantLegs Legs;
+	FLegValues StanceZ;
+	if (!R.Plant->MeasureLegs(Legs) || !(NextStance ? R.Plant->StanceHeights(*NextStance, StanceZ) : R.Plant->FoldedHeights(StanceZ)))
+	{
+		return false;
+	}
+	R.LawTuning = MakeTuning(Tuning, R.PreferenceDeg);
+	R.Plant->ClearancePoints(R.LawTuning, R.Points);
+	bool bAdopted = false;
+	for (int32 Round = 0; Round < AdoptRounds; ++Round)
+	{
+		FAdoption  Plan;
+		FLegValues Left;
+		if (!PlanAdoption(Legs, StanceZ, R.Points, R.LawTuning, Plan) || !R.Plant->RebaseLegs(Plan.BaseZ, Left))
+		{
+			break;
+		}
+		// What the law goes on from is what the joints could be left with.
+		bAdopted = true;
+		OutAdoption = MoveTemp(Plan);
+		OutAdoption.Dz = MoveTemp(Left);
+		// Once more from the legs as they now measure: a wheel's place fore
+		// and aft is taken at its baseline, which has just moved, and the
+		// law will allocate over the legs it is given next. The pose is the
+		// same: each baseline with what was left on it.
+		if (Round + 1 == AdoptRounds || !R.Plant->MeasureLegs(Legs) || Legs.Num() != OutAdoption.Dz.Num())
+		{
+			break;
+		}
+		for (int32 Index = 0; Index < Legs.Num(); ++Index)
+		{
+			Legs[Index].BaseZ += OutAdoption.Dz[Index];
+		}
+	}
+	return bAdopted;
+}
+
 void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDriveStance* NextStance)
 {
 	RammsLevel::FAssistRuntime& R = *Runtime;
-	if (!Taker || !R.Plant || R.Taker.Get() != Taker)
+	if (!Taker || !R.Plant)
 	{
 		return;
+	}
+	if (R.Taker.Get() != Taker)
+	{
+		// Nobody yielded to it. A drive mode that has the legs all the same
+		// (picked by hand: this component's own tick stood by for it, its
+		// backstop) may still hand them back to a stance; anything else is
+		// nobody's hand-back.
+		const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(const_cast<UObject*>(Taker));
+		if (R.Taker.IsValid() || !NextStance || !Mode || !Mode->IsDriveModeActive() || R.Law.Arbiter.GetState() != RammsLevel::EState::Yielded)
+		{
+			return;
+		}
 	}
 	if (!NextStance && R.TakerNested > 0)
 	{
@@ -609,8 +688,14 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 	}
 	R.PreYieldLaw.Reset();
 	R.PreYieldLast.Reset();
+	// Levelling goes on from the pose the taker left: its plane back out of
+	// the commands (while the fold's own commands are still remembered: with
+	// no stance to go to, they are what the pose is measured against), and the
+	// law told in the same call, before anyone reads a command again.
+	RammsLevel::FAdoption Adoption;
+	const bool			  bAdopted = AdoptPose(NextStance, Adoption);
 	R.Plant->ForgetFold();
-	StepLaw(0.0, false, true);
+	StepLaw(0.0, false, true, bAdopted ? &Adoption : nullptr);
 }
 
 bool URammsLevelAssistComponent::IsLevelling() const
@@ -676,6 +761,7 @@ FString URammsLevelAssistComponent::GetStatusLine(ERammsControlTextSeverity& Out
 	Facts.CannotLevel = R.CannotLevel;
 	Facts.bOn = R.bSwitch;
 	Facts.bModeNotLevelled = R.bModeNotLevelled;
+	Facts.bStanceChanging = R.bStanceChanging;
 	Facts.ReachLimit = R.Last.ReachLimit;
 	return RammsLevel::StatusLine(Facts, OutSeverity);
 }

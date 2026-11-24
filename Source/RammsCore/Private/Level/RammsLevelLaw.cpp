@@ -340,6 +340,13 @@ namespace RammsLevel
 		const FVector2D PrevCorrectionDeg = State.CorrectionDeg;
 		const FVector2D PrevWantedDeg = State.Tilt.Get();
 
+		// The offsets a hand-back left on the legs, where it says.
+		bool bResumeDz = In.bResume && In.bResumeHasPlane && In.ResumeDz.Num() == NumLegs && NumLegs > 0;
+		for (int32 Index = 0; bResumeDz && Index < NumLegs; ++Index)
+		{
+			bResumeDz = FMath::IsFinite(In.ResumeDz[Index]);
+		}
+
 		// ---- 1. Sensing ----
 		FVector2D AchievedDeg = FVector2D::ZeroVector;
 		if (bValid)
@@ -349,8 +356,18 @@ namespace RammsLevel
 			// the legs the robot stands on: who they are is found here as the
 			// allocation will find it (the set kept in the state is not
 			// touched: that is PrepareLegs' to move on).
+			// (A plane handed back with the offsets it left: those are what
+			// the legs carry now, and who stood before the take-over says
+			// nothing of who stands in the pose it left.)
 			LawImpl::FLegs Sensed;
-			LawImpl::MaskLegs(In, Tuning, State.Support, State.LastDz, Sensed);
+			if (bResumeDz)
+			{
+				LawImpl::MaskLegs(In, Tuning, TConstArrayView<bool>(), In.ResumeDz, Sensed);
+			}
+			else
+			{
+				LawImpl::MaskLegs(In, Tuning, State.Support, State.LastDz, Sensed);
+			}
 			AchievedDeg = MeasuredCorrection(Sensed);
 			const FVector2D Filtered = State.Attitude.Tick(In.AttitudeDeg, Dt, Tuning.AttitudeFilterSeconds);
 			// The ground as far as it can have turned: by the distance
@@ -393,6 +410,7 @@ namespace RammsLevel
 		Ask.bCorrectionZero = State.CorrectionDeg.Size() < ReleaseDoneDeg && FMath::Abs(State.RideCm) < ReleaseDoneCm
 			&& FMath::Abs(State.SeatTrim.Get()) < ReleaseDoneDeg && !State.bLegsBehind;
 		Ask.bDiverged = State.Divergence.HasDiverged();
+		Ask.bStanceChanging = In.bStanceChanging;
 		const FArbiterStep Arbiter = State.Arbiter.Tick(Ask);
 
 		// The wanted attitude was set this step: it starts moving on the next,
@@ -470,6 +488,13 @@ namespace RammsLevel
 			// The offsets the plant has just put on the motors: the adopted
 			// plane, allocated with no ride shift and no slew.
 			LawImpl::KeepAllocation(State, Allocate(Legs, In.Points, State.CorrectionDeg, Tuning, 0.0, 0.0));
+			if (bResumeDz)
+			{
+				// ... but for a leg the plant could not leave it on exactly:
+				// what it did leave is where the next steps start from.
+				State.LastDz.Reset();
+				State.LastDz.Append(In.ResumeDz.GetData(), NumLegs);
+			}
 		}
 
 		bool bQuiet = false;
@@ -500,6 +525,9 @@ namespace RammsLevel
 				bWantedSet = true;
 			}
 			FVector2D GoalDeg = GroundDeg;
+			// Standing still with nothing left to walk and nothing moving the
+			// stance: all that is between here and a rest is the settle time.
+			bool bAboutToRest = false;
 			if (bActive)
 			{
 				// Level where the legs can hold it; and how much they must
@@ -510,8 +538,9 @@ namespace RammsLevel
 				State.GoalLimit = Goal.Limit;
 				// No rest while something moves the stance under the offsets:
 				// nothing would be written, and the base would go with it.
-				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, State.Tilt.IsNear(GoalDeg) && !bBaselinesMoving, Dt,
-					Tuning);
+				const bool bMayRest = State.Tilt.IsNear(GoalDeg) && !bBaselinesMoving;
+				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, bMayRest, Dt, Tuning);
+				bAboutToRest = bMayRest && !In.bStick && In.SpeedCmS < QuietSpeedCmS;
 			}
 			// At rest nothing is written, so the servos simply hold; and a step
 			// in which no time passes advances nothing.
@@ -519,15 +548,30 @@ namespace RammsLevel
 			{
 				if (!bWantedSet)
 				{
-					State.Tilt.Tick(GoalDeg, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
+					// One deliberate change of the rider's attitude at a time:
+					// while a drive mode's stance is being changed under the
+					// legs the base rocks onto other wheels by itself, and the
+					// walk waits for that to be over (it comes to rest within
+					// the policy's acceleration, and goes on from there).
+					if (In.bStanceChanging)
+					{
+						State.Tilt.Brake(Dt, Tuning.TiltAccelDegPerSec2);
+					}
+					else
+					{
+						State.Tilt.Tick(GoalDeg, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
+					}
 				}
 				const FVector2D WantedNow = State.Tilt.Get();
 
 				// The integral only trims while levelling, on a stance that can
 				// be levelled, and not while the legs are already going as fast
 				// as they can.
-				const bool		bIntegrate = bActive && Standing >= MinSupportForIntegral && !State.bRateLimited;
-				const FVector2D RawDeg = State.Loop.Tick(LoopAttitudeDeg, WantedNow, GroundDeg, Dt, bIntegrate, State.bSaturated, Tuning);
+				const bool bIntegrate = bActive && Standing >= MinSupportForIntegral && !State.bRateLimited;
+				// (About to rest, the integral trims what a walk or a knock left
+				// in it down to a narrower band than the loop's: the rest is
+				// then on the wanted attitude, not on the deadband's edge.)
+				const FVector2D RawDeg = State.Loop.Tick(LoopAttitudeDeg, WantedNow, GroundDeg, Dt, bIntegrate, State.bSaturated, Tuning, bAboutToRest ? RestTrimDeadbandDeg : -1.0);
 
 				// The per-axis limit is a limit like the legs' reach: asking to
 				// pass it is being at reach. (The loop holds its own integral
@@ -567,7 +611,9 @@ namespace RammsLevel
 					// What is left of the correction once the wanted attitude
 					// is the ground's is the integral's trim, which no ground
 					// explains: it is ramped out open loop.
-					State.ReleaseSeconds += Dt;
+					// (A walk kept waiting by a stance change is not one that
+					// cannot get there: the wait does not count.)
+					State.ReleaseSeconds += In.bStanceChanging ? 0.0 : Dt;
 					// ("Reached" as IsNear has it: the ground's attitude is an
 					// estimate that never stands quite still.)
 					if (State.Tilt.IsNear(GroundDeg) || State.ReleaseSeconds > ReleaseMaxSeconds)

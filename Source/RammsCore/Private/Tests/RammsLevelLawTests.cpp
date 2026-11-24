@@ -11,7 +11,9 @@
 // taken back, a correction held at its per-axis limit); a knock, and the pitch
 // of a base being braked, left to pass where ground on the move is followed;
 // no rest while a stance moves under the base; a release that ends without a
-// step. Every number is made up -- the
+// step; the wanted attitude kept waiting while a drive mode's stance changes;
+// a hand-back's plane taken up with the offsets left on the legs; and a rest
+// that is on level, not on the deadband's edge. Every number is made up -- the
 // made-up six-wheeled robot of the curb's tests (corners 90 cm apart fore/aft
 // and 50 across, the middle pair 54 across), on 9 cm wheels -- no robot's own.
 //
@@ -153,6 +155,7 @@ namespace RammsLevelLawTests
 			In.bYield = false;
 			In.bResume = false;
 			In.bResumeHasPlane = false;
+			In.ResumeDz = TConstArrayView<double>();
 			In.bColdReset = false;
 			return Out;
 		}
@@ -2225,6 +2228,294 @@ bool FRammsLevelLawAtReachSteady::RunTest(const FString& Parameters)
 	ExpectStatus(*this, TEXT("switched on past reach, first frame"), Out, EStatus::AtReach);
 	TestTrue(TEXT("switched on past reach, first frame: a leg's travel is named"), Out.ReachLimit == EReachLimit::LegTravel);
 	TestTrue(TEXT("... with no offset given yet"), MaxSize(Out.Dz) == 0.0);
+	return true;
+}
+
+// Catches: the wanted attitude walked while a drive mode's stance is being
+// changed under the legs (the rider is then turned by the walk and by the
+// stance's own rock at once); the walk stopped dead rather than within the
+// tilt policy's acceleration; a release that runs its time out while it
+// waits, and finishes open loop.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawWantedHeldForStance,
+	"Ramms.Level.Law.WantedHeldWhileTheStanceChanges",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawWantedHeldForStance::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// The largest change of the wanted attitude's rate from one frame to the
+	// next over Frames frames (deg/s^2), and where the rate ends (deg/s).
+	struct FWalk
+	{
+		double MostAccel = 0.0;
+		double MostRate = 0.0;
+		double EndRate = 0.0;
+	};
+	const auto Watch = [](FToy& Toy, int32 Frames, FVector2D& InOutWanted, FVector2D& InOutRate) {
+		FWalk Walk;
+		for (int32 Index = 0; Index < Frames; ++Index)
+		{
+			const FOutputs	Out = Toy.Step(Frame);
+			const FVector2D Rate = (Out.WantedDeg - InOutWanted) / Frame;
+			Walk.MostAccel = FMath::Max(Walk.MostAccel, (Rate - InOutRate).Size() / Frame);
+			Walk.MostRate = FMath::Max(Walk.MostRate, Rate.Size());
+			InOutWanted = Out.WantedDeg;
+			InOutRate = Rate;
+		}
+		Walk.EndRate = InOutRate.Size();
+		return Walk;
+	};
+
+	{
+		// Switched on on a slope, a second and a half into the walk to level:
+		// the wanted attitude is moving at the policy's rate.
+		FToy Toy(12.0);
+		Toy.GroundDeg = FVector2D(6.0, 3.0);
+		FOutputs  Out = Toy.Run(1.5 - Frame);
+		FVector2D Wanted = Out.WantedDeg;
+		FVector2D Rate = FVector2D::ZeroVector;
+		Out = Toy.Step(Frame);
+		Rate = (Out.WantedDeg - Wanted) / Frame;
+		Wanted = Out.WantedDeg;
+		TestTrue(TEXT("(walking to level at the policy's rate)"), Rate.Size() >= Toy.Tuning.TiltRateDegPerSec - 0.05 && Wanted.Size() > 2.0);
+
+		// A drive mode's stance begins to change: the walk stops, within the
+		// policy's acceleration, and waits.
+		Toy.In.bStanceChanging = true;
+		const FWalk Stopping = Watch(Toy, 16, Wanted, Rate);
+		AddInfo(FString::Printf(TEXT("stance change during the walk: the wanted attitude's rate changed by %.2f deg/s^2 at most, ended at %.3f deg/s, held at (%.2f, %.2f)"), Stopping.MostAccel,
+			Stopping.EndRate, Wanted.X, Wanted.Y));
+		TestTrue(TEXT("the walk stops within the policy's acceleration"), Stopping.MostAccel <= Toy.Tuning.TiltAccelDegPerSec2 + 1.0e-6);
+		TestEqual(TEXT("... and has stopped within a second"), Stopping.EndRate, 0.0, 1.0e-9);
+		const FVector2D Held = Wanted;
+		TestTrue(TEXT("(short of level: there is a walk left to wait with)"), Held.Size() > 0.5);
+		const FWalk Waiting = Watch(Toy, 32, Wanted, Rate);
+		TestTrue(TEXT("held for as long as the stance changes"), Waiting.MostRate <= 1.0e-9 && (Wanted - Held).Size() <= 1.0e-9);
+		ExpectState(*this, TEXT("levelling still, on the attitude held"), Toy.Step(Frame), EState::Active);
+		TestTrue(TEXT("... the base held there"), (Toy.Attitude() - Held).Size() <= 0.3);
+
+		// The stance has arrived: the walk goes on, again within the policy.
+		Toy.In.bStanceChanging = false;
+		const FWalk Again = Watch(Toy, 64, Wanted, Rate);
+		TestTrue(TEXT("the walk goes on once the stance has arrived"), Again.MostRate >= 1.0);
+		TestTrue(TEXT("... within the policy's rate and acceleration"), Again.MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6 && Again.MostAccel <= Toy.Tuning.TiltAccelDegPerSec2 + 1.0e-6);
+		TestTrue(TEXT("... to level"), Wanted.Size() <= 0.05 && Inclination(Toy.Attitude()) <= 0.25);
+	}
+	{
+		// Level on a slope, and the mode becomes one it does not level in, its
+		// stance change beginning with it: the base is given back only once
+		// the stance has arrived, however long that takes.
+		FToy Toy(12.0);
+		Toy.GroundDeg = FVector2D(-5.0, 2.0);
+		FOutputs Out = Toy.Run(8.0);
+		TestTrue(TEXT("(level on the slope)"), Inclination(Toy.Attitude()) <= 0.25);
+		Toy.In.Mode = EMode::Release;
+		Toy.In.bStanceChanging = true;
+		FVector2D Wanted = Out.WantedDeg;
+		FVector2D Rate = FVector2D::ZeroVector;
+		// Longer than a release may run closed loop (ReleaseMaxSeconds).
+		const FWalk Waiting = Watch(Toy, FMath::RoundToInt32((ReleaseMaxSeconds + 2.0) / Frame), Wanted, Rate);
+		Out = Toy.Step(Frame);
+		ExpectState(*this, TEXT("a release that waits for the stance"), Out, EState::Releasing);
+		TestTrue(TEXT("the wanted attitude did not move while the stance changed"), Waiting.MostRate <= 1.0e-9);
+		TestTrue(TEXT("the base stayed level meanwhile"), Inclination(Toy.Attitude()) <= 0.25);
+		TestFalse(TEXT("the wait does not count against the release's time: still closed loop"), Out.bOpenLoop);
+		Toy.In.bStanceChanging = false;
+		Wanted = Out.WantedDeg;
+		Rate = FVector2D::ZeroVector;
+		const FWalk Back = Watch(Toy, 80, Wanted, Rate);
+		TestTrue(TEXT("then it walks back to the ground's attitude"), Back.MostRate >= 1.0 && Back.MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6);
+		Out = Toy.Run(2.0);
+		ExpectState(*this, TEXT("given back"), Out, EState::Suspended);
+		TestTrue(TEXT("... on its stance"), (Toy.Attitude() - Toy.GroundDeg).Size() <= 1.0e-6 && MaxSize(Toy.Offset) == 0.0);
+	}
+	return true;
+}
+
+// Catches: a hand-back whose plane is taken up with the offsets the allocation
+// would give rather than the ones the plant could leave on the legs: a leg it
+// could not leave the plane on (a raised leg on its stop) is then stepped to
+// the allocation's offset on the first frame after.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawAdoptKeepsOffsetsLeft,
+	"Ramms.Level.Law.AdoptKeepsTheOffsetsLeft",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawAdoptKeepsOffsetsLeft::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// The front pair carried 8 cm off the ground, 0.3 cm short of its stop.
+	FToy Toy(12.0);
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		Toy.Legs[Index].BaseZ = -22.0;
+		Toy.Legs[Index].MeasuredZ = -22.0;
+		Toy.Legs[Index].MaxZ = -21.7;
+		// (The toy's own base stands on the other four: where this pair is says nothing of its attitude.)
+		Toy.Legs[Index].CarryShare = 0.0;
+	}
+	FLegValues StanceZ;
+	for (const FLegReach& Leg : Toy.Legs)
+	{
+		StanceZ.Add(Leg.BaseZ);
+	}
+	Toy.GroundDeg = FVector2D(-5.0, 0.0);
+	FOutputs Out = Toy.Run(8.0);
+	TestTrue(TEXT("(level nose down, the raised pair let out with the plane)"), Inclination(Toy.Attitude()) <= 0.25 && Toy.Offset[0] < -3.0);
+
+	// A take-over: folded, and the taker draws the raised pair back up onto
+	// its stance height (the rest it leaves as they were, level).
+	Toy.In.bYield = true;
+	Toy.In.Mode = EMode::Taken;
+	Out = Toy.Step(0.0);
+	ExpectAction(*this, TEXT("the yield"), Out, EAction::Fold);
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		Toy.Legs[Index].BaseZ = -22.0;
+	}
+	Toy.Run(1.0);
+
+	// The hand-back: the plane out of the baselines, but for the raised pair,
+	// whose baselines cannot go past their stop.
+	FAdoption Adoption;
+	if (!TestTrue(TEXT("a plan"), PlanAdoption(Toy.Legs, StanceZ, TConstArrayView<FClearancePoint>(), Toy.Tuning, Adoption)))
+	{
+		return false;
+	}
+	for (int32 Index = 0; Index < Toy.Legs.Num(); ++Index)
+	{
+		Toy.Legs[Index].BaseZ = Adoption.BaseZ[Index];
+		Toy.Offset[Index] = Adoption.Dz[Index];
+	}
+	TestTrue(TEXT("(the raised pair could keep only what its stop allows)"), Adoption.Dz[0] > -0.31 && Adoption.Dz[0] <= 0.0 && Adoption.Dz[4] > 1.0);
+	Toy.In.bResume = true;
+	Toy.In.bResumeHasPlane = true;
+	Toy.In.ResumePlaneDeg = Adoption.PlaneDeg;
+	Toy.In.ResumeDz = Adoption.Dz;
+	Toy.In.Mode = EMode::Allowed;
+	const FLegValues Left = Toy.Offset;
+	Out = Toy.Step(0.0);
+	ExpectAction(*this, TEXT("the hand-back"), Out, EAction::Adopt);
+	ExpectState(*this, TEXT("the hand-back"), Out, EState::Active);
+	TestTrue(TEXT("the offsets the law goes on from are the ones left on the legs"), MaxDifference(Out.Dz, Left) <= 1.0e-9);
+
+	// The first frame after: the raised pair is on its way to the plane's
+	// offset at the legs' rate, not there in one step; the legs that stand
+	// have not moved.
+	Out = Toy.Step(Frame);
+	const double Most = Toy.Tuning.LegRateFraction * Toy.Legs[0].MaxRateCmS * Frame;
+	AddInfo(FString::Printf(TEXT("hand-back with a raised pair on its stop: left with %.2f cm, the plane asks %.2f; first frame after it carries %.2f (the legs' rate allows %.2f a frame)"), Left[0],
+		Toy.Legs[0].XY.X * FMath::Tan(FMath::DegreesToRadians(Adoption.PlaneDeg.X)), Out.Dz[0], Most));
+	TestTrue(TEXT("the raised pair moves towards the plane"), Out.Dz[0] < Left[0] - 0.05);
+	TestTrue(TEXT("... no faster than a leg may"), FMath::Abs(Out.Dz[0] - Left[0]) <= Most + 1.0e-6 && FMath::Abs(Out.Dz[1] - Left[1]) <= Most + 1.0e-6);
+	for (int32 Index = 2; Index < 6; ++Index)
+	{
+		TestTrue(FString::Printf(TEXT("leg %d, which stands, is not moved by it"), Index), FMath::Abs(Out.Dz[Index] - Left[Index]) <= 0.02);
+	}
+	Out = Toy.Run(4.0);
+	TestTrue(TEXT("in the end the raised pair carries the plane's offset"), Out.Dz[0] < -3.0);
+	TestTrue(TEXT("... the base level throughout"), Inclination(Toy.Attitude()) <= 0.25);
+
+	// The ground the law goes on from is read off the legs as the hand-back left them: who carries, and how far
+	// each is behind its offset, by the offsets LEFT. (By the offsets from before the take-over, none, every leg
+	// the plane has retracted would read as still on its way down and be left out of the plane.)
+	{
+		FToy Six(12.0);
+		Six.GroundDeg = FVector2D(4.0, -2.0);
+		Six.Run(8.0);
+		Six.In.bYield = true;
+		Six.In.Mode = EMode::Taken;
+		Six.Step(0.0);
+		Six.Run(0.5);
+		FLegValues Stance;
+		Stance.Init(-30.0, Six.Legs.Num());
+		FAdoption Plan;
+		if (!TestTrue(TEXT("six standing legs: a plan"), PlanAdoption(Six.Legs, Stance, TConstArrayView<FClearancePoint>(), Six.Tuning, Plan)))
+		{
+			return false;
+		}
+		// One standing leg left half a centimetre less than the plane (the pose is the same).
+		Plan.BaseZ[1] += 0.5;
+		Plan.Dz[1] -= 0.5;
+		for (int32 Index = 0; Index < Six.Legs.Num(); ++Index)
+		{
+			Six.Legs[Index].BaseZ = Plan.BaseZ[Index];
+			Six.Offset[Index] = Plan.Dz[Index];
+		}
+		TArray<FLegReach> AsLeft = Six.Legs;
+		SupportMask(AsLeft, TConstArrayView<bool>(), Six.Tuning);
+		DiscountLateLegs(AsLeft, Plan.Dz, Six.Tuning);
+		const FVector2D Expected = Six.Attitude() + MeasuredCorrection(AsLeft);
+		Six.In.bResume = true;
+		Six.In.bResumeHasPlane = true;
+		Six.In.ResumePlaneDeg = Plan.PlaneDeg;
+		Six.In.ResumeDz = Plan.Dz;
+		Six.In.Mode = EMode::Allowed;
+		const FOutputs Adopted = Six.Step(0.0);
+		ExpectAction(*this, TEXT("six standing legs: the hand-back"), Adopted, EAction::Adopt);
+		AddInfo(FString::Printf(TEXT("hand-back with one standing leg left 0.5 cm short: ground read as (%.4f, %.4f); off the legs as left (%.4f, %.4f)"), Adopted.GroundDeg.X, Adopted.GroundDeg.Y, Expected.X,
+			Expected.Y));
+		TestTrue(TEXT("six standing legs: the ground is read off the legs as the hand-back left them"), (Adopted.GroundDeg - Expected).Size() <= 1.0e-9);
+	}
+	return true;
+}
+
+// Catches: a base left resting on the edge of the loop's deadband. Legs that
+// give less than the law believes leave an error the integral trims only
+// until it is back inside the deadband, where nothing acts: the rest is then
+// declared 0.15 deg off, and stays. Standing still, the integral trims on to a
+// narrower band before the rest; on the move it must not (the deadband is
+// there to keep the legs from hunting over ground that moves under them).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawRestOnLevel,
+	"Ramms.Level.Law.RestIsOnLevelNotOnTheDeadbandEdge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawRestOnLevel::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	for (const FVector2D& GroundDeg : { FVector2D(6.0, 0.0), FVector2D(-4.0, 3.0) })
+	{
+		{
+			// Parked, the legs giving 15 % less than the law believes.
+			FToy Toy(12.0);
+			Toy.JointShare = 0.85;
+			Toy.GroundDeg = GroundDeg;
+			const FOutputs	Out = Toy.Run(10.0);
+			const FVector2D Off = Toy.Attitude();
+			AddInfo(FString::Printf(TEXT("parked on (%.0f, %.0f) deg, legs giving 0.85: rests (%.3f, %.3f) deg off level; integral (%.2f, %.2f)"), GroundDeg.X, GroundDeg.Y, Off.X, Off.Y,
+				Toy.State.Loop.GetIntegral().X, Toy.State.Loop.GetIntegral().Y));
+			ExpectStatus(*this, TEXT("parked: at rest"), Out, EStatus::Settled);
+			TestTrue(TEXT("(the integral had work to do)"), Toy.State.Loop.GetIntegral().Size() > 0.5);
+			// (The trim has the settle time to work in, and the rest is declared
+			// at its end whether or not the error is at the trim's band yet:
+			// here it has come two thirds of the way from the deadband's edge.
+			// A rest that waited for the band itself would never come on a base
+			// whose attitude is not perfectly still.)
+			TestTrue(FString::Printf(TEXT("parked: the rest is well inside the deadband, per axis nearer the rest trim's band than the edge (%.3f, %.3f)"), Off.X, Off.Y),
+				FMath::Abs(Off.X) <= RestTrimDeadbandDeg + 0.045 && FMath::Abs(Off.Y) <= RestTrimDeadbandDeg + 0.045);
+			int32 Writes = 0;
+			for (int32 Index = 0; Index < 32; ++Index)
+			{
+				Writes += Toy.Step(Frame).bWrite ? 1 : 0;
+			}
+			TestEqual(TEXT("parked: at rest nothing is written"), Writes, 0);
+		}
+		{
+			// The same, driving: the loop's own deadband, no narrower.
+			FToy Toy(12.0);
+			Toy.JointShare = 0.85;
+			Toy.GroundDeg = GroundDeg;
+			Toy.In.SpeedCmS = 30.0;
+			Toy.In.bStick = true;
+			Toy.Run(10.0);
+			const FVector2D Off = Toy.Attitude();
+			AddInfo(FString::Printf(TEXT("driving on (%.0f, %.0f) deg, legs giving 0.85: (%.3f, %.3f) deg off level"), GroundDeg.X, GroundDeg.Y, Off.X, Off.Y));
+			TestTrue(TEXT("driving: inside the loop's deadband"), FMath::Abs(Off.X) <= Toy.Tuning.DeadbandDeg + 0.02 && FMath::Abs(Off.Y) <= Toy.Tuning.DeadbandDeg + 0.02);
+			TestTrue(TEXT("driving: and not trimmed further (the deadband's edge on the axis with the slope)"), FMath::Abs(Off.X) >= Toy.Tuning.DeadbandDeg - 0.03);
+		}
+	}
 	return true;
 }
 

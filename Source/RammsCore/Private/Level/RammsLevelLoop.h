@@ -248,6 +248,14 @@ namespace RammsLevel
 		}
 		/** One tick; returns W (deg). */
 		FVector2D Tick(const FVector2D& GoalDeg, double Dt, double MaxRateDegPerSec, double MaxAccelDegPerSec2);
+		/**
+		 * One tick of coming to rest where it can, whatever the goal: the
+		 * velocity is shortened by at most MaxAccel Dt (to zero at once for
+		 * MaxAccel <= 0) and W moves on by it. At rest it stays at rest. For
+		 * a walk that must wait (a stance being changed under the base): it
+		 * stops as gently as it would at its goal, not dead.
+		 */
+		FVector2D Brake(double Dt, double MaxAccelDegPerSec2);
 
 		FVector2D Get() const { return Wanted; }
 		/** W's velocity (deg/s). */
@@ -272,9 +280,20 @@ namespace RammsLevel
 	 * The loop: the curb's structure, terrain feed-forward with a PI trim.
 	 *
 	 *   e     = (Deadband(A.X - W.X, DeadbandDeg), Deadband(A.Y - W.Y, ...))
-	 *   I    += IntegralGain e Dt, per axis, where allowed (below), then
+	 *   e_I   = e, or with a TrimDeadbandDeg of 0 or more the same error less
+	 *           that band (the lesser of it and DeadbandDeg) instead
+	 *   I    += IntegralGain e_I Dt, per axis, where allowed (below), then
 	 *           clamped to +-IntegralMaxDeg per axis
 	 *   C_raw = FeedForwardGain (G - W) + I + ProportionalGain e
+	 *
+	 * The deadband keeps the legs from hunting after the last tenth of a
+	 * degree while the ground moves under them. It also means that nothing
+	 * acts inside it: an integral wound up by a transient (the lag of a walk,
+	 * a knock) unwinds only until the error is back at the band's edge, and
+	 * the base is left resting there. So where the law knows the base is
+	 * standing still and about to rest it gives the integral a narrower band
+	 * (TrimDeadbandDeg), and the rest is on the wanted attitude. The
+	 * proportional term keeps the whole deadband either way.
 	 *
 	 * A nose-up error gives a positive pitch correction, which retracts the
 	 * front legs. C_raw is NOT clamped here: the law clamps per axis, slews
@@ -294,9 +313,10 @@ namespace RammsLevel
 	public:
 		void Reset() { *this = FLevelLoop(); }
 
-		/** One tick; returns C_raw (deg). */
+		/** One tick; returns C_raw (deg). TrimDeadbandDeg under 0: the
+		 *  integral's band is the loop's. */
 		FVector2D Tick(const FVector2D& AttitudeDeg, const FVector2D& WantedDeg, const FVector2D& GroundDeg, double Dt, bool bIntegrate,
-			bool bSaturated, const FTuning& Tuning);
+			bool bSaturated, const FTuning& Tuning, double TrimDeadbandDeg = -1.0);
 
 		/**
 		 * A limit gave AchievedDeg where AskedDeg was asked (the allocation's

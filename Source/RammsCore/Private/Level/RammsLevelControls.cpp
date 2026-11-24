@@ -248,7 +248,11 @@ namespace RammsLevel
 			case EStatus::Yielded:
 				return TEXT("Standing by: a curb crossing has the legs");
 			case EStatus::Waiting:
-				return Facts.bModeNotLevelled ? TEXT("Waiting: not levelling in this drive mode") : TEXT("Waiting: the tilt cannot be read yet");
+				if (Facts.bModeNotLevelled)
+				{
+					return TEXT("Waiting: not levelling in this drive mode");
+				}
+				return Facts.bStanceChanging ? TEXT("Waiting: the drive mode is taking its stance") : TEXT("Waiting: the tilt cannot be read yet");
 			case EStatus::Diverged:
 				OutSeverity = ESeverity::Fault;
 				return TEXT("Stopped: levelling was making the tilt worse. Switch it off and on to try again.");

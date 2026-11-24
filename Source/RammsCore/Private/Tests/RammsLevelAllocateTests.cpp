@@ -3,8 +3,9 @@
 // Who stands; the rigid plane of leg offsets and its signs; the ride height
 // kept, and shifted where that buys reach; the plane scaled back at a travel
 // limit, at a lifted leg's clearance and at a belly point; roll kept off the
-// legs it must not move; the plane fitted back through a set of heights; and
-// the travel a moved leg has left. Every number is made up: a six-wheeled
+// legs it must not move; the plane fitted back through a set of heights; the
+// plane a hand-back takes back out of a pose, against the stance the legs go
+// to next; and the travel a moved leg has left. Every number is made up: a six-wheeled
 // robot (corners 90 cm apart fore/aft and 50 across, the middle pair 54
 // across) on 9 cm wheels whose centres sit 20 cm under the chassis origin
 // with 10 cm of travel either way, and a four-legged one whose front and
@@ -1312,6 +1313,131 @@ bool FRammsLevelAllocateReachNearest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("axis limit far off: a leg's travel is the nearest"), Far.NearestLimit == EReachLimit::LegTravel);
 		CheckNear(*this, TEXT("axis limit far off: the share of the planned travel left"), Far.ReachLeft, 1.0 - 45.0 * TanDeg(3.0) / 7.5, 1.0e-9);
 	}
+	return true;
+}
+
+// Catches: the plane a hand-back takes out fitted over legs the next stance
+// carries off the ground (wherever the taker left one would bend it), the
+// residual the stance ramp is left with still holding a tilt, offsets that are
+// not the ones the law's own allocation gives on the baselines left (a step on
+// the first frame after), a pose that is not kept, and a baseline put past a
+// leg's travel.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelFitPlaneAdoption,
+	"Ramms.Level.FitPlane.AdoptionAgainstAStance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelFitPlaneAdoption::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAllocateTests;
+	using RammsLevel::FAdoption;
+	const FTuning Tuning;
+
+	// The stance the legs are going to: the front pair carried 6 cm off the
+	// ground, the other four standing.
+	const double		 StanceZ[6] = { -14.0, -14.0, -20.0, -20.0, -20.0, -20.0 };
+	const TArray<double> Stance(StanceZ, 6);
+	// The pose the taker left: level on a slope by the plane (4, -2.5), the
+	// base 3 cm lower than the stance has it (every leg 3 cm further up), and
+	// the front pair set down on the ground with the rest, the -Y one half a
+	// centimetre deeper than the plane has it.
+	const FVector2D	  Plane(4.0, -2.5);
+	TArray<FLegReach> Pose = SixWheels();
+	for (int32 Index = 0; Index < 6; ++Index)
+	{
+		Pose[Index].BaseZ = -20.0 + 3.0 + RammsLevel::PlaneRise(Pose[Index].XY, true, Plane) + (Index == 0 ? -0.5 : 0.0);
+		Pose[Index].MeasuredZ = Pose[Index].BaseZ;
+	}
+	FAdoption A;
+	if (!TestTrue(TEXT("a plan"), RammsLevel::PlanAdoption(Pose, Stance, TConstArrayView<FClearancePoint>(), Tuning, A)) || !TestEqual(TEXT("... for every leg"), A.Dz.Num(), 6)
+		|| !TestEqual(TEXT("... and its baseline"), A.BaseZ.Num(), 6))
+	{
+		return false;
+	}
+	AddInfo(FString::Printf(TEXT("adopted plane (%.4f, %.4f) of (4, -2.5); offsets %.2f %.2f %.2f %.2f %.2f %.2f cm"), A.PlaneDeg.X, A.PlaneDeg.Y, A.Dz[0], A.Dz[1], A.Dz[2], A.Dz[3], A.Dz[4],
+		A.Dz[5]));
+	// The plane is the standing four's: the front pair's 9 cm (and the odd
+	// half centimetre) is no part of it.
+	CheckNear(*this, TEXT("the plane's pitch is the pose's over the legs that will stand"), A.PlaneDeg.X, Plane.X, 1.0e-6);
+	CheckNear(*this, TEXT("the plane's roll"), A.PlaneDeg.Y, Plane.Y, 1.0e-6);
+	TArray<FLegReach> After = Pose;
+	for (int32 Index = 0; Index < 6; ++Index)
+	{
+		CheckNear(*this, FString::Printf(TEXT("leg %d: baseline plus offset is the pose (nothing is told to move)"), Index), A.BaseZ[Index] + A.Dz[Index], Pose[Index].BaseZ, Tight);
+		After[Index].BaseZ = A.BaseZ[Index];
+	}
+	// What the stance ramp is left with on the legs that will stand: one
+	// height, no tilt.
+	for (int32 Index = 3; Index < 6; ++Index)
+	{
+		CheckNear(*this, FString::Printf(TEXT("leg %d: left as far from its stance as leg 2 (a height, no plane)"), Index), A.BaseZ[Index] - StanceZ[Index], A.BaseZ[2] - StanceZ[2], 1.0e-6);
+	}
+	// The offsets are the law's own for that plane on those baselines.
+	Stand(After, Tuning);
+	const FAllocation Own = AllocateFor(After, A.PlaneDeg, Tuning);
+	CheckNear(*this, TEXT("(the whole plane fits)"), Own.Fraction, 1.0, Tight);
+	for (int32 Index = 0; Index < 6; ++Index)
+	{
+		CheckNear(*this, FString::Printf(TEXT("leg %d: the offset left is the allocation's own (no step on the next frame)"), Index), A.Dz[Index], Own.Dz[Index], 1.0e-6);
+	}
+
+	// A leg the stance carries on its retract stop, left there by the taker,
+	// on a slope whose plane would have it further up still: its baseline
+	// stays inside its travel, and it keeps the offset it can.
+	{
+		TArray<FLegReach> Stopped = SixWheels();
+		const FVector2D	  Down(-5.0, 0.0);
+		const double	  StopStanceZ[6] = { -10.3, -10.3, -20.0, -20.0, -20.0, -20.0 };
+		for (int32 Index = 0; Index < 6; ++Index)
+		{
+			Stopped[Index].BaseZ = Index < 2 ? -10.3 : -20.0 + RammsLevel::PlaneRise(Stopped[Index].XY, true, Down);
+			Stopped[Index].MeasuredZ = Stopped[Index].BaseZ;
+		}
+		FAdoption B;
+		if (TestTrue(TEXT("a plan with the front pair on its stop"), RammsLevel::PlanAdoption(Stopped, TArray<double>(StopStanceZ, 6), TConstArrayView<FClearancePoint>(), Tuning, B)))
+		{
+			CheckNear(*this, TEXT("stopped pair: the plane is still the standing four's"), B.PlaneDeg.X, Down.X, 1.0e-6);
+			for (int32 Index = 0; Index < 6; ++Index)
+			{
+				TestTrue(FString::Printf(TEXT("stopped pair, leg %d: its baseline is inside its travel"), Index), B.BaseZ[Index] <= Stopped[Index].MaxZ + Tight && B.BaseZ[Index] >= Stopped[Index].MinZ - Tight);
+				CheckNear(*this, FString::Printf(TEXT("stopped pair, leg %d: baseline plus offset is the pose"), Index), B.BaseZ[Index] + B.Dz[Index], Stopped[Index].BaseZ, Tight);
+			}
+			// (Nose down the plane extends the front pair: a baseline that
+			// much above the pose would be 3.6 cm past the stop.)
+			TestTrue(TEXT("stopped pair: it keeps less than the plane's offset"), B.Dz[0] > -0.4 && B.Dz[0] <= 0.0);
+		}
+	}
+
+	// The same pair on its stop, the slope the other way and the base a centimetre lower: now the plane has the pair
+	// further UP than its stop. It cannot go there, and need not: its baseline is put as far below the stop as the
+	// plane's offset is long, where it is still carried well clear of the ground. (Worked out with the pair's baseline
+	// left near the stop it would seem to have no clearance to give, and the whole plane would be cut for it.)
+	{
+		TArray<FLegReach> Stopped = SixWheels();
+		const FVector2D	  Up(5.0, 0.0);
+		const double	  StopStanceZ[6] = { -10.3, -10.3, -20.0, -20.0, -20.0, -20.0 };
+		// The standing four: the plane about their own middle, a centimetre up.
+		const double Mean = 0.5 * RammsLevel::PlaneRise(Stopped[4].XY, true, Up);
+		for (int32 Index = 0; Index < 6; ++Index)
+		{
+			Stopped[Index].BaseZ = Index < 2 ? -10.3 : -20.0 + 1.0 + RammsLevel::PlaneRise(Stopped[Index].XY, true, Up) - Mean;
+			Stopped[Index].MeasuredZ = Stopped[Index].BaseZ;
+		}
+		FAdoption C;
+		if (TestTrue(TEXT("a plan with the front pair on its stop, nose up"), RammsLevel::PlanAdoption(Stopped, TArray<double>(StopStanceZ, 6), TConstArrayView<FClearancePoint>(), Tuning, C)))
+		{
+			const double Whole = RammsLevel::PlaneRise(Stopped[0].XY, true, Up) - Mean;
+			AddInfo(FString::Printf(TEXT("raised pair on its stop, nose up: plane %.4f of 5; the pair left %.3f cm of the plane's %.3f"), C.PlaneDeg.X, C.Dz[0], Whole));
+			CheckNear(*this, TEXT("stopped pair, nose up: the whole plane is taken out"), C.PlaneDeg.X, Up.X, 1.0e-6);
+			CheckNear(*this, TEXT("stopped pair, nose up: the pair is left the plane's whole offset"), C.Dz[0], Whole, 1.0e-6);
+			CheckNear(*this, TEXT("stopped pair, nose up: baseline plus offset is the pose"), C.BaseZ[0] + C.Dz[0], Stopped[0].BaseZ, Tight);
+			TestTrue(TEXT("stopped pair, nose up: the standing legs are left the stance, a centimetre up"), FMath::IsNearlyEqual(C.BaseZ[2], -19.0, 1.0e-6) && FMath::IsNearlyEqual(C.BaseZ[5], -19.0, 1.0e-6));
+		}
+	}
+
+	// Nothing to go by: no legs, a stance of another length.
+	FAdoption None;
+	TestFalse(TEXT("no legs: no plan"), RammsLevel::PlanAdoption(TConstArrayView<FLegReach>(), TConstArrayView<double>(), TConstArrayView<FClearancePoint>(), Tuning, None));
+	TestFalse(TEXT("a stance of another length: no plan"), RammsLevel::PlanAdoption(Pose, TArray<double>(StanceZ, 5), TConstArrayView<FClearancePoint>(), Tuning, None));
 	return true;
 }
 

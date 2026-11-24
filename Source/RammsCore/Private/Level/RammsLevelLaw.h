@@ -52,7 +52,7 @@
  *    the legs that carry the robot.
  *
  * 2. THE ARBITER. FArbiter::Tick with In's bEnable, Mode, bYield, bResume,
- *    bResumeHasPlane, bColdReset (or step 0's), the validity above,
+ *    bResumeHasPlane, bStanceChanging, bColdReset (or step 0's), the validity above,
  *    bCorrectionZero = |C| < ReleaseDoneDeg and |Ride| < ReleaseDoneCm and
  *    |seat trim| < ReleaseDoneDeg and the offsets not held back behind the
  *    allocation (g2 below) (all as the last step left them), and
@@ -75,7 +75,13 @@
  *                       baseline: on the same step, even); then as ColdResume;
  *                       LastDz := Allocate(Legs, Points, C, Tuning, 0, 0).Dz.
  *                       In.Legs must be the legs AFTER the shell's rebase, so
- *                       that these are the offsets already on the motors.
+ *                       that these are the offsets already on the motors --
+ *                       or, where the shell could not leave exactly those on
+ *                       every leg, LastDz := In.ResumeDz, the ones it did
+ *                       leave: the next steps then bring them to the
+ *                       allocation's within the legs' rate (g2), and nothing
+ *                       steps. (This step's sensing takes In.ResumeDz for the
+ *                       offsets last given, and no support memory.)
  *                       (The plan words this "C and I are set to the plane";
  *                       the integral here is the plane less the feed-forward,
  *                       which is what makes the next C_raw the plane.)
@@ -120,11 +126,25 @@
  *       but on a step whose action set W (StartFromAttitude, ColdResume,
  *       Adopt), when W stays where it was put and starts moving on the next
  *       step: this step's C_raw is then exactly the correction already
- *       applied, and the offsets do not move at all.
- *    e. C_raw = Loop.Tick(A', W, G, Dt, bIntegrate, bSaturated, Tuning), with
+ *       applied, and the offsets do not move at all. And but while
+ *       In.bStanceChanging, when W = Tilt.Brake(Dt, TiltAccelDegPerSec2): it
+ *       comes to rest where it can and waits. A drive mode's stance change
+ *       rocks the base onto other wheels by itself; walked on top of that,
+ *       the rider is turned by both at once, and the base stalls against the
+ *       rock and then catches up faster than the tilt policy allows. The
+ *       loop goes on holding the base at W meanwhile (levelling, or a release
+ *       not yet begun to walk), and the walk goes on once the stance has
+ *       arrived. (A START waits for the stance too: the arbiter's rule.)
+ *    e. C_raw = Loop.Tick(A', W, G, Dt, bIntegrate, bSaturated, Tuning, Trim), with
  *       bIntegrate = Active (never in Releasing) and at least
  *       MinSupportForIntegral support legs and not bRateLimited; bSaturated
- *       and bRateLimited as the last step left them. Then the per-axis
+ *       and bRateLimited as the last step left them. Trim, the integral's own
+ *       deadband, is RestTrimDeadbandDeg while Active with the chassis under
+ *       QuietSpeedCmS, the stick still, Tilt.IsNear(Goal) and the baselines
+ *       standing still (all that is left before a rest is the settle time),
+ *       and the loop's own otherwise: what a walk or a knock wound into the
+ *       integral is trimmed out before the rest is declared, where it would
+ *       otherwise leave the base resting on the deadband's edge. Then the per-axis
  *       limit: Asked = ClampAxes(C_raw, MaxCorrectionDeg), and
  *       bAxisLimited = an axis of C_raw is more than AxisLimitSlackDeg past
  *       its limit.
@@ -157,7 +177,8 @@
  *       the allocation's: the offsets catch them up over the next steps.
  *       Dz = LastDz = the result; bWrite is true.
  *    h. Active: Divergence.Tick(|A - W|, A, MeasuredCorrection(Legs),
- *       Alloc.Fraction >= 1, Dt) (not while quiet). Releasing: ReleaseSeconds += Dt, and bReleaseOpen becomes
+ *       Alloc.Fraction >= 1, Dt) (not while quiet). Releasing: ReleaseSeconds += Dt
+ *       (not while In.bStanceChanging keeps the walk waiting), and bReleaseOpen becomes
  *       true once Tilt.IsNear(G) or ReleaseSeconds > ReleaseMaxSeconds:
  *       what is left of C is then the integral's trim, which no ground
  *       explains, and it is ramped out open loop.
@@ -248,7 +269,8 @@ namespace RammsLevel
 		bool   bStick = false;
 		/** The stance is being changed under the legs (a drive mode switch in
 		 *  progress): no rest meanwhile, whether or not a baseline has moved
-		 *  yet. */
+		 *  yet; no start from nothing; and the wanted attitude waits where it
+		 *  is. */
 		bool bStanceChanging = false;
 		/** The robot has a seat tilt for the trim. */
 		bool bSeat = false;
@@ -270,6 +292,11 @@ namespace RammsLevel
 		bool	  bResume = false;
 		bool	  bResumeHasPlane = false;
 		FVector2D ResumePlaneDeg = FVector2D::ZeroVector;
+		/** With bResumeHasPlane: the offset the plant left on each leg (cm,
+		 *  positive retracts; the legs' order), where it could not leave
+		 *  exactly the allocation's for ResumePlaneDeg (a leg at the end of
+		 *  its travel). Empty, or not the legs' length: the allocation's. */
+		TConstArrayView<double> ResumeDz;
 		/** Once: time ran backwards or the robot was moved by hand. */
 		bool bColdReset = false;
 	};

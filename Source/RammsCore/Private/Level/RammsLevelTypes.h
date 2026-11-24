@@ -127,6 +127,16 @@ namespace RammsLevel
 	 *  rate (FGroundGate): a robot standing on a line of legs has no span,
 	 *  and none would mean the ground could turn at any rate. */
 	constexpr double GroundSpanMinCm = 10.0;
+	/** Standing still before a rest, the integral trims the error down to
+	 *  this (deg) rather than to the loop's deadband (FLevelLoop). What a
+	 *  walk or a knock wound into the integral otherwise leaves the base
+	 *  resting anywhere inside the deadband, most often on its edge. */
+	constexpr double RestTrimDeadbandDeg = 0.05;
+	/** PlanAdoption's rounds: the offsets a plane leaves decide which legs
+	 *  stand, which decides the offsets. Who stands does not move with a
+	 *  height every leg shares, so the second round already agrees with the
+	 *  first; the others are for a plane cut at the legs' reach. */
+	constexpr int32 AdoptPasses = 4;
 
 	/**
 	 * The level assist's tuning. A plain mirror of the reflected

@@ -4,8 +4,9 @@
 // The switch on and off; a curb controller's yield folding the offsets once;
 // its hand-back with and without a plane; the cold reset and the start after
 // a fault; a mode that asks for a gentle release; a missing attitude; a
-// divergence latching until switched off and on; and a mode that took the
-// legs without saying so. There are no numbers in the arbiter, so there are
+// divergence latching until switched off and on; a mode that took the
+// legs without saying so; and a start that waits for a stance being changed.
+// There are no numbers in the arbiter, so there are
 // none here: every test is a sequence of made-up inputs.
 //
 // Beside each test, the change to the arbiter it is there to catch.
@@ -616,6 +617,68 @@ bool FRammsLevelArbiterUnexpectedModeFoldsOrZeroes::RunTest(const FString& Param
 		FArbiter		   Arbiter = MakeFaulted();
 		const FArbiterStep Step = Expect(*this, TEXT("taken with no yield, Faulted"), Arbiter, Taken, EState::Faulted, EAction::None);
 		TestFalse(TEXT("... flags nothing"), Step.bUnexpected);
+	}
+	return true;
+}
+
+// Catches: levelling begun on a stance that is still being changed (the
+// wanted attitude then walks on top of the stance's own rock), a start kept
+// waiting once the stance has arrived, a hand-back's plane refused because
+// the stance is about to change, or levelling under way dropped by one.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelArbiterStartWaitsForStance,
+	"Ramms.Level.Arbiter.StartWaitsForTheStance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelArbiterStartWaitsForStance::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelArbiterTests;
+
+	FArbiterInputs Changing = Ready();
+	Changing.bStanceChanging = true;
+	{
+		// Switched on in the middle of a mode switch, or the mode it levels
+		// in coming up with its stance still being taken: it waits.
+		FArbiter Arbiter;
+		Expect(*this, TEXT("from Off, the stance changing"), Arbiter, Changing, EState::Suspended, EAction::None);
+		TestFalse(TEXT("waiting: no offsets"), Arbiter.HasOffsets());
+		Expect(*this, TEXT("still changing"), Arbiter, Changing, EState::Suspended, EAction::None);
+		Expect(*this, TEXT("the stance has arrived"), Arbiter, Ready(), EState::Active, EAction::StartFromAttitude);
+		// Under way, a stance change is ridden through: nothing is dropped.
+		Expect(*this, TEXT("a stance change while levelling"), Arbiter, Changing, EState::Active, EAction::None);
+	}
+	{
+		// A taker's mode left with no hand-back, the next mode's stance being
+		// ramped in: the cold start waits for it too.
+		FArbiter Arbiter = MakeYielded();
+		Expect(*this, TEXT("from Yielded, the stance changing"), Arbiter, Changing, EState::Suspended, EAction::None);
+		Expect(*this, TEXT("... and arrived"), Arbiter, Ready(), EState::Active, EAction::StartFromAttitude);
+	}
+	{
+		// A hand-back is not a start: the plane is out of the baselines, and
+		// is taken up whatever the stance is about to do.
+		FArbiter	   Arbiter = MakeYielded();
+		FArbiterInputs Resume = Changing;
+		Resume.Mode = EMode::Taken;
+		Resume.bResume = true;
+		Resume.bResumeHasPlane = true;
+		Expect(*this, TEXT("hand-back with a plane, the stance changing"), Arbiter, Resume, EState::Active, EAction::Adopt);
+	}
+	{
+		// A release is not held up either, nor a release taken back.
+		FArbiter	   Arbiter = MakeActive();
+		FArbiterInputs Off = Changing;
+		Off.bEnable = false;
+		Expect(*this, TEXT("switched off, the stance changing"), Arbiter, Off, EState::Releasing, EAction::BeginRelease);
+		Expect(*this, TEXT("switched on again, the stance changing"), Arbiter, Changing, EState::Active, EAction::None);
+	}
+	{
+		// A cold reset in the middle of one: whatever was applied is gone, and
+		// the start waits like any other.
+		FArbiter	   Arbiter = MakeActive();
+		FArbiterInputs Reset = Changing;
+		Reset.bColdReset = true;
+		Expect(*this, TEXT("cold reset, the stance changing"), Arbiter, Reset, EState::Suspended, EAction::Clear);
+		Expect(*this, TEXT("... then the stance arrives"), Arbiter, Ready(), EState::Active, EAction::StartFromAttitude);
 	}
 	return true;
 }

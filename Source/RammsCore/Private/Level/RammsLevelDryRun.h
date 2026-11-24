@@ -224,13 +224,19 @@ namespace RammsLevel::DryRun
 		StanceRamp,
 		/** A take-over: the law is told bYield with Mode Taken, and on its
 		 *  Fold the offsets are folded into the baselines (baseline :=
-		 *  baseline + offset, the offsets zero); nothing writes for Seconds
-		 *  (a frame at least); then the hand-back: the plane FitPlane puts
-		 *  through (baseline - StanceZ) over the legs that stood before the
-		 *  fold is taken back out (baseline := baseline - PlaneRise less its
-		 *  support mean, the offset the same: RigidOffsets), and the law is
-		 *  told bResume with that plane. Any Fold the law asks for (an
-		 *  unexpected take-over too) is carried out the same way. */
+		 *  baseline + offset, the offsets zero); the law writes nothing for
+		 *  Seconds (a frame at least), while the taker may move the baselines
+		 *  to a pose of its own (StanceRamp events in that time). Then the
+		 *  hand-back, to the stance the run started in (each leg's StanceZ):
+		 *  PlanAdoption takes the plane by which the pose differs from that
+		 *  stance back out of the baselines, and the law is told bResume with
+		 *  that plane and the offsets it left -- or, with bCold, told bResume
+		 *  with no plane, the baselines left as the taker had them. With
+		 *  RampSeconds over 0 a drive mode's stance ramp follows at once:
+		 *  every leg's baseline goes in a straight line to its StanceZ over
+		 *  that long, the law told the stance is changing meanwhile. Any Fold
+		 *  the law asks for (an unexpected take-over too) is carried out the
+		 *  same way. */
 		FoldAdopt,
 		/** For Seconds the attitude cannot be read. */
 		AttitudeLoss,
@@ -240,7 +246,11 @@ namespace RammsLevel::DryRun
 		 *  Tuning.LevelReferenceDeg from here on): the rider changing the tilt
 		 *  they prefer. "Off level" in the result is measured against the
 		 *  reference in force on each frame. */
-		SetReference
+		SetReference,
+		/** For Seconds the law is told a drive mode's stance is being changed
+		 *  (FInputs::bStanceChanging): a mode switch under way, whose stages
+		 *  are StanceRamp events in that time. */
+		StanceChanging
 	};
 
 	struct FDryEvent
@@ -252,6 +262,11 @@ namespace RammsLevel::DryRun
 		double	  Seconds = 0.0;
 		FVector2D PlaneDeg = FVector2D::ZeroVector;
 		uint32	  Mask = 0;
+		/** FoldAdopt: the hand-back gives no plane (levelling starts again
+		 *  from nothing on the pose the taker left); and how long the stance
+		 *  ramp that follows the hand-back takes (s; 0: none). */
+		bool   bCold = false;
+		double RampSeconds = 0.0;
 	};
 
 	struct FOptions

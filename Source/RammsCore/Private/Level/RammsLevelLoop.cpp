@@ -221,8 +221,26 @@ namespace RammsLevel
 		return Wanted;
 	}
 
+	FVector2D FTiltTarget::Brake(double Dt, double MaxAccelDegPerSec2)
+	{
+		if (Dt <= 0.0)
+		{
+			return Wanted;
+		}
+		const double Speed = Rate.Size();
+		const double Slower = MaxAccelDegPerSec2 > 0.0 ? Speed - MaxAccelDegPerSec2 * Dt : 0.0;
+		if (Slower <= 0.0 || Speed <= 0.0)
+		{
+			Rate = FVector2D::ZeroVector;
+			return Wanted;
+		}
+		Rate *= Slower / Speed;
+		Wanted += Rate * Dt;
+		return Wanted;
+	}
+
 	FVector2D FLevelLoop::Tick(const FVector2D& AttitudeDeg, const FVector2D& WantedDeg, const FVector2D& GroundDeg, double Dt, bool bIntegrate,
-		bool bSaturated, const FTuning& Tuning)
+		bool bSaturated, const FTuning& Tuning, double TrimDeadbandDeg)
 	{
 		if (Dt <= 0.0)
 		{
@@ -231,7 +249,11 @@ namespace RammsLevel
 		const FVector2D Error(Deadband(AttitudeDeg.X - WantedDeg.X, Tuning.DeadbandDeg), Deadband(AttitudeDeg.Y - WantedDeg.Y, Tuning.DeadbandDeg));
 		if (bIntegrate)
 		{
-			const FVector2D Step = Error * (Tuning.IntegralGain * Dt);
+			// The integral's own band, where one is given: never wider than
+			// the loop's.
+			const double	TrimBand = TrimDeadbandDeg >= 0.0 ? FMath::Min(TrimDeadbandDeg, FMath::Max(0.0, Tuning.DeadbandDeg)) : Tuning.DeadbandDeg;
+			const FVector2D Trimmed(Deadband(AttitudeDeg.X - WantedDeg.X, TrimBand), Deadband(AttitudeDeg.Y - WantedDeg.Y, TrimBand));
+			const FVector2D Step = Trimmed * (Tuning.IntegralGain * Dt);
 			// Against a limit the integral may only come back: a step with the
 			// sign of the last correction would wind it further into a plane
 			// the legs cannot give, to be unwound later as an overshoot. The

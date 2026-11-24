@@ -74,6 +74,9 @@ namespace RammsLevel
 		/** While waiting: the active drive mode is one it does not level in
 		 *  (else it waits for the attitude). */
 		bool bModeNotLevelled = false;
+		/** While waiting: the drive mode's stance is still being taken
+		 *  (levelling begins once it has arrived). */
+		bool bStanceChanging = false;
 		/** At reach: what stops the correction. */
 		EReachLimit ReachLimit = EReachLimit::None;
 	};

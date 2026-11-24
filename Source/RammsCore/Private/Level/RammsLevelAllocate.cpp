@@ -764,6 +764,98 @@ namespace RammsLevel
 		return Out;
 	}
 
+	bool PlanAdoption(TConstArrayView<FLegReach> Legs, TConstArrayView<double> StanceZ, TConstArrayView<FClearancePoint> Points, const FTuning& Tuning,
+		FAdoption& Out)
+	{
+		using FLegs = TArray<FLegReach, TInlineAllocator<8>>;
+		Out = FAdoption();
+		const int32 Num = Legs.Num();
+		if (Num == 0 || StanceZ.Num() != Num)
+		{
+			return false;
+		}
+
+		// Who stands in the stance the legs are going to: the base's attitude
+		// there is theirs, so the plane is fitted over them and no other. (A
+		// wheel the stance carries off the ground may be anywhere in the pose.)
+		FLegs Stance;
+		Stance.Append(Legs.GetData(), Num);
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			Stance[Index].BaseZ = StanceZ[Index];
+		}
+		SupportMask(Stance, TConstArrayView<bool>(), Tuning);
+		TArray<FVector2D, TInlineAllocator<8>> XY;
+		FLegValues							   Carried;
+		TArray<bool, TInlineAllocator<8>>	   Use;
+		TArray<bool, TInlineAllocator<8>>	   Roll;
+		bool								   bAnyStands = false;
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			XY.Add(Legs[Index].XY);
+			Carried.Add(Legs[Index].BaseZ - StanceZ[Index]);
+			Use.Add(Stance[Index].bSupport);
+			Roll.Add(Legs[Index].bRoll);
+			bAnyStands = bAnyStands || Stance[Index].bSupport;
+		}
+		FVector2D PlaneDeg = FVector2D::ZeroVector;
+		double	  HeightCm = 0.0;
+		if (!bAnyStands || !FitPlane(XY, Carried, Use, Roll, PlaneDeg, HeightCm) || !FMath::IsFinite(PlaneDeg.X) || !FMath::IsFinite(PlaneDeg.Y))
+		{
+			return false;
+		}
+		PlaneDeg = ClampAxes(PlaneDeg, Tuning.MaxCorrectionDeg);
+
+		// The offsets are the law's own for that plane, on the baselines they
+		// leave: which legs stand there (and so the height the offsets are
+		// taken about) is found from those baselines, which the offsets set.
+		// Who stands does not depend on a height all the legs share, so a
+		// round or two settles it; a plane cut at the legs' reach takes more.
+		// The first round takes the plane about the legs that stand in the
+		// stance, as it will be once the ramp is done: a leg the stance
+		// carries off the ground then starts from a baseline that keeps it
+		// off the ground, and is not taken for one that limits the plane.
+		FLegs	   Trial;
+		FLegValues Dz;
+		Trial.Append(Legs.GetData(), Num);
+		const double StanceMean = AllocateImpl::MeanRise(Stance, PlaneDeg);
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			Dz.Add(PlaneRise(Legs[Index].XY, Legs[Index].bRoll, PlaneDeg) - StanceMean);
+		}
+		const auto Place = [&]() {
+			for (int32 Index = 0; Index < Num; ++Index)
+			{
+				// Never a baseline past the leg's travel: no joint makes it.
+				const FLegReach& Leg = Legs[Index];
+				Trial[Index].BaseZ = FMath::Clamp(Leg.BaseZ - Dz[Index], FMath::Min(Leg.MinZ, Leg.MaxZ), FMath::Max(Leg.MinZ, Leg.MaxZ));
+			}
+		};
+		for (int32 Pass = 0; Pass < AdoptPasses; ++Pass)
+		{
+			Place();
+			SupportMask(Trial, TConstArrayView<bool>(), Tuning);
+			const FAllocation Alloc = Allocate(Trial, Points, PlaneDeg, Tuning, 0.0, 0.0);
+			if (Alloc.Dz.Num() != Num)
+			{
+				return false;
+			}
+			if (Alloc.Fraction < 1.0)
+			{
+				PlaneDeg = Alloc.AppliedDeg;
+			}
+			Dz = Alloc.Dz;
+		}
+		Place();
+		Out.PlaneDeg = PlaneDeg;
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			Out.BaseZ.Add(Trial[Index].BaseZ);
+			Out.Dz.Add(Legs[Index].BaseZ - Trial[Index].BaseZ);
+		}
+		return true;
+	}
+
 	double TravelMargin(TConstArrayView<FLegReach> Legs, TConstArrayView<double> Dz)
 	{
 		double		Least = NoTravelMarginCm;

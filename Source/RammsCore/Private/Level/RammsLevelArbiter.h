@@ -12,13 +12,18 @@
  * tick and does what it says. It moves nothing itself.
  *
  * THE RULES. Each Tick takes the first rule that applies, top to bottom.
- * "Ready" is bEnable and Mode == Allowed and bAttitudeValid. "Has offsets"
+ * "Ready" is bEnable and Mode == Allowed and bAttitudeValid. "May start" is
+ * Ready and not bStanceChanging: levelling is not BEGUN while a drive mode's
+ * stance is being changed under the legs (the base is rocking onto other
+ * wheels by itself; a wanted attitude set walking then turns the rider on top
+ * of that). Levelling under way rides a stance change through, and a plane
+ * handed back is taken up whatever the stance is about to do. "Has offsets"
  * is Active, Holding, Releasing, or Faulted not yet latched.
  *
  *  1. bColdReset (time ran backwards, the robot was teleported, the legs
  *     changed): whatever was applied is gone at once.
  *       Faulted                    -> Faulted, latched, Clear
- *       Ready                      -> Active, StartFromAttitude
+ *       May start                  -> Active, StartFromAttitude
  *       not bEnable                -> Off, Clear
  *       else, Mode == Taken        -> Yielded, Clear
  *       else                       -> Suspended, Clear
@@ -55,13 +60,13 @@
  *
  *  5. Off:
  *       not bEnable                -> Off, None
- *       Ready                      -> Active, StartFromAttitude
+ *       May start                  -> Active, StartFromAttitude
  *       Mode == Taken              -> Yielded, None
  *       else                       -> Suspended, None
  *
  *  6. Yielded or Suspended (no offsets):
  *       not bEnable                -> Off, None
- *       Ready                      -> Active, StartFromAttitude
+ *       May start                  -> Active, StartFromAttitude
  *       Mode == Taken              -> Yielded, None
  *       else                       -> Suspended, None
  *     (A Yielded that sees an allowed mode with no hand-back -- a crossing
@@ -120,6 +125,9 @@ namespace RammsLevel
 		bool bCorrectionZero = false;
 		/** The law's divergence watch has tripped. */
 		bool bDiverged = false;
+		/** A drive mode's stance is being changed under the legs (a mode
+		 *  switch under way): no start from nothing meanwhile. */
+		bool bStanceChanging = false;
 	};
 
 	/** What it answers. */

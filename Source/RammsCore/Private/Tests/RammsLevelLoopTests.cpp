@@ -4,8 +4,9 @@
 // deadband, freeze and back-calculation, alone and closed round a toy base;
 // the correction's slew (plane rate, leg rate, soft zone); the wanted tilt's
 // goal and its rate-and-acceleration limiter; the seat trim; the drive-speed
-// cap; the rest detector; the divergence mark; and the gate that lets the
-// ground's attitude turn only as far as the robot has travelled. Every number is made up -- the
+// cap; the rest detector; the divergence mark; the gate that lets the
+// ground's attitude turn only as far as the robot has travelled; and the
+// integral's own narrower band. Every number is made up -- the
 // made-up six-wheeled robot of the curb's tests (corners 90 cm apart fore/aft
 // and 50 across, the middle pair 54 across), on 9 cm wheels -- no robot's own.
 //
@@ -1521,6 +1522,39 @@ bool FRammsLevelLoopTiltGoalLimit::RunTest(const FString& Parameters)
 		const FTiltGoal AtReference = WantedTiltGoalWithLimit(FVector2D(0.0, 5.0), Legs, NoPoints, Tuning);
 		Near(*this, TEXT("on ground that is the reference: nothing left"), AtReference.ShortDeg, 0.0, 1.0e-12);
 		TestTrue(TEXT("... and no limit"), AtReference.Limit == EReachLimit::None);
+	}
+	return true;
+}
+
+// Catches: the integral's narrower band (given while the base stands still
+// before a rest) also narrowing the proportional term's deadband, applied
+// when none is given, or allowed to be wider than the loop's own.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopTrimBand,
+	"Ramms.Level.Loop.IntegralTrimBand",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopTrimBand::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning	Tuning;
+	const FVector2D Ground(2.0, 1.0);
+	// An error inside the loop's deadband (0.15) on both axes.
+	const FVector2D Attitude(0.10, -0.12);
+	{
+		FLevelLoop		Loop;
+		const FVector2D C = Loop.Tick(Attitude, FVector2D::ZeroVector, Ground, 0.1, true, false, Tuning, 0.05);
+		NearBoth(*this, TEXT("a trim band of 0.05: the integral takes the error past it"), Loop.GetIntegral(), FVector2D(2.0 * 0.05 * 0.1, 2.0 * -0.07 * 0.1), 1e-12);
+		// The proportional term still sees nothing inside the loop's deadband.
+		NearBoth(*this, TEXT("... and the proportional term none of it"), C, Ground + Loop.GetIntegral(), 1e-12);
+	}
+	{
+		FLevelLoop Loop;
+		Loop.Tick(Attitude, FVector2D::ZeroVector, Ground, 0.1, true, false, Tuning);
+		NearBoth(*this, TEXT("no trim band given: the loop's deadband, no integral"), Loop.GetIntegral(), FVector2D::ZeroVector, 1e-12);
+		Loop.Tick(Attitude, FVector2D::ZeroVector, Ground, 0.1, true, false, Tuning, 1.0);
+		NearBoth(*this, TEXT("a trim band wider than the deadband: the deadband"), Loop.GetIntegral(), FVector2D::ZeroVector, 1e-12);
+		Loop.Tick(Attitude, FVector2D::ZeroVector, Ground, 0.1, false, false, Tuning, 0.05);
+		NearBoth(*this, TEXT("not integrating: a trim band changes nothing"), Loop.GetIntegral(), FVector2D::ZeroVector, 1e-12);
 	}
 	return true;
 }

@@ -13,6 +13,11 @@ namespace RammsLevel
 		EAction Action = EAction::None;
 		bool	bUnexpected = false;
 
+		// A start from nothing waits for a stance that is being changed: the
+		// drive mode's ramp is rocking the base onto other wheels, and a wanted
+		// attitude set walking now would turn the rider on top of that.
+		const bool bMayStart = bReady && !In.bStanceChanging;
+
 		// Where a state with no offsets goes when nothing was handed back: on
 		// to levelling if it may, else to the state that says why it waits.
 		// Rules 5 and 6 are this and nothing else.
@@ -21,7 +26,7 @@ namespace RammsLevel
 			{
 				State = EState::Off;
 			}
-			else if (bReady)
+			else if (bMayStart)
 			{
 				State = EState::Active;
 				Action = EAction::StartFromAttitude;
@@ -72,7 +77,7 @@ namespace RammsLevel
 				bFaultLatched = true;
 				Action = EAction::Clear;
 			}
-			else if (bReady)
+			else if (bMayStart)
 			{
 				State = EState::Active;
 				Action = EAction::StartFromAttitude;

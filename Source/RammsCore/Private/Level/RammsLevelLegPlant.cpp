@@ -6,7 +6,10 @@
 #include "Ramms4BarKinematics.h"
 #include "Ramms5BarKinematics.h"
 #include "Ramms5BarLinkageController.h"
+#include "RammsControlIds.h"
 #include "RammsCurbNegotiationController.h"
+#include "RammsDriveModeSelector.h"
+#include "RammsDriveStance.h"
 #include "RammsMotorSpec.h"
 #include "RammsRobotBaseComponent.h"
 #include "UObject/WeakObjectPtr.h"
@@ -25,9 +28,8 @@
  * angles that put the wheel at (baseline height + dz) and at the baseline
  * height, both solved the same way, so that dz = 0 is exactly no offset.
  *
- * SEAMS for later: the seat's tilt motor is not among the levelled motors yet
- * (the law works out a seat trim; nothing here applies it), and Adopt against
- * a stance is not built (a hand-back starts again cold).
+ * SEAM for later: the seat's tilt motor is not among the levelled motors yet
+ * (the law works out a seat trim; nothing here applies it).
  */
 namespace RammsLevel
 {
@@ -126,7 +128,9 @@ namespace RammsLevel
 			virtual void Fold() override;
 			virtual bool Unfold() override;
 			virtual void ForgetFold() override;
-			virtual bool Adopt(const FRammsDriveStance* NextStance, FVector2D& OutPlaneDeg) override;
+			virtual bool StanceHeights(const FRammsDriveStance& Stance, FLegValues& OutZ) const override;
+			virtual bool FoldedHeights(FLegValues& OutZ) const override;
+			virtual bool RebaseLegs(TConstArrayView<double> BaseZ, FLegValues& OutDz) override;
 			virtual void FoldOrZero(int32& OutFolded, int32& OutZeroed) override;
 			virtual void SyncBaselineHolders() override;
 
@@ -140,6 +144,10 @@ namespace RammsLevel
 			/** Note every motor's offset as it now stands (after this plant
 			 *  changed them), for OffsetsLost. */
 			void RememberOffsets();
+			/** A leg's wheel-centre height (cm) with its motors at Angles (a
+			 *  crank in X; hips A and B). False when its linkage does not close
+			 *  there. */
+			bool HeightAt(const FPlantLeg& Leg, const FVector2D& Angles, double& OutZ) const;
 
 			TWeakObjectPtr<URammsRobotBaseComponent>			  Base;
 			TWeakObjectPtr<const URammsCurbNegotiationController> Curb;
@@ -703,11 +711,200 @@ namespace RammsLevel
 			}
 		}
 
-		bool FLegPlant::Adopt(const FRammsDriveStance* NextStance, FVector2D& OutPlaneDeg)
+		bool FLegPlant::HeightAt(const FPlantLeg& Leg, const FVector2D& Angles, double& OutZ) const
 		{
-			// Not built yet: a hand-back starts again cold, the drive mode's
-			// stance ramp un-levels the base and the law levels it again.
-			return false;
+			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
+			if (!CurbPtr || !CurbPtr->Legs.IsValidIndex(Leg.CurbIndex))
+			{
+				return false;
+			}
+			bool bValid = false;
+			if (Leg.bFourBar)
+			{
+				// (Within the crank's own range, as MeasureLegs takes a baseline.)
+				const FRamms4BarLegSpec& Spec = CurbPtr->Legs[Leg.CurbIndex].FourBar;
+				const double			 Lo = FMath::Min(Spec.CrankRange.X, Spec.CrankRange.Y);
+				const double			 Hi = FMath::Max(Spec.CrankRange.X, Spec.CrankRange.Y);
+				OutZ = URamms4BarKinematics::ComputeWheelCenter(Spec, static_cast<float>(FMath::Clamp(Angles.X, Lo, Hi)), bValid).Y;
+			}
+			else if (const URamms5BarLinkageController* FiveBar = Leg.FiveBar.Get())
+			{
+				OutZ = URamms5BarKinematics::ComputeEndpoint(FiveBar->GetResolvedLinkage(), Angles, bValid).Y;
+			}
+			return bValid;
+		}
+
+		bool FLegPlant::StanceHeights(const FRammsDriveStance& Stance, FLegValues& OutZ) const
+		{
+			OutZ.Reset();
+			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
+			if (!CurbPtr)
+			{
+				return false;
+			}
+			// Who ramps the stance in, and what it leaves out of every stance
+			// (a linkage that is no leg's; here in case a leg's is named).
+			const AActor*				   Owner = CurbPtr->GetOwner();
+			const URammsDriveModeSelector* Selector = Owner ? Owner->FindComponentByClass<URammsDriveModeSelector>() : nullptr;
+			if (Selector && !Selector->bApplyLinkageStance)
+			{
+				// No stance is applied at all: there is nothing the legs are
+				// about to be taken to.
+				return false;
+			}
+			const auto TargetOf = [&Stance](FName MotorId) -> const FRammsStanceMotorTarget* {
+				return Stance.MotorTargets.FindByPredicate([MotorId](const FRammsStanceMotorTarget& Target) { return Target.MotorId == MotorId; });
+			};
+			for (const FPlantLeg& Leg : Legs)
+			{
+				// A leg the stance does not name stays where its baseline is.
+				double Z = Leg.BaseZ;
+				if (Leg.bFourBar)
+				{
+					if (const FRammsStanceMotorTarget* Crank = TargetOf(Motors[Leg.Motors[0]].Id))
+					{
+						if (!HeightAt(Leg, FVector2D(Crank->Target, 0.0), Z))
+						{
+							return false;
+						}
+					}
+				}
+				else if (const URamms5BarLinkageController* FiveBar = Leg.FiveBar.Get())
+				{
+					const FRammsStanceMotorTarget* HipA = TargetOf(Motors[Leg.Motors[0]].Id);
+					const FRammsStanceMotorTarget* HipB = TargetOf(Motors[Leg.Motors[1]].Id);
+					if (HipA && HipB)
+					{
+						if (!HeightAt(Leg, FVector2D(HipA->Target, HipB->Target), Z))
+						{
+							return false;
+						}
+					}
+					else if (Stance.bHasLinkageHeight && !(Selector && Selector->IsStanceExcludedAxis(RammsControlIds::Linkage::Height(FiveBar->GetName()))))
+					{
+						// The linkage's height control is its endpoint's z: the
+						// wheel centre's.
+						Z = Stance.LinkageHeightCm;
+					}
+				}
+				OutZ.Add(Z);
+			}
+			return true;
+		}
+
+		bool FLegPlant::FoldedHeights(FLegValues& OutZ) const
+		{
+			OutZ.Reset();
+			if (!bFoldRemembered)
+			{
+				return false;
+			}
+			for (const FPlantLeg& Leg : Legs)
+			{
+				FVector2D Angles = FVector2D::ZeroVector;
+				for (int32 Motor = 0; Motor < Leg.NumMotors; ++Motor)
+				{
+					const FPlantMotor& Of = Motors[Leg.Motors[Motor]];
+					if (!Of.bFolded)
+					{
+						OutZ.Reset();
+						return false;
+					}
+					Angles[Motor] = Of.PreFoldBaseline;
+				}
+				double Z = 0.0;
+				if (!HeightAt(Leg, Angles, Z))
+				{
+					OutZ.Reset();
+					return false;
+				}
+				OutZ.Add(Z);
+			}
+			return true;
+		}
+
+		bool FLegPlant::RebaseLegs(TConstArrayView<double> BaseZ, FLegValues& OutDz)
+		{
+			OutDz.Reset();
+			URammsRobotBaseComponent*			   BasePtr = Base.Get();
+			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
+			const UObject*						   LayerPtr = Layer.Get();
+			if (!BasePtr || !CurbPtr || !LayerPtr || BaseZ.Num() != Legs.Num())
+			{
+				return false;
+			}
+			// What every leg is told now, and whether a baseline of it can be
+			// moved at all (all of them or none: a plane out of some legs only
+			// is no plane).
+			TArray<FVector2D, TInlineAllocator<8>> Told;
+			for (const FPlantLeg& Leg : Legs)
+			{
+				FVector2D Angles = FVector2D::ZeroVector;
+				for (int32 Motor = 0; Motor < Leg.NumMotors; ++Motor)
+				{
+					const FName Id = Motors[Leg.Motors[Motor]].Id;
+					float		Baseline = 0.0f, Effective = 0.0f;
+					if (!CurbPtr->Legs.IsValidIndex(Leg.CurbIndex) || !BasePtr->GetMotorCommand(Id, Baseline) || !BasePtr->GetMotorEffectiveCommand(Id, Effective)
+						|| !BasePtr->RebaseMotorCommand(Id, Baseline, LayerPtr))
+					{
+						return false;
+					}
+					Angles[Motor] = Effective;
+				}
+				Told.Add(Angles);
+			}
+			for (int32 Index = 0; Index < Legs.Num(); ++Index)
+			{
+				FPlantLeg& Leg = Legs[Index];
+				if (!FMath::IsFinite(BaseZ[Index]))
+				{
+					continue;
+				}
+				if (Leg.bFourBar)
+				{
+					// (A height past the crank's travel solves to that end.)
+					bool		bReachable = false;
+					float		WheelX = 0.0f;
+					const float Crank = URamms4BarKinematics::SolveCrankForHeight(CurbPtr->Legs[Leg.CurbIndex].FourBar, static_cast<float>(BaseZ[Index]), bReachable, WheelX);
+					BasePtr->RebaseMotorCommand(Motors[Leg.Motors[0]].Id, Crank, LayerPtr);
+				}
+				else if (const URamms5BarLinkageController* FiveBar = Leg.FiveBar.Get())
+				{
+					// Straight up or down from where the wheel is told to be: a
+					// height the linkage cannot make leaves the leg as it is.
+					const FRamms5BarLinkageSpec& Spec = FiveBar->GetResolvedLinkage();
+					bool						 bValid = false;
+					const FVector2D				 At = URamms5BarKinematics::ComputeEndpoint(Spec, Told[Index], bValid);
+					FVector2D					 Hips;
+					if (bValid && SolveHips(Leg, Spec, FVector2D(At.X, BaseZ[Index]), Hips))
+					{
+						BasePtr->RebaseMotorCommand(Motors[Leg.Motors[0]].Id, static_cast<float>(Hips.X), LayerPtr);
+						BasePtr->RebaseMotorCommand(Motors[Leg.Motors[1]].Id, static_cast<float>(Hips.Y), LayerPtr);
+					}
+				}
+			}
+			// What that left on each leg, from the baselines as the base now
+			// has them (it keeps a baseline within its motor's range).
+			for (int32 Index = 0; Index < Legs.Num(); ++Index)
+			{
+				FPlantLeg& Leg = Legs[Index];
+				FVector2D  Now = FVector2D::ZeroVector;
+				for (int32 Motor = 0; Motor < Leg.NumMotors; ++Motor)
+				{
+					float Baseline = 0.0f;
+					BasePtr->GetMotorCommand(Motors[Leg.Motors[Motor]].Id, Baseline);
+					Now[Motor] = Baseline;
+				}
+				double ToldZ = 0.0, BaselineZ = 0.0;
+				OutDz.Add(HeightAt(Leg, Told[Index], ToldZ) && HeightAt(Leg, Now, BaselineZ) ? ToldZ - BaselineZ : 0.0);
+				// The offsets it now has are the ones it is meant to carry.
+				Leg.bHasBaseline = true;
+				Leg.bOffsetOn = true;
+			}
+			bFoldRemembered = false;
+			RememberOffsets();
+			SyncBaselineHolders();
+			return true;
 		}
 
 		void FLegPlant::FoldOrZero(int32& OutFolded, int32& OutZeroed)
