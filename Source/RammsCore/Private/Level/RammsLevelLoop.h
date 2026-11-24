@@ -15,8 +15,10 @@
  *
  * The variables, as the law names them:
  *   A  the measured attitude, low-passed (FAttitudeFilter)
+ *   S  the ground as far as it can have turned (FGroundGate): A with the
+ *      joints' correction put back, less what only the body can have done
  *   G  the terrain estimate: the attitude the base would have standing on
- *      its baseline stance (FTerrainEstimate)
+ *      its baseline stance (FTerrainEstimate), from S
  *   W  the wanted attitude: every deliberate change of the rider's attitude
  *      goes through it, on the tilt policy's rate and acceleration
  *      (WantedTiltGoal, FTiltTarget)
@@ -88,6 +90,82 @@ namespace RammsLevel
 	};
 
 	/**
+	 * The ground as far as it can have turned.
+	 *
+	 * The attitude, with the correction the joints have made put back (A +
+	 * c_meas, the terrain estimate's reading), is the ground's -- while the
+	 * robot rests quietly on it. A base being braked, driven off, knocked, or
+	 * rocking onto a leg just set down reads something else for a few tenths
+	 * of a second, and legs sent after that reading arrive as the base comes
+	 * back by itself: the knock is answered by a swing the other way. The
+	 * ground cannot do that. Its attitude changes only as the robot moves
+	 * over it, by no more than a grade break turns it over the standing legs'
+	 * span; so the reading is followed only that fast:
+	 *
+	 *   allowance (deg/s) = Trust * (Tuning.SettleDegPerSec
+	 *                                + TurnDegPerCm * |SpeedCmS|)
+	 *                     + ExplainedDeg / Dt
+	 *   Value moves towards RawGroundDeg by at most allowance * Dt (Euclidean
+	 *   over pitch and roll)
+	 *
+	 * TurnDegPerCm is what the ground may turn per cm travelled (the law
+	 * gives Tuning.BreakDeg / StandingSpanCm). ExplainedDeg is how far the
+	 * legs' own baselines can have turned the stance this tick
+	 * (BaselineTurnDeg): a stance being ramped moves the reading with the ground
+	 * standing still, and by exactly that. Trust (0..1) is how far the
+	 * attitude is believed to be the ground's at all: with the base's speed
+	 * changing by a (cm/s^2, from one tick's SpeedCmS to the next) it is at
+	 * most 1 for |a| <= BodyAccelStartCmS2, 0 for |a| >= BodyAccelFullCmS2
+	 * and on a straight line between, taken at once when that is less than
+	 * it was; and it rises again by no more than Dt / BodySettleSeconds a
+	 * tick. A base being braked that hard pitches by its own inertia, and
+	 * goes on rocking for a moment after.
+	 *
+	 * What the gate leaves out is not lost: a reading that stays is caught up
+	 * at the allowance. With Tuning.BreakDeg <= 0 there is no gate: Value is
+	 * RawGroundDeg. The first reading (and Seed) is taken whole.
+	 */
+	class FGroundGate
+	{
+	public:
+		/** Its own tuning; a test or the dry run may change it. */
+		FGroundTuning Tuning;
+
+		/** Forget (the tuning stays): the next reading is taken whole. */
+		void Reset()
+		{
+			const FGroundTuning Kept = Tuning;
+			*this = FGroundGate();
+			Tuning = Kept;
+		}
+		/** Take GroundDeg now, whole; the travel is believed again from here. */
+		void Seed(const FVector2D& GroundDeg)
+		{
+			Value = GroundDeg;
+			bSeeded = true;
+			Trust = 1.0;
+			bHasSpeed = false;
+		}
+		/** One tick; returns the ground as far as it can have turned (deg). */
+		FVector2D Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt);
+
+		FVector2D Get() const { return Value; }
+		bool	  IsSeeded() const { return bSeeded; }
+		/** How far the travel is believed (0..1), and the last tick's
+		 *  allowance (deg/s). */
+		double GetTrust() const { return Trust; }
+		double GetAllowanceDegPerSec() const { return Allowance; }
+
+	private:
+		FVector2D Value = FVector2D::ZeroVector;
+		bool	  bSeeded = false;
+		double	  Trust = 1.0;
+		double	  LastSpeedCmS = 0.0;
+		bool	  bHasSpeed = false;
+		double	  Allowance = 0.0;
+	};
+
+	/**
 	 * Where the wanted attitude should go while levelling (deg): level where
 	 * the legs can hold it, and beyond that the part of the ground's tilt they
 	 * cannot take out, along the ground's own direction, never more than
@@ -111,6 +189,24 @@ namespace RammsLevel
 	 * SupportMask.
 	 */
 	FVector2D WantedTiltGoal(const FVector2D& GroundDeg, TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points,
+		const FTuning& Tuning);
+
+	/** WantedTiltGoal, with how much the legs must leave and what makes them. */
+	struct FTiltGoal
+	{
+		/** WantedTiltGoal's goal (deg). */
+		FVector2D GoalDeg = FVector2D::ZeroVector;
+		/** How much of the correction that would hold the reference the legs
+		 *  cannot give (deg, Euclidean): |T - Got|, before MaxTiltDeg caps the
+		 *  goal. 0 inside reach. */
+		double ShortDeg = 0.0;
+		/** What stops them: the allocation's limit where its share is under 1
+		 *  (AllocateReach, the limits pulled in by the soft zone), else
+		 *  AxisLimit where the per-axis clamp cut T, else None. */
+		EReachLimit Limit = EReachLimit::None;
+	};
+
+	FTiltGoal WantedTiltGoalWithLimit(const FVector2D& GroundDeg, TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points,
 		const FTuning& Tuning);
 
 	/** WantedTiltGoal's rule with the reach share s0 given (0..1) rather than
@@ -362,7 +458,8 @@ namespace RammsLevel
 		/**
 		 * One tick; returns whether it is quiet. ErrorDeg is the size of A - W
 		 * (deg, Euclidean, no deadband); bMayRest is the law's leave (the
-		 * wanted tilt has arrived at its goal).
+		 * wanted tilt has arrived at its goal, and no leg's baseline is being
+		 * moved under it).
 		 */
 		bool Tick(double SpeedCmS, double ErrorDeg, bool bStick, bool bMayRest, double Dt, const FTuning& Tuning);
 		bool IsQuiet() const { return bQuiet; }

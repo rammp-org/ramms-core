@@ -451,7 +451,10 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume)
 	{
 		const URammsDriveModeSelector* Selector = Owner->FindComponentByClass<URammsDriveModeSelector>();
 		const FName					   SelectedId = Selector ? Selector->GetActiveModeId() : NAME_None;
-		TArray<FName>				   Levelled;
+		// A drive mode switch under way is ramping the stance, or about to:
+		// no rest until it is done.
+		In.bStanceChanging = Selector && Selector->IsSwitchingMode();
+		TArray<FName> Levelled;
 		R.Plant->LevelledMotorIds(Levelled);
 		bool bAnyActive = false;
 		for (UActorComponent* Component : Owner->GetComponents())
@@ -673,6 +676,7 @@ FString URammsLevelAssistComponent::GetStatusLine(ERammsControlTextSeverity& Out
 	Facts.CannotLevel = R.CannotLevel;
 	Facts.bOn = R.bSwitch;
 	Facts.bModeNotLevelled = R.bModeNotLevelled;
+	Facts.ReachLimit = R.Last.ReachLimit;
 	return RammsLevel::StatusLine(Facts, OutSeverity);
 }
 

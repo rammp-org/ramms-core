@@ -32,9 +32,18 @@
  *    until the legs read again.)
  *
  * 1. SENSING, when valid: A = Attitude.Tick(In.AttitudeDeg, Dt,
- *    AttitudeFilterSeconds); G = Terrain.Tick(A, MeasuredCorrection(Legs),
- *    Dt, TerrainFilterSeconds); LossSeconds = 0. When not: both hold and
- *    LossSeconds += Dt. Legs here are In.Legs through SupportMask, going on
+ *    AttitudeFilterSeconds); c = MeasuredCorrection(Legs);
+ *    S = Ground.Tick(A + c, In.SpeedCmS, Ground.Tuning.BreakDeg /
+ *    StandingSpanCm(Legs), BaselineTurnDeg(Legs, the baselines of the last
+ *    step that took time), Dt): the ground as far as it can have turned
+ *    (FGroundGate); G = Terrain.Tick(S - c, c, Dt, TerrainFilterSeconds),
+ *    the low-pass of S; LossSeconds = 0. When not: all hold and
+ *    LossSeconds += Dt. The LOOP's attitude, "A'" below, is S - c: the
+ *    attitude less what only the body can have done to it (a knock, braking,
+ *    a rock onto a leg set down). It is A whenever the gate lets the reading
+ *    through, which is always but in those. The rest at standstill, the seat
+ *    trim, the divergence watch, the speed cap's error and everything
+ *    reported go on reading A itself. Legs here are In.Legs through SupportMask, going on
  *    from the support set kept in the state (which this does not move on),
  *    and DiscountLateLegs with the offsets last given (LastDz, as the last
  *    step left it; zero while there are none);
@@ -52,7 +61,7 @@
  *    StartFromAttitude  C = 0, Loop.Reset, Ride = 0, LastDz = 0; then as
  *                       ColdResume.
  *    ColdResume         when valid, the filters are seeded from this step's
- *                       readings (A := In.AttitudeDeg, G := A +
+ *                       readings (A := In.AttitudeDeg, S := G := A +
  *                       MeasuredCorrection(Legs)); W := A at rest
  *                       (Tilt.Reset); Loop.StartFrom(C, W, G); Quiet and
  *                       Divergence reset; the support memory cleared;
@@ -83,25 +92,36 @@
  *    ACTIVE, and RELEASING while valid and not bReleaseOpen (closed loop):
  *    0. On the first such step after an open-loop one (a release taken back
  *       part way through its ramp; a release that lost its attitude and has
- *       it again): W := A at rest and Loop.StartFrom(C, W, G), as a resume,
+ *       it again): W := A' at rest and Loop.StartFrom(C, W, G), as a resume,
  *       and W starts moving on the next step. The loop was not consulted
  *       during the ramp, and its integral from before would ask again for
  *       what was ramped out. Active also clears bReleaseOpen.
  *    a. Support: a copy of the legs goes through SupportMask with the
  *       remembered mask (kept for the next step) -- unless In.bSupportGiven,
  *       when the legs' own bSupport and BaselineClearanceCm are used as given.
- *    b. Goal: Active, WantedTiltGoal(G, Legs, Points, Tuning). Releasing, G
+ *    b. Goal: Active, WantedTiltGoalWithLimit(G, Legs, Points, Tuning), which
+ *       also says how much of the correction that would hold the reference
+ *       the legs must leave, and why: bShort is set once that is over
+ *       AtReachOnDeg and until it is back under AtReachOffDeg. Releasing, G
  *       itself: the attitude of the baseline stance on this ground.
  *    c. Active only: Quiet.Tick(In.SpeedCmS, |A - W|, In.bStick,
- *       Tilt.IsNear(Goal), Dt). While quiet, d to h are skipped: W, the
- *       integral, C and Ride hold, Dz = LastDz and bWrite is false. The same
- *       on a step with Dt 0.
+ *       Tilt.IsNear(Goal) and the baselines standing still, Dt). While
+ *       quiet, d to h are skipped: W, the integral, C and Ride hold, Dz =
+ *       LastDz and bWrite is false. The same on a step with Dt 0.
+ *       The baselines stand still unless In.bStanceChanging, or a leg's
+ *       BaseZ is more than BaselineStillCm from where it was last found
+ *       still (it is then taken as found, for every leg that has a
+ *       baseline; one that has none, bHasBaseline false, is not looked at
+ *       and keeps its place): a stance being
+ *       ramped under a resting base would carry it off level with nothing
+ *       written, so there is no rest while one moves, and one that moves
+ *       ends a rest.
  *    d. W = Tilt.Tick(Goal, Dt, TiltRateDegPerSec, TiltAccelDegPerSec2) --
  *       but on a step whose action set W (StartFromAttitude, ColdResume,
  *       Adopt), when W stays where it was put and starts moving on the next
  *       step: this step's C_raw is then exactly the correction already
  *       applied, and the offsets do not move at all.
- *    e. C_raw = Loop.Tick(A, W, G, Dt, bIntegrate, bSaturated, Tuning), with
+ *    e. C_raw = Loop.Tick(A', W, G, Dt, bIntegrate, bSaturated, Tuning), with
  *       bIntegrate = Active (never in Releasing) and at least
  *       MinSupportForIntegral support legs and not bRateLimited; bSaturated
  *       and bRateLimited as the last step left them. Then the per-axis
@@ -179,14 +199,18 @@
  *    Faulted -> Diverged; Holding -> AttitudeLost once LossSeconds >=
  *    MeasurementLossSeconds, else Holding; Off -> Off; Yielded -> Yielded;
  *    Suspended -> Waiting; Releasing -> Releasing; then, Active:
- *    Inclination(A - Ref) > FaultTiltDeg -> TiltFault; at reach and
- *    Inclination(A - Ref) > MaxTiltDeg -> PastReach; at reach -> AtReach;
- *    quiet -> Settled; else Levelling. "At reach" is Fraction < 1 or
- *    bAxisLimited: a correction held at a per-axis limit the loop asks to
- *    pass is as much out of reach as one the legs' travel stops. (A
- *    correction that RESTS on a limit, the wanted tilt having taken the
- *    excess, is neither: that is Levelling, as a slope a little past the
- *    legs' planned reach is.)
+ *    Inclination(A - Ref) > FaultTiltDeg -> TiltFault; the legs stopped
+ *    (Fraction < 1 or bAxisLimited) and Inclination(A - Ref) > MaxTiltDeg ->
+ *    PastReach; at reach -> AtReach; quiet -> Settled; else Levelling. "At
+ *    reach" is bShort, Fraction < 1 or bAxisLimited: the correction that
+ *    would hold the reference cannot all be given. It is said for as long as that is so -- a correction that
+ *    RESTS on a limit, the wanted tilt having taken the excess, is at reach
+ *    still: the base is held off the reference, and the rider is owed why.
+ *    ReachLimit names what stops it: the allocation's own limit where its
+ *    share is under 1, else the goal's (step b), else the per-axis limit,
+ *    else whatever the allocation found nearest. ReachLeft (level.reach) and
+ *    MinMarginCm (the speed cap's reach term) are of the nearest limit of
+ *    any kind (FAllocation).
  *
  * The rest follows from the pieces:
  *  - ENABLE is bumpless: on the first Active step W is the attitude as
@@ -215,10 +239,17 @@ namespace RammsLevel
 		 *  unfiltered, and whether it was read at all. */
 		FVector2D AttitudeDeg = FVector2D::ZeroVector;
 		bool	  bAttitudeValid = true;
-		/** The chassis' speed over the ground (cm/s, 0 or more) and whether
-		 *  the rider's stick is off centre: for the rest at standstill. */
+		/** The chassis' speed over the ground as measured (cm/s, 0 or more):
+		 *  for the rest at standstill, and for how far the ground can have
+		 *  turned (the distance travelled, and how hard the base is being
+		 *  braked or driven off: FGroundGate). Whether the rider's stick is
+		 *  off centre: for the rest. */
 		double SpeedCmS = 0.0;
 		bool   bStick = false;
+		/** The stance is being changed under the legs (a drive mode switch in
+		 *  progress): no rest meanwhile, whether or not a baseline has moved
+		 *  yet. */
+		bool bStanceChanging = false;
 		/** The robot has a seat tilt for the trim. */
 		bool bSeat = false;
 		/** Take the legs' bSupport and BaselineClearanceCm as given instead of
@@ -284,13 +315,21 @@ namespace RammsLevel
 		double TiltDeg = 0.0;
 		/** |A - W| (deg, Euclidean). */
 		double ErrorDeg = 0.0;
-		/** The last allocation's share, travel left and margin; level.reach is
-		 *  ReachLeft. 1, 1 and NoTravelMarginCm with no offsets. */
+		/** The last allocation's share, and its reach left and room: of
+		 *  whatever is nearest stopping the correction, a leg's travel or not
+		 *  (FAllocation); level.reach is ReachLeft. 1, 1 and NoTravelMarginCm
+		 *  with no offsets. */
 		double Fraction = 1.0;
 		double ReachLeft = 1.0;
 		double MinMarginCm = NoTravelMarginCm;
 		int32  LimitingLeg = INDEX_NONE;
 		int32  LimitingPoint = INDEX_NONE;
+		/** While at reach (the status AtReach or PastReach): what stops the
+		 *  correction. None otherwise. */
+		EReachLimit ReachLimit = EReachLimit::None;
+		/** The attitude the loop steered by this step (deg): A less what only
+		 *  the body can have done (FGroundGate); A itself outside a knock. */
+		FVector2D LoopAttitudeDeg = FVector2D::ZeroVector;
 		/** The legs' rate use this step (the slew's, or the offsets' own if
 		 *  larger; before any cut, so it can pass 1) and whether a rate cut
 		 *  the step. */
@@ -309,6 +348,7 @@ namespace RammsLevel
 	{
 		FArbiter		 Arbiter;
 		FAttitudeFilter	 Attitude;
+		FGroundGate		 Ground;
 		FTerrainEstimate Terrain;
 		FTiltTarget		 Tilt;
 		FLevelLoop		 Loop;
@@ -329,11 +369,22 @@ namespace RammsLevel
 		/** Who stood last step, for SupportMask's hysteresis; empty: no memory. */
 		TArray<bool, TInlineAllocator<8>> Support;
 		/** The last allocation, for the steps that reuse its figures. */
-		double Fraction = 1.0;
-		double ReachLeft = 1.0;
-		double MinMarginCm = NoTravelMarginCm;
-		int32  LimitingLeg = INDEX_NONE;
-		int32  LimitingPoint = INDEX_NONE;
+		double		Fraction = 1.0;
+		double		ReachLeft = 1.0;
+		double		MinMarginCm = NoTravelMarginCm;
+		int32		LimitingLeg = INDEX_NONE;
+		int32		LimitingPoint = INDEX_NONE;
+		EReachLimit Limit = EReachLimit::None;
+		EReachLimit NearestLimit = EReachLimit::None;
+		/** The correction that would hold the reference cannot all be given
+		 *  (with its hysteresis), and what the goal found stops it. */
+		bool		bShort = false;
+		EReachLimit GoalLimit = EReachLimit::None;
+		/** Each leg's baseline height at the last step that took time (for
+		 *  how far the stance itself turned since), and where each was last
+		 *  found standing still (for "a baseline is moving"). Empty: none yet. */
+		FLegValues PrevBaseZ;
+		FLegValues StillBaseZ;
 		/** The last step's allocation was short of the plane; its loop asked
 		 *  past a per-axis limit; a rate cut its slew or its offsets; its
 		 *  offsets were held back behind the allocation's by the legs' rate. */

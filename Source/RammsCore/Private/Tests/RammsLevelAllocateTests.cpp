@@ -402,7 +402,20 @@ bool FRammsLevelAllocateScalesBackAtReach::RunTest(const FString& Parameters)
 	const FAllocation Out = AllocateFor(Legs, FVector2D(JustOutDeg, 0.0), Tuning);
 	CheckNear(*this, TEXT("just inside: all of it"), In.Fraction, 1.0, Tight);
 	TestEqual(TEXT("just inside: no limiting leg"), In.LimitingLeg, static_cast<int32>(INDEX_NONE));
-	TestTrue(TEXT("just inside: a little reach left"), In.ReachLeft > 0.0 && In.ReachLeft < 0.01);
+	TestTrue(TEXT("just inside: no limit named"), In.Limit == RammsLevel::EReachLimit::None);
+	// The reach left is of the travel the wanted tilt is PLANNED with: the
+	// soft zone (2 cm) is kept back, which leaves these legs 0.5 cm of it.
+	CheckNear(*this, TEXT("just inside the margin, far past the planned reach: none left"), In.ReachLeft, 0.0, Tight);
+	TestTrue(TEXT("... and it is a leg's travel that is nearest"), In.NearestLimit == RammsLevel::EReachLimit::LegTravel);
+	{
+		const FAllocation Half = AllocateFor(Legs, FVector2D(FMath::RadiansToDegrees(FMath::Atan(0.25 / 45.0)), 0.0), Tuning);
+		CheckNear(*this, TEXT("0.25 cm of a planned 0.5: half the reach left"), Half.ReachLeft, 0.5, 1.0e-6);
+		FTuning NoZone = Tuning;
+		NoZone.SoftZoneCm = 0.0;
+		const FAllocation Hard = AllocateFor(Legs, FVector2D(JustInDeg, 0.0), NoZone);
+		TestTrue(TEXT("with no soft zone the planned reach is the margin's: a little left"), Hard.ReachLeft > 0.0 && Hard.ReachLeft < 0.01);
+	}
+	TestTrue(TEXT("scaled back: the limit is a leg's travel"), A.Limit == RammsLevel::EReachLimit::LegTravel);
 	TestTrue(TEXT("just outside: not all of it"), Out.Fraction < 1.0 && Out.Fraction > 0.99);
 	TestTrue(TEXT("just outside: a front or rear leg named"), Out.LimitingLeg == 0 || Out.LimitingLeg == 1 || Out.LimitingLeg == 4 || Out.LimitingLeg == 5);
 	return true;
@@ -437,9 +450,30 @@ bool FRammsLevelAllocateLiftedLegClampsQuietly::RunTest(const FString& Parameter
 	TestEqual(TEXT("retracting: nothing limits"), Up.LimitingLeg, static_cast<int32>(INDEX_NONE));
 	CheckNear(*this, TEXT("retracting: the lifted leg stops at its travel"), Up.Dz[1], 2.0, Tight);
 	CheckNear(*this, TEXT("retracting: the standing legs keep the whole plane"), WorstOffPlane(Legs, Up), 0.0, Tight);
-	// A lifted leg resting on its stop is not the robot running out of reach.
-	TestTrue(TEXT("retracting: the lifted leg is not counted in the margin"), Up.MinMarginCm > 5.0);
-	TestTrue(TEXT("retracting: nor in the reach left"), Up.ReachLeft > 0.5);
+	// A lifted leg resting on its stop is not the robot out of reach: it has
+	// its clearance to spend. Held 8 cm up it may lose 5.5 of that (2.5 kept),
+	// and with its 2 cm of travel may be asked 7.5 cm; the plane asks
+	// 45 tan(4 deg) + (the standing legs' mean, 9 tan(4 deg)) = 3.78. That is
+	// what the reach left and the margin are now counted from: of whatever is
+	// nearest stopping the plane, a leg's travel or not.
+	const double AskedCm = RigidDz(Legs, 1, FVector2D(4.0, 0.0), 0.0);
+	CheckNear(*this, TEXT("retracting: the lifted leg's clearance is what is nearest used up"), Up.ReachLeft, 1.0 - AskedCm / 7.5, 1.0e-6);
+	CheckNear(*this, TEXT("retracting: the room left is its clearance over the least it may keep"), Up.MinMarginCm, 7.5 - AskedCm, 1.0e-6);
+	TestTrue(TEXT("retracting: (a good part of it)"), Up.ReachLeft > 0.4 && Up.MinMarginCm > 3.0);
+	{
+		// (The other front leg, which stands, is asked as much of a planned
+		// 7.5 cm: a tie. With no soft zone it has 9.5, and the lifted leg's
+		// clearance is the nearer by itself.)
+		FTuning NoZone = Tuning;
+		NoZone.SoftZoneCm = 0.0;
+		const FAllocation Hard = AllocateFor(Legs, FVector2D(4.0, 0.0), NoZone);
+		CheckNear(*this, TEXT("retracting, no soft zone: the same share of the lifted leg's clearance"), Hard.ReachLeft, 1.0 - AskedCm / 7.5, 1.0e-6);
+		TestTrue(TEXT("retracting, no soft zone: ... and it is named as that"), Hard.NearestLimit == RammsLevel::EReachLimit::LiftedClearance);
+	}
+	{
+		// Extending, a lifted leg only ends up higher: it uses nothing up.
+		TestTrue(TEXT("extending: the lifted leg is not what is nearest"), Down.NearestLimit != RammsLevel::EReachLimit::LiftedClearance);
+	}
 
 	CheckNear(*this, TEXT("extending: all of the plane fits"), Down.Fraction, 1.0, Tight);
 	CheckNear(*this, TEXT("extending: the lifted leg stops at its travel"), Down.Dz[1], -1.0, Tight);
@@ -1051,6 +1085,232 @@ bool FRammsLevelMeasuredCorrectionCarryingLegs::RunTest(const FString& Parameter
 		const FVector2D Measured = RammsLevel::MeasuredCorrection(Legs);
 		CheckNear(*this, TEXT("all but in line: the pitch along the line"), Measured.X, Plane.X, 0.05);
 		CheckNear(*this, TEXT("all but in line: the roll is not the line's noise"), Measured.Y, Plane.Y, 0.3);
+	}
+	return true;
+}
+
+// Catches: a stance moved up or down as a whole read as a turn of it; the
+// turn's sign or size; a leg that does not carry the robot counted in it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAllocateBaselinePlaneMove,
+	"Ramms.Level.Allocate.BaselinePlaneMoveIsTheStancesOwnTurn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAllocateBaselinePlaneMove::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAllocateTests;
+	const FTuning Tuning;
+	const auto	  BaseOf = [](const TArray<FLegReach>& Legs) {
+		   RammsLevel::FLegValues Out;
+		   for (const FLegReach& Leg : Legs)
+		   {
+			   Out.Add(Leg.BaseZ);
+		   }
+		   return Out;
+	};
+	{
+		TArray<FLegReach> Legs = SixWheels();
+		Stand(Legs, Tuning);
+		const RammsLevel::FLegValues Before = BaseOf(Legs);
+		TestTrue(TEXT("nothing moved: no turn"), RammsLevel::BaselinePlaneMove(Legs, Before).IsNearlyZero(Tight));
+		for (FLegReach& Leg : Legs)
+		{
+			Leg.BaseZ += 1.3;
+		}
+		Stand(Legs, Tuning);
+		TestTrue(TEXT("every leg moved alike (the ride height): no turn"), RammsLevel::BaselinePlaneMove(Legs, Before).IsNearlyZero(Tight));
+		const RammsLevel::FLegValues TooFew = { -20.0, -20.0 };
+		TestTrue(TEXT("baselines that are not the legs': no turn"), RammsLevel::BaselinePlaneMove(Legs, TooFew).IsZero());
+	}
+	{
+		// Each baseline moved by a plane of (0.5, -0.3) deg, and 0.4 cm besides.
+		TArray<FLegReach> Legs = SixWheels();
+		Stand(Legs, Tuning);
+		const RammsLevel::FLegValues Before = BaseOf(Legs);
+		const FVector2D				 Plane(0.5, -0.3);
+		for (FLegReach& Leg : Legs)
+		{
+			Leg.BaseZ += RammsLevel::PlaneRise(Leg.XY, true, Plane) + 0.4;
+		}
+		Stand(Legs, Tuning);
+		const FVector2D Turn = RammsLevel::BaselinePlaneMove(Legs, Before);
+		CheckNear(*this, TEXT("a plane: its pitch"), Turn.X, 0.5, 1.0e-6);
+		CheckNear(*this, TEXT("a plane: its roll"), Turn.Y, -0.3, 1.0e-6);
+	}
+	{
+		// The front +Y wheel is carried 8 cm up, and is moved alone.
+		TArray<FLegReach> Legs = SixWheels();
+		Legs[1].BaseZ = -12.0;
+		Stand(Legs, Tuning);
+		const RammsLevel::FLegValues Before = BaseOf(Legs);
+		Legs[1].BaseZ += 2.0;
+		Stand(Legs, Tuning);
+		TestTrue(TEXT("a leg carried off the ground, moved alone: the stance is not turned"), RammsLevel::BaselinePlaneMove(Legs, Before).IsNearlyZero(Tight));
+		// The rear pair, which the robot stands on, drawn up 0.6 cm: it sits back.
+		Legs[4].BaseZ += 0.6;
+		Legs[5].BaseZ += 0.6;
+		Stand(Legs, Tuning);
+		const FVector2D Turn = RammsLevel::BaselinePlaneMove(Legs, Before);
+		TestTrue(TEXT("legs it stands on, moved at one end: a turn that way"), Turn.X < -0.2);
+	}
+	{
+		// The rear pair drawn up 1.5 cm: past where a leg counts as carrying
+		// (1 cm), inside the band it stays in the support set by (2 cm). The
+		// robot may well have sat back onto it. As far as the legs carry the
+		// stance has not turned; as far as it CAN have, it has, by the plane
+		// through all six: 1.5 cm at one end of 90.
+		TArray<FLegReach> Legs = SixWheels();
+		Stand(Legs, Tuning);
+		const RammsLevel::FLegValues Before = BaseOf(Legs);
+		const TArray<bool>			 Stood = { true, true, true, true, true, true };
+		Legs[4].BaseZ += 1.5;
+		Legs[5].BaseZ += 1.5;
+		RammsLevel::SupportMask(Legs, Stood, Tuning);
+		TestTrue(TEXT("(the rear pair is still of the support set, and carries nothing)"), Legs[4].bSupport && Legs[5].bSupport && Legs[4].CarryShare == 0.0);
+		TestTrue(TEXT("as far as the legs carry: no turn"), RammsLevel::BaselinePlaneMove(Legs, Before).IsNearlyZero(Tight));
+		const double Can = RammsLevel::BaselineTurnDeg(Legs, Before);
+		TestTrue(FString::Printf(TEXT("as far as the stance can have turned: the plane through the support set (%.2f deg)"), Can), Can > 0.6 && Can < 1.0);
+		// Drawn up clear of the support band: no longer a leg it can be sitting on.
+		Legs[4].BaseZ += 1.5;
+		Legs[5].BaseZ += 1.5;
+		const RammsLevel::FLegValues Mid = BaseOf(Legs);
+		RammsLevel::SupportMask(Legs, Stood, Tuning);
+		Legs[4].BaseZ += 1.0;
+		Legs[5].BaseZ += 1.0;
+		CheckNear(*this, TEXT("legs already clear of the support band, drawn further: no turn either way"), RammsLevel::BaselineTurnDeg(Legs, Mid), 0.0, Tight);
+		// Never less than the plane the carrying legs give.
+		TArray<FLegReach> Plane = SixWheels();
+		Stand(Plane, Tuning);
+		const RammsLevel::FLegValues PlaneBefore = BaseOf(Plane);
+		for (FLegReach& Leg : Plane)
+		{
+			Leg.BaseZ += RammsLevel::PlaneRise(Leg.XY, true, FVector2D(0.5, -0.3));
+		}
+		Stand(Plane, Tuning);
+		CheckNear(*this, TEXT("a plane: its size"), RammsLevel::BaselineTurnDeg(Plane, PlaneBefore), FVector2D(0.5, -0.3).Size(), 1.0e-6);
+		CheckNear(*this, TEXT("baselines that are not the legs': none"), RammsLevel::BaselineTurnDeg(Plane, TConstArrayView<double>()), 0.0, 0.0);
+	}
+	return true;
+}
+
+// Catches: the standing legs' span taken along one axis only, a lifted leg
+// counted in it, legs in a line read as no span at all (the ground then free
+// to turn at any rate).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAllocateStandingSpan,
+	"Ramms.Level.Allocate.StandingSpanIsTheShorterSide",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAllocateStandingSpan::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAllocateTests;
+	const FTuning	  Tuning;
+	TArray<FLegReach> Legs = SixWheels();
+	Stand(Legs, Tuning);
+	CheckNear(*this, TEXT("six standing: 90 long, 54 wide: the width"), RammsLevel::StandingSpanCm(Legs), 54.0, Tight);
+	Legs[0].bSupport = false;
+	Legs[1].bSupport = false;
+	CheckNear(*this, TEXT("the front pair lifted: 45 long, 54 wide: the length"), RammsLevel::StandingSpanCm(Legs), 45.0, Tight);
+	for (int32 Index = 0; Index < 6; ++Index)
+	{
+		Legs[Index].bSupport = Index == 2 || Index == 3;
+	}
+	CheckNear(*this, TEXT("only the centre pair: a line across, 54 wide"), RammsLevel::StandingSpanCm(Legs), 54.0, Tight);
+	for (int32 Index = 0; Index < 6; ++Index)
+	{
+		Legs[Index].bSupport = Index == 2;
+	}
+	CheckNear(*this, TEXT("one leg: no span, the least there is"), RammsLevel::StandingSpanCm(Legs), RammsLevel::GroundSpanMinCm, Tight);
+	for (FLegReach& Leg : Legs)
+	{
+		Leg.bSupport = false;
+	}
+	CheckNear(*this, TEXT("none standing: every leg counts"), RammsLevel::StandingSpanCm(Legs), 54.0, Tight);
+	TArray<FLegReach> Pairs = TwoDrivesTwoPairs();
+	Stand(Pairs, Tuning);
+	CheckNear(*this, TEXT("two drives and two pairs: 75 long, 56 wide"), RammsLevel::StandingSpanCm(Pairs), 56.0, Tight);
+	CheckNear(*this, TEXT("no legs: the least there is"), RammsLevel::StandingSpanCm(TConstArrayView<FLegReach>()), RammsLevel::GroundSpanMinCm, Tight);
+	return true;
+}
+
+// Catches: the reach left and the margin read off the standing legs' travel
+// alone (a raised wheel's clearance, the underside's, or an axis' limit used
+// up with "reach left" still reading most of it and the speed cap seeing
+// nothing), and the limit's kind not named, or named wrongly.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAllocateReachNearest,
+	"Ramms.Level.Allocate.ReachIsOfWhateverIsNearest",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAllocateReachNearest::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAllocateTests;
+	using RammsLevel::EReachLimit;
+	const TConstArrayView<FClearancePoint> NoPoints;
+	{
+		// A raised wheel's clearance (as LiftedClearanceBinds): the front +Y
+		// wheel 3 cm up with 0.5 cm of retraction left may be asked 1 cm.
+		const FTuning	  Tuning;
+		TArray<FLegReach> Legs = SixWheels();
+		Legs[1].BaseZ = -17.0;
+		Legs[1].MaxZ = -16.5;
+		Stand(Legs, Tuning);
+		const FVector2D	  Wanted(3.0, 0.0);
+		const FAllocation A = AllocateFor(Legs, Wanted, Tuning);
+		TestTrue(TEXT("raised wheel: cut back, and by its clearance"), A.Fraction < 0.5 && A.Limit == EReachLimit::LiftedClearance);
+		TestTrue(TEXT("raised wheel: no reach left"), A.ReachLeft < 0.02 && A.NearestLimit == EReachLimit::LiftedClearance);
+		TestTrue(TEXT("raised wheel: no room left (the standing legs have most of their travel)"), A.MinMarginCm < 0.02 && RammsLevel::TravelMargin(Legs, A.Dz) > 5.0);
+		const RammsLevel::FReach Reach = RammsLevel::AllocateReach(Legs, NoPoints, Wanted, Tuning, 0.0);
+		CheckNear(*this, TEXT("raised wheel: AllocateReach finds the same share"), Reach.Share, A.Fraction, Tight);
+		TestTrue(TEXT("raised wheel: ... and names the same limit"), Reach.Limit == EReachLimit::LiftedClearance);
+		// Half of that plane: half its clearance left, 0.5 cm of room, nothing cut.
+		const FAllocation Half = AllocateFor(Legs, A.AppliedDeg * 0.5, Tuning);
+		CheckNear(*this, TEXT("raised wheel, half the plane: all of it fits"), Half.Fraction, 1.0, Tight);
+		TestTrue(TEXT("raised wheel, half the plane: no limit"), Half.Limit == EReachLimit::None);
+		CheckNear(*this, TEXT("raised wheel, half the plane: half the reach left"), Half.ReachLeft, 0.5, 0.01);
+		CheckNear(*this, TEXT("raised wheel, half the plane: half a centimetre of room"), Half.MinMarginCm, 0.5, 0.01);
+		TestTrue(TEXT("raised wheel, half the plane: still the nearest"), Half.NearestLimit == EReachLimit::LiftedClearance);
+	}
+	{
+		// The underside (as BellyPointBinds): the ground under the point may
+		// come up 1 cm.
+		const FTuning	  Tuning;
+		TArray<FLegReach> Legs = SixWheels();
+		Stand(Legs, Tuning);
+		TArray<FClearancePoint> Points;
+		FClearancePoint			Belly;
+		Belly.XY = FVector2D(40.0, 0.0);
+		Belly.UndersideZ = -26.0;
+		Belly.MinCm = 2.0;
+		Points.Add(Belly);
+		const FVector2D	  Wanted(3.0, 0.0);
+		const FAllocation A = RammsLevel::Allocate(Legs, Points, Wanted, Tuning, 0.0, 0.0);
+		TestTrue(TEXT("underside: cut back, and by it"), A.Fraction < 0.55 && A.Limit == EReachLimit::Underside);
+		TestTrue(TEXT("underside: no reach left"), A.ReachLeft < 0.02 && A.NearestLimit == EReachLimit::Underside);
+		TestTrue(TEXT("underside: no room left"), A.MinMarginCm < 0.02);
+		TestTrue(TEXT("underside: AllocateReach names it"), RammsLevel::AllocateReach(Legs, Points, Wanted, Tuning, 0.0).Limit == EReachLimit::Underside);
+		const FAllocation Away = RammsLevel::Allocate(Legs, Points, FVector2D(-3.0, 0.0), Tuning, 0.0, 0.0);
+		TestTrue(TEXT("underside: the ground falling away from it uses nothing of it"), Away.NearestLimit != EReachLimit::Underside);
+	}
+	{
+		// An axis' own limit: 4 deg of pitch allowed, 3 applied. The legs
+		// have 10 cm, 7.5 planned, and use 2.36: 0.69 of that left.
+		FTuning Tuning;
+		Tuning.MaxCorrectionDeg = FVector2D(4.0, 15.0);
+		TArray<FLegReach> Legs = SixWheels();
+		Stand(Legs, Tuning);
+		const FAllocation A = AllocateFor(Legs, FVector2D(3.0, 0.0), Tuning);
+		CheckNear(*this, TEXT("axis limit: all of the plane fits"), A.Fraction, 1.0, Tight);
+		CheckNear(*this, TEXT("axis limit: a quarter of it left"), A.ReachLeft, 0.25, 1.0e-9);
+		TestTrue(TEXT("axis limit: named as the nearest"), A.NearestLimit == EReachLimit::AxisLimit);
+		// The degree left, at the corners' 45 cm.
+		CheckNear(*this, TEXT("axis limit: the room is the degree left, as a height at the furthest standing leg"), A.MinMarginCm, 45.0 * TanDeg(1.0), 1.0e-9);
+		const FAllocation Over = AllocateFor(Legs, FVector2D(6.0, 0.0), Tuning);
+		CheckNear(*this, TEXT("axis limit, asked past it: held on it"), Over.AppliedDeg.X, 4.0, Tight);
+		CheckNear(*this, TEXT("axis limit, asked past it: none left"), Over.ReachLeft, 0.0, Tight);
+		CheckNear(*this, TEXT("axis limit, asked past it: no room"), Over.MinMarginCm, 0.0, Tight);
+		// With the limit far away it is the legs' travel that is nearest.
+		Tuning.MaxCorrectionDeg = FVector2D(15.0, 15.0);
+		const FAllocation Far = AllocateFor(Legs, FVector2D(3.0, 0.0), Tuning);
+		TestTrue(TEXT("axis limit far off: a leg's travel is the nearest"), Far.NearestLimit == EReachLimit::LegTravel);
+		CheckNear(*this, TEXT("axis limit far off: the share of the planned travel left"), Far.ReachLeft, 1.0 - 45.0 * TanDeg(3.0) / 7.5, 1.0e-9);
 	}
 	return true;
 }

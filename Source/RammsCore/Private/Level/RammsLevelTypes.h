@@ -82,9 +82,13 @@ namespace RammsLevel
 	constexpr double TiltArrivedRateDegPerSec = 0.5;
 	/** A release is done once the correction is under this (deg, Euclidean),
 	 *  the ride-height shift under this (cm) and the seat trim under this
-	 *  (deg): the offsets are then set exactly to zero. */
-	constexpr double ReleaseDoneDeg = 0.1;
-	constexpr double ReleaseDoneCm = 0.1;
+	 *  (deg): the offsets are then set exactly to zero. As good as nothing:
+	 *  a release's own ramp arrives at zero within the tilt policy, and what
+	 *  it leaves to that last step must be no step at all (a thousandth of a
+	 *  degree is a hundredth of a millimetre at a leg; a tenth of a degree
+	 *  was a millimetre, and a raised leg's crank dropped by it at once). */
+	constexpr double ReleaseDoneDeg = 0.001;
+	constexpr double ReleaseDoneCm = 0.001;
 	/** A closed-loop release that has not brought the wanted tilt to the
 	 *  ground's in this long (s) finishes open loop. */
 	constexpr double ReleaseMaxSeconds = 6.0;
@@ -106,6 +110,23 @@ namespace RammsLevel
 	/** ... and when it does step (the legs that stand have changed), it picks
 	 *  the ride height's rate up, and loses it, over this long (s). */
 	constexpr double RideHeightRampSeconds = 0.25;
+	/** The correction that would hold the reference cannot all be given: said
+	 *  ("at reach") once what the legs must leave is over On (deg), and until
+	 *  it is back under Off. The gap keeps a slope at the very end of the
+	 *  reach from being reported one tick and not the next. */
+	constexpr double AtReachOnDeg = 0.15;
+	constexpr double AtReachOffDeg = 0.05;
+	/** A correction counts towards the per-axis limit's share of the reach
+	 *  from this much (deg). */
+	constexpr double ReachMinCorrectionDeg = 0.01;
+	/** A leg's baseline has MOVED once it is this far (cm) from where it was
+	 *  last found still: a stance being ramped, a height being jogged. Under
+	 *  it is the last digits of a joint read back. */
+	constexpr double BaselineStillCm = 0.02;
+	/** The standing legs span at least this (cm) for the ground's turning
+	 *  rate (FGroundGate): a robot standing on a line of legs has no span,
+	 *  and none would mean the ground could turn at any rate. */
+	constexpr double GroundSpanMinCm = 10.0;
 
 	/**
 	 * The level assist's tuning. A plain mirror of the reflected
@@ -197,6 +218,44 @@ namespace RammsLevel
 	};
 
 	/**
+	 * How fast the GROUND's attitude can change under a robot (FGroundGate).
+	 * Not part of FTuning: nothing here is a robot's to author (the one figure
+	 * a robot does bring, how far apart its standing legs are, is read off the
+	 * legs), and FTuning mirrors the reflected tuning member for member.
+	 *
+	 * The ground turns under the robot only as the robot moves over it: a
+	 * break of B deg has passed under legs L cm apart once the robot has moved
+	 * L, so the ground the robot stands on turns B / L deg per cm travelled.
+	 * What changes the attitude faster than that is the BODY's doing (braking,
+	 * a start, a knock, a leg set down), and is left to pass.
+	 */
+	struct FGroundTuning
+	{
+		/** The sharpest grade break (deg) the ground's attitude is followed
+		 *  through whole: with the standing legs L cm apart it may turn
+		 *  BreakDeg / L deg for every cm the robot moves. 0 or less: no bound
+		 *  at all (the attitude as read is taken for the ground's, at once). */
+		double BreakDeg = 12.0;
+		/** ... and this much (deg/s) besides, moving or not: joints settling
+		 *  under the load, a leg model a little off while the correction
+		 *  moves, a stance rocking onto a leg that is lifted or set down. (A
+		 *  knock of a degree and a half that is gone in a third of a second
+		 *  is followed by under half a degree at this.) */
+		double SettleDegPerSec = 1.25;
+		/** A base being braked or driven off harder than Start (cm/s^2) pitches
+		 *  on its tyres and legs by its own inertia, and its attitude then
+		 *  says nothing of the ground: from there both allowances above are
+		 *  given up in a straight line, all of them at Full, and they come
+		 *  back over BodySettleSeconds (s) once the base moves steadily again.
+		 *  (About 0.15 and 0.3 of gravity: a drive slowed by the speed cap, or
+		 *  meeting a grade break, stays under the first; letting go of the
+		 *  stick at speed is past the second.) */
+		double BodyAccelStartCmS2 = 150.0;
+		double BodyAccelFullCmS2 = 300.0;
+		double BodySettleSeconds = 0.5;
+	};
+
+	/**
 	 * One levelled leg as the law sees it this tick. Everything but bSupport,
 	 * BaselineClearanceCm and CarryShare is an input the plant measures; those
 	 * three are filled by SupportMask.
@@ -224,6 +283,11 @@ namespace RammsLevel
 		/** Roll reaches it. False for a leg a roll correction must not move (a
 		 *  ganged pair): it then takes x tan(pitch) only. */
 		bool bRoll = true;
+		/** Something commands it: BaseZ is a baseline. False for a leg that was
+		 *  let go (driven by hand for a moment): its BaseZ is then only where
+		 *  its joint is, and its coming and going there is not a stance being
+		 *  moved. */
+		bool bHasBaseline = true;
 		/** On the ground at its baseline, as SupportMask finds. */
 		bool bSupport = true;
 		/** How far (cm, 0 or more) its wheel bottom is above the lowest
@@ -253,6 +317,20 @@ namespace RammsLevel
 		double MinCm = 0.0;
 	};
 
+	/** What stops a correction, in the order the status names them. */
+	enum class EReachLimit : uint8
+	{
+		None,
+		/** A leg the robot stands on is at the end of its travel. */
+		LegTravel,
+		/** A wheel the stance carries off the ground would come too near it. */
+		LiftedClearance,
+		/** The underside would come too near the ground. */
+		Underside,
+		/** The most correction allowed on an axis (MaxCorrectionDeg). */
+		AxisLimit
+	};
+
 	/** What Allocate gives: every leg's offset for one correction plane. */
 	struct FAllocation
 	{
@@ -273,12 +351,25 @@ namespace RammsLevel
 		 *  INDEX_NONE at Fraction 1. */
 		int32 LimitingLeg = INDEX_NONE;
 		int32 LimitingPoint = INDEX_NONE;
-		/** TravelMargin of Dz (cm). */
+		/** ... and what kind of limit that is (None at Fraction 1, or when only
+		 *  the ride window is at fault). */
+		EReachLimit Limit = EReachLimit::None;
+		/** The least room (cm) left to whatever is nearest stopping the plane:
+		 *  TravelMargin of Dz, a lifted leg's clearance above the least it may
+		 *  keep, an underside point's above the least it must keep, and a
+		 *  per-axis limit's room turned into cm at the standing leg furthest
+		 *  from the standing legs' middle. NoTravelMarginCm when nothing is
+		 *  used at all. */
 		double MinMarginCm = NoTravelMarginCm;
-		/** The least share (0..1) of travel left to a support leg, from its
-		 *  baseline to its margin-ed limit in the direction it was moved: 1
-		 *  with no leg moved, 0 with one on its limit. What level.reach shows. */
-		double ReachLeft = 1.0;
+		/** The least share (0..1) left of whatever limits the plane, each
+		 *  measured from none of it used to all of it: a support leg's travel
+		 *  from its baseline to its margin-ed limit in the direction it was
+		 *  moved; a lifted leg's rise to the most it may be asked; an underside
+		 *  point's ground rise to the most it may take; each axis' correction
+		 *  to MaxCorrectionDeg. 1 with nothing used, 0 with one on its limit.
+		 *  What level.reach shows; NearestLimit is whose share it is. */
+		double		ReachLeft = 1.0;
+		EReachLimit NearestLimit = EReachLimit::None;
 		/** The largest leg-rate use of the tick (SlewCorrection's). Allocate
 		 *  leaves it 0; the law fills it. */
 		double RateUse = 0.0;
@@ -355,8 +446,10 @@ namespace RammsLevel
 		Levelling,
 		/** Active and at rest: nothing is being written. */
 		Settled,
-		/** Active, the correction scaled back at a travel or clearance limit,
-		 *  or held at a per-axis limit the loop asks to pass. */
+		/** Active, and the correction that would hold the reference cannot all
+		 *  be given: the legs' travel, a clearance or a per-axis limit stops
+		 *  it (FOutputs::ReachLimit says which), and the base is left tilted
+		 *  by the rest. */
 		AtReach,
 		/** ... and the base more than MaxTiltDeg off the reference: "slope
 		 *  past levelling reach". A warning; the drive is slowed, not stopped. */

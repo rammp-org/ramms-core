@@ -30,6 +30,10 @@ namespace RammsLevel
 			State.MinMarginCm = NoTravelMarginCm;
 			State.LimitingLeg = INDEX_NONE;
 			State.LimitingPoint = INDEX_NONE;
+			State.Limit = EReachLimit::None;
+			State.NearestLimit = EReachLimit::None;
+			State.bShort = false;
+			State.GoalLimit = EReachLimit::None;
 			State.bSaturated = false;
 			State.bAxisLimited = false;
 			State.bRateLimited = false;
@@ -61,6 +65,7 @@ namespace RammsLevel
 			if (bValid)
 			{
 				State.Attitude.Seed(In.AttitudeDeg);
+				State.Ground.Seed(In.AttitudeDeg + AchievedDeg);
 				State.Terrain.Seed(In.AttitudeDeg + AchievedDeg);
 			}
 			if (State.Attitude.IsSeeded())
@@ -83,6 +88,8 @@ namespace RammsLevel
 			State.bAxisLimited = false;
 			State.bRateLimited = false;
 			State.bLegsBehind = false;
+			State.bShort = false;
+			State.GoalLimit = EReachLimit::None;
 			State.bReleaseOpen = false;
 			State.bLoopOpen = false;
 			State.PrevGroundDeg = State.Terrain.Get();
@@ -253,6 +260,44 @@ namespace RammsLevel
 			State.MinMarginCm = Alloc.MinMarginCm;
 			State.LimitingLeg = Alloc.LimitingLeg;
 			State.LimitingPoint = Alloc.LimitingPoint;
+			State.Limit = Alloc.Limit;
+			State.NearestLimit = Alloc.NearestLimit;
+		}
+
+		/**
+		 * Whether a leg's baseline has moved from where it was last found
+		 * still (BaselineStillCm); when one has, every leg's is taken as found.
+		 * A stance being ramped, a height being jogged: something is moving
+		 * the base under the offsets, and a base at rest would be carried off
+		 * level with nothing written.
+		 */
+		bool BaselinesMoved(const FInputs& In, FState& State)
+		{
+			bool	   bMoved = State.StillBaseZ.Num() != In.Legs.Num();
+			const bool bFirst = bMoved;
+			// (A leg nothing commands has no baseline to move: where its joint
+			// is says nothing, and it keeps the place it was last commanded at,
+			// so that being taken back there is no move either.)
+			for (int32 Index = 0; Index < In.Legs.Num() && !bMoved; ++Index)
+			{
+				bMoved = In.Legs[Index].bHasBaseline && FMath::Abs(In.Legs[Index].BaseZ - State.StillBaseZ[Index]) > BaselineStillCm;
+			}
+			if (bMoved)
+			{
+				for (int32 Index = 0; Index < In.Legs.Num(); ++Index)
+				{
+					if (bFirst)
+					{
+						State.StillBaseZ.Add(In.Legs[Index].BaseZ);
+					}
+					else if (In.Legs[Index].bHasBaseline)
+					{
+						State.StillBaseZ[Index] = In.Legs[Index].BaseZ;
+					}
+				}
+			}
+			// (The first sight of the legs is not a move.)
+			return bMoved && !bFirst;
 		}
 	} // namespace LawImpl
 
@@ -269,6 +314,11 @@ namespace RammsLevel
 		if (State.LastDz.Num() != NumLegs)
 		{
 			State.LastDz.Init(0.0, NumLegs);
+		}
+		if (bColdReset)
+		{
+			State.PrevBaseZ.Reset();
+			State.StillBaseZ.Reset();
 		}
 
 		// Every number the legs and the points come with, not only the two
@@ -303,13 +353,33 @@ namespace RammsLevel
 			LawImpl::MaskLegs(In, Tuning, State.Support, State.LastDz, Sensed);
 			AchievedDeg = MeasuredCorrection(Sensed);
 			const FVector2D Filtered = State.Attitude.Tick(In.AttitudeDeg, Dt, Tuning.AttitudeFilterSeconds);
-			State.Terrain.Tick(Filtered, AchievedDeg, Dt, Tuning.TerrainFilterSeconds);
+			// The ground as far as it can have turned: by the distance
+			// travelled over the standing legs' span, and by what the legs'
+			// own baselines turned the stance. What the attitude did beyond
+			// that (a knock, braking, a rock onto a leg set down) is the
+			// body's, and neither the terrain estimate nor the loop sees it.
+			const double	TurnDegPerCm = State.Ground.Tuning.BreakDeg / StandingSpanCm(Sensed);
+			const double	ExplainedDeg = BaselineTurnDeg(Sensed, State.PrevBaseZ);
+			const FVector2D SeenDeg = State.Ground.Tick(Filtered + AchievedDeg, In.SpeedCmS, TurnDegPerCm, ExplainedDeg, Dt);
+			State.Terrain.Tick(SeenDeg - AchievedDeg, AchievedDeg, Dt, Tuning.TerrainFilterSeconds);
 			State.LossSeconds = 0.0;
 		}
 		else
 		{
 			State.LossSeconds += Dt;
 		}
+		if (bLegsValid && Dt > 0.0)
+		{
+			// (Only on a step that takes time: a rebase carried out in the
+			// middle of a frame is then part of the next step's move.)
+			State.PrevBaseZ.Reset();
+			for (const FLegReach& Leg : In.Legs)
+			{
+				State.PrevBaseZ.Add(Leg.BaseZ);
+			}
+		}
+		// Something is moving the stance under the offsets.
+		const bool bBaselinesMoving = (bLegsValid && LawImpl::BaselinesMoved(In, State)) || In.bStanceChanging;
 
 		// ---- 2. The arbiter, and what it asks for ----
 		FArbiterInputs Ask;
@@ -384,6 +454,10 @@ namespace RammsLevel
 
 		const FVector2D AttitudeDeg = State.Attitude.Get();
 		const FVector2D GroundDeg = State.Terrain.Get();
+		// What the loop steers by: the attitude less what only the body can
+		// have done to it. (The attitude itself whenever the gate lets the
+		// reading through.)
+		const FVector2D LoopAttitudeDeg = bValid && State.Ground.IsSeeded() ? State.Ground.Get() - AchievedDeg : AttitudeDeg;
 
 		LawImpl::FLegs Legs;
 		int32		   Standing = 0;
@@ -418,17 +492,26 @@ namespace RammsLevel
 				// consulted meanwhile: its integral is from before, and would
 				// ask again for what was just ramped out. Go on from the
 				// correction as it stands, as a resume does.
-				State.Tilt.Reset(AttitudeDeg);
+				State.Tilt.Reset(LoopAttitudeDeg);
 				State.Loop.StartFrom(State.CorrectionDeg, State.Tilt.Get(), GroundDeg, Tuning);
 				State.bLoopOpen = false;
 				State.bSaturated = false;
 				State.bRateLimited = false;
 				bWantedSet = true;
 			}
-			const FVector2D GoalDeg = bActive ? WantedTiltGoal(GroundDeg, Legs, In.Points, Tuning) : GroundDeg;
+			FVector2D GoalDeg = GroundDeg;
 			if (bActive)
 			{
-				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, State.Tilt.IsNear(GoalDeg), Dt, Tuning);
+				// Level where the legs can hold it; and how much they must
+				// leave, and why, said steadily (the gap between On and Off).
+				const FTiltGoal Goal = WantedTiltGoalWithLimit(GroundDeg, Legs, In.Points, Tuning);
+				GoalDeg = Goal.GoalDeg;
+				State.bShort = Goal.ShortDeg > (State.bShort ? AtReachOffDeg : AtReachOnDeg);
+				State.GoalLimit = Goal.Limit;
+				// No rest while something moves the stance under the offsets:
+				// nothing would be written, and the base would go with it.
+				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, State.Tilt.IsNear(GoalDeg) && !bBaselinesMoving, Dt,
+					Tuning);
 			}
 			// At rest nothing is written, so the servos simply hold; and a step
 			// in which no time passes advances nothing.
@@ -444,7 +527,7 @@ namespace RammsLevel
 				// be levelled, and not while the legs are already going as fast
 				// as they can.
 				const bool		bIntegrate = bActive && Standing >= MinSupportForIntegral && !State.bRateLimited;
-				const FVector2D RawDeg = State.Loop.Tick(AttitudeDeg, WantedNow, GroundDeg, Dt, bIntegrate, State.bSaturated, Tuning);
+				const FVector2D RawDeg = State.Loop.Tick(LoopAttitudeDeg, WantedNow, GroundDeg, Dt, bIntegrate, State.bSaturated, Tuning);
 
 				// The per-axis limit is a limit like the legs' reach: asking to
 				// pass it is being at reach. (The loop holds its own integral
@@ -532,6 +615,12 @@ namespace RammsLevel
 			}
 		}
 
+		if (!bActive)
+		{
+			// Only levelling can be short of what would hold the reference.
+			State.bShort = false;
+			State.GoalLimit = EReachLimit::None;
+		}
 		const bool bHasOffsets = State.Arbiter.HasOffsets();
 
 		// ---- 4. The seat trim ----
@@ -549,8 +638,16 @@ namespace RammsLevel
 		const double	TiltDeg = State.Attitude.IsSeeded() ? Inclination(AttitudeDeg) : 0.0;
 		const double	OffReferenceDeg = State.Attitude.IsSeeded() ? Inclination(AttitudeDeg - Ref) : 0.0;
 		const double	ErrorDeg = bHasOffsets && State.Attitude.IsSeeded() ? (AttitudeDeg - WantedDeg).Size() : 0.0;
-		const bool		bAtReach = bActive && (State.Fraction < 1.0 || State.bAxisLimited);
-		const bool		bPastReach = bAtReach && OffReferenceDeg > Tuning.MaxTiltDeg;
+		// At reach: the correction that would hold the reference cannot all
+		// be given. For as long as that is so, whether the allocation is being
+		// cut this tick or the wanted tilt has already taken the rest.
+		const bool bAtReach = bActive && (State.bShort || State.Fraction < 1.0 || State.bAxisLimited);
+		// Past it: the legs themselves stopped (the allocation cut, an axis
+		// held at its limit) with the base beyond the tilt policy. Not while
+		// the wanted tilt is still walking to where a slope a little past the
+		// planned reach will leave it: switched on there, the base starts
+		// further off than the policy allows and is on its way in.
+		const bool bPastReach = bActive && (State.Fraction < 1.0 || State.bAxisLimited) && OffReferenceDeg > Tuning.MaxTiltDeg;
 		if (bActive || Now == EState::Releasing || bRamping)
 		{
 			bool bMoving = false;
@@ -602,6 +699,26 @@ namespace RammsLevel
 		Out.MinMarginCm = State.MinMarginCm;
 		Out.LimitingLeg = State.LimitingLeg;
 		Out.LimitingPoint = State.LimitingPoint;
+		if (bAtReach)
+		{
+			// What stops it: the allocation's own limit where it is being
+			// cut, else what the goal found, else an axis held at its limit,
+			// else whatever is nearest.
+			Out.ReachLimit = State.Fraction < 1.0 ? State.Limit : EReachLimit::None;
+			if (Out.ReachLimit == EReachLimit::None && State.bShort)
+			{
+				Out.ReachLimit = State.GoalLimit;
+			}
+			if (Out.ReachLimit == EReachLimit::None && State.bAxisLimited)
+			{
+				Out.ReachLimit = EReachLimit::AxisLimit;
+			}
+			if (Out.ReachLimit == EReachLimit::None)
+			{
+				Out.ReachLimit = State.NearestLimit;
+			}
+		}
+		Out.LoopAttitudeDeg = LoopAttitudeDeg;
 		Out.RateUse = RateUse;
 		Out.bRateLimited = State.bRateLimited;
 		Out.bQuiet = bQuiet;

@@ -172,8 +172,26 @@ namespace RammsLevel
 			OutSurface.Add(Axis);
 		};
 		Value(TiltControlId(), NSLOCTEXT("Ramms", "LevelTilt", "Base tilt"), ERammsControlUnits::Degrees, FVector2D(0.0, 45.0), 0.0f);
-		Value(ReachControlId(), NSLOCTEXT("Ramms", "LevelReach", "Leg travel left"), ERammsControlUnits::None, FVector2D(0.0, 1.0), 1.0f);
+		Value(ReachControlId(), NSLOCTEXT("Ramms", "LevelReach", "Levelling reach left"), ERammsControlUnits::None, FVector2D(0.0, 1.0), 1.0f);
 		Value(SpeedScaleControlId(), NSLOCTEXT("Ramms", "LevelSpeedScale", "Level speed limit"), ERammsControlUnits::None, FVector2D(0.0, 1.0), 1.0f);
+	}
+
+	const TCHAR* ReachLimitWords(EReachLimit Limit)
+	{
+		switch (Limit)
+		{
+			case EReachLimit::LegTravel:
+				return TEXT("a leg is at the end of its travel");
+			case EReachLimit::LiftedClearance:
+				return TEXT("a raised wheel would come too near the ground");
+			case EReachLimit::Underside:
+				return TEXT("the underside would come too near the ground");
+			case EReachLimit::AxisLimit:
+				return TEXT("the most correction allowed");
+			case EReachLimit::None:
+			default:
+				return TEXT("");
+		}
 	}
 
 	FString StatusLine(const FStatusFacts& Facts, ERammsControlTextSeverity& OutSeverity)
@@ -192,11 +210,31 @@ namespace RammsLevel
 			case EStatus::Settled:
 				return TEXT("Level, at rest");
 			case EStatus::AtReach:
+			{
+				// The base is held off level on purpose: say by how much once
+				// it is a degree or more, and what stops the legs.
 				OutSeverity = ESeverity::Attention;
-				return TEXT("At the end of the legs' reach");
+				FString Line = TEXT("At the end of levelling reach");
+				if (Facts.OffReferenceDeg >= 0.95)
+				{
+					Line += FString::Printf(TEXT(", %.0f deg off"), Facts.OffReferenceDeg);
+				}
+				if (Facts.ReachLimit != EReachLimit::None)
+				{
+					Line += FString::Printf(TEXT(": %s"), ReachLimitWords(Facts.ReachLimit));
+				}
+				return Line;
+			}
 			case EStatus::PastReach:
+			{
 				OutSeverity = ESeverity::Attention;
-				return FString::Printf(TEXT("Slope past levelling reach: %.0f deg"), Facts.OffReferenceDeg);
+				FString Line = FString::Printf(TEXT("Slope past levelling reach: %.0f deg"), Facts.OffReferenceDeg);
+				if (Facts.ReachLimit != EReachLimit::None)
+				{
+					Line += FString::Printf(TEXT(" (%s)"), ReachLimitWords(Facts.ReachLimit));
+				}
+				return Line;
+			}
 			case EStatus::TiltFault:
 				OutSeverity = ESeverity::Fault;
 				return FString::Printf(TEXT("Tilted %.0f deg: this slope is far past levelling reach"), Facts.OffReferenceDeg);

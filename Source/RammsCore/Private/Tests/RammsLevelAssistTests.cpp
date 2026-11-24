@@ -534,6 +534,35 @@ bool FRammsLevelControlsStatusWords::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("status %d is information"), static_cast<int32>(Status)), Severity == ESeverity::Info);
 	}
 	TestTrue(TEXT("at reach asks for attention"), !Line(EStatus::AtReach, Severity).IsEmpty() && Severity == ESeverity::Attention);
+	{
+		// At reach, and past it, say what stops the legs, each kind in its own
+		// words; and at reach says how far off level the base is held once
+		// that is a degree.
+		TSet<FString> Words;
+		for (const EReachLimit Limit : { EReachLimit::LegTravel, EReachLimit::LiftedClearance, EReachLimit::Underside, EReachLimit::AxisLimit })
+		{
+			FStatusFacts Facts;
+			Facts.bOn = true;
+			Facts.Status = EStatus::AtReach;
+			Facts.ReachLimit = Limit;
+			Facts.OffReferenceDeg = 0.4;
+			const FString Near = StatusLine(Facts, Severity);
+			const FString Why = ReachLimitWords(Limit);
+			TestTrue(*FString::Printf(TEXT("limit %d has words"), static_cast<int32>(Limit)), !Why.IsEmpty());
+			Words.Add(Why);
+			TestEqual(*FString::Printf(TEXT("at reach, limit %d: what stops the legs"), static_cast<int32>(Limit)), Near, FString::Printf(TEXT("At the end of levelling reach: %s"), *Why));
+			Facts.OffReferenceDeg = 1.8;
+			TestEqual(*FString::Printf(TEXT("at reach, limit %d: and how far off the base is held"), static_cast<int32>(Limit)), StatusLine(Facts, Severity),
+				FString::Printf(TEXT("At the end of levelling reach, 2 deg off: %s"), *Why));
+			Facts.Status = EStatus::PastReach;
+			Facts.OffReferenceDeg = 7.4;
+			TestEqual(*FString::Printf(TEXT("past reach, limit %d"), static_cast<int32>(Limit)), StatusLine(Facts, Severity), FString::Printf(TEXT("Slope past levelling reach: 7 deg (%s)"), *Why));
+		}
+		TestEqual(TEXT("each kind of limit in words of its own"), Words.Num(), 4);
+		TestEqual(TEXT("the words for a raised wheel"), FString(ReachLimitWords(EReachLimit::LiftedClearance)), FString(TEXT("a raised wheel would come too near the ground")));
+		TestEqual(TEXT("no limit: no words"), FString(ReachLimitWords(EReachLimit::None)), FString());
+		TestEqual(TEXT("at reach with no limit named"), Line(EStatus::AtReach, Severity, 0.2), FString(TEXT("At the end of levelling reach")));
+	}
 	TestEqual(TEXT("past reach names the tilt"), Line(EStatus::PastReach, Severity, 7.4), FString(TEXT("Slope past levelling reach: 7 deg")));
 	TestTrue(TEXT("... and asks for attention"), Severity == ESeverity::Attention);
 	TestTrue(TEXT("a tilt past the fault line names it"), Line(EStatus::TiltFault, Severity, 13.2).Contains(TEXT("13 deg")));
@@ -944,15 +973,16 @@ bool FRammsLevelAssistClaimsLevelsAndReleases::RunTest(const FString& Parameters
 	TestEqual(TEXT("the ride height is kept: the legs' offsets sum to nothing"), R.LegDz(0) + R.LegDz(1) + R.LegDz(2) + R.LegDz(3) + R.LegDz(4) + R.LegDz(5), 0.0, 0.3);
 	TestEqual(TEXT("level.tilt reads the base's tilt"), static_cast<double>(R.Control(RammsLevel::TiltControlId())), RammsLevel::Inclination(Attitude), 0.05);
 	{
-		// level.reach: the least share of its travel (to the margin) any leg has left, from the made-up legs' own
-		// travel and how far each has been moved.
+		// level.reach: the least share of its planned travel (to the margin and the soft zone) any leg has left, from
+		// the made-up legs' own travel and how far each has been moved. (No leg is carried off the ground and the
+		// correction is far inside its per-axis limit: a leg's travel is what is nearest.)
 		TUniquePtr<RammsLevel::IPlant> Probe = RammsLevel::MakeLegPlant(*R.Base, *R.Curb, R.Other());
 		FString						   Why;
 		RammsLevel::FPlantLegs		   Legs;
 		double						   Expected = 1.0;
 		if (TestTrue(TEXT("the legs measure"), Probe->Resolve(Why) && Probe->MeasureLegs(Legs) && Legs.Num() == 6))
 		{
-			const double Margin = R.Level->Tuning.LegRangeMarginCm;
+			const double Margin = R.Level->Tuning.LegRangeMarginCm + R.Level->Tuning.SoftZoneCm;
 			for (int32 Index = 0; Index < 6; ++Index)
 			{
 				const double Dz = R.LegDz(Index);
@@ -962,7 +992,7 @@ bool FRammsLevelAssistClaimsLevelsAndReleases::RunTest(const FString& Parameters
 		}
 		AddInfo(FString::Printf(TEXT("level.reach reads %.3f; the legs' travel gives %.3f"), R.Control(RammsLevel::ReachControlId()), Expected));
 		TestTrue(TEXT("(the legs have used a good part of their travel, and not all)"), Expected > 0.3 && Expected < 0.85);
-		TestEqual(TEXT("level.reach reads the least share of travel a leg has left"), static_cast<double>(R.Control(RammsLevel::ReachControlId())), Expected, 0.02);
+		TestEqual(TEXT("level.reach reads the least share of planned travel a leg has left"), static_cast<double>(R.Control(RammsLevel::ReachControlId())), Expected, 0.02);
 	}
 	TestEqual(TEXT("level.speed_scale reads full speed"), R.Control(RammsLevel::SpeedScaleControlId()), 1.0f);
 	// While it holds the legs' offsets it ticks after the curb controller (a baseline writer that ticks before
@@ -1930,7 +1960,9 @@ bool FRammsLevelAssistPastReachAgainstPreference::RunTest(const FString& Paramet
 		Attitude.Y, *R.Status(), R.Control(RammsLevel::TiltControlId()), R.Control(RammsLevel::ReachControlId())));
 	TestTrue(TEXT("the legs gave what they may"), Attitude.Equals(FVector2D(4.0, 0.0), 0.05));
 	TestTrue(TEXT("(off the horizontal the base is inside the tilt policy)"), RammsLevel::Inclination(Attitude) < R.Level->Tuning.MaxTiltDeg - 0.5);
-	TestEqual(TEXT("the status names how far the base is off what the rider asked, not off the horizontal"), R.Status(), FString(TEXT("Slope past levelling reach: 7 deg")));
+	TestEqual(TEXT("the status names how far the base is off what the rider asked, not off the horizontal, and what stops the legs"), R.Status(),
+		FString(TEXT("Slope past levelling reach: 7 deg (the most correction allowed)")));
+	TestEqual(TEXT("level.reach reads none left"), static_cast<double>(R.Control(RammsLevel::ReachControlId())), 0.0, 0.01);
 	TestEqual(TEXT("... and asks for attention"), R.Control(RammsLevel::StatusControlId()), static_cast<float>(ERammsControlTextSeverity::Attention));
 	TestEqual(TEXT("level.tilt is the base's own tilt"), static_cast<double>(R.Control(RammsLevel::TiltControlId())), 4.0, 0.05);
 	return true;

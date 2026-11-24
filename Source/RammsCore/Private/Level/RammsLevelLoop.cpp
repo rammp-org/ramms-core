@@ -69,6 +69,49 @@ namespace RammsLevel
 		return Filter.Tick(AttitudeDeg + MeasuredCorrectionDeg, Dt, Seconds);
 	}
 
+	FVector2D FGroundGate::Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt)
+	{
+		if (!bSeeded)
+		{
+			Seed(RawGroundDeg);
+		}
+		if (Dt <= 0.0)
+		{
+			return Value;
+		}
+		// How hard the base is being braked or driven off: from one tick's
+		// speed to the next. (None on the first: there is no tick before it.)
+		const double Speed = FMath::Abs(SpeedCmS);
+		const double Accel = bHasSpeed ? FMath::Abs(Speed - LastSpeedCmS) / Dt : 0.0;
+		LastSpeedCmS = Speed;
+		bHasSpeed = true;
+		const double Start = FMath::Max(0.0, Tuning.BodyAccelStartCmS2);
+		const double Full = FMath::Max(Start, Tuning.BodyAccelFullCmS2);
+		const double Believed = Accel <= Start ? 1.0 : (Accel >= Full ? 0.0 : (Full - Accel) / (Full - Start));
+		// Down at once, up again only as the body settles.
+		Trust = Believed < Trust ? Believed : FMath::Min(Believed, Trust + (Tuning.BodySettleSeconds > 0.0 ? Dt / Tuning.BodySettleSeconds : 1.0));
+
+		if (Tuning.BreakDeg <= 0.0)
+		{
+			Allowance = 0.0;
+			Value = RawGroundDeg;
+			return Value;
+		}
+		// (While the base is being braked or driven off hard its attitude says
+		// nothing of the ground, slowly or otherwise: the settling allowance
+		// is given up with the travel's. What the baselines did is known.)
+		Allowance = Trust * (FMath::Max(0.0, Tuning.SettleDegPerSec) + FMath::Max(0.0, TurnDegPerCm) * Speed) + FMath::Max(0.0, ExplainedDeg) / Dt;
+		FVector2D	 Step = RawGroundDeg - Value;
+		const double Size = Step.Size();
+		const double Most = Allowance * Dt;
+		if (Size > Most)
+		{
+			Step *= Most / Size;
+		}
+		Value += Step;
+		return Value;
+	}
+
 	/**
 	 * WantedTiltGoal with the reach share given rather than found: the part of
 	 * the rule that is this file's own, so the rule can be checked at any
@@ -86,9 +129,29 @@ namespace RammsLevel
 	{
 		// The limits are pulled in by the soft zone, so that resting on the
 		// goal the correction sits short of the margin.
+		return WantedTiltGoalWithLimit(GroundDeg, Legs, Points, Tuning).GoalDeg;
+	}
+
+	FTiltGoal WantedTiltGoalWithLimit(const FVector2D& GroundDeg, TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points,
+		const FTuning& Tuning)
+	{
 		const FVector2D Whole = GroundDeg - Tuning.LevelReferenceDeg;
-		const double	Share = AllocateFraction(Legs, Points, Whole, Tuning, Tuning.SoftZoneCm);
-		return WantedTiltGoalForShare(GroundDeg, Share, Tuning);
+		const FReach	Reach = AllocateReach(Legs, Points, Whole, Tuning, Tuning.SoftZoneCm);
+		FTiltGoal		Out;
+		Out.GoalDeg = WantedTiltGoalForShare(GroundDeg, Reach.Share, Tuning);
+		// What the legs leave of it, and why: their own limits first; with
+		// those out of the way, an axis held at the most it may correct.
+		const FVector2D Clamped = ClampAxes(Whole, Tuning.MaxCorrectionDeg);
+		Out.ShortDeg = (Whole - Clamped * FMath::Clamp(Reach.Share, 0.0, 1.0)).Size();
+		if (Reach.Share < 1.0)
+		{
+			Out.Limit = Reach.Limit;
+		}
+		else if (!(Whole - Clamped).IsNearlyZero(1.0e-9))
+		{
+			Out.Limit = EReachLimit::AxisLimit;
+		}
+		return Out;
 	}
 
 	FVector2D FTiltTarget::Tick(const FVector2D& GoalDeg, double Dt, double MaxRateDegPerSec, double MaxAccelDegPerSec2)

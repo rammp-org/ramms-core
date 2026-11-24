@@ -167,6 +167,13 @@ namespace RammsLevel
 			return FMath::Max(0.0, Leg.MaxZ - MarginCm - Leg.BaseZ);
 		}
 
+		/** The most a lifted leg may be asked to rise: its travel, and what of
+		 *  its stance's clearance it may lose (the constraint set's U_i). */
+		double LiftedHigh(const FLegReach& Leg, double MinLiftedClearanceCm)
+		{
+			return FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ) + FMath::Max(0.0, Leg.BaselineClearanceCm - MinLiftedClearanceCm);
+		}
+
 		/** One search's fixed part: the legs, the points, the whole plane
 		 *  (after the per-axis clamps) and how far each point's ground may rise. */
 		struct FProblem
@@ -257,7 +264,7 @@ namespace RammsLevel
 					// what it falls short by has used up the clearance its
 					// stance gave it. Asked to extend too far it only ends up
 					// higher, so it has no lower limit.
-					High = FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ) + FMath::Max(0.0, Leg.BaselineClearanceCm - Problem.MinLiftedClearanceCm);
+					High = LiftedHigh(Leg, Problem.MinLiftedClearanceCm);
 				}
 				const double NeedLo = Rise - High;
 				if (NeedLo > Span.Lo)
@@ -320,6 +327,54 @@ namespace RammsLevel
 			}
 			OutUnfitShare = High;
 			return Low;
+		}
+
+		/**
+		 * What stopped a search: at UnfitShare, the last share found not to
+		 * fit, with the shift that comes nearest to fitting (every limit moves
+		 * one for one with the shift, so that is midway between the two that
+		 * clash, kept inside the window), the limit crossed furthest. Both
+		 * INDEX_NONE when only the window is at fault.
+		 */
+		void LimitAt(const FProblem& Problem, double UnfitShare, double WindowLo, double WindowHi, int32& OutLeg, int32& OutPoint)
+		{
+			OutLeg = INDEX_NONE;
+			OutPoint = INDEX_NONE;
+			const FRideSpan Bad = SpanAt(Problem, UnfitShare);
+			double			NearestCm = 0.5 * (Bad.Lo + Bad.Hi);
+			if (Bad.Hi >= UnboundedCm)
+			{
+				NearestCm = Bad.Lo;
+			}
+			else if (Bad.Lo <= -UnboundedCm)
+			{
+				NearestCm = Bad.Hi;
+			}
+			NearestCm = FMath::Clamp(NearestCm, WindowLo, FMath::Max(WindowLo, WindowHi));
+			const double OverHigh = Bad.Lo - NearestCm;
+			const double UnderLow = NearestCm - Bad.Hi;
+			if (OverHigh >= UnderLow && OverHigh > 0.0)
+			{
+				OutLeg = Bad.LoLeg;
+				OutPoint = Bad.LoPoint;
+			}
+			else if (UnderLow > 0.0)
+			{
+				OutLeg = Bad.HiLeg;
+			}
+		}
+
+		EReachLimit KindOf(TConstArrayView<FLegReach> Legs, int32 Leg, int32 Point)
+		{
+			if (Point != INDEX_NONE)
+			{
+				return EReachLimit::Underside;
+			}
+			if (Legs.IsValidIndex(Leg))
+			{
+				return Legs[Leg].bSupport ? EReachLimit::LegTravel : EReachLimit::LiftedClearance;
+			}
+			return EReachLimit::None;
 		}
 	} // namespace AllocateImpl
 
@@ -448,6 +503,84 @@ namespace RammsLevel
 		return AllocateImpl::SlopeDeg(Slope);
 	}
 
+	FVector2D BaselinePlaneMove(TConstArrayView<FLegReach> Legs, TConstArrayView<double> PrevBaseZ)
+	{
+		if (PrevBaseZ.Num() != Legs.Num())
+		{
+			return FVector2D::ZeroVector;
+		}
+		// The plane the joints would be measured to have made had they gone
+		// from the old baselines to the new: the same legs, the same weights.
+		TArray<FLegReach, TInlineAllocator<8>> Moved;
+		Moved.Append(Legs.GetData(), Legs.Num());
+		for (int32 Index = 0; Index < Moved.Num(); ++Index)
+		{
+			Moved[Index].MeasuredZ = Legs[Index].BaseZ;
+			Moved[Index].BaseZ = PrevBaseZ[Index];
+		}
+		return MeasuredCorrection(Moved);
+	}
+
+	double BaselineTurnDeg(TConstArrayView<FLegReach> Legs, TConstArrayView<double> PrevBaseZ)
+	{
+		if (PrevBaseZ.Num() != Legs.Num())
+		{
+			return 0.0;
+		}
+		const double Carried = BaselinePlaneMove(Legs, PrevBaseZ).Size();
+		// ... and through the whole support set, each leg alike: one drawn up
+		// inside the support band may be the one the robot now sits on.
+		TArray<FVector2D, TInlineAllocator<8>> XY;
+		FLegValues							   Moved;
+		TArray<bool, TInlineAllocator<8>>	   Stands;
+		TArray<bool, TInlineAllocator<8>>	   Roll;
+		for (int32 Index = 0; Index < Legs.Num(); ++Index)
+		{
+			XY.Add(Legs[Index].XY);
+			Moved.Add(Legs[Index].BaseZ - PrevBaseZ[Index]);
+			Stands.Add(Legs[Index].bSupport);
+			Roll.Add(Legs[Index].bRoll);
+		}
+		FVector2D	 Deg = FVector2D::ZeroVector;
+		double		 HeightCm = 0.0;
+		const double Standing = FitPlane(XY, Moved, Stands, Roll, Deg, HeightCm) ? Deg.Size() : 0.0;
+		return FMath::Max(Carried, Standing);
+	}
+
+	double StandingSpanCm(TConstArrayView<FLegReach> Legs)
+	{
+		bool bAnyStands = false;
+		for (const FLegReach& Leg : Legs)
+		{
+			bAnyStands = bAnyStands || Leg.bSupport;
+		}
+		FVector2D Low = FVector2D::ZeroVector;
+		FVector2D High = FVector2D::ZeroVector;
+		bool	  bAny = false;
+		for (const FLegReach& Leg : Legs)
+		{
+			if (bAnyStands && !Leg.bSupport)
+			{
+				continue;
+			}
+			Low = bAny ? FVector2D(FMath::Min(Low.X, Leg.XY.X), FMath::Min(Low.Y, Leg.XY.Y)) : Leg.XY;
+			High = bAny ? FVector2D(FMath::Max(High.X, Leg.XY.X), FMath::Max(High.Y, Leg.XY.Y)) : Leg.XY;
+			bAny = true;
+		}
+		const double Along = High.X - Low.X;
+		const double Across = High.Y - Low.Y;
+		double		 Span = 0.0;
+		if (Along >= GroundSpanMinCm)
+		{
+			Span = Along;
+		}
+		if (Across >= GroundSpanMinCm)
+		{
+			Span = Span > 0.0 ? FMath::Min(Span, Across) : Across;
+		}
+		return Span > 0.0 ? Span : GroundSpanMinCm;
+	}
+
 	void RigidOffsets(TConstArrayView<FLegReach> Legs, const FVector2D& Deg, FLegValues& Out)
 	{
 		const double Mean = AllocateImpl::MeanRise(Legs, Deg);
@@ -461,9 +594,26 @@ namespace RammsLevel
 	double AllocateFraction(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg,
 		const FTuning& Tuning, double ExtraMarginCm)
 	{
+		return AllocateReach(Legs, Points, CorrectionDeg, Tuning, ExtraMarginCm).Share;
+	}
+
+	FReach AllocateReach(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg, const FTuning& Tuning,
+		double ExtraMarginCm)
+	{
 		const AllocateImpl::FProblem Problem = AllocateImpl::MakeProblem(Legs, Points, CorrectionDeg, Tuning, ExtraMarginCm);
+		const double				 WindowLo = -FMath::Max(0.0, Tuning.RideHeightDownCm);
+		const double				 WindowHi = FMath::Max(0.0, Tuning.RideHeightUpCm);
 		double						 UnfitShare = -1.0;
-		return AllocateImpl::LargestShare(Problem, -FMath::Max(0.0, Tuning.RideHeightDownCm), FMath::Max(0.0, Tuning.RideHeightUpCm), UnfitShare);
+		FReach						 Out;
+		Out.Share = AllocateImpl::LargestShare(Problem, WindowLo, WindowHi, UnfitShare);
+		if (UnfitShare >= 0.0)
+		{
+			int32 Leg = INDEX_NONE;
+			int32 Point = INDEX_NONE;
+			AllocateImpl::LimitAt(Problem, UnfitShare, WindowLo, WindowHi, Leg, Point);
+			Out.Limit = AllocateImpl::KindOf(Legs, Leg, Point);
+		}
+		return Out;
 	}
 
 	FAllocation Allocate(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg,
@@ -514,34 +664,22 @@ namespace RammsLevel
 
 		if (UnfitShare >= 0.0)
 		{
-			// What stopped it: at the share that did not fit, with the shift
-			// that comes nearest to fitting (every limit moves one for one
-			// with the shift, so that is midway between the two that clash,
-			// kept inside the window), the limit crossed furthest.
-			const AllocateImpl::FRideSpan Bad = AllocateImpl::SpanAt(Problem, UnfitShare);
-			double						  NearestCm = 0.5 * (Bad.Lo + Bad.Hi);
-			if (Bad.Hi >= AllocateImpl::UnboundedCm)
-			{
-				NearestCm = Bad.Lo;
-			}
-			else if (Bad.Lo <= -AllocateImpl::UnboundedCm)
-			{
-				NearestCm = Bad.Hi;
-			}
-			NearestCm = FMath::Clamp(NearestCm, WindowLo, FMath::Max(WindowLo, WindowHi));
-			const double OverHigh = Bad.Lo - NearestCm;
-			const double UnderLow = NearestCm - Bad.Hi;
-			if (OverHigh >= UnderLow && OverHigh > 0.0)
-			{
-				Out.LimitingLeg = Bad.LoLeg;
-				Out.LimitingPoint = Bad.LoPoint;
-			}
-			else if (UnderLow > 0.0)
-			{
-				Out.LimitingLeg = Bad.HiLeg;
-			}
+			AllocateImpl::LimitAt(Problem, UnfitShare, WindowLo, WindowHi, Out.LimitingLeg, Out.LimitingPoint);
+			Out.Limit = AllocateImpl::KindOf(Legs, Out.LimitingLeg, Out.LimitingPoint);
 		}
 
+		// How near the plane applied is to whatever would stop it: a leg's
+		// travel, a lifted wheel's clearance, the underside's, an axis' limit.
+		// The first of them on a tie.
+		const auto Take = [&Out](double Used, double Most, double RoomCm, EReachLimit Kind) {
+			const double Left = Most > 0.0 ? FMath::Clamp(1.0 - Used / Most, 0.0, 1.0) : 0.0;
+			if (Left < Out.ReachLeft)
+			{
+				Out.ReachLeft = Left;
+				Out.NearestLimit = Kind;
+			}
+			Out.MinMarginCm = FMath::Min(Out.MinMarginCm, FMath::Max(0.0, RoomCm));
+		};
 		Out.MinMarginCm = TravelMargin(Legs, Out.Dz);
 		for (int32 LegIndex = 0; LegIndex < Legs.Num(); ++LegIndex)
 		{
@@ -551,9 +689,77 @@ namespace RammsLevel
 			{
 				continue;
 			}
-			const double LimitCm = MovedCm > 0.0 ? AllocateImpl::SupportHigh(Leg, Problem.MarginCm) : AllocateImpl::SupportLow(Leg, Problem.MarginCm);
-			const double Left = FMath::Abs(LimitCm) > 0.0 ? FMath::Clamp(1.0 - MovedCm / LimitCm, 0.0, 1.0) : 0.0;
-			Out.ReachLeft = FMath::Min(Out.ReachLeft, Left);
+			// Of the travel the wanted tilt is PLANNED with (the soft zone kept
+			// back): resting at the end of the planned reach reads 0.
+			const double PlannedCm = Problem.MarginCm + FMath::Max(0.0, Tuning.SoftZoneCm);
+			const double LimitCm = MovedCm > 0.0 ? AllocateImpl::SupportHigh(Leg, PlannedCm) : AllocateImpl::SupportLow(Leg, PlannedCm);
+			// (The room is TravelMargin's, taken above: to the true limit.)
+			Take(FMath::Abs(MovedCm), FMath::Abs(LimitCm), NoTravelMarginCm, EReachLimit::LegTravel);
+		}
+		for (const FLegReach& Leg : Legs)
+		{
+			// What the plane asks of a leg carried off the ground, whatever its
+			// travel then lets it do: the part it cannot follow comes off its
+			// clearance.
+			const double WantCm = PlaneRise(Leg.XY, Leg.bRoll, Out.AppliedDeg) - Mean - Out.HeightCm;
+			if (Leg.bSupport || WantCm <= TravelMarginMinMoveCm)
+			{
+				continue;
+			}
+			const double MostCm = AllocateImpl::LiftedHigh(Leg, Problem.MinLiftedClearanceCm);
+			Take(WantCm, MostCm, MostCm - WantCm, EReachLimit::LiftedClearance);
+		}
+		for (int32 PointIndex = 0; PointIndex < Problem.PointCap.Num(); ++PointIndex)
+		{
+			const double RiseCm = PlaneRise(Points[PointIndex].XY, true, Out.AppliedDeg) - Mean - Out.HeightCm;
+			if (RiseCm <= TravelMarginMinMoveCm)
+			{
+				continue;
+			}
+			Take(RiseCm, Problem.PointCap[PointIndex], Problem.PointCap[PointIndex] - RiseCm, EReachLimit::Underside);
+		}
+		{
+			// An axis' own limit, its room as a height at the standing leg
+			// furthest from the standing legs' middle along that axis.
+			bool bAnyStands = false;
+			for (const FLegReach& Leg : Legs)
+			{
+				bAnyStands = bAnyStands || Leg.bSupport;
+			}
+			FVector2D Middle = FVector2D::ZeroVector;
+			int32	  Count = 0;
+			for (const FLegReach& Leg : Legs)
+			{
+				if (!bAnyStands || Leg.bSupport)
+				{
+					Middle += Leg.XY;
+					++Count;
+				}
+			}
+			Middle = Count > 0 ? Middle / Count : Middle;
+			FVector2D Arm = FVector2D::ZeroVector;
+			for (const FLegReach& Leg : Legs)
+			{
+				if (!bAnyStands || Leg.bSupport)
+				{
+					Arm.X = FMath::Max(Arm.X, FMath::Abs(Leg.XY.X - Middle.X));
+					Arm.Y = FMath::Max(Arm.Y, Leg.bRoll ? FMath::Abs(Leg.XY.Y - Middle.Y) : 0.0);
+				}
+			}
+			const FVector2D MostDeg(FMath::Max(0.0, Tuning.MaxCorrectionDeg.X), FMath::Max(0.0, Tuning.MaxCorrectionDeg.Y));
+			for (int32 Axis = 0; Axis < 2; ++Axis)
+			{
+				const double UsedDeg = FMath::Abs(Out.AppliedDeg[Axis]);
+				if (UsedDeg <= ReachMinCorrectionDeg)
+				{
+					continue;
+				}
+				// (Legs with no extent along the axis are moved by none of it:
+				// there is then no height to give the room as.)
+				const double RoomDeg = FMath::Max(0.0, MostDeg[Axis] - UsedDeg);
+				const double RoomCm = Arm[Axis] > 0.0 ? Arm[Axis] * FMath::Tan(FMath::DegreesToRadians(RoomDeg)) : NoTravelMarginCm;
+				Take(UsedDeg, MostDeg[Axis], RoomCm, EReachLimit::AxisLimit);
+			}
 		}
 		return Out;
 	}

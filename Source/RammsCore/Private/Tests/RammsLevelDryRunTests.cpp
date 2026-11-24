@@ -7,7 +7,10 @@
 // law believes, a wrong support set, a stance change and a take-over in the
 // middle of a slope, the switch thrown while parked, a noisy and biased
 // sensor, joints that sag, and a base wired backwards; and the same grade
-// breaks with the sensor a frame late, and at two and three times the pace.
+// breaks with the sensor a frame late, and at two and three times the pace;
+// a hard stop from speed and a knock, against the same with the switch off;
+// a stance ramped under a base at rest; and a slope past what the clearance
+// of wheels carried off the ground allows.
 //
 // Two made-up robots, each at 16, 30 and 60 frames a second: the six-wheeled
 // robot of the curb's tests (four corner legs and two centre legs, all
@@ -238,6 +241,54 @@ namespace RammsLevelDryRunTests
 		Test.TestTrue(FString::Printf(TEXT("%s: %s agrees across frame rates (%.2f, %.2f, %.2f)"), Kit.Name, What, Values[0], Values[1], Values[2]),
 			Most - Least <= FMath::Max(0.1 * Most, AbsoluteDeg));
 	}
+
+	/** A base's swing between two times, from a trace: the true pitch's
+	 *  peak-to-peak (deg) and the true attitude's largest rate over 0.3 s
+	 *  (deg/s) of the frames in between. */
+	struct FSwing
+	{
+		double RangeDeg = 0.0;
+		double RateDegPerSec = 0.0;
+	};
+
+	FSwing SwingBetween(const FResult& Result, double FromSeconds, double ToSeconds, double TickSeconds)
+	{
+		FSwing		Out;
+		double		Low = 0.0;
+		double		High = 0.0;
+		bool		bAny = false;
+		const int32 Window = FMath::Max(1, FMath::RoundToInt32(0.3 / TickSeconds));
+		for (int32 Index = 0; Index < Result.Trace.Num(); ++Index)
+		{
+			const FSample& Sample = Result.Trace[Index];
+			if (Sample.Seconds < FromSeconds || Sample.Seconds > ToSeconds)
+			{
+				continue;
+			}
+			Low = bAny ? FMath::Min(Low, Sample.TrueAttitudeDeg.X) : Sample.TrueAttitudeDeg.X;
+			High = bAny ? FMath::Max(High, Sample.TrueAttitudeDeg.X) : Sample.TrueAttitudeDeg.X;
+			bAny = true;
+			if (Index >= Window)
+			{
+				Out.RateDegPerSec = FMath::Max(Out.RateDegPerSec, (Sample.TrueAttitudeDeg - Result.Trace[Index - Window].TrueAttitudeDeg).Size() / (Window * TickSeconds));
+			}
+		}
+		Out.RangeDeg = High - Low;
+		return Out;
+	}
+
+	/** The law as it was before it asked how far the ground can have turned:
+	 *  the attitude as read taken for the ground's, at once. */
+	FGroundTuning NoGate()
+	{
+		FGroundTuning Tuning;
+		Tuning.BreakDeg = 0.0;
+		return Tuning;
+	}
+
+	/** What a change of speed does to the made-up robots' bodies (deg of
+	 *  pitch per cm/s^2): 1.2 deg at a fifth of gravity. */
+	constexpr double BodyPitchPerAccel = 0.006;
 } // namespace RammsLevelDryRunTests
 
 // Catches: a ground with a slope's sign turned, a profile read off the wrong
@@ -1350,7 +1401,12 @@ bool FRammsLevelDryRunBackwards::RunTest(const FString& Parameters)
 			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
 			Report(*this, Kit, TEXT("legs wired backwards"), Rate, Result);
 			TestEqual(Label(Kit, Rate, TEXT("every pose a stable rest")), Result.UnstableFrames, 0);
-			TestTrue(Label(Kit, Rate, TEXT("it ran away")), Result.PeakTiltDeg >= FMath::Abs(Kit.BackwardsGroundDeg) + 0.8 * Kit.BackwardsLimitDeg);
+			// (Parked, the ground cannot have turned: the law takes the base's
+			// going the wrong way for the body's own doing and follows it
+			// only slowly, so the runaway is caught some degrees in, not at
+			// the correction's limit.)
+			TestTrue(Label(Kit, Rate, TEXT("it ran away")), Result.PeakTiltDeg >= FMath::Abs(Kit.BackwardsGroundDeg) + DivergenceErrorDeg);
+			TestTrue(Label(Kit, Rate, TEXT("... not as far as the correction's limit")), Result.PeakTiltDeg <= FMath::Abs(Kit.BackwardsGroundDeg) + Kit.BackwardsLimitDeg);
 			TestTrue(Label(Kit, Rate, TEXT("... and was caught")), Result.bEverFaulted);
 			TestEqual(Label(Kit, Rate, TEXT("faulted at the end")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Faulted));
 			TestEqual(Label(Kit, Rate, TEXT("and says so")), static_cast<int32>(Result.FinalStatus), static_cast<int32>(EStatus::Diverged));
@@ -1568,6 +1624,20 @@ bool FRammsLevelDryRunAtSpeed::RunTest(const FString& Parameters)
 				Report(*this, Kit, Cases[SpeedIndex], Rate, Result);
 				ExpectSound(*this, Kit, Rate, Result);
 				Peaks[SpeedIndex] = Result.PeakTiltDeg;
+				{
+					// The ground that turns under a robot at speed is followed
+					// as it was before the law asked how far the ground can
+					// have turned: the same run with the reading taken for the
+					// ground at once.
+					FOptions Before = Options;
+					Before.Ground = NoGate();
+					const FResult Was = DryRun::Run(Kit.Robot, Course, Before);
+					AddInfo(FString::Printf(TEXT("%s | %s | %s | peak %.2f deg, lag %.2f s; with the reading taken for the ground at once %.2f deg, %.2f s"), Kit.Name, Cases[SpeedIndex], FrameNames[Rate],
+						Result.PeakTiltDeg, Result.LongestOffLevelSeconds, Was.PeakTiltDeg, Was.LongestOffLevelSeconds));
+					TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the break is followed as well as with no gate (%.2f against %.2f deg)"), Cases[SpeedIndex], Result.PeakTiltDeg, Was.PeakTiltDeg)),
+						Result.PeakTiltDeg <= Was.PeakTiltDeg + 0.1);
+					TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: ... and no later"), Cases[SpeedIndex])), Result.LongestOffLevelSeconds <= Was.LongestOffLevelSeconds + 0.07);
+				}
 
 				double LimitedSeconds = 0.0;
 				double MostUse = 0.0;
@@ -1968,9 +2038,10 @@ bool FRammsLevelDryRunPreferenceBeforeSwitchOn::RunTest(const FString& Parameter
 // What the rider gets, by the law's own rule (WantedTiltGoal): the part of
 // the asked correction the legs' PLANNED reach (their travel less the margin
 // and the soft zone) cannot give is kept as tilt off the preference, up to
-// MaxTiltDeg; resting there is Levelling or Settled, not "at reach". Asked
-// for more than that, the legs go to their margin, the base keeps the rest,
-// and the status is "slope past levelling reach".
+// MaxTiltDeg; resting there the base is held off the preference by the legs'
+// reach, and the status says so ("at reach", with what stops the legs) for
+// as long as it is. Asked for more than that, the legs go to their margin,
+// the base keeps the rest, and the status is "slope past levelling reach".
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferencePastReach,
 	"Ramms.Level.DryRun.PreferencePastTheLegsReach",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -2053,8 +2124,15 @@ bool FRammsLevelDryRunPreferencePastReach::RunTest(const FString& Parameters)
 				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the wanted tilt takes what the legs do not plan to"), Case.Name)),
 					FMath::IsNearlyEqual(Last.Out.WantedDeg.X, Case.EndsAtDeg, 0.1));
 				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the legs stay out of their soft zone"), Case.Name)), Result.MaxOffsetCm <= 1.5 + 0.15 && Result.SecondsAtReach == 0.0);
-				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: resting there is not a warning"), Case.Name)),
-					Last.Out.Status == EStatus::Settled || Last.Out.Status == EStatus::Levelling);
+				// Held off the preference by the legs' reach: said, steadily,
+				// for the whole of the last two seconds, with what stops them.
+				int32 NotSaid = 0;
+				for (const FSample& Sample : Result.Trace)
+				{
+					NotSaid += Sample.Seconds >= Last.Seconds - 2.0 && !(Sample.Out.Status == EStatus::AtReach && Sample.Out.ReachLimit == EReachLimit::LegTravel) ? 1 : 0;
+				}
+				TestEqual(Label(Kit, Rate, *FString::Printf(TEXT("%s: resting there is said: at reach, at a leg's travel, on every frame"), Case.Name)), NotSaid, 0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: level.reach reads none left"), Case.Name)), Last.Out.ReachLeft <= 0.1);
 			}
 		}
 	}
@@ -2273,6 +2351,406 @@ bool FRammsLevelDryRunStanceRampLiftsLegs::RunTest(const FString& Parameters)
 		TestTrue(Label(Kit, Rate, TEXT("the fronts did leave the ground")), Result.Trace.Num() > 0 && Result.Trace.Last().Touching == 6 && Result.Trace[Result.Trace.Num() / 2].Touching == 4);
 		TestEqual(Label(Kit, Rate, TEXT("waiting at the end")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Suspended));
 		TestTrue(Label(Kit, Rate, TEXT("... every offset exactly zero")), Result.FinalMaxOffsetCm == 0.0);
+	}
+	return true;
+}
+
+// Catches: the pitch of a body being braked taken for ground. Letting go of
+// the stick at speed pitches the base nose down for a few tenths of a second
+// whatever the legs do; legs sent after that reading arrive as the base
+// comes back by itself, and the knock is answered by a swing the other way.
+// Measured against the same stop with the switch off, and against the law
+// with the reading taken for the ground at once (which is how it was).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunStopFromSpeed,
+	"Ramms.Level.DryRun.StopFromSpeed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunStopFromSpeed::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	for (const FKit& Kit : Kits())
+	{
+		for (const double GradeDeg : { 0.0, Kit.GradeDeg })
+		{
+			const FGround Course = Plane(GradeDeg, 0.0);
+			for (int32 Rate = 0; Rate < 3; ++Rate)
+			{
+				// 60 cm/s, the stick let go 5 s in: the drive is down to a
+				// third in a tenth of a second (6 m/s^2 at first), and the
+				// body pitches 1.3 deg with it.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 60.0;
+				Options.DriveLagSeconds = 0.1;
+				Options.PitchPerAccelDeg = BodyPitchPerAccel;
+				Options.MaxSeconds = 9.0;
+				Options.bKeepTrace = true;
+				Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, 0.0));
+
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				FOptions BeforeOptions = Options;
+				BeforeOptions.Ground = NoGate();
+				const FResult Off = DryRun::Run(Kit.Robot, Course, OffOptions);
+				const FResult Before = DryRun::Run(Kit.Robot, Course, BeforeOptions);
+				const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+				const FSwing  OffSwing = SwingBetween(Off, 5.0, 8.0, Options.FrameSeconds);
+				const FSwing  BeforeSwing = SwingBetween(Before, 5.0, 8.0, Options.FrameSeconds);
+				const FSwing  Swing = SwingBetween(Result, 5.0, 8.0, Options.FrameSeconds);
+				const FString Case = FString::Printf(TEXT("stop from 60 cm/s on %.0f deg"), GradeDeg);
+				Report(*this, Kit, *Case, Rate, Result);
+				AddInfo(FString::Printf(TEXT("%s | %s | %s | swing %.2f deg at %.1f deg/s; switched off %.2f at %.1f; with the reading taken for the ground at once %.2f at %.1f"), Kit.Name, *Case, FrameNames[Rate],
+					Swing.RangeDeg, Swing.RateDegPerSec, OffSwing.RangeDeg, OffSwing.RateDegPerSec, BeforeSwing.RangeDeg, BeforeSwing.RateDegPerSec));
+				ExpectSound(*this, Kit, Rate, Result);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: (the stop knocks the base over a degree, switched off)"), *Case)), OffSwing.RangeDeg >= 1.0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: (taken for the ground, the knock is answered by a swing the other way: %.2f against %.2f deg)"), *Case, BeforeSwing.RangeDeg, OffSwing.RangeDeg)),
+					BeforeSwing.RangeDeg >= 1.3 * OffSwing.RangeDeg);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the knock is left to pass (%.2f against %.2f deg switched off)"), *Case, Swing.RangeDeg, OffSwing.RangeDeg)), Swing.RangeDeg <= 1.2 * OffSwing.RangeDeg);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: ... and the base moves no faster for the legs (%.1f against %.1f deg/s)"), *Case, Swing.RateDegPerSec, OffSwing.RateDegPerSec)),
+					Swing.RateDegPerSec <= 1.2 * OffSwing.RateDegPerSec);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: level before the stop"), *Case)), PeakTiltBetween(Result, Kit.Tuning, 4.0, 5.0) <= 0.5);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: level after it"), *Case)), Result.SteadyResidualDeg <= 0.3);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: no rocking after it"), *Case)), Result.SteadyTiltRangeDeg <= 0.2);
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: a knock on a robot that stands, or crawls, followed as ground
+// would be. (On a robot at cruising speed a knock cannot be told from ground
+// by how far it has travelled: the ground could have turned as fast. That
+// one is reported, and held to being no worse than it was.)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunKnock,
+	"Ramms.Level.DryRun.KnockStandingAndOnTheMove",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunKnock::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FGround Flat = Plane(0.0, 0.0);
+	// The most the swing may be of the same knock with the switch off:
+	// standing, crawling, cruising (not asked of it there).
+	const double Speeds[3] = { 0.0, 10.0, 40.0 };
+	const double Allowed[3] = { 1.2, 1.25, 0.0 };
+	for (const FKit& Kit : Kits())
+	{
+		for (int32 SpeedIndex = 0; SpeedIndex < 3; ++SpeedIndex)
+		{
+			for (int32 Rate = 0; Rate < 3; ++Rate)
+			{
+				// 1.5 deg nose down, gone in a fraction of a second.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = Speeds[SpeedIndex];
+				Options.MaxSeconds = 8.0;
+				Options.bKeepTrace = true;
+				FDryEvent Kick = MakeEvent(3.0, EEvent::AttitudeKick, 0.15);
+				Kick.PlaneDeg = FVector2D(-1.5, 0.0);
+				Options.Events.Add(Kick);
+
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				FOptions BeforeOptions = Options;
+				BeforeOptions.Ground = NoGate();
+				const FSwing  Off = SwingBetween(DryRun::Run(Kit.Robot, Flat, OffOptions), 3.0, 6.0, Options.FrameSeconds);
+				const FSwing  Before = SwingBetween(DryRun::Run(Kit.Robot, Flat, BeforeOptions), 3.0, 6.0, Options.FrameSeconds);
+				const FResult Result = DryRun::Run(Kit.Robot, Flat, Options);
+				const FSwing  Swing = SwingBetween(Result, 3.0, 6.0, Options.FrameSeconds);
+				const FString Case = FString::Printf(TEXT("a 1.5 deg knock at %.0f cm/s"), Speeds[SpeedIndex]);
+				AddInfo(FString::Printf(TEXT("%s | %s | %s | swing %.2f deg at %.1f deg/s; switched off %.2f at %.1f; with the reading taken for the ground at once %.2f at %.1f"), Kit.Name, *Case, FrameNames[Rate],
+					Swing.RangeDeg, Swing.RateDegPerSec, Off.RangeDeg, Off.RateDegPerSec, Before.RangeDeg, Before.RateDegPerSec));
+				ExpectSound(*this, Kit, Rate, Result);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: level after it"), *Case)), Result.SteadyResidualDeg <= 0.3);
+				if (Allowed[SpeedIndex] > 0.0)
+				{
+					TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: (taken for the ground, it is answered by a swing the other way: %.2f against %.2f deg)"), *Case, Before.RangeDeg, Off.RangeDeg)),
+						Before.RangeDeg >= 1.25 * Off.RangeDeg);
+					TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: left to pass (%.2f against %.2f deg switched off)"), *Case, Swing.RangeDeg, Off.RangeDeg)), Swing.RangeDeg <= Allowed[SpeedIndex] * Off.RangeDeg);
+				}
+				else
+				{
+					TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: no worse than with no gate (%.2f against %.2f deg)"), *Case, Swing.RangeDeg, Before.RangeDeg)), Swing.RangeDeg <= Before.RangeDeg + 0.05);
+				}
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: a body that pitches under the drive's own changes of speed
+// spoiling a grade break at speed (the speed cap slows the drive through the
+// break, the body pitches with that, and a law that reads the pitch for
+// ground slows the drive further for it).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunAtSpeedBody,
+	"Ramms.Level.DryRun.GradeBreakAtSpeedWithABodyThatPitches",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunAtSpeedBody::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const double Speeds[3] = { 40.0, 80.0, 120.0 };
+	for (const FKit& Kit : Kits())
+	{
+		const FGround Course = RampUp(Kit.GradeDeg, 900.0);
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			for (const double Speed : Speeds)
+			{
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = Speed;
+				Options.DistanceCm = 800.0;
+				Options.PitchPerAccelDeg = BodyPitchPerAccel;
+				Options.bKeepTrace = true;
+				FOptions BeforeOptions = Options;
+				BeforeOptions.Ground = NoGate();
+				const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+				const FResult Before = DryRun::Run(Kit.Robot, Course, BeforeOptions);
+				// (From a second in: the start's own pitch is the body's, not the break's.)
+				const double Peak = PeakTiltBetween(Result, Kit.Tuning, 1.0, 1000.0);
+				const double Was = PeakTiltBetween(Before, Kit.Tuning, 1.0, 1000.0);
+				AddInfo(FString::Printf(TEXT("%s | grade break at %.0f cm/s, the body pitching with the drive | %s | peak %.2f deg, least speed scale %.2f; with the reading taken for the ground at once %.2f deg, %.2f"), Kit.Name,
+					Speed, FrameNames[Rate], Peak, Result.MinSpeedScale, Was, Before.MinSpeedScale));
+				ExpectSound(*this, Kit, Rate, Result);
+				TestTrue(Label(Kit, Rate, TEXT("it got there")), Result.TravelCm >= 800.0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("at %.0f cm/s the break is followed as well as with no gate (%.2f against %.2f deg)"), Speed, Peak, Was)), Peak <= Was + 0.2);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("at %.0f cm/s the drive is slowed hardly more for it (%.2f against %.2f)"), Speed, Result.MinSpeedScale, Before.MinSpeedScale)),
+					Result.MinSpeedScale >= Before.MinSpeedScale - 0.1);
+				TestTrue(Label(Kit, Rate, TEXT("level on the grade")), Result.SteadyResidualDeg <= 0.5);
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: "at rest" declared, or kept, while a drive mode's stance ramp is
+// still moving the baselines: nothing is written at rest, so the base goes
+// where the ramp carries it (under the wake error) and stays there reading
+// "Level, at rest". And a quick stance change under a standing robot taken
+// for a knock: what the baselines turn the stance by is the stance's, and is
+// followed.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunStanceRampAtRest,
+	"Ramms.Level.DryRun.StanceRampUnderABaseAtRest",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunStanceRampAtRest::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FGround Flat = Plane(0.0, 0.0);
+	// A part of each kit's stance change that tilts its base by 0.38 deg:
+	// between the settle error and the wake error.
+	const double	   SmallShare[2] = { 0.2, 0.33 };
+	const TArray<FKit> AllKits = Kits();
+	for (int32 KitIndex = 0; KitIndex < AllKits.Num(); ++KitIndex)
+	{
+		const FKit&	 Kit = AllKits[KitIndex];
+		const double SmallCm = SmallShare[FMath::Min(KitIndex, 1)] * Kit.RampCm;
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			{
+				// Parked, level and at rest; then the ramp, over three seconds.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.MaxSeconds = 12.0;
+				Options.bKeepTrace = true;
+				for (const int32 Leg : Kit.RampLegs)
+				{
+					Options.Events.Add(MakeEvent(4.0, EEvent::StanceRamp, 3.0, SmallCm, Leg));
+				}
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				const FResult Off = DryRun::Run(Kit.Robot, Flat, OffOptions);
+				const FResult Result = DryRun::Run(Kit.Robot, Flat, Options);
+				Report(*this, Kit, TEXT("stance ramp under a base at rest"), Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				bool  bRestBefore = false;
+				int32 RestDuring = 0;
+				int32 WrittenDuring = 0;
+				for (const FSample& Sample : Result.Trace)
+				{
+					bRestBefore = bRestBefore || (Sample.Seconds > 3.5 && Sample.Seconds < 3.95 && Sample.Out.bQuiet);
+					// (From half a second in: a baseline has moved once it is
+					// BaselineStillCm from where it stood, which this slow a
+					// ramp takes a quarter of a second to do.)
+					if (Sample.Seconds > 4.5 && Sample.Seconds < 6.95)
+					{
+						RestDuring += Sample.Out.bQuiet || Sample.Out.Status == EStatus::Settled ? 1 : 0;
+						WrittenDuring += Sample.Out.bWrite ? 1 : 0;
+					}
+				}
+				AddInfo(FString::Printf(TEXT("%s | stance ramp under a base at rest | %s | switched off the ramp leaves the base %.2f deg off level; on, %.2f deg; frames at rest while it ran %d, written %d"), Kit.Name,
+					FrameNames[Rate], Off.FinalTiltDeg, Result.FinalTiltDeg, RestDuring, WrittenDuring));
+				TestTrue(Label(Kit, Rate, TEXT("at rest before the ramp")), bRestBefore);
+				TestTrue(Label(Kit, Rate, TEXT("(the ramp alone tilts the base: past the settle error, and by less than would wake it)")),
+					Off.FinalTiltDeg > Kit.Tuning.SettleErrorDeg + 0.03 && Off.FinalTiltDeg < Kit.Tuning.WakeErrorDeg - 0.05);
+				TestEqual(Label(Kit, Rate, TEXT("no frame at rest while the baselines move")), RestDuring, 0);
+				TestTrue(Label(Kit, Rate, TEXT("... and the offsets are written through it")), WrittenDuring > 0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("the base is not left where the ramp carried it (%.2f deg; the ramp alone %.2f)"), Result.FinalTiltDeg, Off.FinalTiltDeg)), Result.FinalTiltDeg <= 0.2);
+				TestEqual(Label(Kit, Rate, TEXT("at rest again once the ramp is done")), static_cast<int32>(Result.FinalStatus), static_cast<int32>(EStatus::Settled));
+				TestEqual(Label(Kit, Rate, TEXT("... with nothing written")), Result.SteadyWrites, 0);
+			}
+			{
+				// The ramp already under way when the base would settle: no
+				// rest until it is done and the settle time has passed.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.MaxSeconds = 9.0;
+				Options.bKeepTrace = true;
+				for (const int32 Leg : Kit.RampLegs)
+				{
+					Options.Events.Add(MakeEvent(0.5, EEvent::StanceRamp, 4.0, SmallCm, Leg));
+				}
+				const FResult Result = DryRun::Run(Kit.Robot, Flat, Options);
+				double		  FirstRest = -1.0;
+				for (const FSample& Sample : Result.Trace)
+				{
+					if (Sample.Seconds > 0.8 && Sample.Out.bQuiet && FirstRest < 0.0)
+					{
+						FirstRest = Sample.Seconds;
+					}
+				}
+				AddInfo(FString::Printf(TEXT("%s | stance ramp from 0.5 to 4.5 s | %s | first at rest %.2f s in; ends %.2f deg off level"), Kit.Name, FrameNames[Rate], FirstRest, Result.FinalTiltDeg));
+				// (The settle time from the last time a baseline was found
+				// moved, which may be up to a third of a second before the
+				// ramp's end.)
+				TestTrue(Label(Kit, Rate, TEXT("no rest is declared while the stance is still being ramped in")), FirstRest >= 4.5 + Kit.Tuning.SettleSeconds - 0.5);
+				TestTrue(Label(Kit, Rate, TEXT("... and the base ends level")), Result.FinalTiltDeg <= 0.2);
+			}
+			{
+				// A quick stance change, standing: the kit's whole ramp in half
+				// a second turns the stance at two to four deg/s, far over what
+				// a standing robot's attitude is otherwise followed at.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.MaxSeconds = 9.0;
+				Options.bKeepTrace = true;
+				for (const int32 Leg : Kit.RampLegs)
+				{
+					Options.Events.Add(MakeEvent(4.0, EEvent::StanceRamp, 0.5, Kit.RampCm, Leg));
+				}
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				FOptions BeforeOptions = Options;
+				BeforeOptions.Ground = NoGate();
+				const FResult Off = DryRun::Run(Kit.Robot, Flat, OffOptions);
+				const FResult Before = DryRun::Run(Kit.Robot, Flat, BeforeOptions);
+				const FResult Result = DryRun::Run(Kit.Robot, Flat, Options);
+				const double  Peak = PeakTiltBetween(Result, Kit.Tuning, 4.0, 100.0);
+				const double  PeakBefore = PeakTiltBetween(Before, Kit.Tuning, 4.0, 100.0);
+				// How far the law's ground estimate is behind the stance's own
+				// turn half a second after the ramp ended.
+				double BehindDeg = 0.0;
+				for (const FSample& Sample : Result.Trace)
+				{
+					if (Sample.Seconds >= 4.95 && Sample.Seconds <= 5.05)
+					{
+						BehindDeg = FMath::Max(BehindDeg, (Sample.Out.GroundDeg - Result.Trace.Last().Out.GroundDeg).Size());
+					}
+				}
+				AddInfo(FString::Printf(TEXT("%s | quick stance change standing | %s | switched off it leaves the base %.2f deg off level; on, the peak through it %.2f deg (%.2f with the reading taken for the ground at once), and the ground estimate %.2f deg behind half a second after"),
+					Kit.Name, FrameNames[Rate], Off.FinalTiltDeg, Peak, PeakBefore, BehindDeg));
+				ExpectSound(*this, Kit, Rate, Result);
+				TestTrue(Label(Kit, Rate, TEXT("(the stance change alone tilts the base a degree or more)")), Off.FinalTiltDeg >= 1.0);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("the stance's own turn is followed as it is made (the estimate %.2f deg behind half a second after)"), BehindDeg)), BehindDeg <= 0.25);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("level through it (%.2f deg at most)"), Peak)), Peak <= 0.6 * Off.FinalTiltDeg);
+				// (The six-wheeler sits back onto the pair that is drawn up, a
+				// rock of its own on top of the stance's turn: that part is
+				// followed at the settling allowance, a quarter of a degree
+				// behind for a moment.)
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("... nearly as well as with no gate (%.2f against %.2f deg)"), Peak, PeakBefore)), Peak <= PeakBefore + 0.3);
+				TestTrue(Label(Kit, Rate, TEXT("level after it")), Result.FinalTiltDeg <= 0.3);
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: a correction stopped by the clearance of wheels carried off the
+// ground (the ground ahead rising towards them as the base is levelled nose
+// down) with the status reading "Levelling" and level.reach reading most of
+// the legs' travel left; and the status dropped a moment after the limit is
+// met, with the base still held off level.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunRaisedClearance,
+	"Ramms.Level.DryRun.RaisedWheelsClearanceIsSaid",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunRaisedClearance::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	// The front pair carried 12 cm clear and 0.3 cm short of its stop may be
+	// asked 0.3 + (12 - 2.5) = 9.8 cm; it is 67.5 cm ahead of the middle of
+	// the four that stand: 8.26 deg. The standing legs' own travel would
+	// give more than twice that.
+	const FKit	 Kit = RaisedFronts();
+	const double ClearanceReachDeg = FMath::RadiansToDegrees(FMath::Atan(9.8 / 67.5));
+	for (int32 Rate = 0; Rate < 3; ++Rate)
+	{
+		{
+			// Parked nose up on 10 deg: 1.74 deg past that.
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.bEnabledAtStart = false;
+			Options.MaxSeconds = 16.0;
+			Options.bKeepTrace = true;
+			Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+			const FResult Result = DryRun::Run(Kit.Robot, Plane(10.0, 0.0), Options);
+			Report(*this, Kit, TEXT("10 deg nose up, past the raised wheels' clearance"), Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			if (!TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const FSample& Last = Result.Trace.Last();
+			int32		   NotSaid = 0;
+			int32		   Counted = 0;
+			double		   FirstSaid = -1.0;
+			for (const FSample& Sample : Result.Trace)
+			{
+				const bool bSaid = (Sample.Out.Status == EStatus::AtReach || Sample.Out.Status == EStatus::PastReach) && Sample.Out.ReachLimit == EReachLimit::LiftedClearance;
+				if (bSaid && FirstSaid < 0.0)
+				{
+					FirstSaid = Sample.Seconds;
+				}
+				if (Sample.Seconds >= 8.0)
+				{
+					++Counted;
+					NotSaid += bSaid ? 0 : 1;
+				}
+			}
+			AddInfo(FString::Printf(TEXT("%s | 10 deg nose up, parked | %s | ends at %.2f deg (the clearance gives %.2f of the 10); first said %.2f s in; status %d, limit %d, level.reach %.2f, room %.2f cm, at rest %d, touching %d"),
+				Kit.Name, FrameNames[Rate], Last.TrueAttitudeDeg.X, ClearanceReachDeg, FirstSaid, static_cast<int32>(Last.Out.Status), static_cast<int32>(Last.Out.ReachLimit), Last.Out.ReachLeft,
+				Last.Out.MinMarginCm, Last.Out.bQuiet ? 1 : 0, Last.Touching));
+			TestEqual(Label(Kit, Rate, TEXT("the base is held where the raised wheels' clearance leaves it")), Last.TrueAttitudeDeg.X, 10.0 - ClearanceReachDeg, 0.35);
+			TestTrue(Label(Kit, Rate, TEXT("(no standing leg is near the end of its 12 cm of travel)")), Result.MaxOffsetCm < 6.0);
+			TestEqual(Label(Kit, Rate, TEXT("said on every frame of the last eight seconds: at reach, a raised wheel's clearance")), NotSaid, 0);
+			TestTrue(Label(Kit, Rate, TEXT("(eight seconds of frames)")), Counted > 100);
+			TestTrue(Label(Kit, Rate, TEXT("level.reach reads none left")), Last.Out.ReachLeft <= 0.05);
+			TestTrue(Label(Kit, Rate, TEXT("the room the speed cap goes by is used up")), Last.Out.MinMarginCm <= 0.3);
+			TestTrue(Label(Kit, Rate, TEXT("at rest there all the same")), Last.Out.bQuiet);
+			TestEqual(Label(Kit, Rate, TEXT("the raised wheels are still off the ground")), Last.Touching, 4);
+		}
+		{
+			// 6 deg: inside it. Level, at rest, and level.reach says how much
+			// of the clearance is left (6 of 8.26: a quarter and a bit).
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 12.0;
+			Options.bKeepTrace = true;
+			const FResult Result = DryRun::Run(Kit.Robot, Plane(6.0, 0.0), Options);
+			if (!TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const FSample& Last = Result.Trace.Last();
+			AddInfo(FString::Printf(TEXT("%s | 6 deg nose up, parked | %s | ends at %.2f deg; status %d, level.reach %.2f"), Kit.Name, FrameNames[Rate], Last.TrueAttitudeDeg.X, static_cast<int32>(Last.Out.Status),
+				Last.Out.ReachLeft));
+			TestTrue(Label(Kit, Rate, TEXT("6 deg: level")), Result.FinalTiltDeg <= 0.3);
+			TestEqual(Label(Kit, Rate, TEXT("6 deg: at rest, and nothing to say")), static_cast<int32>(Last.Out.Status), static_cast<int32>(EStatus::Settled));
+			TestEqual(Label(Kit, Rate, TEXT("6 deg: level.reach is what is left of the raised wheels' clearance")), Last.Out.ReachLeft, 1.0 - FMath::Tan(FMath::DegreesToRadians(6.0)) * 67.5 / 9.8, 0.06);
+		}
 	}
 	return true;
 }

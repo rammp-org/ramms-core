@@ -29,7 +29,9 @@ namespace RammsLevel
 	FName StateControlId();
 	/** level.tilt: the base's total tilt (deg), read-only. */
 	FName TiltControlId();
-	/** level.reach: the least share of travel left to a leg (0..1), read-only. */
+	/** level.reach: the least share left (0..1) of whatever is nearest stopping
+	 *  the correction -- a leg's planned travel, a raised wheel's clearance,
+	 *  the underside's, the most correction allowed on an axis -- read-only. */
 	FName ReachControlId();
 	/** level.speed_scale: the share of the rider's speed levelling asks the
 	 *  drive to keep (its floor..1), read-only. */
@@ -72,7 +74,13 @@ namespace RammsLevel
 		/** While waiting: the active drive mode is one it does not level in
 		 *  (else it waits for the attitude). */
 		bool bModeNotLevelled = false;
+		/** At reach: what stops the correction. */
+		EReachLimit ReachLimit = EReachLimit::None;
 	};
+
+	/** What stops the correction, in plain words, to follow "... reach: ";
+	 *  empty for None. */
+	const TCHAR* ReachLimitWords(EReachLimit Limit);
 
 	/** The status in plain words, and how much they need the rider. */
 	FString StatusLine(const FStatusFacts& Facts, ERammsControlTextSeverity& OutSeverity);

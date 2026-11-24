@@ -8,7 +8,10 @@
 // legs' reach; a step in which no time passes; and the rules a review found
 // unguarded or wrong (the seat trim, the integral's gates, each limit on the
 // legs' rate, the level reference, a leg that is not a number, a release
-// taken back, a correction held at its per-axis limit). Every number is made up -- the
+// taken back, a correction held at its per-axis limit); a knock, and the pitch
+// of a base being braked, left to pass where ground on the move is followed;
+// no rest while a stance moves under the base; a release that ends without a
+// step. Every number is made up -- the
 // made-up six-wheeled robot of the curb's tests (corners 90 cm apart fore/aft
 // and 50 across, the middle pair 54 across), on 9 cm wheels -- no robot's own.
 //
@@ -89,7 +92,17 @@ namespace RammsLevelLawTests
 				Offset.Add(0.0);
 			}
 			In.bEnable = true;
+			// The toy's ground is changed under a base that stands where it
+			// is, which no ground does: the law would (rightly) take a step of
+			// it for a knock and follow it only slowly. These tests are of the
+			// rules that come after, so the toy's law takes its reading for
+			// the ground at once; the gate has its own tests, which switch it
+			// on (GateOn).
+			State.Ground.Tuning.BreakDeg = 0.0;
 		}
+
+		/** The law's own ground gate, as the robots run it. */
+		void GateOn() { State.Ground.Tuning = FGroundTuning(); }
 
 		FVector2D Attitude() const { return GroundDeg - MeasuredCorrection(Legs) * Sense; }
 
@@ -732,11 +745,27 @@ bool FRammsLevelLawPastReach::RunTest(const FString& Parameters)
 	Toy.In.bStick = true;
 
 	// A slope a little past reach: the base keeps what the legs cannot take
-	// out, the legs sit short of their margin, and nothing is at a limit.
+	// out and the legs sit short of their margin, the whole correction asked
+	// of them fitting. The base is held off level all the same, and that is
+	// said for as long as it is so, with what stops the legs.
 	Toy.GroundDeg = FVector2D(6.0, 0.0);
-	FOutputs Out = Toy.Run(8.0);
+	FOutputs Out;
+	int32	 NotSaid = 0;
+	int32	 SaidPast = 0;
+	for (int32 Index = 0; Index < 16 * 8; ++Index)
+	{
+		Out = Toy.Step(Frame);
+		// (Switched on 6 deg off level, further than the tilt policy's 5:
+		// the base is on its way in, the legs are not stopped, and "slope
+		// past reach" is not yet anything to say.)
+		SaidPast += Out.Status == EStatus::PastReach ? 1 : 0;
+		NotSaid += Index >= 16 * 6 && !(Out.Status == EStatus::AtReach && Out.ReachLimit == EReachLimit::LegTravel) ? 1 : 0;
+	}
+	TestEqual(TEXT("6 deg: never said to be past reach, not even while the base is still walking in from 6 deg off"), SaidPast, 0);
 	ExpectState(*this, TEXT("6 deg"), Out, EState::Active);
-	ExpectStatus(*this, TEXT("6 deg"), Out, EStatus::Levelling);
+	ExpectStatus(*this, TEXT("6 deg"), Out, EStatus::AtReach);
+	TestEqual(TEXT("6 deg: at reach, at a leg's travel, on every frame of two seconds resting there"), NotSaid, 0);
+	TestTrue(TEXT("6 deg: level.reach reads none left"), Out.ReachLeft <= 0.05);
 	TestNearlyEqual(TEXT("6 deg: the wanted tilt is the slope less the planned reach"), Out.WantedDeg.X, 6.0 - PlannedReachDeg, 0.05);
 	TestNearlyEqual(TEXT("6 deg: the base rests on it"), Toy.Attitude().X, 6.0 - PlannedReachDeg, 0.25);
 	TestTrue(TEXT("6 deg: the whole correction fits"), Out.Fraction >= 1.0);
@@ -1274,11 +1303,15 @@ bool FRammsLevelLawAxisLimit::RunTest(const FString& Parameters)
 	Toy.In.bStick = true;
 
 	// 9 deg of cross fall: the cap takes 6 and the base is planned to keep 3,
-	// inside the policy. That is levelling as far as it goes, not a limit hit.
+	// inside the policy. That is levelling as far as it goes -- and the base
+	// is 3 deg off level, so it is said: at reach, at the most correction
+	// allowed.
 	Toy.GroundDeg = FVector2D(0.0, 9.0);
 	FOutputs Out = Toy.Run(8.0);
 	ExpectState(*this, TEXT("9 deg"), Out, EState::Active);
-	ExpectStatus(*this, TEXT("9 deg"), Out, EStatus::Levelling);
+	ExpectStatus(*this, TEXT("9 deg"), Out, EStatus::AtReach);
+	TestTrue(TEXT("9 deg: what stops it is the per-axis limit"), Out.ReachLimit == EReachLimit::AxisLimit);
+	TestTrue(TEXT("9 deg: level.reach reads none left"), Out.ReachLeft <= 0.01);
 	TestNearlyEqual(TEXT("9 deg: the wanted roll is what the cap leaves"), Out.WantedDeg.Y, 3.0, 0.05);
 	TestNearlyEqual(TEXT("9 deg: the roll correction rests on its cap"), Out.AppliedDeg.Y, 6.0, 0.05);
 	TestTrue(TEXT("9 deg: full speed"), Out.SpeedScale > 0.99);
@@ -1428,7 +1461,8 @@ bool FRammsLevelLawSoftZoneIntegral::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("There was trimming to do inside the soft zone"), InZoneWithError >= 8);
 	TestTrue(FString::Printf(TEXT("The integral moved on every such frame but the odd one (%d of %d)"), Trimmed, InZoneWithError), Trimmed >= InZoneWithError - 2);
-	ExpectStatus(*this, TEXT("at the end"), Out, EStatus::Levelling);
+	// (The base is held 4 deg off level: at reach, whatever fits.)
+	ExpectStatus(*this, TEXT("at the end"), Out, EStatus::AtReach);
 	TestTrue(TEXT("The base rests on the wanted tilt, to the deadband"), FMath::Abs(Toy.Attitude().X - Out.WantedDeg.X) <= Toy.Tuning.DeadbandDeg + 0.05);
 	TestTrue(TEXT("... by a correction past the planned reach, inside the zone"), Out.AppliedDeg.X > 2.3 && Out.MinMarginCm < 2.5);
 	return true;
@@ -1773,7 +1807,10 @@ bool FRammsLevelLawRestLiveGoal::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The base keeps what the legs cannot take out"), Out.WantedDeg.X > 3.5 && FMath::Abs(Toy.Attitude().X - Out.WantedDeg.X) <= 0.3);
 	TestTrue(TEXT("The ground estimate does go on moving in its last digits"), bGoalMoved);
 	TestTrue(TEXT("... and the robot rests all the same"), Out.bQuiet);
-	ExpectStatus(*this, TEXT("parked past reach"), Out, EStatus::Settled);
+	// (At rest, and held off level by the legs' reach: the second is what
+	// the rider is told.)
+	ExpectStatus(*this, TEXT("parked past reach"), Out, EStatus::AtReach);
+	TestTrue(TEXT("... at a leg's travel"), Out.ReachLimit == EReachLimit::LegTravel);
 	TestEqual(TEXT("... with nothing written in its last two seconds"), Writes, 0);
 	return true;
 }
@@ -1827,6 +1864,367 @@ bool FRammsLevelLawTerrainCarryingLegs::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("%s: the ground is the attitude and the standing legs' plane (%.3f, %.3f)"), What, Out.GroundDeg.X, Out.GroundDeg.Y),
 			(Out.GroundDeg - (Reads + Made)).Size() <= 1.0e-6);
 	}
+	return true;
+}
+
+namespace RammsLevelLawTests
+{
+	/**
+	 * How far the legs' offsets went from where they stood (cm, the most over
+	 * the legs and the frames) through Frames frames in which the attitude
+	 * READS KnockPitchDeg[i] off what the base is doing (0 past the end), with
+	 * the base's speed SpeedsCmS[i] (the last one held; left alone when empty).
+	 */
+	double OffsetsMovedThrough(FToy& Toy, TConstArrayView<double> KnockPitchDeg, TConstArrayView<double> SpeedsCmS, int32 Frames)
+	{
+		const FLegValues Before = Toy.Offset;
+		double			 Most = 0.0;
+		for (int32 Index = 0; Index < Frames; ++Index)
+		{
+			Toy.ReadingOffsetDeg = FVector2D(KnockPitchDeg.IsValidIndex(Index) ? KnockPitchDeg[Index] : 0.0, 0.0);
+			if (SpeedsCmS.Num() > 0)
+			{
+				Toy.In.SpeedCmS = SpeedsCmS[FMath::Min(Index, SpeedsCmS.Num() - 1)];
+			}
+			Toy.Step(Frame);
+			Most = FMath::Max(Most, MaxDifference(Toy.Offset, Before));
+		}
+		Toy.ReadingOffsetDeg = FVector2D::ZeroVector;
+		return Most;
+	}
+} // namespace RammsLevelLawTests
+
+// Catches: a knock taken for ground (the legs sent after an attitude that
+// comes back by itself, so the knock is answered by a swing the other way),
+// and, the other way about, ground that turns under a robot on the move
+// followed any differently for the gate.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawKnock,
+	"Ramms.Level.Law.AKnockAtStandstillIsLeftToPass",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawKnock::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// Level and at rest on 4 deg; then the base reads 1.5 deg nose down for a
+	// quarter of a second, and is back.
+	const double Knock[4] = { -1.5, -1.5, -1.5, -1.5 };
+	double		 Moved[2] = { 0.0, 0.0 };
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		FToy Toy(12.0);
+		if (Pass == 1)
+		{
+			Toy.GateOn();
+		}
+		Toy.GroundDeg = FVector2D(4.0, 0.0);
+		FOutputs Out = Toy.Run(8.0);
+		ExpectStatus(*this, Pass == 0 ? TEXT("no gate, before the knock") : TEXT("before the knock"), Out, EStatus::Settled);
+		Moved[Pass] = OffsetsMovedThrough(Toy, MakeArrayView(Knock), TConstArrayView<double>(), 32);
+		Out = Toy.Run(3.0);
+		TestTrue(Pass == 0 ? TEXT("no gate: level again after it") : TEXT("level again after it"), Inclination(Toy.Attitude()) <= 0.25);
+	}
+	AddInfo(FString::Printf(TEXT("a 1.5 deg knock of 0.25 s at standstill: the legs' offsets moved %.2f cm with the reading taken for the ground, %.2f cm as the law is"), Moved[0], Moved[1]));
+	// (A degree at the corners' 45 cm is 0.79 cm.)
+	TestTrue(TEXT("(taken for the ground, the knock is chased: most of a centimetre at a leg)"), Moved[0] >= 0.6);
+	TestTrue(TEXT("left to pass: the legs hardly move"), Moved[1] <= 0.3);
+	TestTrue(TEXT("... a third of the chase or less"), Moved[1] <= Moved[0] / 3.0);
+
+	// Ground that really turns under a robot on the move: 3 deg in half a
+	// second at 40 cm/s, well inside what a grade break does there. Followed
+	// with the gate exactly as without: the same offsets on every frame.
+	FToy With(12.0);
+	FToy Without(12.0);
+	With.GateOn();
+	double Differ = 0.0;
+	double Turned = 0.0;
+	for (FToy* Toy : { &With, &Without })
+	{
+		Toy->GroundDeg = FVector2D(4.0, 0.0);
+		Toy->In.SpeedCmS = 40.0;
+		Toy->In.bStick = true;
+		Toy->Run(6.0);
+	}
+	for (int32 Index = 0; Index < 48; ++Index)
+	{
+		const FVector2D Ground(4.0 + 6.0 * Frame * FMath::Min(Index + 1, 8), 0.0);
+		With.GroundDeg = Ground;
+		Without.GroundDeg = Ground;
+		const FOutputs A = With.Step(Frame);
+		const FOutputs B = Without.Step(Frame);
+		Differ = FMath::Max(Differ, MaxDifference(A.Dz, B.Dz));
+		Turned = FMath::Max(Turned, MaxSize(A.Dz));
+	}
+	TestTrue(TEXT("(the ground did turn, and the legs went with it)"), Turned > 4.0);
+	TestTrue(FString::Printf(TEXT("ground turning under a robot on the move is followed as if there were no gate (%.3g cm apart at most)"), Differ), Differ <= 1.0e-9);
+	return true;
+}
+
+// Catches: the pitch of a base being braked taken for the ground (a hard
+// stop from speed chased as it is at standstill), the travel's allowance kept
+// while it is braked, or the settling one.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawBraked,
+	"Ramms.Level.Law.ABaseBeingBrakedIsNotReadForTheGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawBraked::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// Cruising level at 60 cm/s on 4 deg; the stick is let go, the speed
+	// falls away in a quarter of a second and the base pitches nose down
+	// with it and comes back. The first frame is still at speed: by travel
+	// alone the ground could have turned as far as the base read.
+	const double Speeds[12] = { 60.0, 32.0, 17.0, 9.0, 5.0, 2.6, 1.4, 0.7, 0.4, 0.2, 0.1, 0.0 };
+	const double Knock[7] = { 0.0, -1.2, -1.27, -1.0, -0.6, -0.3, -0.1 };
+	double		 Moved[2] = { 0.0, 0.0 };
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		FToy Toy(12.0);
+		if (Pass == 1)
+		{
+			Toy.GateOn();
+		}
+		Toy.GroundDeg = FVector2D(4.0, 0.0);
+		Toy.In.SpeedCmS = 60.0;
+		Toy.In.bStick = true;
+		Toy.Run(6.0);
+		TestTrue(TEXT("level at speed before the stop"), Inclination(Toy.Attitude()) <= 0.2);
+		Toy.In.bStick = false;
+		Moved[Pass] = OffsetsMovedThrough(Toy, MakeArrayView(Knock), MakeArrayView(Speeds), 32);
+		Toy.Run(3.0);
+		TestTrue(TEXT("level again after the stop"), Inclination(Toy.Attitude()) <= 0.25);
+	}
+	AddInfo(FString::Printf(TEXT("a stop from 60 cm/s that pitches the base 1.3 deg: the legs' offsets moved %.2f cm with the reading taken for the ground, %.2f cm as the law is"), Moved[0], Moved[1]));
+	TestTrue(TEXT("(taken for the ground, the stop's pitch is chased)"), Moved[0] >= 0.5);
+	TestTrue(TEXT("a base being braked is not read: the legs hardly move"), Moved[1] <= 0.2);
+	TestTrue(TEXT("... a quarter of the chase or less"), Moved[1] <= Moved[0] / 4.0);
+	return true;
+}
+
+// Catches: rest entered, or kept, while something moves the stance under the
+// offsets (nothing is then written, and the base goes off level with the
+// baselines while the status reads "at rest"); a leg that was only let go
+// taken for a stance being moved.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawNoRestWhileMoving,
+	"Ramms.Level.Law.NoRestWhileTheBaselinesMove",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawNoRestWhileMoving::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	FToy Toy(12.0);
+	Toy.GateOn();
+	Toy.GroundDeg = FVector2D(3.0, -2.0);
+	FOutputs Out = Toy.Run(8.0);
+	ExpectStatus(*this, TEXT("parked and level"), Out, EStatus::Settled);
+	TestTrue(TEXT("parked and level: at rest, nothing written"), Out.bQuiet && !Out.bWrite);
+	const auto MoveAll = [&Toy](double Cm) {
+		for (FLegReach& Leg : Toy.Legs)
+		{
+			Leg.BaseZ += Cm;
+			Leg.MinZ += Cm;
+			Leg.MaxZ += Cm;
+		}
+	};
+	// How long until it is at rest again, in frames (-1: not within three seconds).
+	const auto FramesToRest = [&Toy]() {
+		for (int32 Index = 1; Index <= 48; ++Index)
+		{
+			if (Toy.Step(Frame).bQuiet)
+			{
+				return Index;
+			}
+		}
+		return -1;
+	};
+
+	// A ride height being ramped under it, 0.05 cm a frame. (In the toy that
+	// turns nothing: the error stays far under the wake error, so it is the
+	// baselines' moving that must end the rest.)
+	int32  QuietFrames = 0;
+	int32  NotWritten = 0;
+	double MostError = 0.0;
+	for (int32 Index = 0; Index < 16; ++Index)
+	{
+		MoveAll(0.05);
+		Out = Toy.Step(Frame);
+		QuietFrames += Out.bQuiet ? 1 : 0;
+		NotWritten += Out.bWrite ? 0 : 1;
+		MostError = FMath::Max(MostError, Out.ErrorDeg);
+	}
+	TestTrue(TEXT("(the error stayed far under the wake error)"), MostError < Toy.Tuning.WakeErrorDeg - 0.2);
+	TestEqual(TEXT("a baseline moving under a resting base ends the rest: no frame at rest"), QuietFrames, 0);
+	TestEqual(TEXT("... and every frame is written"), NotWritten, 0);
+	int32 Frames = FramesToRest();
+	TestTrue(FString::Printf(TEXT("still again: at rest after the settle time, not before (%d frames)"), Frames), Frames >= 15 && Frames <= 18);
+
+	// Less than the last digits of a joint: no move.
+	MoveAll(0.5 * BaselineStillCm);
+	Out = Toy.Step(Frame);
+	TestTrue(TEXT("a baseline moved by less than counts: still at rest"), Out.bQuiet);
+	// ... but a creep adds up: 0.6 of that a frame for three seconds.
+	QuietFrames = 0;
+	for (int32 Index = 0; Index < 48; ++Index)
+	{
+		MoveAll(0.6 * BaselineStillCm);
+		QuietFrames += Toy.Step(Frame).bQuiet ? 1 : 0;
+	}
+	TestTrue(FString::Printf(TEXT("a slow creep of the baselines: no rest once it has begun (%d frames at rest of 48)"), QuietFrames), QuietFrames <= 1);
+	Frames = FramesToRest();
+	TestTrue(TEXT("still again: at rest after the settle time"), Frames >= 15 && Frames <= 18);
+
+	// The drive mode says its stance is being changed, before a baseline has moved.
+	Toy.In.bStanceChanging = true;
+	QuietFrames = 0;
+	for (int32 Index = 0; Index < 24; ++Index)
+	{
+		QuietFrames += Toy.Step(Frame).bQuiet ? 1 : 0;
+	}
+	TestEqual(TEXT("a stance change under way: no rest, whether or not a baseline has moved yet"), QuietFrames, 0);
+	Toy.In.bStanceChanging = false;
+	Frames = FramesToRest();
+	TestTrue(TEXT("the stance change done: at rest after the settle time"), Frames >= 15 && Frames <= 18);
+
+	// A leg let go (nothing commands it): where its joint is, is not a
+	// baseline, and its coming and going is not a stance being moved.
+	Toy.Spoil = [](TArray<FLegReach>& Legs, TArray<FClearancePoint>&) {
+		Legs[2].bHasBaseline = false;
+		Legs[2].BaseZ += 0.3;
+		Legs[2].MeasuredZ += 0.3;
+	};
+	QuietFrames = 0;
+	for (int32 Index = 0; Index < 8; ++Index)
+	{
+		QuietFrames += Toy.Step(Frame).bQuiet ? 1 : 0;
+	}
+	TestEqual(TEXT("a leg let go: the rest goes on"), QuietFrames, 8);
+	Toy.Spoil = nullptr;
+	Out = Toy.Step(Frame);
+	TestTrue(TEXT("taken back where it was: the rest goes on"), Out.bQuiet);
+	// (The same move of a leg that IS commanded ends it.)
+	Toy.Spoil = [](TArray<FLegReach>& Legs, TArray<FClearancePoint>&) {
+		Legs[2].BaseZ += 0.3;
+		Legs[2].MeasuredZ += 0.3;
+	};
+	Out = Toy.Step(Frame);
+	TestFalse(TEXT("a commanded leg's baseline moved as far: the rest ends"), Out.bQuiet);
+	return true;
+}
+
+// Catches: a release that ends by dropping what is left of the offsets in one
+// frame (a tenth of a degree's worth: a step at every leg, largest on the
+// crank of a leg carried off the ground), or one kept waiting for an exact
+// zero that never comes.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawReleaseEnd,
+	"Ramms.Level.Law.AReleaseEndsWithoutAStep",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawReleaseEnd::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	for (const double JointShare : { 1.0, 0.8 })
+	{
+		FToy Toy(12.0);
+		Toy.GroundDeg = FVector2D(5.0, -3.0);
+		// (Joints that fall short leave the integral a trim to give back.)
+		Toy.JointShare = JointShare;
+		Toy.Run(8.0);
+		TestTrue(TEXT("levelled"), MaxSize(Toy.Offset) > 3.0);
+
+		Toy.In.bEnable = false;
+		FLegValues Last = Toy.Offset;
+		double	   LastStep = 0.0;
+		double	   StepBefore = 0.0;
+		double	   MostStep = 0.0;
+		int32	   Frames = 0;
+		bool	   bOff = false;
+		while (!bOff && Frames < 16 * 12)
+		{
+			const FOutputs Out = Toy.Step(Frame);
+			const double   Step = MaxDifference(Toy.Offset, Last);
+			Last = Toy.Offset;
+			++Frames;
+			bOff = Out.State == EState::Off;
+			MostStep = FMath::Max(MostStep, Step);
+			if (bOff)
+			{
+				LastStep = Step;
+			}
+			else
+			{
+				StepBefore = Step;
+			}
+		}
+		AddInfo(FString::Printf(TEXT("release (joints reach %.1f of their commands): off after %.2f s; the last frame moved a leg %.4f cm, the one before %.4f cm; the most in a frame %.3f cm"), JointShare,
+			Frames * Frame, LastStep, StepBefore, MostStep));
+		if (!TestTrue(TEXT("the release ended"), bOff))
+		{
+			continue;
+		}
+		TestTrue(TEXT("every offset exactly zero"), MaxSize(Toy.Offset) == 0.0);
+		// A thousandth of a degree at the corners' 45 cm is under 0.001 cm.
+		TestTrue(TEXT("the last frame is no step: the ramp had brought the offsets in"), LastStep <= 0.002);
+		// 3 deg/s at the corners is 0.15 cm a frame; the legs' own rate 0.6.
+		TestTrue(TEXT("no frame steps a leg"), MostStep <= 0.25);
+		// 5.8 deg at 3 deg/s, the rate picked up and lost, and the last of
+		// the ramp: not kept waiting.
+		TestTrue(TEXT("the release is not kept waiting for its end"), Frames * Frame <= 5.0);
+	}
+	return true;
+}
+
+// Catches: "at reach" said one tick and not the next on a slope at the very
+// end of the reach (no gap between where it is said and where it is taken
+// back), and what stops the legs not named until the correction has grown.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawAtReachSteady,
+	"Ramms.Level.Law.AtReachIsSaidSteadilyAndFromTheFirstFrame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawAtReachSteady::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// 4 cm of travel: 1.5 cm planned at the corners' 45 cm, 1.909 deg.
+	const double PlannedDeg = FMath::RadiansToDegrees(FMath::Atan(1.5 / 45.0));
+	FToy		 Toy(4.0);
+	Toy.In.SpeedCmS = 40.0;
+	Toy.In.bStick = true;
+
+	// 0.09 deg past the planned reach: under where it is said.
+	Toy.GroundDeg = FVector2D(PlannedDeg + 0.09, 0.0);
+	FOutputs Out = Toy.Run(4.0);
+	ExpectStatus(*this, TEXT("0.09 deg past the planned reach"), Out, EStatus::Levelling);
+	TestTrue(TEXT("0.09 deg past: no limit named"), Out.ReachLimit == EReachLimit::None);
+	// 0.19 past: said.
+	Toy.GroundDeg = FVector2D(PlannedDeg + 0.19, 0.0);
+	Out = Toy.Run(4.0);
+	ExpectStatus(*this, TEXT("0.19 deg past the planned reach"), Out, EStatus::AtReach);
+	TestTrue(TEXT("0.19 deg past: a leg's travel"), Out.ReachLimit == EReachLimit::LegTravel);
+	// Back to 0.09 past: between the two, and it stays said.
+	Toy.GroundDeg = FVector2D(PlannedDeg + 0.09, 0.0);
+	int32 NotSaid = 0;
+	for (int32 Index = 0; Index < 16 * 4; ++Index)
+	{
+		NotSaid += Toy.Step(Frame).Status == EStatus::AtReach ? 0 : 1;
+	}
+	TestEqual(TEXT("back to 0.09 deg past: said on every frame still"), NotSaid, 0);
+	// 0.02 past: taken back.
+	Toy.GroundDeg = FVector2D(PlannedDeg + 0.02, 0.0);
+	Out = Toy.Run(4.0);
+	ExpectStatus(*this, TEXT("0.02 deg past the planned reach"), Out, EStatus::Levelling);
+
+	// Switched on far past reach: what stops the legs is named on the very
+	// first frame, with the correction still nothing.
+	FToy Fresh(4.0);
+	Fresh.GroundDeg = FVector2D(6.0, 0.0);
+	Out = Fresh.Step(Frame);
+	ExpectState(*this, TEXT("switched on past reach, first frame"), Out, EState::Active);
+	ExpectStatus(*this, TEXT("switched on past reach, first frame"), Out, EStatus::AtReach);
+	TestTrue(TEXT("switched on past reach, first frame: a leg's travel is named"), Out.ReachLimit == EReachLimit::LegTravel);
+	TestTrue(TEXT("... with no offset given yet"), MaxSize(Out.Dz) == 0.0);
 	return true;
 }
 

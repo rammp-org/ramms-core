@@ -4,7 +4,8 @@
 // deadband, freeze and back-calculation, alone and closed round a toy base;
 // the correction's slew (plane rate, leg rate, soft zone); the wanted tilt's
 // goal and its rate-and-acceleration limiter; the seat trim; the drive-speed
-// cap; the rest detector; the divergence mark. Every number is made up -- the
+// cap; the rest detector; the divergence mark; and the gate that lets the
+// ground's attitude turn only as far as the robot has travelled. Every number is made up -- the
 // made-up six-wheeled robot of the curb's tests (corners 90 cm apart fore/aft
 // and 50 across, the middle pair 54 across), on 9 cm wheels -- no robot's own.
 //
@@ -1307,6 +1308,220 @@ bool FRammsLevelQuietStopsAndWakes::RunTest(const FString& Parameters)
 	TestTrue(TEXT("settles again"), RestFor(Quiet, 10, 0.1, Tuning));
 	Quiet.Reset();
 	TestFalse(TEXT("Reset: awake"), Quiet.IsQuiet());
+	return true;
+}
+
+// Catches: a reading followed at any rate while the robot stands (a knock
+// taken for ground), the travel's allowance left out (a grade break at speed
+// left behind), a bound on each axis by itself where it is on the two
+// together, a reading inside the allowance not followed exactly, and a gate
+// that cannot be switched off.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopGroundGateTravel,
+	"Ramms.Level.Loop.GroundGateFollowsOnlyAsFarAsTravelled",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopGroundGateTravel::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const double Dt = 0.05;
+	// The ground may turn 0.2 deg for every cm travelled.
+	const double Turn = 0.2;
+	{
+		// Standing: a reading that steps 2 deg is followed at the settling
+		// allowance and no faster.
+		FGroundGate	 Gate;
+		const double Settle = Gate.Tuning.SettleDegPerSec;
+		NearBoth(*this, TEXT("the first reading is taken whole"), Gate.Tick(FVector2D(1.0, -0.5), 0.0, Turn, 0.0, Dt), FVector2D(1.0, -0.5), 0.0);
+		const FVector2D Stepped = Gate.Tick(FVector2D(3.0, -0.5), 0.0, Turn, 0.0, Dt);
+		NearBoth(*this, TEXT("standing: a step is followed at the settling allowance"), Stepped, FVector2D(1.0 + Settle * Dt, -0.5), 1.0e-12);
+		Near(*this, TEXT("... which is what it reports"), Gate.GetAllowanceDegPerSec(), Settle, 1.0e-12);
+		NearBoth(*this, TEXT("no time passes: nothing moves"), Gate.Tick(FVector2D(9.0, 9.0), 0.0, Turn, 0.0, 0.0), Stepped, 0.0);
+		FVector2D Seen = Stepped;
+		for (int32 Index = 0; Index < 40; ++Index)
+		{
+			Seen = Gate.Tick(FVector2D(3.0, -0.5), 0.0, Turn, 0.0, Dt);
+		}
+		NearBoth(*this, TEXT("a reading that stays is caught up, and exactly"), Seen, FVector2D(3.0, -0.5), 1.0e-12);
+		Gate.Reset();
+		TestFalse(TEXT("Reset: nothing held"), Gate.IsSeeded());
+	}
+	{
+		// Travelling at 40 cm/s: 8 deg/s more, over pitch and roll together.
+		FGroundGate Gate;
+		Gate.Seed(FVector2D::ZeroVector);
+		const double	Allowed = (Gate.Tuning.SettleDegPerSec + Turn * 40.0) * Dt;
+		const FVector2D Seen = Gate.Tick(FVector2D(3.0, 4.0), 40.0, Turn, 0.0, Dt);
+		NearBoth(*this, TEXT("travelling: the settling allowance and the travel's, along the reading's own direction"), Seen, FVector2D(0.6, 0.8) * Allowed, 1.0e-12);
+		// A reading that turns slower than that (6 deg/s) is the ground's:
+		// followed with nothing held back.
+		FGroundGate Ramp;
+		Ramp.Seed(FVector2D::ZeroVector);
+		double Worst = 0.0;
+		for (int32 Index = 1; Index <= 20; ++Index)
+		{
+			const FVector2D Reading(6.0 * Index * Dt, -3.0 * Index * Dt);
+			Worst = FMath::Max(Worst, (Ramp.Tick(Reading, 40.0, Turn, 0.0, Dt) - Reading).Size());
+		}
+		Near(*this, TEXT("a reading inside the allowance is followed exactly"), Worst, 0.0, 1.0e-12);
+		// Backwards counts as forwards: it is the distance that matters.
+		FGroundGate Back;
+		Back.Seed(FVector2D::ZeroVector);
+		NearBoth(*this, TEXT("a speed is a speed, whichever way"), Back.Tick(FVector2D(3.0, 4.0), -40.0, Turn, 0.0, Dt), Seen, 1.0e-12);
+	}
+	{
+		// No bound asked for: the reading is the ground, at once.
+		FGroundGate Gate;
+		Gate.Tuning.BreakDeg = 0.0;
+		Gate.Seed(FVector2D::ZeroVector);
+		NearBoth(*this, TEXT("no bound: through at once"), Gate.Tick(FVector2D(5.0, -5.0), 0.0, Turn, 0.0, Dt), FVector2D(5.0, -5.0), 0.0);
+		Gate.Reset();
+		Near(*this, TEXT("Reset keeps the tuning"), Gate.Tuning.BreakDeg, 0.0, 0.0);
+	}
+	return true;
+}
+
+// Catches: a base being braked hard still read for the ground (the knock of
+// a stop followed), the settling allowance left on meanwhile, the belief back
+// at once (the rock after the stop followed), a driving-off not counted as
+// braking is, and a gentle change of speed distrusted (a drive slowed by the
+// speed cap, or meeting a grade, left behind).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopGroundGateBraked,
+	"Ramms.Level.Loop.GroundGateDistrustsABaseBeingBraked",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopGroundGateBraked::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const double Dt = 0.05;
+	const double Turn = 0.2;
+	FGroundGate	 Gate;
+	Gate.Seed(FVector2D::ZeroVector);
+	const FGroundTuning& T = Gate.Tuning;
+	TestTrue(TEXT("(the made-up speeds below straddle the tuning's two accelerations)"), T.BodyAccelStartCmS2 == 150.0 && T.BodyAccelFullCmS2 == 300.0 && T.BodySettleSeconds == 0.5);
+	Gate.Tick(FVector2D::ZeroVector, 60.0, Turn, 0.0, Dt);
+	Near(*this, TEXT("cruising: believed"), Gate.GetTrust(), 1.0, 0.0);
+
+	// 60 to 40 cm/s in a tick: 400 cm/s^2. The reading dips 1.5 deg with it.
+	const FVector2D Knock(-1.5, 0.0);
+	FVector2D		Seen = Gate.Tick(Knock, 40.0, Turn, 0.0, Dt);
+	Near(*this, TEXT("braked hard: not believed at all"), Gate.GetTrust(), 0.0, 0.0);
+	NearBoth(*this, TEXT("... and nothing of the dip is taken, not even at the settling allowance"), Seen, FVector2D::ZeroVector, 0.0);
+
+	// Steady again: the belief comes back a tenth a tick (0.05 s of 0.5 s).
+	Seen = Gate.Tick(Knock, 40.0, Turn, 0.0, Dt);
+	Near(*this, TEXT("steady again: a tenth believed after a tick"), Gate.GetTrust(), 0.1, 1.0e-12);
+	Near(*this, TEXT("... and a tenth of the allowance given"), Seen.X, -0.1 * (T.SettleDegPerSec + Turn * 40.0) * Dt, 1.0e-12);
+	for (int32 Index = 0; Index < 8; ++Index)
+	{
+		Gate.Tick(Seen, 40.0, Turn, 0.0, Dt);
+	}
+	Near(*this, TEXT("nine ticks: nine tenths"), Gate.GetTrust(), 0.9, 1.0e-9);
+	Gate.Tick(Seen, 40.0, Turn, 0.0, Dt);
+	Near(*this, TEXT("half a second: believed again"), Gate.GetTrust(), 1.0, 1.0e-9);
+
+	// 40 to 35 in a tick, 100 cm/s^2: a drive slowed gently is believed.
+	Gate.Tick(Seen, 35.0, Turn, 0.0, Dt);
+	Near(*this, TEXT("slowed gently: still believed"), Gate.GetTrust(), 1.0, 0.0);
+	// 35 to 23.75, 225 cm/s^2: halfway between the two.
+	Gate.Tick(Seen, 23.75, Turn, 0.0, Dt);
+	Near(*this, TEXT("halfway between the two accelerations: half believed"), Gate.GetTrust(), 0.5, 1.0e-9);
+	// Driving off is the same to a body as braking: 23.75 to 43.75.
+	Gate.Tick(Seen, 43.75, Turn, 0.0, Dt);
+	Near(*this, TEXT("driven off hard: not believed"), Gate.GetTrust(), 0.0, 0.0);
+
+	// Seeding takes the reading whole and believes the base from there.
+	Gate.Seed(FVector2D(2.0, 1.0));
+	Near(*this, TEXT("Seed: believed"), Gate.GetTrust(), 1.0, 0.0);
+	NearBoth(*this, TEXT("Seed: the reading whole"), Gate.Get(), FVector2D(2.0, 1.0), 0.0);
+	// ... and forgets the speed before it: no acceleration on the next tick.
+	Gate.Tick(FVector2D(2.0, 1.0), 0.0, Turn, 0.0, Dt);
+	Near(*this, TEXT("Seed: the speed before it is forgotten"), Gate.GetTrust(), 1.0, 0.0);
+	return true;
+}
+
+// Catches: a stance being ramped under a standing robot taken for a knock
+// (what its own baselines turned it by not let through), and that let through
+// only while the base is believed.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopGroundGateStance,
+	"Ramms.Level.Loop.GroundGateLetsTheStancesOwnTurnThrough",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopGroundGateStance::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const double Dt = 0.05;
+	FGroundGate	 Gate;
+	Gate.Seed(FVector2D::ZeroVector);
+	// Standing; the baselines turned the stance 0.3 deg this tick (6 deg/s,
+	// far over the settling allowance), and the reading with it.
+	FVector2D Seen = Gate.Tick(FVector2D(0.3, 0.0), 0.0, 0.2, 0.3, Dt);
+	NearBoth(*this, TEXT("the stance's own turn is followed whole"), Seen, FVector2D(0.3, 0.0), 0.0);
+	// A reading that moved further than the baselines explain: the rest at
+	// the settling allowance.
+	Seen = Gate.Tick(FVector2D(1.3, 0.0), 0.0, 0.2, 0.2, Dt);
+	Near(*this, TEXT("more than explained: the rest at the settling allowance"), Seen.X, 0.3 + 0.2 + Gate.Tuning.SettleDegPerSec * Dt, 1.0e-12);
+	// A base being braked is not believed, but what its baselines did is known.
+	Gate.Seed(FVector2D::ZeroVector);
+	Gate.Tick(FVector2D::ZeroVector, 60.0, 0.2, 0.0, Dt);
+	Seen = Gate.Tick(FVector2D(0.25, 0.0), 20.0, 0.2, 0.25, Dt);
+	Near(*this, TEXT("(braked: not believed)"), Gate.GetTrust(), 0.0, 0.0);
+	NearBoth(*this, TEXT("braked: the stance's own turn is followed all the same"), Seen, FVector2D(0.25, 0.0), 1.0e-12);
+	return true;
+}
+
+// Catches: the wanted tilt's goal not saying how much the legs must leave of
+// the correction that would hold the reference, or why: a leg's travel, or an
+// axis held at the most it may correct (the clamp's cut taken for the legs').
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopTiltGoalLimit,
+	"Ramms.Level.Loop.WantedTiltGoalSaysWhatTheLegsLeaveAndWhy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopTiltGoalLimit::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const TConstArrayView<FClearancePoint> NoPoints;
+	{
+		// Inside reach: level, nothing left, nothing to name.
+		const FTuning			Tuning;
+		const TArray<FLegReach> Legs = SixLegs(12.0, 12.0, 0.0);
+		const FTiltGoal			Goal = WantedTiltGoalWithLimit(FVector2D(4.0, 2.0), Legs, NoPoints, Tuning);
+		NearBoth(*this, TEXT("inside reach: the goal is level"), Goal.GoalDeg, FVector2D::ZeroVector, 1.0e-12);
+		Near(*this, TEXT("inside reach: nothing left to the base"), Goal.ShortDeg, 0.0, 1.0e-12);
+		TestTrue(TEXT("inside reach: no limit"), Goal.Limit == EReachLimit::None);
+	}
+	{
+		// 4 cm of travel: 1.5 planned at the corners, 1.909 deg of the 6.
+		const FTuning			Tuning;
+		const TArray<FLegReach> Legs = SixLegs(4.0, 4.0, 0.0);
+		const double			PlannedDeg = FMath::RadiansToDegrees(FMath::Atan(1.5 / 45.0));
+		const FTiltGoal			Goal = WantedTiltGoalWithLimit(FVector2D(6.0, 0.0), Legs, NoPoints, Tuning);
+		NearBoth(*this, TEXT("short legs: the goal is WantedTiltGoal's"), Goal.GoalDeg, WantedTiltGoal(FVector2D(6.0, 0.0), Legs, NoPoints, Tuning), 0.0);
+		Near(*this, TEXT("short legs: what they leave"), Goal.ShortDeg, 6.0 - PlannedDeg, 0.01);
+		TestTrue(TEXT("short legs: a leg's travel"), Goal.Limit == EReachLimit::LegTravel);
+		// Far past: the goal stops at the tilt policy's 5 deg; what the legs
+		// leave is still all of it.
+		const FTiltGoal Far = WantedTiltGoalWithLimit(FVector2D(12.0, 0.0), Legs, NoPoints, Tuning);
+		Near(*this, TEXT("far past: the goal stops at the tilt policy"), Far.GoalDeg.X, Tuning.MaxTiltDeg, 1.0e-9);
+		Near(*this, TEXT("far past: what the legs leave is not cut with it"), Far.ShortDeg, 12.0 - PlannedDeg, 0.01);
+	}
+	{
+		// Plenty of travel, roll held to 3 deg: 5 deg of cross fall leaves 2.
+		FTuning Tuning;
+		Tuning.MaxCorrectionDeg = FVector2D(15.0, 3.0);
+		const TArray<FLegReach> Legs = SixLegs(12.0, 12.0, 0.0);
+		const FTiltGoal			Goal = WantedTiltGoalWithLimit(FVector2D(0.0, 5.0), Legs, NoPoints, Tuning);
+		NearBoth(*this, TEXT("axis held: the goal keeps what the axis cannot take"), Goal.GoalDeg, FVector2D(0.0, 2.0), 1.0e-9);
+		Near(*this, TEXT("axis held: what is left"), Goal.ShortDeg, 2.0, 1.0e-9);
+		TestTrue(TEXT("axis held: named as that"), Goal.Limit == EReachLimit::AxisLimit);
+		// With legs that run out first, it is the legs that are named.
+		const TArray<FLegReach> Short = SixLegs(2.6, 2.6, 0.0);
+		TestTrue(TEXT("legs out of travel before the axis is: a leg's travel"), WantedTiltGoalWithLimit(FVector2D(0.0, 5.0), Short, NoPoints, Tuning).Limit == EReachLimit::LegTravel);
+		// The reference counts: on ground that is the reference, nothing is left.
+		Tuning.LevelReferenceDeg = FVector2D(0.0, 5.0);
+		const FTiltGoal AtReference = WantedTiltGoalWithLimit(FVector2D(0.0, 5.0), Legs, NoPoints, Tuning);
+		Near(*this, TEXT("on ground that is the reference: nothing left"), AtReference.ShortDeg, 0.0, 1.0e-12);
+		TestTrue(TEXT("... and no limit"), AtReference.Limit == EReachLimit::None);
+	}
 	return true;
 }
 

@@ -18,6 +18,12 @@
  *  - Drive: the speed follows SpeedCmS times the law's speed scale with a
  *    first-order lag (DriveLagSeconds); the chassis origin moves that far
  *    along its heading. The heading (YawDeg) and the track never change.
+ *  - Body, optional: a base being braked or driven off pitches on its tyres
+ *    and legs by its own inertia. The body's pitch follows
+ *    PitchPerAccelDeg times the drive's acceleration (cm/s^2, positive
+ *    speeding up: nose up; braking: nose down) with a first-order lag
+ *    (BodyLagSeconds), and is added to the solved attitude as a kick is:
+ *    whatever the legs do. It is the body's, not the ground's.
  *  - Each leg: its command is baseline + offset (cm, a wheel-centre height in
  *    the law's terms), given once per frame to a RammsMotion::FFollower,
  *    which is stepped here within the leg's rate and acceleration; the
@@ -263,6 +269,12 @@ namespace RammsLevel::DryRun
 		/** The speed commanded from the start (cm/s) and the drive's lag (s). */
 		double SpeedCmS = 60.0;
 		double DriveLagSeconds = 0.15;
+		/** The body's pitch under the drive's acceleration (deg per cm/s^2,
+		 *  nose up speeding up; 0: none) and its lag (s). */
+		double PitchPerAccelDeg = 0.0;
+		double BodyLagSeconds = 0.1;
+		/** How fast the law takes the ground to turn (FGroundGate's tuning). */
+		FGroundTuning Ground;
 		/** The joints' lag behind their setpoints (s) and their sag (cm, with
 		 *  the load shared evenly; 0: none). */
 		double ServoLagSeconds = 0.03;

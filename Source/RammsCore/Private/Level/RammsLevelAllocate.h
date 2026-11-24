@@ -145,6 +145,43 @@ namespace RammsLevel
 	FVector2D MeasuredCorrection(TConstArrayView<FLegReach> Legs);
 
 	/**
+	 * How far the plane the legs stand at has turned since their baselines
+	 * were PrevBaseZ (cm, the legs' order): MeasuredCorrection's plane, with
+	 * its weights and its rules, through BaseZ - PrevBaseZ (deg). A stance
+	 * being ramped, or a height jogged on one side, turns the base by this
+	 * much with the ground standing still; legs all moved alike turn it by
+	 * nothing. Zero when PrevBaseZ is not the legs' length. Legs as
+	 * MeasuredCorrection wants them.
+	 */
+	FVector2D BaselinePlaneMove(TConstArrayView<FLegReach> Legs, TConstArrayView<double> PrevBaseZ);
+
+	/**
+	 * How far (deg, 0 or more) the legs' own baselines can have turned the
+	 * stance since they were PrevBaseZ: the larger of two planes' sizes
+	 * through BaseZ - PrevBaseZ -- BaselinePlaneMove's (the legs as far as
+	 * they carry), and FitPlane's through every leg of the support set alike
+	 * (bSupport; each leg's bRoll honoured). The second, because a leg drawn
+	 * up within the support band may be the very one the robot has rocked
+	 * back onto: its carry share says it has left the ground, and the base
+	 * has turned with it all the same. It is for an allowance (FGroundGate),
+	 * so the larger is the one wanted. Zero when PrevBaseZ is not the legs'
+	 * length. Legs as MeasuredCorrection wants them.
+	 */
+	double BaselineTurnDeg(TConstArrayView<FLegReach> Legs, TConstArrayView<double> PrevBaseZ);
+
+	/**
+	 * How far apart the legs the robot stands on are (cm), for how fast the
+	 * ground can turn under it (FGroundGate): the lesser of their extents
+	 * along x and along y, an extent under GroundSpanMinCm not counting (legs
+	 * in a line span nothing that way); GroundSpanMinCm when neither counts.
+	 * The standing legs are those with bSupport (every leg when none has).
+	 * Legs must have been through SupportMask. The lesser, because the law
+	 * does not know which way the robot is travelling, and a break passes
+	 * soonest under the shorter side.
+	 */
+	double StandingSpanCm(TConstArrayView<FLegReach> Legs);
+
+	/**
 	 * Each leg's offset for the whole plane Deg with nothing limiting it:
 	 * want_i of the constraint set at s = 1, r = 0, WITHOUT the per-axis
 	 * clamp (the caller's plane is taken as given). Out is set to the legs'
@@ -160,6 +197,21 @@ namespace RammsLevel
 	 */
 	double AllocateFraction(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg,
 		const FTuning& Tuning, double ExtraMarginCm);
+
+	/** AllocateFraction's share, and what stops the plane beyond it. */
+	struct FReach
+	{
+		double Share = 1.0;
+		/** With Share < 1: the kind of the constraint crossed first beyond it,
+		 *  found as Allocate finds LimitingLeg / LimitingPoint (a support leg:
+		 *  LegTravel; a lifted one: LiftedClearance; a point: Underside). None
+		 *  at Share 1. */
+		EReachLimit Limit = EReachLimit::None;
+	};
+
+	/** AllocateFraction, with what limits it. */
+	FReach AllocateReach(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg, const FTuning& Tuning,
+		double ExtraMarginCm);
 
 	/**
 	 * Every leg's offset for the wanted plane CorrectionDeg. Legs must have
@@ -187,11 +239,30 @@ namespace RammsLevel
 	 * stay INDEX_NONE when only the window is at fault); a leg at Fraction < 1
 	 * then sits on its margin to within the search's resolution, and HeightCm,
 	 * where the slew window is what binds, within about 0.001 cm of the
-	 * window's end. MinMarginCm = TravelMargin(Legs,
-	 * Dz). ReachLeft = the least, over support legs with |Dz| over
-	 * TravelMarginMinMoveCm, of 1 - Dz / Hi_i (Dz > 0) or 1 - Dz / Lo_i
-	 * (Dz < 0), within 0..1, 0 where that limit is 0; 1 with no such leg.
-	 * RateUse is left 0.
+	 * window's end. Limit is that constraint's kind.
+	 *
+	 * ReachLeft and MinMarginCm are of whatever is NEAREST stopping the plane,
+	 * a leg's travel or not, at the plane applied (rise_i, m and r as the
+	 * constraint set, at Fraction and HeightCm):
+	 *  - a support leg with |Dz| over TravelMarginMinMoveCm: the share
+	 *    1 - Dz / Hi_i (Dz > 0) or 1 - Dz / Lo_i (Dz < 0), Hi_i and Lo_i taken
+	 *    with ExtraMarginCm = Tuning.SoftZoneCm (the travel the wanted tilt is
+	 *    planned with: a leg resting at the end of the planned reach reads
+	 *    0), 0 where that limit is 0; the room TravelMargin's (to its true
+	 *    limit, no margin);
+	 *  - a lifted leg asked to rise by want_i over TravelMarginMinMoveCm: the
+	 *    share 1 - want_i / U_i, U_i the most it may be asked (the constraint
+	 *    set's), 0 where U_i is 0; the room U_i - want_i;
+	 *  - an underside point whose ground rises by g_k over
+	 *    TravelMarginMinMoveCm: the share 1 - g_k / cap_k, 0 where cap_k is
+	 *    0; the room cap_k - g_k;
+	 *  - an axis with |AppliedDeg| over ReachMinCorrectionDeg: the share
+	 *    1 - |AppliedDeg| / MaxCorrectionDeg, 0 where that is 0; the room
+	 *    (MaxCorrectionDeg - |AppliedDeg|) at the standing leg furthest (along
+	 *    that axis) from the standing legs' middle: arm tan(room).
+	 * Shares within 0..1, rooms 0 or more. ReachLeft is the least share (1
+	 * with none), NearestLimit whose it is (the first of the list on a tie),
+	 * MinMarginCm the least room (NoTravelMarginCm with none). RateUse is left 0.
 	 */
 	FAllocation Allocate(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg,
 		const FTuning& Tuning, double PrevRideCm, double MaxRideStepCm);

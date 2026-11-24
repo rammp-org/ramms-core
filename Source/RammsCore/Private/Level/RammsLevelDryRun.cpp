@@ -448,13 +448,13 @@ namespace RammsLevel::DryRun
 			return Result;
 		}
 		// A copy: an event may change what level means on the way (EEvent::SetReference).
-		FTuning		   Tuning = Options.Tuning;
-		const double   FrameSeconds = FMath::Max(Options.FrameSeconds, 1.0e-3);
-		const double   Tick = FMath::Clamp(Options.PhysicsStepSeconds, 1.0e-4, FrameSeconds);
-		const int32	   PoseEvery = FMath::Max(1, FMath::RoundToInt32(Options.PoseStepSeconds / Tick));
-		const double   PoseSeconds = PoseEvery * Tick;
-		const double   DriveShare = Options.DriveLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.DriveLagSeconds) : 1.0;
-		const double   ServoShare = Options.ServoLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.ServoLagSeconds) : 1.0;
+		FTuning		 Tuning = Options.Tuning;
+		const double FrameSeconds = FMath::Max(Options.FrameSeconds, 1.0e-3);
+		const double Tick = FMath::Clamp(Options.PhysicsStepSeconds, 1.0e-4, FrameSeconds);
+		const int32	 PoseEvery = FMath::Max(1, FMath::RoundToInt32(Options.PoseStepSeconds / Tick));
+		const double PoseSeconds = PoseEvery * Tick;
+		const double DriveShare = Options.DriveLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.DriveLagSeconds) : 1.0;
+		const double ServoShare = Options.ServoLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.ServoLagSeconds) : 1.0;
 
 		// ---- the plant ----
 		FLegValues											Baseline;
@@ -525,6 +525,9 @@ namespace RammsLevel::DryRun
 		double			SpeedScale = 1.0;
 		FVector2D		Kick = FVector2D::ZeroVector;
 		double			KickSeconds = 0.0;
+		// The body's own pitch under the drive's acceleration (deg, nose up).
+		double		 BodyPitch = 0.0;
+		const double BodyShare = Options.BodyLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.BodyLagSeconds) : 1.0;
 
 		FRestPose Pose;
 		PlaceBottoms();
@@ -556,7 +559,8 @@ namespace RammsLevel::DryRun
 			}
 		}
 
-		FState		  Law;
+		FState Law;
+		Law.Ground.Tuning = Options.Ground;
 		FRandomStream Random(Options.Seed);
 		FVector2D	  LastReading = FVector2D::ZeroVector;
 		bool		  bHaveReading = false;
@@ -731,7 +735,7 @@ namespace RammsLevel::DryRun
 				}
 
 				// The sensor.
-				const FVector2D TrueNow = Pose.AttitudeDeg + Kick;
+				const FVector2D TrueNow = Pose.AttitudeDeg + Kick + FVector2D(BodyPitch, 0.0);
 				FVector2D		Reading = TrueNow + Options.BiasDeg;
 				if (Options.NoiseDeg > 0.0)
 				{
@@ -877,7 +881,9 @@ namespace RammsLevel::DryRun
 			}
 
 			// ======== one physics step ========
+			const double SpeedBefore = Speed;
 			Speed += (SpeedCommand * SpeedScale - Speed) * DriveShare;
+			BodyPitch += (Options.PitchPerAccelDeg * (Speed - SpeedBefore) / Tick - BodyPitch) * BodyShare;
 			Origin += Heading * (Speed * Tick);
 			Travel += Speed * Tick;
 			for (int32 Index = 0; Index < NumLegs; ++Index)

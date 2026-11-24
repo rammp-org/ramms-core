@@ -447,6 +447,7 @@ namespace RammsLevel
 				Reach.MinZ = Leg.MinZ;
 				Reach.MaxZ = Leg.MaxZ;
 				Reach.MaxRateCmS = RateCmS;
+				Reach.bHasBaseline = Leg.bHasBaseline;
 				OutLegs.Add(Reach);
 			}
 			if (!bAll)
