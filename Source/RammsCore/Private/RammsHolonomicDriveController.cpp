@@ -432,6 +432,16 @@ float URammsHolonomicDriveController::GetDriveSpeedScale() const
 	return static_cast<float>(SpeedRequests->Get(Now()));
 }
 
+float URammsHolonomicDriveController::GetAskedSpeedCmS() const
+{
+	if (!bDriveModeActive)
+	{
+		return -1.0f;
+	}
+	const FRammsDriveMotion Asked = RammsDrive::HolonomicMotion(Command, Resolved.MaxLinearSpeedCmPerSecond, Resolved.MaxYawRateDegPerSecond);
+	return static_cast<float>(FMath::Sqrt(FMath::Square(static_cast<double>(Asked.ForwardCmPerSecond)) + FMath::Square(static_cast<double>(Asked.RightCmPerSecond))));
+}
+
 void URammsHolonomicDriveController::ResetSwitching()
 {
 	Output = FRammsDriveMotion();

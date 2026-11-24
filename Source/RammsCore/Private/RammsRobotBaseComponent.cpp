@@ -219,6 +219,12 @@ double URammsRobotBaseComponent::GetSimulationTime() const
 	return Backend_ ? Backend_->GetSimulationTime() : -1.0;
 }
 
+double URammsRobotBaseComponent::GetTransformTime() const
+{
+	EnsureBackend();
+	return Backend_ ? Backend_->GetTransformTime() : -1.0;
+}
+
 bool URammsRobotBaseComponent::ReleaseMotor(FName MotorId)
 {
 	// Letting go means letting go: a loop still driving this motor would put
@@ -606,10 +612,28 @@ void URammsRobotBaseComponent::SetMotorCommand(FName MotorId, float Value)
 		// later, and a servo eased at the physics rate would start for the
 		// first.
 		Layered->Effective = ClampToControlRange(Spec, Value + Layered->Offset);
+		if (IsPastOwnTick())
+		{
+			// Written after this frame's tick, by a controller that ticks in a
+			// later group: the frame's last word on this motor, told now with
+			// its offset, as it would be told now with nothing claimed. Kept
+			// for the next tick it would lose to whoever writes the motor
+			// earlier in that frame, every frame.
+			Layered->bDirty = false;
+			Layered->bToldLate = true;
+			PushCommand(MotorId, Spec, Layered->Effective);
+			return;
+		}
 		Layered->bDirty = true;
 		return;
 	}
 	PushCommand(MotorId, Spec, Value);
+}
+
+bool URammsRobotBaseComponent::IsPastOwnTick() const
+{
+	const UWorld* World = GetWorld();
+	return World && World->bInTick && World->TickGroup > PrimaryComponentTick.GetActualTickGroup();
 }
 
 void URammsRobotBaseComponent::PushCommand(FName MotorId, const FRammsMotorSpec* Spec, float Value)
@@ -813,6 +837,15 @@ void URammsRobotBaseComponent::FlushCommandOffsets()
 	for (TPair<FName, FCommandOffset>& Pair : CommandOffsets)
 	{
 		FCommandOffset& Layered = Pair.Value;
+		if (Layered.bToldLate)
+		{
+			// Its last writer of the frame ticks after this: what is waiting
+			// here (an earlier writer's value, a new offset) is not that
+			// writer's word, and goes out with its next write -- or at the next
+			// tick, if it does not write again.
+			Layered.bToldLate = false;
+			continue;
+		}
 		if (!Layered.bDirty)
 		{
 			continue;

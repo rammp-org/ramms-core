@@ -104,12 +104,24 @@ namespace RammsLevel
 		const double Full = FMath::Max(Start, Tuning.BodyAccelFullCmS2);
 		const double Believed = Accel <= Start ? 1.0 : (Accel >= Full ? 0.0 : (Full - Accel) / (Full - Start));
 		// Down at once, up again only as the body settles.
+		const double TrustBefore = Trust;
 		Trust = Believed < Trust ? Believed : FMath::Min(Believed, Trust + (Tuning.BodySettleSeconds > 0.0 ? Dt / Tuning.BodySettleSeconds : 1.0));
+		// A speed is the distance between two readings over the time between
+		// them: it says how the base moved BETWEEN them, and a braking that
+		// began late in that time hardly shows in it. So the tick before the
+		// one that shows the braking has already read some of the body's
+		// pitch, and followed it as ground: as much of that last step as the
+		// trust now lost says was not the ground's is taken back.
+		if (Trust < TrustBefore && TrustBefore > 0.0)
+		{
+			Value -= LastStep * ((TrustBefore - Trust) / TrustBefore);
+		}
 
 		if (Tuning.BreakDeg <= 0.0)
 		{
 			Allowance = 0.0;
 			Value = RawGroundDeg;
+			LastStep = FVector2D::ZeroVector;
 			return Value;
 		}
 		// (While the base is being braked or driven off hard its attitude says
@@ -127,6 +139,11 @@ namespace RammsLevel
 			Step *= Most / Size;
 		}
 		Value += Step;
+		// (What the baselines turned the stance by is known, whatever the
+		// base is doing: that part of a step is never taken back.)
+		const double Explained = FMath::Max(0.0, ExplainedDeg);
+		const double Taken = Step.Size();
+		LastStep = Taken > Explained ? Step * ((Taken - Explained) / Taken) : FVector2D::ZeroVector;
 		return Value;
 	}
 
@@ -490,16 +507,22 @@ namespace RammsLevel
 	{
 		if (Dt <= 0.0)
 		{
-			return Scale;
+			return Out;
 		}
 		const double Floor = LoopSpeedFloor(Tuning);
 
 		// The scale as the drive has had time to answer it, and from that the
 		// speed the rider's stick is asking for: the speed there is, over the
 		// share of it the drive is being let have.
-		Driven += (Scale - Driven) * LoopFilterShare(Dt, Cap.DriveLagSeconds);
+		Driven += (Out - Driven) * LoopFilterShare(Dt, Cap.DriveLagSeconds);
 		const double Speed = FMath::IsFinite(In.SpeedCmS) ? FMath::Abs(In.SpeedCmS) : 0.0;
-		if (Speed >= Cap.MinSpeedCmS)
+		const bool	 bAskKnown = FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0;
+		if (bAskKnown)
+		{
+			// The drive says what its stick asks.
+			FreeSpeed = In.AskedSpeedCmS >= Cap.MinSpeedCmS ? In.AskedSpeedCmS : 0.0;
+		}
+		else if (Speed >= Cap.MinSpeedCmS)
 		{
 			const double Asked = Speed / FMath::Max(Driven, Floor);
 			// (The first of it whole: a robot already under way when the cap
@@ -511,9 +534,33 @@ namespace RammsLevel
 			FreeSpeed = 0.0;
 		}
 
+		// How steadily the drive is being asked -- by its stick, and by this
+		// scale as the last tick left it -- and how steadily the robot is
+		// moving (a drive still bringing it up to what was asked a while ago
+		// is pitching it too). Down at once, up again only once both have
+		// been steady for a while.
+		const double AskedNow = Out * FreeSpeed;
+		const double AskAccel = bHasAsked ? FMath::Abs(AskedNow - LastAskedCmS) / Dt : 0.0;
+		const double SpeedAccel = bHasAsked ? FMath::Abs(Speed - LastSpeedCmS) / Dt : 0.0;
+		LastAskedCmS = AskedNow;
+		LastSpeedCmS = Speed;
+		bHasAsked = true;
+		const double Believed = FMath::Min(LoopRamp(AskAccel, FMath::Max(0.0, Cap.SteadyAskCmS2), 1.0, Cap.UnsteadyAskCmS2, 0.0),
+			LoopRamp(SpeedAccel, FMath::Max(0.0, Cap.SteadySpeedCmS2), 1.0, Cap.UnsteadySpeedCmS2, 0.0));
+		Steady = Believed < Steady ? Believed : FMath::Min(Believed, Steady + (Cap.SteadySettleSeconds > 0.0 ? Dt / Cap.SteadySettleSeconds : 1.0));
+
 		// How fast the ground is turning under the robot, and how fast it may.
-		const FVector2D Rate = In.bGroundRateKnown && FMath::IsFinite(In.GroundRateDegPerSec.X) && FMath::IsFinite(In.GroundRateDegPerSec.Y) ? In.GroundRateDegPerSec : FVector2D::ZeroVector;
-		Turn += (Rate - Turn) * LoopFilterShare(Dt, Cap.TurnFilterSeconds);
+		// Less what the chassis' own turning about the vertical swings the
+		// slope by in its frame: no break in the ground, and nothing that
+		// going slower helps. Taken up only as far as the drive is being
+		// asked steadily (the pitch of a drive changing speed is in the
+		// estimate too); what was last read stands meanwhile.
+		FVector2D	 Rate = In.bGroundRateKnown && FMath::IsFinite(In.GroundRateDegPerSec.X) && FMath::IsFinite(In.GroundRateDegPerSec.Y) ? In.GroundRateDegPerSec : FVector2D::ZeroVector;
+		const double RateSize = Rate.Size();
+		const double YawRadPerSec = FMath::IsFinite(In.YawRateDegPerSec) ? FMath::DegreesToRadians(FMath::Abs(In.YawRateDegPerSec)) : 0.0;
+		const double Swung = (FMath::IsFinite(In.SlopeDeg) ? FMath::Max(0.0, In.SlopeDeg) : 0.0) * YawRadPerSec;
+		Rate = RateSize > Swung ? Rate * ((RateSize - Swung) / RateSize) : FVector2D::ZeroVector;
+		Turn += (Rate - Turn) * (LoopFilterShare(Dt, Cap.TurnFilterSeconds) * (In.bGroundRateKnown ? Steady : 1.0));
 		Follow = FMath::Max(0.0, Cap.FollowMaxDegPerSec);
 		if (In.LegsDegPerSec > 0.0)
 		{
@@ -547,7 +594,7 @@ namespace RammsLevel
 			SinceSteepestCm = 0.0;
 		}
 		ExitSpeed = 0.0;
-		if (Follow > 0.0 && Steepest > 0.0 && In.SpanCm > 0.0)
+		if (Cap.bSlopeEnd && Follow > 0.0 && Steepest > 0.0 && In.SpanCm > 0.0)
 		{
 			ExitSpeed = Follow * In.SpanCm / Steepest;
 			if (FreeSpeed > ExitSpeed)
@@ -556,15 +603,28 @@ namespace RammsLevel
 			}
 		}
 		Target = FMath::Clamp(Target, Floor, 1.0);
+		// It slows, it never stops: the drive is a speed loop, and asked for
+		// much less than the speed there is it brakes through what was asked.
+		// Never asked for more than a little under the speed the robot has,
+		// it is led down, and arrives.
+		if (FreeSpeed > 0.0 && Cap.LeadCmS > 0.0)
+		{
+			Target = FMath::Max(Target, FMath::Min(1.0, (Speed * (1.0 - FMath::Clamp(Cap.LeadShare, 0.0, 1.0)) - Cap.LeadCmS) / FreeSpeed));
+		}
 
 		if (Target < Scale)
 		{
 			// Down no faster than brakes the robot as hard as the ground's
-			// estimate still believes the base's attitude through.
+			// estimate still believes the base's attitude through; and the
+			// last of the way gently.
 			double Fall = FMath::Max(0.0, Cap.FallPerSec);
 			if (Cap.BrakeCmS2 > 0.0 && FreeSpeed > 0.0)
 			{
 				Fall = FMath::Min(Fall, Cap.BrakeCmS2 / FreeSpeed);
+			}
+			if (Cap.FallSeconds > 0.0)
+			{
+				Fall = FMath::Min(Fall, (Scale - Target) / Cap.FallSeconds);
 			}
 			Scale = FMath::Max(Target, Scale - Fall * Dt);
 		}
@@ -572,23 +632,39 @@ namespace RammsLevel
 		{
 			Scale = FMath::Min(Target, Scale + FMath::Max(0.0, Tuning.SpeedScaleRisePerSec) * Dt);
 		}
-		return Scale;
+		// A robot running away past what its stick asks (gravity, down the far
+		// side of a crest, with the drive's loop still holding the climb): the
+		// further past, the less is asked, at once and for as long as it is
+		// past and no longer. That is the drive's own loop made stiffer while
+		// it is being outrun; it fades as the speed comes back, so it brakes
+		// the robot towards what was asked and never through it.
+		Out = Scale;
+		// (Only where the drive says what is asked: a speed taken for the
+		// speed asked cannot be over it.)
+		if (bAskKnown && FreeSpeed > 0.0 && Cap.OverspeedGain > 0.0 && Speed > FreeSpeed)
+		{
+			Out = FMath::Max(Floor, Scale - Cap.OverspeedGain * (Speed - FreeSpeed) / FreeSpeed);
+		}
+		return Out;
 	}
 
 	double FSpeedScale::Relax(double Dt, const FTuning& Tuning)
 	{
 		if (Dt <= 0.0)
 		{
-			return Scale;
+			return Out;
 		}
 		// Nothing is being levelled: what the ground was doing is forgotten.
-		Driven += (Scale - Driven) * LoopFilterShare(Dt, Cap.DriveLagSeconds);
+		Driven += (Out - Driven) * LoopFilterShare(Dt, Cap.DriveLagSeconds);
 		Turn = FVector2D::ZeroVector;
 		ExitSpeed = 0.0;
 		Steepest = 0.0;
 		SinceSteepestCm = 0.0;
+		bHasAsked = false;
+		Steady = 1.0;
 		Scale = FMath::Min(1.0, Scale + FMath::Max(0.0, Tuning.SpeedScaleRisePerSec) * Dt);
-		return Scale;
+		Out = Scale;
+		return Out;
 	}
 
 	bool FQuiet::Tick(double SpeedCmS, double ErrorDeg, bool bStick, bool bMayRest, double Dt, const FTuning& Tuning)
@@ -666,5 +742,41 @@ namespace RammsLevel
 			bDiverged = true;
 		}
 		return bDiverged;
+	}
+	double FMotionSense::Tick(const FVector& PositionCm, const FVector2D& Heading, double SampleSeconds)
+	{
+		Moved = 0.0;
+		bBackwards = false;
+		if (PositionCm.ContainsNaN() || !FMath::IsFinite(SampleSeconds))
+		{
+			return 0.0;
+		}
+		const double Since = bHas ? SampleSeconds - LastSeconds : 0.0;
+		if (bHas && Since == 0.0)
+		{
+			// The same pose again: it says nothing the last one did not.
+			return 0.0;
+		}
+		if (!bHas || Since < 0.0)
+		{
+			// The first reading, or a clock that was reset: begin again here.
+			bBackwards = bHas;
+			SpeedCmS = 0.0;
+			YawRateDegPerSec = 0.0;
+		}
+		else
+		{
+			Moved = FVector::Dist(PositionCm, LastPosition);
+			SpeedCmS = Moved / Since;
+			// How fast the heading turned: on a slope that swings the ground
+			// from pitch into roll under a robot that has gone nowhere.
+			const bool bHeadings = !Heading.IsNearlyZero() && !LastHeading.IsNearlyZero();
+			YawRateDegPerSec = bHeadings ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector2D::DotProduct(Heading, LastHeading), -1.0, 1.0))) / Since : 0.0;
+		}
+		LastPosition = PositionCm;
+		LastHeading = Heading;
+		LastSeconds = SampleSeconds;
+		bHas = true;
+		return FMath::Max(0.0, Since);
 	}
 } // namespace RammsLevel

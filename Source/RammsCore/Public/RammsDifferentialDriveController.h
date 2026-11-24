@@ -536,6 +536,10 @@ public:
 	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) override;
 	/** The scale the live requests leave this mode at now (1: none). */
 	float GetDriveSpeedScale() const;
+	/** The forward speed the stick asks (velocity control: the mean of the
+	 *  two sides' speeds as the stick mixes them, before any request to go
+	 *  slower); negative in torque control, where it asks no speed. */
+	virtual float GetAskedSpeedCmS() const override;
 
 private:
 	/** Inactive modes contribute nothing: no controls, no claims, no commands. */

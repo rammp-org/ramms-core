@@ -30,6 +30,13 @@ namespace RammsLevel
 		 *  swings the slope from pitch into roll with no distance travelled).
 		 *  Zero where the source does not know it. */
 		FVector2D Heading = FVector2D::ZeroVector;
+		/** When the reading was TAKEN (s, on a clock that runs with the
+		 *  physics; only differences are used): the time every rate made from
+		 *  two readings must be counted on, and every filter fed by them. It
+		 *  is not the time of the tick that reads it where the pose is one the
+		 *  simulator published a while before. Negative: the source cannot
+		 *  say, and the reading is taken as of the tick that read it. */
+		double TimeSeconds = -1.0;
 	};
 
 	class IAttitudeSource

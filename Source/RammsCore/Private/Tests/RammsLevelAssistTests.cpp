@@ -3202,13 +3202,15 @@ bool FRammsLevelAssistStanceTime::RunTest(const FString& Parameters)
 		Whole,
 		Part,
 		None,
-		Off
+		Off,
+		MidCrossing
 	};
-	for (const ECase Case : { ECase::Whole, ECase::Part, ECase::None, ECase::Off })
+	for (const ECase Case : { ECase::Whole, ECase::Part, ECase::None, ECase::Off, ECase::MidCrossing })
 	{
 		const TCHAR* const Name = Case == ECase::Whole ? TEXT("the whole plane adopted") : Case == ECase::Part ? TEXT("part of the plane adopted")
 			: Case == ECase::None																			   ? TEXT("nothing adopted, levelling on")
-																											   : TEXT("the level assist off");
+			: Case == ECase::Off																			   ? TEXT("the level assist off")
+																											   : TEXT("handed back from the middle of a crossing");
 		const auto		   Say = [Name](const TCHAR* What) { return FString::Printf(TEXT("%s: %s"), Name, What); };
 		FLevelRig		   R;
 		if (!TestTrue(Say(TEXT("the made-up robot with a level assist")), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
@@ -3243,6 +3245,16 @@ bool FRammsLevelAssistStanceTime::RunTest(const FString& Parameters)
 		{
 			R.Level->Tuning.MaxCorrectionDeg = FVector2D(1.0, 15.0);
 		}
+		if (Case == ECase::MidCrossing)
+		{
+			// A crossing stopped part way (a fault; a simulation reset under it): its legs wherever it had them, the
+			// rear pair drawn far up. That pose is no drive stance with a plane on it.
+			for (const FName& Id : { CrankRL, CrankRR })
+			{
+				R.Base->SetMotorCommand(Id, R.Baseline(Id) + 0.6f);
+			}
+			R.Level->Tuning.MaxCorrectionDeg = FVector2D(3.0, 15.0);
+		}
 		for (int32 Index = 0; Index < 3; ++Index)
 		{
 			FrameOnPose(R);
@@ -3276,6 +3288,18 @@ bool FRammsLevelAssistStanceTime::RunTest(const FString& Parameters)
 					TestTrue(Say(*FString::Printf(TEXT("%s: its command as the crossing left it"), *Id.ToString())), SameBits(R.Baseline(Id), Was[Id]));
 				}
 				TestEqual(Say(TEXT("the whole pose is in the commands: timed for the turn to the ground's attitude")), Seconds, TimeFor(4.0), 1.0e-3);
+				break;
+			}
+			case ECase::MidCrossing:
+			{
+				// The plane fitted through that pose is no turn the stance ramp will make of the base: what is left of
+				// it in the commands is tens of degrees, and a ramp timed for that at the tilt policy's rate takes a
+				// quarter of a minute over nothing (with levelling waiting for it, where it starts from nothing). The
+				// ramp cannot turn the base further than it would with no levelling at all.
+				FVector2D Left;
+				TestTrue(Say(TEXT("(a plane was taken back out, and far more than the turn to the ground's attitude is left in the commands)")), R.Level->GetHandBackTurnDeg(Left) && Left.Size() > 4.5);
+				AddInfo(Say(*FString::Printf(TEXT("%.1f deg of the pose's plane left in the commands"), Left.Size())));
+				TestTrue(Say(*FString::Printf(TEXT("the stance change is given no longer than with no level assist (%.2f against %.2f s)"), Seconds, TimeFor(4.0))), Seconds <= TimeFor(4.0) + 1.0e-3);
 				break;
 			}
 			default:
@@ -3689,22 +3713,33 @@ bool FRammsLevelAssistSpeedScaleLetGo::RunTest(const FString& Parameters)
 	IRammsDriveMode*				CurbMode = R.Curb;
 	const float						Dt = 1.0f / 30.0f;
 	R.Log->SimTime = 50.0;
-	// Driven along a 9 deg slope at 150 cm/s (the chassis moved by hand): the cap holds the speed the slope's end can
-	// be taken at for as long as the robot stands on it, whatever is left to correct.
-	const auto DriveOn = [&R, Dt]() {
+	// Driven along a slope at 150 cm/s (the chassis moved by hand), levelled; then the slope steepens under it at
+	// 9 deg/s for a second, faster than the legs are asked to follow: the cap asks the drive for a part of its speed.
+	// (From then on the slope goes on steepening and easing at that rate, between 1 and 10 deg, for as long as the
+	// robot is driven: a ground that keeps turning under it.)
+	double	   Turning = 0.0;
+	const auto DriveOn = [&R, &Turning, Dt]() {
 		R.Log->SimTime += Dt;
 		R.Origin.X += 150.0 * Dt;
+		R.GroundDeg.X += Turning * 9.0 * Dt;
+		Turning = R.GroundDeg.X >= 10.0 ? -1.0 : (R.GroundDeg.X <= 1.0 && Turning != 0.0 ? 1.0 : Turning);
 		R.Frame(Dt);
 	};
-	R.GroundDeg = FVector2D(9.0, 0.0);
+	R.GroundDeg = FVector2D(1.0, 0.0);
 	R.PoseChassis(R.GroundDeg);
 	R.Level->SetAssistEnabled(true);
 	for (int32 Index = 0; Index < 240; ++Index)
 	{
 		DriveOn();
 	}
+	TestEqual(TEXT("levelled and driving on a steady slope: nothing asked of the drive"), Drive->GetDriveSpeedScale(), 1.0f, 1.0e-6f);
+	Turning = 1.0;
+	for (int32 Index = 0; Index < 30; ++Index)
+	{
+		DriveOn();
+	}
 	const float Held = Drive->GetDriveSpeedScale();
-	if (!TestTrue(*FString::Printf(TEXT("levelled and driving on the slope, the drive held to a part of its speed (%.2f)"), Held), R.State() == EState::Active && Held < 0.95f))
+	if (!TestTrue(*FString::Printf(TEXT("the ground turning faster than the legs follow, the drive held to a part of its speed (%.2f)"), Held), R.State() == EState::Active && Held < 0.95f))
 	{
 		return false;
 	}
@@ -3885,6 +3920,270 @@ bool FRammsLevelLegPlantStanceHeights::RunTest(const FString& Parameters)
 	}
 	Selector->bApplyLinkageStance = false;
 	TestFalse(TEXT("a selector that applies no stance: there is none to read the legs against"), Plant->StanceHeights(Stance, Z));
+	return true;
+}
+
+// Catches: the law stepped through the time between two ticks' looks at the clock while the chassis it reads is a
+// pose taken at another moment. A simulator stepping on its own thread publishes the bodies' poses for a frame when
+// the frame asks, so the pose a tick reads is of an even moment a little back while the clock it reads jumps by an
+// uneven amount: the distance between two poses over the time between two ticks is a speed that swings by a quarter
+// from tick to tick, the ground estimate takes the swing for a base being braked and stops believing the attitude,
+// and the legs do not follow the ground over a crest at all (the base ends up further off level than with no
+// levelling). And a pose given twice (no new one published since the last tick) taken for a reset, or for a stop.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistRunsOnThePosesTime,
+	"Ramms.Level.Assist.FollowsACrestWhenTheClockIsNotThePoses",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistRunsOnThePosesTime::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+
+	// The clock's steps from tick to tick (s): 30 frames a second in the mean, as a simulator paced to the wall
+	// clock gave them. The poses are taken evenly, a thirtieth of a second apart.
+	const double ClockSteps[3] = { 0.026, 0.034, 0.040 };
+	const double PoseStep = 1.0 / 30.0;
+	// Both ways: the poses stamped with their own time, and (as a backend that cannot say) with the clock's.
+	double Peaks[2] = { 0.0, 0.0 };
+	for (int32 Way = 0; Way < 2; ++Way)
+	{
+		const bool bStamped = Way == 0;
+		FLevelRig  R;
+		if (!TestTrue(TEXT("the made-up robot with a level assist"), R.IsReady() && R.Level != nullptr))
+		{
+			return false;
+		}
+		double PoseTime = 100.0;
+		int32  Tick = 0;
+		R.Log->SimTime = 100.0;
+		const auto Frame = [&](bool bNewPose) {
+			R.Log->SimTime += ClockSteps[Tick++ % 3];
+			if (bNewPose)
+			{
+				PoseTime += PoseStep;
+				R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+			}
+			if (bStamped)
+			{
+				R.Log->TransformTime = PoseTime;
+			}
+			R.Level->TickComponent(static_cast<float>(PoseStep), LEVELTICK_All, nullptr);
+			R.Tick(static_cast<float>(PoseStep));
+		};
+		// Standing on 6 deg nose up, switched on and walked level.
+		R.GroundDeg = FVector2D(6.0, 0.0);
+		R.PoseChassis(R.GroundDeg);
+		R.Level->SetAssistEnabled(true);
+		const FString Name = bStamped ? TEXT("poses with their own time") : TEXT("poses taken for the clock's");
+		for (int32 Index = 0; Index < 30; ++Index)
+		{
+			Frame(true);
+		}
+		if (bStamped)
+		{
+			// In the middle of the walk to level, no new pose for three ticks (the clock goes on): no time has passed
+			// between the readings, so nothing is learnt, nothing moves -- the walk waits -- and nothing resets.
+			const FVector2D Before = R.CorrectionDeg();
+			TestTrue(Name + TEXT(": (it is walking to level)"), Before.X > 0.5 && Before.X < 5.0);
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				Frame(false);
+			}
+			TestEqual(Name + TEXT(": a pose given again is not a reset"), static_cast<int32>(R.State()), static_cast<int32>(EState::Active));
+			TestTrue(Name + TEXT(": ... and is no time passed: the walk waits for the next"), R.CorrectionDeg().Equals(Before, 1.0e-6));
+		}
+		for (int32 Index = 0; Index < 120; ++Index)
+		{
+			Frame(true);
+		}
+		TestEqual(Name + TEXT(": levelled where it stands"), R.CorrectionDeg().X, 6.0, 0.3);
+
+		// Driven at 60 cm/s over a crest: the ground under it turns from 6 deg nose up to 6 deg nose down in a
+		// second and a half, then stays.
+		for (int32 Index = 0; Index < 90; ++Index)
+		{
+			R.Origin.X += 60.0 * PoseStep;
+			R.GroundDeg.X = 6.0 - 12.0 * FMath::Clamp((Index + 1) / 45.0, 0.0, 1.0);
+			Frame(true);
+			Peaks[Way] = FMath::Max(Peaks[Way], FMath::Abs(R.GroundDeg.X - R.CorrectionDeg().X));
+		}
+		AddInfo(FString::Printf(TEXT("%s: the base %.2f deg off level at most over the crest; the legs' plane %.2f deg at the end"), *Name, Peaks[Way], R.CorrectionDeg().X));
+		if (bStamped)
+		{
+			TestTrue(FString::Printf(TEXT("%s: the legs follow the ground over the crest (%.2f deg off level at most)"), *Name, Peaks[Way]), Peaks[Way] <= 2.0);
+			TestEqual(Name + TEXT(": ... and have taken the far slope out"), R.CorrectionDeg().X, -6.0, 0.5);
+		}
+	}
+	// (What it is for: taken on the clock's time, the same poses leave the base several times as far off level.)
+	TestTrue(FString::Printf(TEXT("(with the poses taken for the clock's, the crest is not followed: %.2f against %.2f deg)"), Peaks[1], Peaks[0]), Peaks[1] >= 2.0 * Peaks[0] && Peaks[1] >= 4.0);
+	return true;
+}
+
+// Catches: the seat's tilt told something other than its last writer's word because the level assist has claimed it.
+// The rider holds the seat tilted: the seat's own controller writes the tilt's command every tick -- during physics,
+// after the robot base has ticked. A drive mode's stance ramp writes the same motor earlier in every frame. With
+// nothing claimed the seat's controller has the last word each frame and the seat stays where the rider has it. With
+// the tilt claimed and told only at the base's tick, the tick found the ramp's value every frame: the tilt went to
+// the stance's while the seat's links stayed, and snapped back when the ramp ended (6 deg at 19 deg/s on a robot).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistSeatHeldThroughAStanceRamp,
+	"Ramms.Level.Assist.SeatHeldByItsControllerThroughAStanceRamp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistSeatHeldThroughAStanceRamp::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	const float Dt = 1.0f / 30.0f;
+	// Where the rider holds the tilt, and where the stance would have it (rad).
+	const float Held = 0.12f;
+	const float StanceTilt = -0.1f;
+
+	// The same frames with the level assist off and on: what the tilt's motor is told at each frame's end.
+	TArray<float> Told[2];
+	for (int32 Way = 0; Way < 2; ++Way)
+	{
+		const bool bOn = Way == 1;
+		FLevelRig  R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+		if (!TestTrue(TEXT("the made-up robot with a seat and a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+		{
+			return false;
+		}
+		R.StandSeat(0.0f, 0.0f, StanceTilt);
+		R.GroundDeg = FVector2D(4.0, 0.0);
+		R.PoseChassis(R.GroundDeg);
+		R.Level->SetAssistEnabled(bOn);
+		// One frame as the world ticks it: whoever writes before physics (the stance ramp, when there is one), the
+		// level assist, the robot base; then, during physics, the seat's controller holding the tilt.
+		const auto Frame = [&](TOptional<float> Ramp) {
+			R.World->bInTick = true;
+			R.World->TickGroup = TG_PrePhysics;
+			if (Ramp.IsSet())
+			{
+				R.Base->SetMotorCommand(SeatTilt, Ramp.GetValue());
+			}
+			R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+			R.Tick(Dt);
+			R.World->TickGroup = TG_DuringPhysics;
+			R.Base->SetMotorCommand(SeatTilt, Held);
+			R.World->bInTick = false;
+			R.World->TickGroup = TG_PrePhysics;
+			R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+		};
+		// The rider tilts the seat and holds it; the base is levelled meanwhile (where the assist is on).
+		for (int32 Index = 0; Index < 150; ++Index)
+		{
+			Frame(TOptional<float>());
+		}
+		TestEqual(bOn ? TEXT("on: levelling") : TEXT("off: off"), static_cast<int32>(R.State()), static_cast<int32>(bOn ? EState::Active : EState::Off));
+		TestEqual(bOn ? TEXT("on: the seat's tilt claimed") : TEXT("off: nothing claimed"), R.Level->IsLevelling(), bOn);
+		// A stance ramp takes the tilt's command towards the stance's over two seconds, then stops writing.
+		for (int32 Index = 0; Index < 90; ++Index)
+		{
+			Frame(Index < 60 ? TOptional<float>(FMath::Lerp(Held, StanceTilt, (Index + 1) / 60.0f)) : TOptional<float>());
+			Told[Way].Add(R.Log->LastFor(SeatTilt));
+		}
+	}
+	if (!TestTrue(TEXT("both ran"), Told[0].Num() == 90 && Told[1].Num() == 90))
+	{
+		return false;
+	}
+	float MostOff = 0.0f;
+	float MostOn = 0.0f;
+	float MostApart = 0.0f;
+	for (int32 Index = 0; Index < 90; ++Index)
+	{
+		MostOff = FMath::Max(MostOff, FMath::Abs(Told[0][Index] - Held));
+		MostOn = FMath::Max(MostOn, FMath::Abs(Told[1][Index] - Held));
+		MostApart = FMath::Max(MostApart, FMath::Abs(Told[1][Index] - Told[0][Index]));
+	}
+	AddInfo(FString::Printf(TEXT("the tilt's motor through a stance ramp of %.2f rad, the seat's controller holding it: told %.4f rad off the held value at most with the assist off, %.4f with it on"), Held - StanceTilt, MostOff,
+		MostOn));
+	TestEqual(TEXT("off: the seat's controller has the last word every frame"), MostOff, 0.0f, 1.0e-6f);
+	TestEqual(TEXT("on, no trim asked: the tilt is told what its controller holds it at, every frame"), MostOn, 0.0f, 1.0e-4f);
+	TestEqual(TEXT("... the same as with nothing claimed"), MostApart, 0.0f, 1.0e-4f);
+	return true;
+}
+
+// Catches: the drive not saying what its stick asks, or the level assist not passing it on. The speed cap then takes
+// the speed there is for the speed asked: a robot run away downhill past its stick is not seen to be, and a robot
+// held back by a slope is slowed for a speed it does not have.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistAskedSpeed,
+	"Ramms.Level.Assist.TheDriveSaysWhatItsStickAsks",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistAskedSpeed::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	{
+		// The differential drive, on its own: what the stick asks forward, in velocity control; nothing to say in
+		// torque control (the stick asks a torque) or when it is not the active mode.
+		FRig							   Bare;
+		URammsDifferentialDriveController* Diff = NewObject<URammsDifferentialDriveController>(Bare.Actor, TEXT("Differential"));
+		IRammsDriveMode*				   DiffMode = Diff;
+		Diff->MaxVelocity = 60.0f;
+		Diff->MaxTurningSpeed = 70.0f;
+		Diff->TrackWidth = 55.0f;
+		Diff->InputDeadZone = 0.0f;
+		Diff->SetControlMode(EDriveControlMode::VelocityControl);
+		DiffMode->SetDriveModeActive(true);
+		Diff->SetDriveInput(FVector2D(0.0, 0.5));
+		TestEqual(TEXT("differential, half stick forward: half its speed asked"), DiffMode->GetAskedSpeedCmS(), 30.0f, 1.0e-3f);
+		Diff->SetDriveInput(FVector2D(0.3, -1.0));
+		TestEqual(TEXT("differential, full stick back with some turn: its full speed (the turn asks none)"), DiffMode->GetAskedSpeedCmS(), 60.0f * (60.0f / (60.0f + 0.3f * FMath::DegreesToRadians(70.0f) * 27.5f)), 0.5f);
+		Diff->SetDriveInput(FVector2D(1.0, 0.0));
+		TestEqual(TEXT("differential, a turn on the spot: no speed asked"), DiffMode->GetAskedSpeedCmS(), 0.0f, 1.0e-3f);
+		Diff->SetControlMode(EDriveControlMode::TorqueControl);
+		TestTrue(TEXT("differential, torque control: it cannot say"), DiffMode->GetAskedSpeedCmS() < 0.0f);
+		Diff->SetControlMode(EDriveControlMode::VelocityControl);
+		DiffMode->SetDriveModeActive(false);
+		TestTrue(TEXT("differential, not the active mode: it cannot say"), DiffMode->GetAskedSpeedCmS() < 0.0f);
+	}
+
+	// Through the level assist: levelled on a slope with the holonomic drive asked for half its speed, the chassis
+	// moved (by hand) at that speed, and then half as fast again -- as down the far side of a crest.
+	FLevelRig R;
+	if (!TestTrue(TEXT("the made-up robot with a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	URammsHolonomicDriveController* Drive = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+	IRammsDriveMode*				DriveMode = Drive;
+	const float						Dt = 1.0f / 30.0f;
+	R.Log->SimTime = 50.0;
+	Drive->SetDriveCommand(FVector(0.5, 0.0, 0.0));
+	const float Asked = DriveMode->GetAskedSpeedCmS();
+	if (!TestTrue(*FString::Printf(TEXT("the holonomic drive says what its command asks (%.1f cm/s)"), Asked), Asked > 5.0f))
+	{
+		return false;
+	}
+	double	   Speed = Asked;
+	const auto DriveOn = [&R, &Speed, Dt]() {
+		R.Log->SimTime += Dt;
+		R.Origin.X += Speed * Dt;
+		R.Frame(Dt);
+	};
+	R.GroundDeg = FVector2D(4.0, 0.0);
+	R.PoseChassis(R.GroundDeg);
+	R.Level->SetAssistEnabled(true);
+	for (int32 Index = 0; Index < 180; ++Index)
+	{
+		DriveOn();
+	}
+	TestTrue(TEXT("levelled, driven at the speed asked: nothing asked of the drive"), R.State() == EState::Active && Drive->GetDriveSpeedScale() >= 1.0f - 1.0e-6f);
+	Speed = 1.25 * Asked;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		DriveOn();
+	}
+	// Twice the excess: a quarter over is half the speed asked for.
+	TestEqual(TEXT("a quarter faster than its stick asks: the drive is asked for half, at once"), Drive->GetDriveSpeedScale(), 0.5f, 0.03f);
+	Speed = Asked;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		DriveOn();
+	}
+	TestTrue(TEXT("back at the speed asked: nothing asked of the drive again"), Drive->GetDriveSpeedScale() >= 0.97f);
 	return true;
 }
 

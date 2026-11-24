@@ -168,6 +168,25 @@ namespace RammsLevelLoopTests
 		return In;
 	}
 
+	/** The speed cap as it was before it led the drive down and left a steady
+	 *  slope alone: slowing all along a slope for its end, a fall straight to
+	 *  its target, no word on how steadily the drive is asked. For the checks
+	 *  of the terms' own forms, which those would otherwise shape. */
+	FSpeedScale PlainCap(bool bSlopeEnd)
+	{
+		FSpeedScale Scale;
+		Scale.Cap.bSlopeEnd = bSlopeEnd;
+		Scale.Cap.LeadCmS = 0.0;
+		Scale.Cap.LeadShare = 0.0;
+		Scale.Cap.OverspeedGain = 0.0;
+		Scale.Cap.FallSeconds = 0.0;
+		Scale.Cap.SteadyAskCmS2 = 1.0e9;
+		Scale.Cap.UnsteadyAskCmS2 = 2.0e9;
+		Scale.Cap.SteadySpeedCmS2 = 1.0e9;
+		Scale.Cap.UnsteadySpeedCmS2 = 2.0e9;
+		return Scale;
+	}
+
 	/** Ticks of a base at rest with the given error; returns the last answer. */
 	bool RestFor(FQuiet& Quiet, int32 Ticks, double ErrorDeg, const FTuning& Tuning)
 	{
@@ -1273,11 +1292,12 @@ bool FRammsLevelSpeedScaleErrorRamp::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Catches: the slope's-end term's form (the speed at which the ground would
-// turn at what the legs can follow when the slope ends: Follow * span /
-// slope), a robot slowed for standing on a slope, or for a speed its stick
-// asks and it does not have; and anything that slows for how little reach is
-// left (the cap is not told).
+// Catches: a steady slope costing the rider speed with the term off (as the
+// cap comes); and, switched on, the slope's-end term's form (the speed at
+// which the ground would turn at what the legs can follow when the slope
+// ends: Follow * span / slope), a robot slowed for standing on a slope, or
+// for a speed its stick asks and it does not have; and anything that slows
+// for how little reach is left (the cap is not told).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelSpeedScaleSlopesEnd,
 	"Ramms.Level.SpeedScale.SlowsForTheSlopesEnd",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1292,30 +1312,38 @@ bool FRammsLevelSpeedScaleSlopesEnd::RunTest(const FString& Parameters)
 	// back within 45 cm: 45 cm/s.
 	const FSpeedCapInputs Six = CapSlope(6.0, 45.0, 10.0);
 	{
+		// The term is off as the cap comes: a steady slope the legs hold level
+		// costs nothing, at any speed.
 		FSpeedScale Scale;
+		Near(*this, TEXT("as it comes, 6 deg at 90 cm/s: full speed"), DrivenScale(Scale, Six, 90.0, Still, Tuning), 1.0, 1e-12);
+		Near(*this, TEXT("as it comes, 12 deg at 600 cm/s: full speed"), DrivenScale(Scale, CapSlope(12.0, 45.0, 10.0), 600.0, Still, Tuning), 1.0, 1e-12);
+		Near(*this, TEXT("... and no speed kept for a slope's end"), Scale.GetExitSpeedCmS(), 0.0, 1e-12);
+	}
+	{
+		FSpeedScale Scale = PlainCap(true);
 		Near(*this, TEXT("6 deg, the stick asking 45 cm/s: full speed"), DrivenScale(Scale, Six, 45.0, Still, Tuning), 1.0, 1e-9);
 		Near(*this, TEXT("... what the legs can follow"), Scale.GetFollowDegPerSec(), 6.0, 1e-9);
 		Near(*this, TEXT("... the speed the slope's end can be taken at"), Scale.GetExitSpeedCmS(), 45.0, 1e-9);
 	}
 	{
-		FSpeedScale Scale;
+		FSpeedScale Scale = PlainCap(true);
 		Near(*this, TEXT("6 deg, the stick asking 90: half"), DrivenScale(Scale, Six, 90.0, Still, Tuning), 0.5, 1e-6);
 		Near(*this, TEXT("... the speed the stick is taken to ask"), Scale.GetFreeSpeedCmS(), 90.0, 1e-6);
 		Near(*this, TEXT("the stick let go to 45: full speed again"), DrivenScale(Scale, Six, 45.0, Still, Tuning), 1.0, 1e-6);
 	}
 	{
-		FSpeedScale Scale;
+		FSpeedScale Scale = PlainCap(true);
 		Near(*this, TEXT("6 deg, the stick asking 600: the floor"), DrivenScale(Scale, Six, 600.0, Still, Tuning), Tuning.MinSpeedScale, 1e-9);
 	}
 	{
 		// Twice the slope is half the speed; twice the span twice it.
-		FSpeedScale Steep, Long;
+		FSpeedScale Steep = PlainCap(true), Long = PlainCap(true);
 		Near(*this, TEXT("12 deg at 45: half"), DrivenScale(Steep, CapSlope(12.0, 45.0, 10.0), 45.0, Still, Tuning), 0.5, 1e-6);
 		Near(*this, TEXT("12 deg over legs 90 cm apart, at 45: full speed"), DrivenScale(Long, CapSlope(12.0, 90.0, 10.0), 45.0, Still, Tuning), 1.0, 1e-9);
 	}
 	{
 		// Slower legs: 0.8 of 5 deg/s is 4, and 30 cm/s.
-		FSpeedScale Slow, Quick, NoRate;
+		FSpeedScale Slow = PlainCap(true), Quick = PlainCap(true), NoRate = PlainCap(true);
 		Near(*this, TEXT("legs at 5 deg/s, 6 deg at 60: half"), DrivenScale(Slow, CapSlope(6.0, 45.0, 5.0), 60.0, Still, Tuning), 0.5, 1e-6);
 		// Legs however quick: the ground no faster than 6 deg/s all the same.
 		Near(*this, TEXT("legs at 100 deg/s, 6 deg at 90: half still"), DrivenScale(Quick, CapSlope(6.0, 45.0, 100.0), 90.0, Still, Tuning), 0.5, 1e-6);
@@ -1326,7 +1354,7 @@ bool FRammsLevelSpeedScaleSlopesEnd::RunTest(const FString& Parameters)
 		// is half -- and so is the way left to lose it in: the drive is not
 		// let go into it. It keeps to the speed the whole slope's end is
 		// taken at until the robot is a span and a half on.
-		FSpeedScale Scale;
+		FSpeedScale Scale = PlainCap(true);
 		DrivenScale(Scale, Six, 90.0, Still, Tuning); // at half: 45 cm/s
 		FSpeedCapInputs Ending = CapSlope(3.0, 45.0, 10.0);
 		Ending.SpeedCmS = 45.0;
@@ -1348,7 +1376,7 @@ bool FRammsLevelSpeedScaleSlopesEnd::RunTest(const FString& Parameters)
 	}
 	{
 		// Standing on the slope, and on level ground at any speed: nothing.
-		FSpeedScale Standing, Level, NoSpan;
+		FSpeedScale Standing = PlainCap(true), Level = PlainCap(true), NoSpan = PlainCap(true);
 		Near(*this, TEXT("standing on 12 deg: full speed"), DrivenScale(Standing, CapSlope(12.0, 45.0, 10.0), 0.0, Still, Tuning), 1.0, 1e-12);
 		Near(*this, TEXT("level ground at 600 cm/s: full speed"), DrivenScale(Level, CapSlope(0.0, 45.0, 10.0), 600.0, Still, Tuning), 1.0, 1e-12);
 		Near(*this, TEXT("no span known: full speed"), DrivenScale(NoSpan, CapSlope(12.0, 0.0, 10.0), 600.0, Still, Tuning), 1.0, 1e-12);
@@ -1357,7 +1385,7 @@ bool FRammsLevelSpeedScaleSlopesEnd::RunTest(const FString& Parameters)
 		// A robot that is not getting the speed its stick asks (a drive at
 		// its limit on the ramp) crawls at 20 cm/s whatever the scale: it is
 		// not slowed for a speed it does not have.
-		FSpeedScale		Scale;
+		FSpeedScale		Scale = PlainCap(true);
 		FSpeedCapInputs In = CapSlope(12.0, 45.0, 10.0);
 		In.SpeedCmS = 20.0;
 		Near(*this, TEXT("12 deg at a crawl of 20 cm/s: full speed"), SettledScale(Scale, In, Tuning), 1.0, 1e-12);
@@ -1424,7 +1452,7 @@ bool FRammsLevelSpeedScaleSlew::RunTest(const FString& Parameters)
 	using namespace RammsLevelLoopTests;
 	const FTuning Tuning; // falls at 2 per s, rises at 0.5
 	{
-		FSpeedScale Scale;
+		FSpeedScale Scale = PlainCap(false);
 		Near(*this, TEXT("starts at full speed"), Scale.Get(), 1.0, 1e-12);
 		Near(*this, TEXT("a large error: down 0.2 in 0.1 s"), Scale.Tick(CapError(9.0), 0.1, Tuning), 0.8, 1e-9);
 		Near(*this, TEXT("and again"), Scale.Tick(CapError(9.0), 0.1, Tuning), 0.6, 1e-9);
@@ -1441,7 +1469,7 @@ bool FRammsLevelSpeedScaleSlew::RunTest(const FString& Parameters)
 	{
 		// At 300 cm/s a fall of 2 per s would brake at 600 cm/s^2: held to
 		// 150, half a scale a second.
-		FSpeedScale		Scale;
+		FSpeedScale		Scale = PlainCap(false);
 		FSpeedCapInputs In = CapError(9.0);
 		In.SpeedCmS = 300.0;
 		Near(*this, TEXT("a large error at 300 cm/s: down 0.05 in 0.1 s"), Scale.Tick(In, 0.1, Tuning), 0.95, 1e-9);
@@ -1937,6 +1965,218 @@ bool FRammsLevelGroundGateTurnOnASlope::RunTest(const FString& Parameters)
 		const FVector2D Knocked = Gentle.Tick(FVector2D(4.0, 0.0), 0.0, 0.1, 0.0, Dt, YawRate);
 		TestEqual(TEXT("a 1 deg slope, a 3 deg knock while turning: the settling allowance and the slope's swing, no more"), Knocked.X - 1.0,
 			(Gentle.Tuning.SettleDegPerSec + 1.0 * FMath::DegreesToRadians(YawRate)) * Dt, 1.0e-9);
+	}
+	return true;
+}
+
+// Catches: a speed taken over the wrong time (the tick's, not the readings'), a reading given twice taken for a
+// stop, a clock that ran backwards taken for a huge speed, a turn's sign or size.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelMotionSenseTest,
+	"Ramms.Level.Loop.MotionSenseIsOnTheReadingsOwnTime",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelMotionSenseTest::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevel;
+
+	FMotionSense	Motion;
+	const FVector2D East(1.0, 0.0);
+	TestEqual(TEXT("the first reading takes no time"), Motion.Tick(FVector(0.0, 0.0, 0.0), East, 10.0), 0.0);
+	TestEqual(TEXT("... and gives no speed"), Motion.GetSpeedCmS(), 0.0);
+	TestTrue(TEXT("... but is a reading"), Motion.HasReading());
+
+	// 50 cm/s, read at uneven moments: the speed is the same at every one.
+	double		 At = 10.0;
+	const double Gaps[5] = { 0.02, 0.07, 0.033, 0.014, 0.052 };
+	for (const double Gap : Gaps)
+	{
+		At += Gap;
+		const double Since = Motion.Tick(FVector(50.0 * (At - 10.0), 0.0, 0.0), East, At);
+		TestEqual(TEXT("the time since the last reading is the readings' own"), Since, Gap, 1.0e-12);
+		TestEqual(TEXT("a steady pace reads steady, however unevenly it is read"), Motion.GetSpeedCmS(), 50.0, 1.0e-6);
+		TestEqual(TEXT("... the distance with it"), Motion.MovedCm(), 50.0 * Gap, 1.0e-9);
+	}
+
+	// The same reading again: nothing new, and not a stop.
+	TestEqual(TEXT("a reading given twice takes no time"), Motion.Tick(FVector(50.0 * (At - 10.0), 0.0, 0.0), East, At), 0.0);
+	TestEqual(TEXT("... and changes no speed"), Motion.GetSpeedCmS(), 50.0, 1.0e-6);
+	TestEqual(TEXT("... nor moved anything"), Motion.MovedCm(), 0.0);
+
+	// A turn of 9 deg in 0.1 s, going nowhere.
+	const double Was = Motion.GetSampleSeconds();
+	Motion.Tick(FVector(50.0 * (At - 10.0), 0.0, 0.0), FVector2D(FMath::Cos(FMath::DegreesToRadians(9.0)), FMath::Sin(FMath::DegreesToRadians(9.0))), Was + 0.1);
+	TestEqual(TEXT("a turn on the spot: no speed"), Motion.GetSpeedCmS(), 0.0, 1.0e-9);
+	TestEqual(TEXT("... 90 deg/s"), Motion.GetYawRateDegPerSec(), 90.0, 1.0e-6);
+	Motion.Tick(FVector(50.0 * (At - 10.0), 0.0, 0.0), FVector2D::ZeroVector, Was + 0.2);
+	TestEqual(TEXT("a heading that is not known: no turning rate"), Motion.GetYawRateDegPerSec(), 0.0);
+
+	// A reading that is not a number is no reading.
+	TestEqual(TEXT("a time that is not a number takes none"), Motion.Tick(FVector(1.0e6, 0.0, 0.0), East, NAN), 0.0);
+	TestEqual(TEXT("... and is not kept"), Motion.GetSampleSeconds(), Was + 0.2, 1.0e-12);
+
+	// Time ran backwards (a simulation reset): begun again, no speed made of it.
+	TestEqual(TEXT("a reading from before the last takes no time"), Motion.Tick(FVector(0.0, 0.0, 0.0), East, 1.0), 0.0);
+	TestTrue(TEXT("... says the clock ran backwards"), Motion.RanBackwards());
+	TestEqual(TEXT("... and gives no speed"), Motion.GetSpeedCmS(), 0.0);
+	Motion.Tick(FVector(3.0, 0.0, 0.0), East, 1.1);
+	TestFalse(TEXT("... once"), Motion.RanBackwards());
+	TestEqual(TEXT("... and goes on from there"), Motion.GetSpeedCmS(), 30.0, 1.0e-6);
+	return true;
+}
+
+// Catches: a cap that stops the robot. The drive it asks is a speed loop: asked for much less than the speed the
+// robot has, it brakes through what was asked. So the speed asked is led down from the speed there is (never more
+// than a fifth of it and 5 cm/s under), the last of the way gently; and a robot going FASTER than its stick asks
+// (run away down the far side of a crest) is asked for less in proportion to the excess, only while it is.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelSpeedScaleLed,
+	"Ramms.Level.SpeedScale.LedDownNeverThrough",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelSpeedScaleLed::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	{
+		// At 60 cm/s, its stick asking 60, the legs suddenly far behind (the cap wants its floor): a drive that
+		// slows at 60 cm/s^2 whatever it is asked. The speed asked is never far under the speed there is.
+		FSpeedScale		Scale;
+		FSpeedCapInputs In = CapError(9.0);
+		In.AskedSpeedCmS = 60.0;
+		double Speed = 60.0;
+		double LeastLead = 0.0;
+		double Biggest = 0.0;
+		double Was = 1.0;
+		for (int32 i = 0; i < 64; ++i)
+		{
+			In.SpeedCmS = Speed;
+			const double Now = Scale.Tick(In, Dt, Tuning);
+			LeastLead = FMath::Min(LeastLead, Now * 60.0 - (0.8 * Speed - 5.0));
+			Biggest = FMath::Max(Biggest, Was - Now);
+			Was = Now;
+			Speed = FMath::Max(Now * 60.0, Speed - 60.0 * Dt);
+		}
+		TestTrue(FString::Printf(TEXT("the speed asked is never more than a fifth of the speed there is, and 5 cm/s, under it (%.2f cm/s)"), LeastLead), LeastLead >= -1.0e-6);
+		Near(*this, TEXT("... and the floor is reached once the robot has come down to it"), Scale.Get(), Tuning.MinSpeedScale, 1e-6);
+		TestTrue(FString::Printf(TEXT("... the scale never falling faster than its rate (%.3f a tick)"), Biggest), Biggest <= 2.0 * Dt + 1.0e-9);
+	}
+	{
+		// A robot that does not slow at all (gravity has it): the scale waits a fifth under its speed, for good.
+		FSpeedScale		Scale;
+		FSpeedCapInputs In = CapError(9.0);
+		In.AskedSpeedCmS = 60.0;
+		In.SpeedCmS = 60.0;
+		Near(*this, TEXT("a robot that is not slowing is not asked for a crawl"), SettledScale(Scale, In, Tuning), (0.8 * 60.0 - 5.0) / 60.0, 1e-6);
+	}
+	{
+		// The last of the way down is gentle: closing on a target a tenth away, the step is the gap over a quarter
+		// of a second, not the rate's.
+		FSpeedScale		Scale;
+		FSpeedCapInputs In = CapError(1.2); // 0.925 of full speed
+		Near(*this, TEXT("a small way down: a quarter of the gap in a sixteenth of a second"), Scale.Tick(In, Dt, Tuning), 1.0 - 0.075 * Dt / 0.25, 1e-9);
+	}
+	{
+		// Faster than its stick asks: asked for less by twice the excess, at once, and back at once.
+		FSpeedScale		Scale;
+		FSpeedCapInputs In;
+		In.AskedSpeedCmS = 60.0;
+		In.SpeedCmS = 60.0;
+		Near(*this, TEXT("at the speed asked: full"), Scale.Tick(In, Dt, Tuning), 1.0, 1e-12);
+		In.SpeedCmS = 66.0;
+		Near(*this, TEXT("a tenth over: asked for a fifth less, at once"), Scale.Tick(In, Dt, Tuning), 0.8, 1e-9);
+		In.SpeedCmS = 120.0;
+		Near(*this, TEXT("twice the speed asked: the floor, never under it"), Scale.Tick(In, Dt, Tuning), Tuning.MinSpeedScale, 1e-12);
+		In.SpeedCmS = 63.0;
+		Near(*this, TEXT("nearly back: nearly full, at once (it fades as the robot comes back)"), Scale.Tick(In, Dt, Tuning), 0.9, 1e-9);
+		In.SpeedCmS = 55.0;
+		Near(*this, TEXT("under the speed asked: full"), Scale.Tick(In, Dt, Tuning), 1.0, 1e-12);
+		// A drive that cannot say what its stick asks: no such term (the speed there is, is all that is known).
+		FSpeedScale		Blind;
+		FSpeedCapInputs Unknown;
+		Unknown.SpeedCmS = 60.0;
+		Blind.Tick(Unknown, Dt, Tuning);
+		Unknown.SpeedCmS = 90.0;
+		TestTrue(TEXT("a drive that cannot say what is asked is not taken to be running away"), Blind.Tick(Unknown, Dt, Tuning) > 0.95);
+	}
+	return true;
+}
+
+// Catches: a cap that answers what its own braking does (a drive made to slow pitches the body nose down, the
+// estimate follows some of it, and the cap slows for that: the speed hunts), or a start; and one that slows for the
+// slope swinging round in the chassis' frame when the chassis is turned about the vertical, which going slower
+// does nothing for.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelSpeedScaleSteady,
+	"Ramms.Level.SpeedScale.DoesNotAnswerItsOwnBrakingNorATurnOnASlope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelSpeedScaleSteady::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	const auto	  Turning = [](double AskedCmS, double SpeedCmS, const FVector2D& RateDegPerSec) {
+		   FSpeedCapInputs In = CapSlope(0.0, 45.0, 10.0);
+		   In.AskedSpeedCmS = AskedCmS;
+		   In.SpeedCmS = SpeedCmS;
+		   In.bGroundRateKnown = true;
+		   In.GroundRateDegPerSec = RateDegPerSec;
+		   return In;
+	};
+	{
+		// A start: the stick goes from nothing to 60 cm/s, and for the next half second the estimate turns at
+		// 20 deg/s (the body pitching back as the drive pushes off). Not the ground: not answered.
+		FSpeedScale Scale;
+		Scale.Tick(Turning(0.0, 0.0, FVector2D::ZeroVector), Dt, Tuning);
+		double Least = 1.0;
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Least = FMath::Min(Least, Scale.Tick(Turning(60.0, 7.0 * (i + 1), FVector2D(20.0, 0.0)), Dt, Tuning));
+		}
+		Near(*this, TEXT("a start's pitch is not answered"), Least, 1.0, 1e-12);
+		TestTrue(TEXT("... nor kept"), Scale.GetTurnDegPerSec().Size() < 0.5);
+		// Driven steadily after, the same turning IS the ground's.
+		for (int32 i = 0; i < 16; ++i)
+		{
+			Least = FMath::Min(Least, Scale.Tick(Turning(60.0, 60.0, FVector2D(20.0, 0.0)), Dt, Tuning));
+		}
+		TestTrue(FString::Printf(TEXT("the same turning under a robot driven steadily is slowed for (%.2f)"), Least), Least < 0.8);
+	}
+	{
+		// Slowing for a ground that turns at 12 deg/s: while the cap itself is bringing the speed asked down, a
+		// reading twice as large (the body pitching with the braking) is not taken up; what was read stands.
+		FSpeedScale Scale;
+		for (int32 i = 0; i < 16; ++i)
+		{
+			Scale.Tick(Turning(60.0, 60.0, FVector2D::ZeroVector), Dt, Tuning);
+		}
+		for (int32 i = 0; i < 4; ++i)
+		{
+			Scale.Tick(Turning(60.0, 60.0, FVector2D(12.0, 0.0)), Dt, Tuning);
+		}
+		const double Read = Scale.GetTurnDegPerSec().X;
+		TestTrue(FString::Printf(TEXT("(the ground's turning read, %.1f deg/s, and the scale coming down, %.2f)"), Read, Scale.Get()), Read > 6.0 && Scale.Get() < 1.0);
+		TestTrue(FString::Printf(TEXT("(the drive is being asked to slow: the turning is not being taken up, %.2f)"), Scale.GetSteady()), Scale.GetSteady() < 0.5);
+		double Most = Read;
+		for (int32 i = 0; i < 3; ++i)
+		{
+			Scale.Tick(Turning(60.0, 50.0 - 10.0 * i, FVector2D(24.0, 0.0)), Dt, Tuning);
+			Most = FMath::Max(Most, Scale.GetTurnDegPerSec().X);
+		}
+		TestTrue(FString::Printf(TEXT("a reading made while the cap is braking is not taken for the ground's (%.1f against %.1f deg/s)"), Most, Read), Most <= Read + 1.5);
+	}
+	{
+		// On a 6 deg slope, turned about the vertical at 60 deg/s: the slope swings 6.3 deg/s in the chassis' frame.
+		// That much of the estimate's turning is not a break in the ground.
+		FSpeedCapInputs In = Turning(60.0, 60.0, FVector2D(-3.0, 5.2)); // 6 deg/s
+		In.SlopeDeg = 6.0;
+		In.YawRateDegPerSec = 60.0;
+		FSpeedScale Turned;
+		Near(*this, TEXT("a slope swung round by the chassis' own turning: full speed"), SettledScale(Turned, In, Tuning), 1.0, 1e-12);
+		Near(*this, TEXT("... nothing of it kept as the ground's turning"), Turned.GetTurnDegPerSec().Size(), 0.0, 1e-9);
+		In.GroundRateDegPerSec = FVector2D(-6.0, 10.4); // 12 deg/s: 5.7 of it is not the turn's
+		FSpeedScale Both;
+		SettledScale(Both, In, Tuning);
+		Near(*this, TEXT("what is over the swing is the ground's"), Both.GetTurnDegPerSec().Size(), 12.0 - 6.0 * FMath::DegreesToRadians(60.0), 0.05);
 	}
 	return true;
 }

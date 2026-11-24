@@ -1579,6 +1579,34 @@ float URammsDifferentialDriveController::GetDriveSpeedScale() const
 	return static_cast<float>(SpeedRequests->Get(Now()));
 }
 
+float URammsDifferentialDriveController::GetAskedSpeedCmS() const
+{
+	if (!bDriveModeActive || ControlMode != EDriveControlMode::VelocityControl)
+	{
+		return -1.0f;
+	}
+	// The stick's own mix, as UpdateVelocityControl makes it.
+	FDifferentialDriveCommand Asked;
+	if (MaxTurningSpeed > 0.0f)
+	{
+		const FVector2D Input = URammsDifferentialDriveLibrary::ApplyDeadZone2D(DriveInput, InputDeadZone);
+		const float		Forward = FMath::Clamp(Input.Y, -1.0f, 1.0f) * MaxVelocity;
+		const float		Turn = FMath::Clamp(Input.X, -1.0f, 1.0f) * FMath::DegreesToRadians(MaxTurningSpeed) * TrackWidth * 0.5f;
+		Asked = FDifferentialDriveCommand(Forward + Turn, Forward - Turn);
+		const float Most = FMath::Max(FMath::Abs(Asked.LeftCommand), FMath::Abs(Asked.RightCommand));
+		if (Most > MaxVelocity && Most > UE_SMALL_NUMBER)
+		{
+			Asked.LeftCommand *= MaxVelocity / Most;
+			Asked.RightCommand *= MaxVelocity / Most;
+		}
+	}
+	else
+	{
+		Asked = URammsDifferentialDriveLibrary::JoystickToDifferentialDrive(DriveInput, MaxVelocity, InputDeadZone);
+	}
+	return FMath::Abs(0.5f * (Asked.LeftCommand + Asked.RightCommand));
+}
+
 FRammsDriveMotion URammsDifferentialDriveController::GetCarriableMotion(const FRammsDriveMotion& Motion) const
 {
 	return RammsDrive::DifferentialCarriable(Motion, MaxTurningSpeed);

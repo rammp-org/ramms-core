@@ -39,6 +39,9 @@ namespace RammsLevel
 		Out.Deg = Deg;
 		Out.Position = Position;
 		Out.Heading = FVector2D(Measured.Forward.X, Measured.Forward.Y).GetSafeNormal();
+		// The pivots are where the backend's poses have them: as of those
+		// poses' time, which need not be the clock's now.
+		Out.TimeSeconds = BasePtr->GetTransformTime();
 		return true;
 	}
 } // namespace RammsLevel

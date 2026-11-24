@@ -1354,7 +1354,19 @@ bool FRammsLevelLawSpeedCap::RunTest(const FString& Parameters)
 			}
 			return Out;
 		};
+		// (With the slope's-end term switched on: as the cap comes, a steady
+		// slope costs nothing -- checked last.)
+		const auto SlopeEndOn = [](FToy& Toy) {
+			Toy.State.SpeedScale.Cap.bSlopeEnd = true;
+			Toy.State.SpeedScale.Cap.LeadCmS = 0.0;
+			Toy.State.SpeedScale.Cap.OverspeedGain = 0.0;
+			Toy.State.SpeedScale.Cap.SteadyAskCmS2 = 1.0e9;
+			Toy.State.SpeedScale.Cap.UnsteadyAskCmS2 = 2.0e9;
+			Toy.State.SpeedScale.Cap.SteadySpeedCmS2 = 1.0e9;
+			Toy.State.SpeedScale.Cap.UnsteadySpeedCmS2 = 2.0e9;
+		};
 		FToy Toy(20.0);
+		SlopeEndOn(Toy);
 		Toy.GroundDeg = FVector2D(9.0, 0.0);
 		Toy.In.bStick = true;
 		FOutputs Out = Settle(Toy, 30.0);
@@ -1372,6 +1384,7 @@ bool FRammsLevelLawSpeedCap::RunTest(const FString& Parameters)
 		// turns the correction at, and a 4 deg grade's end is taken slower
 		// for it.
 		FToy Slow(20.0);
+		SlopeEndOn(Slow);
 		for (FLegReach& Leg : Slow.Legs)
 		{
 			Leg.MaxRateCmS = 2.0;
@@ -1382,6 +1395,27 @@ bool FRammsLevelLawSpeedCap::RunTest(const FString& Parameters)
 		const double LegsDegPerSec = 0.8 * 2.0 / (45.0 * FMath::Tan(FMath::DegreesToRadians(1.0)));
 		TestNearlyEqual(TEXT("Slow legs: the ground may turn at 0.8 of what they turn the correction at"), Slow.State.SpeedScale.GetFollowDegPerSec(), 0.8 * LegsDegPerSec, 1.0e-3);
 		TestNearlyEqual(TEXT("Slow legs: the speed a 4 deg grade's end can be taken at"), Slow.State.SpeedScale.GetExitSpeedCmS(), 0.8 * LegsDegPerSec * 54.0 / 4.0, 0.5);
+
+		// As the cap comes: the same steady 9 deg, the stick asking 72 cm/s,
+		// costs nothing.
+		FToy Free(20.0);
+		Free.GroundDeg = FVector2D(9.0, 0.0);
+		Free.In.bStick = true;
+		Free.In.AskedSpeedCmS = 72.0;
+		Out = Settle(Free, 72.0);
+		TestTrue(FString::Printf(TEXT("9 deg, levelled, the stick asking 72 cm/s: a steady slope costs nothing (%.3f)"), Out.SpeedScale), Out.ErrorDeg < 0.3 && Out.SpeedScale >= 1.0 - 1.0e-9);
+
+		// What the stick asks reaches the cap: going half as fast again as
+		// asked (run away downhill), the drive is asked for less at once; with
+		// the drive not saying what is asked, the speed there is, is all the
+		// cap has, and it is not taken for a run-away.
+		Free.In.AskedSpeedCmS = 40.0;
+		Free.In.SpeedCmS = 60.0;
+		Out = Free.Step(Frame);
+		TestNearlyEqual(TEXT("Half as fast again as its stick asks: asked for the floor"), Out.SpeedScale, Free.Tuning.MinSpeedScale, 1.0e-9);
+		Free.In.AskedSpeedCmS = -1.0;
+		Out = Free.Step(Frame);
+		TestTrue(FString::Printf(TEXT("A drive that does not say what is asked: no run-away is read into its speed (%.3f)"), Out.SpeedScale), Out.SpeedScale >= 0.95);
 	}
 	return true;
 }

@@ -216,4 +216,16 @@ public:
 	 * crossing) is not slowed by anyone.
 	 */
 	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) {}
+
+	/**
+	 * The speed over the ground this mode's operator is asking for now (cm/s,
+	 * 0 or more), before any request to go slower (SetDriveSpeedScale): what
+	 * the stick says, not what the robot is doing. For whoever asks the mode
+	 * to go slower: a robot can be going faster than its stick asks (gravity,
+	 * down the far side of a crest) or slower (a drive at its limit on a
+	 * ramp), and a request sized by the speed there is, taken for the speed
+	 * asked, chases the difference. Negative: this mode cannot say (the
+	 * default; a mode whose stick asks a torque, not a speed).
+	 */
+	virtual float GetAskedSpeedCmS() const { return -1.0f; }
 };

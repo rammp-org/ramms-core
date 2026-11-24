@@ -170,6 +170,9 @@ public:
 	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) override;
 	/** The scale the live requests leave this mode at now (1: none). */
 	float GetDriveSpeedScale() const;
+	/** The speed over the ground the command asks (forward and strafe
+	 *  together), before any request to go slower. */
+	virtual float GetAskedSpeedCmS() const override;
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;

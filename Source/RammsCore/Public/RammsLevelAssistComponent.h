@@ -90,7 +90,9 @@ namespace RammsLevel
  * that ticks in a later group (the 5-bar, seat and Gen1 lift controllers
  * tick during physics) is NOT made a prerequisite: that would move this
  * tick, and the base's behind it, out of the group before physics. What such
- * a writer commands in its own tick is told a frame late, with its offset.
+ * a writer commands in its own tick is told at once, with its offset: it is
+ * the frame's last word on that motor, as with nothing claimed (the base's
+ * rule for a write made after its tick).
  * It also means that, for as long as the layer is held (a crossing it stands
  * by for included: the layer is kept, with every offset zero or folded), a
  * command to a levelled motor -- a leg's, the seat's tilt -- is told at the

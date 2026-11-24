@@ -58,7 +58,8 @@
  * Per frame (FOptions::FrameSeconds): the sensor reads the true attitude
  * (plus Bias, plus noise uniform in +-NoiseDeg per axis from a FRandomStream
  * seeded with Seed, a frame late with bDelayOneFrame); the legs are measured;
- * FLaw::Step runs with Dt = FrameSeconds; its Dz is commanded when bWrite or
+ * FLaw::Step runs with Dt = FrameSeconds (unlocked, FUnlocked: with the time
+ * between the poses it was given); its Dz is commanded when bWrite or
  * when a baseline changed (a baseline write always pushes baseline + the
  * offset last written); its speed scale is taken. An event takes effect on
  * the first frame at or after its time. A stalled leg's setpoint waits with
@@ -301,11 +302,89 @@ namespace RammsLevel::DryRun
 		bool bLeaveSeat = false;
 	};
 
+	/**
+	 * UNLOCKED STEPPING: how a simulator that steps on its own thread, paced
+	 * to the wall clock, looks to whatever runs once a game frame. (Without it
+	 * the dry run is the frame-locked simulator: every frame the same length,
+	 * the plant read as it is at the frame.)
+	 *  - Frames come uneven: each is up to FrameJitter (a share) longer or
+	 *    shorter than FOptions::FrameSeconds, so each sees a different number
+	 *    of physics steps. Commands land at the frame's own time.
+	 *  - The chassis' pose (its attitude and where it is) is the plant's as it
+	 *    was PoseAgeMinFrames to PoseAgeMaxFrames frames (of FrameSeconds)
+	 *    before the frame, a different while each frame, never older than the
+	 *    last frame's: a pose published when somebody last asked for one. The
+	 *    joints are read as they are at the frame.
+	 *  - The clock a tick reads is behind the frame's own time by up to
+	 *    ClockLagFrames, a different while each frame: it is neither the
+	 *    frame's time nor the pose's.
+	 *  - The chassis' speed is not given to the law: it is measured as the
+	 *    level assist's component measures it (FMotionSense), from the poses.
+	 * bOnTickClock says which time the law is run on, and the speed measured
+	 * against. False: the time each pose was taken at, as the component does
+	 * where its attitude source knows it. True: the clock read at the tick,
+	 * as it did before it asked -- kept so that what that costs stays measured
+	 * (a speed that swings from frame to frame, read as a base being braked).
+	 * The defaults are a simulator's own measured unevenness, and half as much
+	 * again: frames within a seventh of their length, poses a frame old give or
+	 * take a seventh, the clock's steps from tick to tick a quarter either way.
+	 */
+	struct FUnlocked
+	{
+		bool   bOn = false;
+		double FrameJitter = 0.15;
+		double PoseAgeMinFrames = 0.7;
+		double PoseAgeMaxFrames = 1.0;
+		double ClockLagFrames = 0.4;
+		bool   bOnTickClock = false;
+		int32  Seed = 7;
+	};
+
+	/**
+	 * THE DRIVE AS A SPEED LOOP ON A SLOPE. Without it the dry run's drive is
+	 * a lag: the speed goes to what is asked, whatever the ground does. A real
+	 * drive is a speed loop of limited strength on a robot that gravity pulls
+	 * along the slope, and what that does is not small: over a crest the pull
+	 * changes sides while the loop's integral still holds the climb, and the
+	 * robot runs away downhill by half its speed again before the loop has
+	 * unwound; asked for much less than the speed it has, the loop winds the
+	 * other way and brakes the robot through what was asked, to a stand.
+	 *
+	 * With bOn, every LoopSeconds (0: every physics step) the loop sets the
+	 * push it gives the robot (cm/s^2):
+	 *   Push = clamp(Kp e + I, +-MaxPushCmS2),  I += Ki e LoopSeconds within
+	 *   +-IntegralMaxCmS2,  e = the speed asked (the stick's, times the law's
+	 *   speed scale) less the speed there is
+	 * and every physics step the speed changes by Push less gravity along the
+	 * ground under the robot (its height StepCm ahead less StepCm behind). The
+	 * speed is signed: a robot can be pulled back down a slope its drive
+	 * cannot hold. The body's pitch (FOptions::PitchPerAccelDeg) then follows
+	 * the PUSH -- what the wheels do to the robot -- not the change of speed:
+	 * a robot that gravity speeds up is not pitched by it.
+	 * The defaults are a robot of a quarter of a tonne on two wheel motors
+	 * that give it 1.8 m/s^2 at most, their loop closed once a frame.
+	 */
+	struct FDriveLoop
+	{
+		bool   bOn = false;
+		double Kp = 3.0;
+		double Ki = 10.0;
+		double IntegralMaxCmS2 = 150.0;
+		double MaxPushCmS2 = 180.0;
+		double LoopSeconds = 1.0 / 16.0;
+		double GravityCmS2 = 981.0;
+		double StepCm = 25.0;
+	};
+
 	struct FOptions
 	{
 		FTuning Tuning;
 		/** The law's tick (s): 1/16, 1/30, 1/60. */
 		double FrameSeconds = 1.0 / 16.0;
+		/** The simulator steps on its own thread (see FUnlocked). */
+		FUnlocked Unlocked;
+		/** The drive is a speed loop on a robot gravity pulls (see FDriveLoop). */
+		FDriveLoop Drive;
 		/** The plant's step (s), and how often the pose is solved (s). */
 		double PhysicsStepSeconds = 0.001;
 		double PoseStepSeconds = 0.002;
@@ -322,6 +401,12 @@ namespace RammsLevel::DryRun
 		double BodyLagSeconds = 0.1;
 		/** How fast the law takes the ground to turn (FGroundGate's tuning). */
 		FGroundTuning Ground;
+		/** The drive-speed cap's own figures (FSpeedScale::Cap), and whether
+		 *  the drive tells the law what its stick asks (FInputs::
+		 *  AskedSpeedCmS; false: it cannot, and the cap takes the speed there
+		 *  is for it). */
+		FSpeedCapTuning SpeedCap;
+		bool			bDriveSaysWhatIsAsked = true;
 		/** The joints' lag behind their setpoints (s) and their sag (cm, with
 		 *  the load shared evenly; 0: none). */
 		double ServoLagSeconds = 0.03;

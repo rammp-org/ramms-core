@@ -103,16 +103,19 @@ namespace RammsLevel
 		 *  YieldTo (YieldSeatTo): the take-over is then past undoing exactly. */
 		bool bSeatYielded = false;
 
-		/** The physics clock and the chassis at the last tick. */
-		double	LastSimTime = -1.0;
-		FVector LastPosition = FVector::ZeroVector;
-		bool	bHasPosition = false;
-		double	SpeedCmS = 0.0;
-		bool	bColdReset = false;
-		/** The chassis' heading at the last tick, and how fast it was turning
-		 *  about the vertical then (deg/s). */
-		FVector2D LastHeading = FVector2D::ZeroVector;
-		double	  YawRateDegPerSec = 0.0;
+		/** The physics clock at the last tick, and time as the ticks have
+		 *  counted it (for an attitude reading that does not say when it was
+		 *  taken). */
+		double LastSimTime = -1.0;
+		double TickSeconds = 0.0;
+		bool   bColdReset = false;
+		/** The chassis' speed over the ground and its turning rate about the
+		 *  vertical, from the attitude source's readings on the time each was
+		 *  taken at; and whether the last reading said when that was. */
+		FMotionSense Motion;
+		bool		 bMotionStamped = false;
+		/** The last step that took time had a reading of the chassis. */
+		bool bReadLastStep = false;
 		/** The last hand-back to a stance took a plane back out of the legs'
 		 *  commands, and left this much of the pose's plane in them (deg) for
 		 *  the stance ramp to turn the base by. Unset: no such hand-back since
@@ -224,13 +227,14 @@ void URammsLevelAssistComponent::AddTickPrerequisites()
 			// its prerequisites: this one as a prerequisite would take the
 			// level assist, and the robot base behind it, out of the group
 			// before physics, and with them every wheel and leg command of
-			// the frame. It is left where it is; what it writes while the
-			// legs are levelled is told at the base's next tick, a frame
-			// late and with its offset (never bare).
+			// the frame. It is left where it is; what it writes in its own
+			// tick while the legs are levelled is told at once with its
+			// offset (never bare), on the offset this tick worked out from
+			// the baseline before it (the base's rule for a late write).
 			if (bDrivesLevelled && !R.LateWritersSaid.Contains(Component->GetFName()))
 			{
 				R.LateWritersSaid.Add(Component->GetFName());
-				UE_LOG(LogRammsLevel, Log, TEXT("[Level] '%s': '%s' ticks after the robot base; while the legs are levelled, a command it writes in its own tick reaches the motor a frame late"),
+				UE_LOG(LogRammsLevel, Log, TEXT("[Level] '%s': '%s' ticks after the robot base; while the legs are levelled, a command it writes in its own tick is told at once, on the offset worked out before it"),
 					*GetNameSafe(Owner), *Component->GetName());
 			}
 			continue;
@@ -400,38 +404,62 @@ void URammsLevelAssistComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	}
 }
 
-void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption)
+void URammsLevelAssistComponent::StepLaw(double ClockDt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption)
 {
 	using namespace RammsLevel;
 	FAssistRuntime& R = *Runtime;
 	AActor*			Owner = GetOwner();
 
 	FInputs In;
-	// --- the chassis ---
+	// --- the chassis, and what time this step is counted on ---
+	// The law is stepped through the time between two READINGS of the chassis,
+	// where the source says when each was taken: every rate made from them
+	// (the chassis' speed, how hard it is braked, how fast it turns, how fast
+	// the ground turns under it) and every filter they feed is then on the
+	// time they really are apart. That is not the time between two ticks' looks
+	// at the clock where the physics runs on its own thread: the pose a tick is
+	// given was published up to a frame before, a different while each tick, and
+	// a distance between two poses over the time between two ticks is a speed
+	// that swings by a quarter from one tick to the next at a steady pace --
+	// read as a base being braked hard, which the ground estimate rightly
+	// distrusts, and the legs then stop following the ground at all.
+	// A source that does not say when reads as of the tick: the clock's time.
+	// A step in the middle of a frame (a yield, a hand-back) takes no time.
+	double	  Dt = ClockDt;
 	FAttitude Attitude;
 	In.bAttitudeValid = R.Attitude && R.Attitude->Read(Attitude);
+	R.TickSeconds += ClockDt;
 	if (In.bAttitudeValid)
 	{
 		In.AttitudeDeg = Attitude.Deg;
-		if (R.bHasPosition && Dt > 0.0)
+		if (ClockDt > 0.0 || !R.Motion.HasReading())
 		{
-			const double Moved = FVector::Dist(Attitude.Position, R.LastPosition);
-			R.bColdReset |= Moved > PoseJumpCm;
-			R.SpeedCmS = Moved / Dt;
-			// How fast the heading turned: on a slope that swings the ground
-			// from pitch into roll under a robot that has gone nowhere.
-			const bool bHeadings = !Attitude.Heading.IsNearlyZero() && !R.LastHeading.IsNearlyZero();
-			R.YawRateDegPerSec = bHeadings ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector2D::DotProduct(Attitude.Heading, R.LastHeading), -1.0, 1.0))) / Dt : 0.0;
-		}
-		if (Dt > 0.0 || !R.bHasPosition)
-		{
-			R.LastPosition = Attitude.Position;
-			R.LastHeading = Attitude.Heading;
-			R.bHasPosition = true;
+			const bool bStamped = Attitude.TimeSeconds >= 0.0;
+			if (bStamped != R.bMotionStamped)
+			{
+				// Another clock from here on: the last reading's time is not on it.
+				R.Motion.Reset();
+				R.bMotionStamped = bStamped;
+			}
+			const bool	 bHadReading = R.Motion.HasReading();
+			const double Since = R.Motion.Tick(Attitude.Position, Attitude.Heading, bStamped ? Attitude.TimeSeconds : R.TickSeconds);
+			// Readings whose time ran backwards are of a simulation that was
+			// reset; a robot far from where it was, of one put elsewhere.
+			R.bColdReset |= R.Motion.RanBackwards() || R.Motion.MovedCm() > PoseJumpCm;
+			// (After a step that had no reading the law has already been
+			// stepped through the clock's time meanwhile: this one is too.)
+			if (bStamped && bHadReading && R.bReadLastStep && ClockDt > 0.0)
+			{
+				Dt = FMath::Clamp(Since, 0.0, MaxStepSeconds);
+			}
 		}
 	}
-	In.SpeedCmS = R.SpeedCmS;
-	In.YawRateDegPerSec = R.YawRateDegPerSec;
+	if (ClockDt > 0.0)
+	{
+		R.bReadLastStep = In.bAttitudeValid;
+	}
+	In.SpeedCmS = R.Motion.GetSpeedCmS();
+	In.YawRateDegPerSec = R.Motion.GetYawRateDegPerSec();
 	In.bColdReset = R.bColdReset;
 	R.bColdReset = false;
 
@@ -574,6 +602,18 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 			// No mode has the robot, and it levels only in named ones: wait.
 			In.Mode = EMode::Release;
 			R.bModeNotLevelled = true;
+		}
+	}
+
+	// What whoever drives is being asked for by its stick, where it can say:
+	// the speed cap goes by that, not by the speed there happens to be.
+	for (UActorComponent* Component : Driving)
+	{
+		const IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component);
+		const float			   Asked = Mode ? Mode->GetAskedSpeedCmS() : -1.0f;
+		if (Asked >= 0.0f && FMath::IsFinite(Asked))
+		{
+			In.AskedSpeedCmS = FMath::Max(In.AskedSpeedCmS, static_cast<double>(Asked));
 		}
 	}
 

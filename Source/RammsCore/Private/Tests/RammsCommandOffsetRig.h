@@ -111,6 +111,9 @@ namespace RammsCommandOffsetTests
 		/** The backend's simulation clock (s), where a test keeps one; under 0, as a backend that has none (everything
 		 *  then goes by the game world's clock, which on this rig stands at zero). */
 		double SimTime = -1.0;
+		/** When the poses in Transforms were taken, on that clock, where a test says (a simulator stepping on its own
+		 *  thread: the poses a tick reads are older than the clock it reads). Unset: as the clock, now. */
+		TOptional<double> TransformTime;
 
 		/** How many commands or profile targets Motor was given. */
 		int32 CountFor(FName Motor) const
@@ -159,6 +162,7 @@ namespace RammsCommandOffsetTests
 		}
 		virtual float  GetVelocity(FName) const override { return 0.0f; }
 		virtual double GetSimulationTime() const override { return Log->SimTime; }
+		virtual double GetTransformTime() const override { return Log->TransformTime.Get(Log->SimTime); }
 		virtual bool  ReleaseMotor(FName MotorId) override
 		{
 			FPush P;

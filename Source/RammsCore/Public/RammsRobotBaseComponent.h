@@ -173,8 +173,20 @@ public:
 	// tick: SetMotorCommand and SetMotorCommandOffset only store. Two writers
 	// in a frame would otherwise tell it a bare baseline and then the sum, and
 	// a servo eased at the physics rate would chase the first for a step. A
-	// write that arrives after this component has ticked is told on the next
-	// frame. A motor nobody has claimed is told at once, as ever.
+	// motor nobody has claimed is told at once, as ever.
+	//
+	// A baseline written LATER IN THE FRAME than this component ticks -- by a
+	// controller whose tick is in a later tick group, which cannot be ordered
+	// before this one -- is told at once, as baseline + offset: it is the
+	// frame's last word on that motor, as it is with nothing claimed. Held
+	// back for the next tick it would be told a frame late, and never at all
+	// while another controller writes the same motor earlier in every frame
+	// (a seat held where its rider has it, under a drive mode's stance ramp:
+	// the ramp's value was what the tick found each frame, and the tilt went
+	// with it while the seat's other motors stayed). Such a motor is then left
+	// to that late write: the tick after one tells it nothing (what is waiting
+	// goes out with the next late write, or at the following tick if none
+	// comes), so it is still told once a frame.
 
 	/**
 	 * Make Layer the one writer of offsets on MotorIds. False, and nothing
@@ -359,6 +371,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot")
 	double GetSimulationTime() const;
 
+	/** The simulated time of the poses GetMotorTransform gives, on
+	 *  GetSimulationTime's clock, which may be earlier than the time that
+	 *  gives now; negative with no such clock. See
+	 *  IRammsActuationBackend::GetTransformTime. (Plain C++.) */
+	double GetTransformTime() const;
+
 private:
 	/** Load MotorTable into Motors once (idempotent; safe from any accessor, so
 	 *  callers that arrive before BeginPlay still see the configured specs). */
@@ -441,6 +459,9 @@ private:
 		float Effective = 0.0f;
 		/** Written since it was last told. */
 		bool bDirty = false;
+		/** Its baseline was written, and told at once, after this component
+		 *  ticked (since its last tick). */
+		bool bToldLate = false;
 	};
 
 	/** The claimed motors, by Id, in the order claimed (nothing is removed
@@ -456,6 +477,10 @@ private:
 
 	/** Tell every claimed motor written since the last tick its command. */
 	void FlushCommandOffsets();
+
+	/** The world is ticking a group after the one this component ticks in:
+	 *  whoever writes a motor now is this frame's last writer of it. */
+	bool IsPastOwnTick() const;
 
 	/** Forget the layer: each claimed motor told its baseline, where that is
 	 *  not what it was last told. */

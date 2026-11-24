@@ -542,6 +542,11 @@ namespace RammsLevel::DryRun
 		double			KickSeconds = 0.0;
 		// The body's own pitch under the drive's acceleration (deg, nose up).
 		double		 BodyPitch = 0.0;
+		// The drive's speed loop (FDriveLoop): its integral, the push it gives,
+		// and when it is next closed.
+		double		 DriveIntegral = 0.0;
+		double		 DrivePush = 0.0;
+		double		 NextLoopAt = 0.0;
 		const double BodyShare = Options.BodyLagSeconds > 0.0 ? FMath::Min(1.0, Tick / Options.BodyLagSeconds) : 1.0;
 		// The seat's tilt (deg, nose up against the chassis): its own command
 		// (zero: the rider has it level; a taker's to move), the law's trim on
@@ -589,14 +594,36 @@ namespace RammsLevel::DryRun
 
 		FState Law;
 		Law.Ground.Tuning = Options.Ground;
+		Law.SpeedScale.Cap = Options.SpeedCap;
 		Law.SeatTrim.Cover = Options.SeatCover;
 		FRandomStream Random(Options.Seed);
 		FVector2D	  LastReading = FVector2D::ZeroVector;
 		bool		  bHaveReading = false;
 
+		// ---- unlocked stepping (FUnlocked) ----
+		// The plant's pose at every physics step of the last frame or two, for
+		// a tick that is given an older one; when the next frame comes; the
+		// time of the last pose given and of the last clock read; and the
+		// chassis' speed as a shell measures it from the poses it is given.
+		struct FPoseRecord
+		{
+			double	  Seconds = 0.0;
+			FVector2D AttitudeDeg = FVector2D::ZeroVector;
+			FVector2D Origin = FVector2D::ZeroVector;
+		};
+		const FUnlocked&	Unlocked = Options.Unlocked;
+		FRandomStream		Uneven(Unlocked.Seed);
+		TArray<FPoseRecord> PoseHistory;
+		double				NextFrameAt = 0.0;
+		double				LastFrameAt = 0.0;
+		double				LastPoseAt = 0.0;
+		double				LastClockAt = 0.0;
+		FMotionSense		Motion;
+
 		// ---- what is kept of every frame, for the figures at the end ----
 		const int32		  ExpectedFrames = FMath::Max(1, FMath::CeilToInt32(FMath::Max(0.0, Options.MaxSeconds) / FrameSeconds) + 2);
 		TArray<double>	  Times;
+		TArray<double>	  LawDts;
 		TArray<FVector2D> TrueDeg;
 		TArray<FVector2D> RiderDeg;
 		TArray<double>	  RiderOffDeg;
@@ -607,6 +634,7 @@ namespace RammsLevel::DryRun
 		TArray<double>	  Commands;
 		TArray<int32>	  EventFrames;
 		Times.Reserve(ExpectedFrames);
+		LawDts.Reserve(ExpectedFrames);
 		TrueDeg.Reserve(ExpectedFrames);
 		RiderDeg.Reserve(ExpectedFrames);
 		RiderOffDeg.Reserve(ExpectedFrames);
@@ -633,10 +661,25 @@ namespace RammsLevel::DryRun
 		while (true)
 		{
 			const double Time = StepIndex * Tick;
+			if (Unlocked.bOn)
+			{
+				FPoseRecord& Record = PoseHistory.AddDefaulted_GetRef();
+				Record.Seconds = Time;
+				Record.AttitudeDeg = Pose.AttitudeDeg + Kick + FVector2D(BodyPitch, 0.0);
+				Record.Origin = Origin;
+			}
 
-			if (Time >= FrameIndex * FrameSeconds - TimeHair)
+			if (Unlocked.bOn ? Time >= NextFrameAt - TimeHair : Time >= FrameIndex * FrameSeconds - TimeHair)
 			{
 				// ======== one frame ========
+				// How long since the last one: what whoever writes baselines
+				// once a frame (a stance ramp, a taker) moves them by.
+				const double FrameDt = Unlocked.bOn && FrameIndex > 0 ? Time - LastFrameAt : FrameSeconds;
+				LastFrameAt = Time;
+				if (Unlocked.bOn)
+				{
+					NextFrameAt = Time + FrameSeconds * (1.0 + FMath::Clamp(Unlocked.FrameJitter, 0.0, 0.9) * Uneven.FRandRange(-1.0f, 1.0f));
+				}
 				bool	  bBaselineMoved = false;
 				bool	  bSeatMoved = false;
 				bool	  bYield = false;
@@ -773,7 +816,7 @@ namespace RammsLevel::DryRun
 				for (int32 RampIndex = Ramps.Num() - 1; RampIndex >= 0; --RampIndex)
 				{
 					FRamp&		 Ramp = Ramps[RampIndex];
-					const double Most = Ramp.RateCmS > 0.0 ? Ramp.RateCmS * FrameSeconds : FMath::Abs(Ramp.LeftCm);
+					const double Most = Ramp.RateCmS > 0.0 ? Ramp.RateCmS * FrameDt : FMath::Abs(Ramp.LeftCm);
 					const double Move = FMath::Clamp(Ramp.LeftCm, -Most, Most);
 					for (int32 Index = 0; Index < NumLegs; ++Index)
 					{
@@ -796,7 +839,7 @@ namespace RammsLevel::DryRun
 				// (Or never commands the seat at all: bLeaveSeat.)
 				if (bTaken && SeatBaseline != 0.0 && !bTakenLeavesSeat)
 				{
-					const double Most = FMath::Max(0.0, Tuning.TiltRateDegPerSec) * FrameSeconds;
+					const double Most = FMath::Max(0.0, Tuning.TiltRateDegPerSec) * FrameDt;
 					SeatBaseline -= FMath::Clamp(SeatBaseline, -Most, Most);
 					bSeatMoved = true;
 				}
@@ -811,7 +854,32 @@ namespace RammsLevel::DryRun
 
 				// The sensor.
 				const FVector2D TrueNow = Pose.AttitudeDeg + Kick + FVector2D(BodyPitch, 0.0);
-				FVector2D		Reading = TrueNow + Options.BiasDeg;
+				// Unlocked, the pose the tick is given is an older one; the time
+				// the law is run on is that pose's own (or the clock the tick
+				// reads, which is neither that nor the frame's: FUnlocked); and
+				// the chassis' speed is what the poses given make it.
+				FVector2D SeenDeg = TrueNow;
+				double	  LawDt = FrameSeconds;
+				double	  SpeedSeen = FMath::Abs(Speed);
+				if (Unlocked.bOn)
+				{
+					const double Age = FrameSeconds * FMath::Lerp(Unlocked.PoseAgeMinFrames, Unlocked.PoseAgeMaxFrames, static_cast<double>(Uneven.FRand()));
+					const double PoseAt = FMath::Clamp(Time - FMath::Max(0.0, Age), LastPoseAt, Time);
+					int32		 Found = PoseHistory.Num() - 1;
+					while (Found > 0 && PoseHistory[Found].Seconds > PoseAt + TimeHair)
+					{
+						--Found;
+					}
+					const FPoseRecord Seen = PoseHistory[Found];
+					// (Nothing older than this is ever asked for again.)
+					PoseHistory.RemoveAt(0, Found, EAllowShrinking::No);
+					LastPoseAt = Seen.Seconds;
+					LastClockAt = FMath::Max(LastClockAt, Time - FrameSeconds * FMath::Max(0.0, Unlocked.ClockLagFrames) * Uneven.FRand());
+					SeenDeg = Seen.AttitudeDeg;
+					LawDt = Motion.Tick(FVector(Seen.Origin.X, Seen.Origin.Y, 0.0), Heading, Unlocked.bOnTickClock ? LastClockAt : Seen.Seconds);
+					SpeedSeen = Motion.GetSpeedCmS();
+				}
+				FVector2D Reading = SeenDeg + Options.BiasDeg;
 				if (Options.NoiseDeg > 0.0)
 				{
 					Reading.X += Options.NoiseDeg * Random.FRandRange(-1.0f, 1.0f);
@@ -847,7 +915,8 @@ namespace RammsLevel::DryRun
 				In.Points = Robot.Points;
 				In.AttitudeDeg = Given;
 				In.bAttitudeValid = !(Time < LossUntil - TimeHair);
-				In.SpeedCmS = FMath::Abs(Speed);
+				In.SpeedCmS = SpeedSeen;
+				In.AskedSpeedCmS = Options.bDriveSaysWhatIsAsked ? FMath::Abs(SpeedCommand) : -1.0;
 				In.bStick = SpeedCommand != 0.0;
 				In.bSeat = Robot.bSeat;
 				In.SeatPreferenceDeg = Split.SeatDeg;
@@ -863,7 +932,7 @@ namespace RammsLevel::DryRun
 				In.ResumePlaneDeg = Adoption.PlaneDeg;
 				In.ResumeDz = Adoption.Dz;
 				In.bStanceChanging = Time < ChangingUntil - TimeHair;
-				const FOutputs Out = FLaw::Step(In, FrameSeconds, Tuning, Law);
+				const FOutputs Out = FLaw::Step(In, LawDt, Tuning, Law);
 
 				// The shell's part: fold, write, push.
 				if (Out.Action == EAction::Fold)
@@ -918,6 +987,7 @@ namespace RammsLevel::DryRun
 					EventFrames.Add(Times.Num());
 				}
 				Times.Add(Time);
+				LawDts.Add(LawDt);
 				TrueDeg.Add(TrueNow);
 				// The rider: the chassis with the seat's tilt, against what
 				// they asked for (the whole preference, wherever it is held).
@@ -948,11 +1018,11 @@ namespace RammsLevel::DryRun
 				bUnstable = false;
 				const double OffLevel = Inclination(TrueNow - Tuning.LevelReferenceDeg);
 				Result.PeakTiltDeg = FMath::Max(Result.PeakTiltDeg, OffLevel);
-				OffLevelSpell = OffLevel > Options.LagTiltDeg ? OffLevelSpell + FrameSeconds : 0.0;
+				OffLevelSpell = OffLevel > Options.LagTiltDeg ? OffLevelSpell + FrameDt : 0.0;
 				Result.LongestOffLevelSeconds = FMath::Max(Result.LongestOffLevelSeconds, OffLevelSpell);
 				Result.FinalTiltDeg = OffLevel;
 				Result.MinSpeedScale = FMath::Min(Result.MinSpeedScale, Out.SpeedScale);
-				Result.SecondsAtReach += Out.Fraction < 1.0 ? FrameSeconds : 0.0;
+				Result.SecondsAtReach += Out.Fraction < 1.0 ? FrameDt : 0.0;
 				Result.MinReachLeft = FMath::Min(Result.MinReachLeft, Out.ReachLeft);
 				Result.MaxCorrectionDeg = FMath::Max(Result.MaxCorrectionDeg, Out.AppliedDeg.Size());
 				Result.MaxOffsetCm = FMath::Max(Result.MaxOffsetCm, MaxOffsetCm);
@@ -998,8 +1068,30 @@ namespace RammsLevel::DryRun
 
 			// ======== one physics step ========
 			const double SpeedBefore = Speed;
-			Speed += (SpeedCommand * SpeedScale - Speed) * DriveShare;
-			BodyPitch += (Options.PitchPerAccelDeg * (Speed - SpeedBefore) / Tick - BodyPitch) * BodyShare;
+			if (Options.Drive.bOn)
+			{
+				// The drive's loop, closed as often as it is; then the push it
+				// gives and gravity along the ground under the robot.
+				const FDriveLoop& Loop = Options.Drive;
+				if (Loop.LoopSeconds <= 0.0 || Time >= NextLoopAt - TimeHair)
+				{
+					const double Period = Loop.LoopSeconds > 0.0 ? Loop.LoopSeconds : Tick;
+					NextLoopAt = Time + Period;
+					const double Error = SpeedCommand * SpeedScale - Speed;
+					DriveIntegral = FMath::Clamp(DriveIntegral + Loop.Ki * Error * Period, -Loop.IntegralMaxCmS2, Loop.IntegralMaxCmS2);
+					DrivePush = FMath::Clamp(Loop.Kp * Error + DriveIntegral, -Loop.MaxPushCmS2, Loop.MaxPushCmS2);
+				}
+				const FVector2D Ahead = Origin + Heading * Loop.StepCm;
+				const FVector2D Behind = Origin - Heading * Loop.StepCm;
+				const double	Rise = (Ground(Ahead.X, Ahead.Y) - Ground(Behind.X, Behind.Y)) / (2.0 * FMath::Max(Loop.StepCm, 1.0));
+				Speed += (DrivePush - Loop.GravityCmS2 * Rise / FMath::Sqrt(1.0 + Rise * Rise)) * Tick;
+				BodyPitch += (Options.PitchPerAccelDeg * DrivePush - BodyPitch) * BodyShare;
+			}
+			else
+			{
+				Speed += (SpeedCommand * SpeedScale - Speed) * DriveShare;
+				BodyPitch += (Options.PitchPerAccelDeg * (Speed - SpeedBefore) / Tick - BodyPitch) * BodyShare;
+			}
 			Origin += Heading * (Speed * Tick);
 			Travel += Speed * Tick;
 			for (int32 Index = 0; Index < NumLegs; ++Index)
@@ -1072,16 +1164,18 @@ namespace RammsLevel::DryRun
 		// The wanted attitude's rate and acceleration, frame to frame.
 		for (int32 Index = 1; Index < NumFrames; ++Index)
 		{
-			if (!bWantedPlanned[Index] || !bWantedPlanned[Index - 1] || bWantedSet[Index])
+			// (On the time the law was run on: the frame's, but unlocked. A step
+			// in which no time passed moved nothing.)
+			if (!bWantedPlanned[Index] || !bWantedPlanned[Index - 1] || bWantedSet[Index] || LawDts[Index] <= 0.0)
 			{
 				continue;
 			}
-			const FVector2D Rate = (WantedDeg[Index] - WantedDeg[Index - 1]) / FrameSeconds;
+			const FVector2D Rate = (WantedDeg[Index] - WantedDeg[Index - 1]) / LawDts[Index];
 			Result.MaxWantedRateDegPerSec = FMath::Max(Result.MaxWantedRateDegPerSec, Rate.Size());
-			if (Index >= 2 && bWantedPlanned[Index - 2] && !bWantedSet[Index - 1])
+			if (Index >= 2 && bWantedPlanned[Index - 2] && !bWantedSet[Index - 1] && LawDts[Index - 1] > 0.0)
 			{
-				const FVector2D Before = (WantedDeg[Index - 1] - WantedDeg[Index - 2]) / FrameSeconds;
-				Result.MaxWantedAccelDegPerSec2 = FMath::Max(Result.MaxWantedAccelDegPerSec2, (Rate - Before).Size() / FrameSeconds);
+				const FVector2D Before = (WantedDeg[Index - 1] - WantedDeg[Index - 2]) / LawDts[Index - 1];
+				Result.MaxWantedAccelDegPerSec2 = FMath::Max(Result.MaxWantedAccelDegPerSec2, (Rate - Before).Size() / LawDts[Index]);
 			}
 		}
 

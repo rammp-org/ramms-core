@@ -140,6 +140,95 @@ bool FRammsCommandOffsetOnePush::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a claimed motor's baseline written after the base's tick (by a controller in a later tick group) kept for
+// the next tick, where whoever writes the same motor earlier in every frame has overwritten it by then: the late
+// writer's value never reaches the motor. (A seat's tilt held by the seat's controller, which ticks during physics,
+// under a drive mode's stance ramp written before it: the tilt went with the ramp and the seat's links did not.)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCommandOffsetLateWriter,
+	"Ramms.Base.CommandOffset.AWriteAfterTheTickIsTheFramesLastWord",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsCommandOffsetLateWriter::RunTest(const FString& Parameters)
+{
+	using namespace RammsCommandOffsetTests;
+	FRig R;
+	if (!TestTrue(TEXT("a robot base on the recording backend"), R.IsReady()))
+	{
+		return false;
+	}
+	const FName Ids[] = { Crank };
+	TestTrue(TEXT("claimed"), R.Base->ClaimCommandOffsetLayer(R.Layer(), Ids));
+	// The world's own tick, as far as the base can tell: before physics (where the base ticks), and during it.
+	const auto Early = [&R]() {
+		R.World->bInTick = true;
+		R.World->TickGroup = TG_PrePhysics;
+	};
+	const auto Late = [&R]() {
+		R.World->bInTick = true;
+		R.World->TickGroup = TG_DuringPhysics;
+	};
+	const auto EndOfFrame = [&R]() {
+		R.World->bInTick = false;
+		R.World->TickGroup = TG_PrePhysics;
+	};
+
+	// Every frame: an early writer ramps the motor away (a stance), the layer sets an offset, the base ticks, and a
+	// late writer holds the motor at 0.5.
+	const float Held = 0.5f;
+	for (int32 Frame = 0; Frame < 6; ++Frame)
+	{
+		const float Ramp = 0.4f - 0.05f * Frame;
+		const float Offset = 0.01f * (Frame + 1);
+		const int32 Before = R.Log->CountFor(Crank);
+		Early();
+		R.Base->SetMotorCommand(Crank, Ramp);
+		R.Base->SetMotorCommandOffset(Crank, Offset, R.Layer());
+		R.Tick();
+		Late();
+		R.Base->SetMotorCommand(Crank, Held);
+		EndOfFrame();
+		TestTrue(FString::Printf(TEXT("frame %d: the late write is the frame's last word, with the frame's offset"), Frame), SameBits(R.Log->LastFor(Crank), Held + Offset));
+		TestTrue(FString::Printf(TEXT("frame %d: ... and what reads back as the command"), Frame), SameBits(R.Baseline(Crank), Held));
+		if (Frame == 0)
+		{
+			// Nobody had written late yet when the base ticked: the early value went out, then the late one.
+			TestEqual(TEXT("the first frame tells the early value and then the late one"), R.Log->CountFor(Crank) - Before, 2);
+		}
+		else
+		{
+			TestEqual(FString::Printf(TEXT("frame %d: told once, and never the earlier writer's value"), Frame), R.Log->CountFor(Crank) - Before, 1);
+		}
+	}
+
+	// The late writer stops: the early writer's value is told from the tick after the next.
+	Early();
+	R.Base->SetMotorCommand(Crank, 0.1f);
+	R.Tick();
+	EndOfFrame();
+	TestTrue(TEXT("the tick after a late write tells nothing yet"), SameBits(R.Log->LastFor(Crank), Held + 0.06f));
+	Early();
+	R.Tick();
+	EndOfFrame();
+	TestTrue(TEXT("with no late write since, the next tick tells what was waiting"), SameBits(R.Log->LastFor(Crank), 0.1f + 0.06f));
+
+	// Outside the world's tick (a call from an input handler, a test) a write is not late: it waits for the tick.
+	const int32 Count = R.Log->CountFor(Crank);
+	R.World->bInTick = false;
+	R.World->TickGroup = TG_DuringPhysics;
+	R.Base->SetMotorCommand(Crank, 0.2f);
+	TestEqual(TEXT("a write outside the world's tick waits"), R.Log->CountFor(Crank), Count);
+	EndOfFrame();
+	R.Tick();
+	TestTrue(TEXT("... for the tick"), SameBits(R.Log->LastFor(Crank), 0.2f + 0.06f));
+
+	// A motor nobody claimed: told at once, early or late, as ever.
+	Late();
+	R.Base->SetMotorCommand(HipA, 0.3f);
+	EndOfFrame();
+	TestTrue(TEXT("an unclaimed motor is told at once"), SameBits(R.Log->LastFor(HipA), 0.3f));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCommandOffsetClamps,
 	"Ramms.Base.CommandOffset.ClampsTheSum",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

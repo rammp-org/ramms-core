@@ -32,7 +32,14 @@
  * other, and may turn faster than either while the seat turns the other way.
  * With no seat that runs, D is 0 and W is R: one wanted attitude, as before.
  *
- * 0. HOUSEKEEPING. Dt is clamped to [0, MaxStepSeconds]. A leg count that
+ * 0. HOUSEKEEPING. Dt is clamped to [0, MaxStepSeconds]. It is the time
+ *    between this step's READINGS of the chassis and the last step's (the
+ *    attitude, and the speed and turning rate made from where it was): every
+ *    filter, gate and rate below is counted on it. Where the readings are
+ *    taken at the step that is the time between two steps; where they are
+ *    older than the step by a different while each time (a simulator
+ *    stepping on its own thread) it is not, and the shell gives the
+ *    readings' own (FMotionSense). A leg count that
  *    differs from the last step's (the first step included) counts as
  *    bColdReset. The attitude is VALID when In.bAttitudeValid and
  *    In.AttitudeDeg, every number of every leg (its XY, heights, travel,
@@ -294,7 +301,8 @@
  *
  * 5. SPEED SCALE. In Active, Releasing and Faulted not yet latched:
  *    SpeedScale.Tick (FSpeedScale) with the error |A - W|, bPastReach as the
- *    status below, In.SpeedCmS, and, once the terrain estimate is seeded and
+ *    status below, In.SpeedCmS, In.AskedSpeedCmS (what the stick asks of the
+ *    drive), In.YawRateDegPerSec, and, once the terrain estimate is seeded and
  *    the legs are numbers: the slope Inclination(G); the standing legs' span
  *    StandingSpanCm(Legs); the ground's turning rate (G less the G the last
  *    step left, over Dt), known only on a step that takes time with a valid
@@ -352,11 +360,17 @@ namespace RammsLevel
 		/** The chassis' speed over the ground as measured (cm/s, 0 or more):
 		 *  for the rest at standstill, for how far the ground can have
 		 *  turned (the distance travelled, and how hard the base is being
-		 *  braked or driven off: FGroundGate), and for the speed cap (the
-		 *  speed the slope's end can be taken at is held against it). Whether
-		 *  the rider's stick is off centre: for the rest. */
+		 *  braked or driven off: FGroundGate), and for the speed cap (how
+		 *  far it is from what the stick asks, AskedSpeedCmS). Made from the
+		 *  readings of where the chassis was, on the time between them
+		 *  (FMotionSense), not the time between two steps. Whether the
+		 *  rider's stick is off centre: for the rest. */
 		double SpeedCmS = 0.0;
 		bool   bStick = false;
+		/** The speed the rider's stick asks of whoever drives, before any
+		 *  request to go slower (cm/s, 0 or more); negative where the drive
+		 *  cannot say. For the speed cap (FSpeedCapInputs::AskedSpeedCmS). */
+		double AskedSpeedCmS = -1.0;
 		/** How fast the chassis is turning about the vertical as measured
 		 *  (deg/s; the sign does not matter). A robot turning on a slope sees
 		 *  the ground turn in its own frame, pitch into roll, by the slope

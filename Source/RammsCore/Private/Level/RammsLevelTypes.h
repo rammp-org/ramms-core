@@ -292,10 +292,58 @@ namespace RammsLevel
 		 *  inside the rider's 4 deg/s; at 8 it was not (the dry run's slope
 		 *  ends, RammsLevelDryRunTests). */
 		double FollowMaxDegPerSec = 6.0;
-		/** A slope that has begun to end counts as steep as it was until the
-		 *  robot has moved this many spans on: the break is not past the legs
-		 *  until then, and the drive is not let go into it. */
+		/** Slow all the way along a slope for the turn its END will be (the
+		 *  speed that turn can be followed at, kept to from the start). Off: a
+		 *  steady slope the legs hold level costs the rider nothing, and the
+		 *  slope's end is slowed for when it comes, as any other turn of the
+		 *  ground. (On, it took a sixth off a robot's pace up 6 deg and a
+		 *  third up 8 for the whole climb, and made the speed hunt downhill.) */
+		bool bSlopeEnd = false;
+		/** With bSlopeEnd: a slope that has begun to end counts as steep as it
+		 *  was until the robot has moved this many spans on: the break is not
+		 *  past the legs until then, and the drive is not let go into it. */
 		double SlopeHeldSpans = 1.5;
+		/** The ground's turning is read off the terrain estimate only while
+		 *  the speed ASKED of the drive (the stick's, times the scale) is
+		 *  changing by less than SteadyAskCmS2 (cm/s^2); not at all from
+		 *  UnsteadyAskCmS2 (a straight line between); and again
+		 *  SteadySettleSeconds (s) after it has stopped changing. A drive made
+		 *  to change speed pitches the body, the estimate follows some of
+		 *  that pitch (it is under what the ground gate distrusts), and a cap
+		 *  that slowed for it would be answering its own braking, and every
+		 *  start: slower, more pitch, slower still. Meanwhile the turning last
+		 *  read stands. */
+		double SteadyAskCmS2 = 30.0;
+		double UnsteadyAskCmS2 = 80.0;
+		double SteadySettleSeconds = 0.4;
+		/** ... nor while the speed there is changes by more than
+		 *  SteadySpeedCmS2, not at all from UnsteadySpeedCmS2 (cm/s^2): a
+		 *  drive still bringing the robot up to what its stick asked a while
+		 *  ago (a start) is pitching it as surely. Wider than the two above:
+		 *  a robot gravity is speeding up over a crest is not being pitched
+		 *  by its drive, and the crest is what the cap must see. */
+		double SteadySpeedCmS2 = 40.0;
+		double UnsteadySpeedCmS2 = 100.0;
+		/** The speed asked of the drive is never more than LeadShare of the
+		 *  speed there is, and LeadCmS (cm/s), under it: a drive is a speed
+		 *  loop, and asked for much less than the robot has (one that has run
+		 *  away down the far side of a crest; one at speed when the ground
+		 *  turns) it winds itself up braking and takes the robot through what
+		 *  was asked, to a stand. Led down by a share of its speed it brakes
+		 *  in proportion, less and less as it arrives. */
+		double LeadShare = 0.2;
+		double LeadCmS = 5.0;
+		/** ... and the scale closes on a lower target over this long (s), the
+		 *  last of the way gently, as well as within FallPerSec: a loop asked
+		 *  to stop slowing all at once runs on past where it was asked to. */
+		double FallSeconds = 0.25;
+		/** A robot going faster than its stick asks is asked for less by this
+		 *  many times the excess (as a share of the speed asked), at once and
+		 *  only while it is: down the far side of a crest gravity changes
+		 *  sides while the drive's loop still holds the climb, and the robot
+		 *  runs away by half its speed again, turning the ground under it that
+		 *  much faster, before the loop has unwound. 0: none. */
+		double OverspeedGain = 2.0;
 		/** The ground's turning rate is the terrain estimate's, low-passed
 		 *  over this long (s): one tick's change of an estimate is mostly its
 		 *  sensor's noise. */

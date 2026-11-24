@@ -5878,6 +5878,15 @@ float URammsCurbNegotiationController::GetStanceChangeMinSeconds() const
 	{
 		return 0.0f;
 	}
+	// From the attitude the base has now to the one a drive stance takes on the
+	// ground under it -- the ground's, plus the stance's own tilt over the
+	// ground it stood on as the crossing began -- where that is known: what
+	// the stance ramp turns the base by with nothing levelling it.
+	const bool	 bGroundKnown = bStanceAttitudeKnown && ActiveTerrain.bValid;
+	const bool	 bFar = bGroundKnown && ActiveTerrain.DistancePastEdge(ChassisOriginXY) >= 0.0;
+	const double GroundTurn = bGroundKnown
+		? ((GroundAttitudeDeg(bFar ? ActiveTerrain.Far : ActiveTerrain.Near) + StanceAttitudeOverGround) - FVector2D(MeasuredPitchDeg, MeasuredRollDeg)).Size()
+		: 0.0;
 	FVector2D LeftDeg = FVector2D::ZeroVector;
 	if (const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this); LevelAssist && LevelAssist->GetHandBackTurnDeg(LeftDeg))
 	{
@@ -5888,21 +5897,22 @@ float URammsCurbNegotiationController::GetStanceChangeMinSeconds() const
 		// whole plane was taken out.
 		// (A level assist that took nothing back out at the hand-back, though it is on, falls through to the turn to the
 		// ground's attitude below: the whole pose is then in the commands the ramp takes to the stance.)
-		return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(LeftDeg.Size(), Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
+		// And never for more than the turn to the ground's attitude, where that is known: levelled or not, the ramp
+		// cannot turn the base further than that. What is left of a pose's plane says so only for a pose that IS a drive
+		// stance with a plane on it. A crossing stopped part way (a fault, a simulation reset under it) hands back legs
+		// wherever it had them; the plane fitted through those is tens of degrees and no turn of the base at all, and a
+		// ramp timed for it took a quarter of a minute, with levelling (begun again from nothing) waiting for it.
+		const double Turn = bGroundKnown ? FMath::Min(LeftDeg.Size(), GroundTurn) : LeftDeg.Size();
+		return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(Turn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
 	}
-	if (!bStanceAttitudeKnown || !ActiveTerrain.bValid)
+	if (!bGroundKnown)
 	{
 		return 0.0f;
 	}
-	// From the attitude the base has now to the one a drive stance takes on the
-	// ground under it -- the ground's, plus the stance's own tilt over the
-	// ground it stood on as the crossing began -- no faster than the base may
-	// turn (pitch and roll together, as a planned tilt), on the selector's
-	// S-curve, with a little to spare for the legs' geometry and lag.
-	const bool		bFar = ActiveTerrain.DistancePastEdge(ChassisOriginXY) >= 0.0;
-	const FVector2D Stance = GroundAttitudeDeg(bFar ? ActiveTerrain.Far : ActiveTerrain.Near) + StanceAttitudeOverGround;
-	const double	Turn = (Stance - FVector2D(MeasuredPitchDeg, MeasuredRollDeg)).Size();
-	return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(Turn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
+	// No faster than the base may turn (pitch and roll together, as a planned
+	// tilt), on the selector's S-curve, with a little to spare for the legs'
+	// geometry and lag.
+	return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(GroundTurn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
 }
 
 bool URammsCurbNegotiationController::StepComplete() const

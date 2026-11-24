@@ -127,6 +127,11 @@ namespace RammsLevel
 	 * tick. A base being braked that hard pitches by its own inertia, and
 	 * goes on rocking for a moment after.
 	 *
+	 * When Trust falls, the share of it lost is taken back out of the LAST
+	 * tick's step too (but for what the baselines explained of it): SpeedCmS
+	 * is measured between two readings, so the braking a tick shows began
+	 * some way into the tick before, whose reading was already part body.
+	 *
 	 * What the gate leaves out is not lost: a reading that stays is caught up
 	 * at the allowance. With Tuning.BreakDeg <= 0 there is no gate: Value is
 	 * RawGroundDeg. The first reading (and Seed) is taken whole.
@@ -151,6 +156,7 @@ namespace RammsLevel
 			bSeeded = true;
 			Trust = 1.0;
 			bHasSpeed = false;
+			LastStep = FVector2D::ZeroVector;
 		}
 		/** One tick; returns the ground as far as it can have turned (deg). */
 		FVector2D Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt, double YawRateDegPerSec = 0.0);
@@ -169,6 +175,9 @@ namespace RammsLevel
 		double	  LastSpeedCmS = 0.0;
 		bool	  bHasSpeed = false;
 		double	  Allowance = 0.0;
+		/** What the last tick moved Value by on the attitude's word (deg; the
+		 *  part the baselines explain left out). */
+		FVector2D LastStep = FVector2D::ZeroVector;
 	};
 
 	/**
@@ -514,6 +523,15 @@ namespace RammsLevel
 		double LegsDegPerSec = 0.0;
 		/** The chassis' speed over the ground as measured (cm/s). */
 		double SpeedCmS = 0.0;
+		/** The speed the rider's stick asks of the drive, before any scale
+		 *  (cm/s, 0 or more); negative where the drive cannot say (it is then
+		 *  taken from the speed there is, over the scale the drive has had
+		 *  time to answer). */
+		double AskedSpeedCmS = -1.0;
+		/** How fast the chassis is turning about the vertical (deg/s): on a
+		 *  slope that swings the ground from pitch into roll in the chassis'
+		 *  own frame, which going slower does nothing for. */
+		double YawRateDegPerSec = 0.0;
 		/** The legs are stopped with the base beyond the tilt policy. */
 		bool bPastReach = false;
 	};
@@ -532,7 +550,7 @@ namespace RammsLevel
 	 *   Follow = min(Cap.FollowMaxDegPerSec, Cap.FollowShare * LegsDegPerSec)
 	 *            (the first alone with no leg rate known)
 	 *
-	 * The scale is the least of four terms, each from 1 down to the floor:
+	 * The scale is the least of these terms, each from 1 down to the floor:
 	 *  - THE TURN NOW: with Turn the low-pass (Cap.TurnFilterSeconds) of
 	 *    GroundRateDegPerSec (towards zero on a tick it is not known):
 	 *    Driven * Follow / |Turn|. Driven is the scale as the drive has had
@@ -540,7 +558,17 @@ namespace RammsLevel
 	 *    ground turns in proportion to the speed, so that is the scale at
 	 *    which it would turn at Follow. (Over 1, and so nothing, while the
 	 *    ground turns slower than that at the speed there is.)
-	 *  - THE SLOPE'S END: the robot is levelled on a slope of SlopeDeg, and
+	 *    Two things are kept out of Turn, because going slower does nothing
+	 *    for either. What the chassis' own turning about the vertical swings
+	 *    the slope by in its frame (SlopeDeg times the yaw rate in rad/s) is
+	 *    taken off the rate's size: a start across a slope that kicks the
+	 *    heading round is not a break in the ground. And the rate is taken up
+	 *    only while the speed asked of the drive, and the speed there is, are
+	 *    steady (Cap.SteadyAskCmS2, Cap.SteadySpeedCmS2 and what follows
+	 *    them): a drive changing speed pitches the body, and the cap must not
+	 *    answer the pitch of its own braking, or of a start.
+	 *  - THE SLOPE'S END, only with Cap.bSlopeEnd (off: a steady slope costs
+	 *    nothing): the robot is levelled on a slope of SlopeDeg, and
 	 *    where that slope ends the ground comes back to level within one
 	 *    span's travel: it will turn SlopeDeg / SpanCm for every cm. That is
 	 *    the one turn of the ground that can be known before it comes, so the
@@ -564,10 +592,30 @@ namespace RammsLevel
 	 * how much reach is left: a steady slope at the very end of the legs'
 	 * travel is driven at its ExitSpeed like any other.
 	 *
+	 * FreeSpeed is the speed the rider's stick asks for: AskedSpeedCmS where
+	 * the drive says, else the estimate above (the slope's-end term's).
+	 *
 	 * The scale falls towards that at Cap.FallPerSec -- and no faster than
-	 * brakes the robot at Cap.BrakeCmS2 (Cap.BrakeCmS2 / FreeSpeed per s) --
-	 * and rises at Tuning.SpeedScaleRisePerSec. It starts at 1. The floor is
+	 * brakes the robot at Cap.BrakeCmS2 (Cap.BrakeCmS2 / FreeSpeed per s), nor
+	 * than closes the gap in Cap.FallSeconds -- and rises at
+	 * Tuning.SpeedScaleRisePerSec. It starts at 1. The floor is
 	 * clamp(MinSpeedScale, 0.01, 1): a tuning of 0 still leaves a crawl.
+	 *
+	 * IT SLOWS, IT NEVER STOPS. The drive it asks is a speed loop, and a loop
+	 * asked for much less than the speed the robot has brakes through what
+	 * was asked. So the scale is never under the one that asks for a share
+	 * of the speed there is, (SpeedCmS (1 - Cap.LeadShare) - Cap.LeadCmS) /
+	 * FreeSpeed (1 at most): the drive is led down, in proportion, and a robot
+	 * that has run away far past what its stick asks (down the far side of a
+	 * crest) is slowed from the speed it has, not from the speed it was
+	 * asked.
+	 *
+	 * And what is given out (Get) is that scale less Cap.OverspeedGain times
+	 * the share by which the robot is going FASTER than its stick asks, at
+	 * once and only while it is (never under the floor; only where the drive
+	 * says what is asked): a robot run away by gravity is braked towards what
+	 * was asked in proportion to how far past it is, which fades as it comes
+	 * back, so it is never braked through it.
 	 *
 	 * WHAT IT CANNOT DO. It reacts: a break the robot meets at speed from
 	 * level ground (nothing levelled yet, so nothing known to end) has turned
@@ -593,22 +641,33 @@ namespace RammsLevel
 		double Tick(const FSpeedCapInputs& In, double Dt, const FTuning& Tuning);
 		/** One tick with nothing to cap for: the scale rises towards 1. */
 		double Relax(double Dt, const FTuning& Tuning);
-		double Get() const { return Scale; }
+		double Get() const { return Out; }
 		/** The speed the rider's stick is taken to ask for (cm/s), the
 		 *  ground's turning rate as filtered (deg/s), and the last tick's
 		 *  Follow (deg/s) and ExitSpeed (cm/s; 0: no such term). */
 		double	  GetFreeSpeedCmS() const { return FreeSpeed; }
 		FVector2D GetTurnDegPerSec() const { return Turn; }
 		double	  GetFollowDegPerSec() const { return Follow; }
+		/** How far the ground's turning is being taken up (0..1). */
+		double	  GetSteady() const { return Steady; }
 		double	  GetExitSpeedCmS() const { return ExitSpeed; }
 
 	private:
+		/** The scale as its terms and rates leave it, and what is given out:
+		 *  that, less what a robot running past its stick's ask takes off. */
 		double	  Scale = 1.0;
+		double	  Out = 1.0;
 		double	  Driven = 1.0;
 		double	  FreeSpeed = 0.0;
 		FVector2D Turn = FVector2D::ZeroVector;
 		double	  Follow = 0.0;
 		double	  ExitSpeed = 0.0;
+		/** The speed asked of the drive at the last tick (cm/s), and how far
+		 *  the ground's turning is taken up (0..1: Cap.SteadyAskCmS2). */
+		double LastAskedCmS = 0.0;
+		double LastSpeedCmS = 0.0;
+		bool   bHasAsked = false;
+		double Steady = 1.0;
 		/** The steepest the slope has been of late (deg), and how far the
 		 *  robot has moved since it was (cm). */
 		double Steepest = 0.0;
@@ -701,5 +760,64 @@ namespace RammsLevel
 		FVector2D LastCorrectionDeg = FVector2D::ZeroVector;
 		bool	  bHasLast = false;
 		bool	  bDiverged = false;
+	};
+	/**
+	 * How fast the chassis moves over the ground and turns about the vertical,
+	 * from readings of where it is -- each with THE TIME IT WAS TAKEN AT.
+	 *
+	 * A speed is a distance over a time, and both must be the readings' own.
+	 * Where the physics runs on its own thread the pose a tick is given was
+	 * taken some time before the tick (up to a frame), a different while each
+	 * tick; and the clock the tick reads is not that pose's either. A distance
+	 * between two poses divided by the time between two TICKS then swings by
+	 * a quarter and more from one tick to the next at a steady pace, and what
+	 * is made of the swing (how hard the base is being braked: FGroundGate)
+	 * is noise. Divided by the time between the two POSES it is the speed.
+	 *
+	 * One Tick takes a reading (a point fixed on the chassis, cm, world; its
+	 * heading, a horizontal unit vector, zero where it is not known) and the
+	 * time it was taken at (s, on any clock that runs with the physics: only
+	 * differences are used). It returns the time since the last reading's:
+	 * what every rate and filter fed by the readings must be counted on.
+	 *  - The first reading: 0, and the speeds are 0.
+	 *  - A reading taken at the same moment as the last (the same pose given
+	 *    twice): 0, and nothing changes -- it says nothing new.
+	 *  - A reading taken BEFORE the last: 0, RanBackwards() is true until the
+	 *    next Tick, and it is taken as a first reading (a clock that was
+	 *    reset).
+	 *  - Otherwise the interval; the speed is the distance over it, the
+	 *    turning rate the angle between the two headings over it (0 with a
+	 *    heading unknown), and MovedCm() the distance (for "was it picked up
+	 *    and put elsewhere").
+	 * Position or time that is not a number is no reading: 0, nothing changes.
+	 */
+	class FMotionSense
+	{
+	public:
+		void   Reset() { *this = FMotionSense(); }
+		double Tick(const FVector& PositionCm, const FVector2D& Heading, double SampleSeconds);
+
+		/** The chassis' speed over the ground (cm/s, 0 or more) and its turning
+		 *  rate about the vertical (deg/s, 0 or more), between the last two
+		 *  readings that were apart in time. */
+		double GetSpeedCmS() const { return SpeedCmS; }
+		double GetYawRateDegPerSec() const { return YawRateDegPerSec; }
+		/** How far the last Tick's reading was from the one before (cm; 0 for a
+		 *  first reading), and whether its time was before the last one's. */
+		double MovedCm() const { return Moved; }
+		bool   RanBackwards() const { return bBackwards; }
+		bool   HasReading() const { return bHas; }
+		/** The time of the last reading taken. */
+		double GetSampleSeconds() const { return LastSeconds; }
+
+	private:
+		FVector	  LastPosition = FVector::ZeroVector;
+		FVector2D LastHeading = FVector2D::ZeroVector;
+		double	  LastSeconds = 0.0;
+		bool	  bHas = false;
+		double	  SpeedCmS = 0.0;
+		double	  YawRateDegPerSec = 0.0;
+		double	  Moved = 0.0;
+		bool	  bBackwards = false;
 	};
 } // namespace RammsLevel

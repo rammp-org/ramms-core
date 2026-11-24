@@ -853,13 +853,15 @@ namespace RammsLevel
 		if (bActive || Now == EState::Releasing || bRamping)
 		{
 			// The cap goes by how fast the ground turns under the robot against
-			// how fast the legs can turn the correction: now, and when the
-			// slope the robot stands on ends (FSpeedScale). Nothing in it looks
-			// at how much reach is left: standing at a limit is not a turn.
+			// how fast the legs can turn the correction (FSpeedScale). Nothing
+			// in it looks at how much reach is left, nor at how steep a steady
+			// slope is: standing at a limit, or on a slope, is not a turn.
 			FSpeedCapInputs Cap;
 			Cap.ErrorDeg = ErrorDeg;
 			Cap.bPastReach = bPastReach;
 			Cap.SpeedCmS = In.SpeedCmS;
+			Cap.AskedSpeedCmS = In.AskedSpeedCmS;
+			Cap.YawRateDegPerSec = In.YawRateDegPerSec;
 			if (State.Terrain.IsSeeded() && bLegsValid)
 			{
 				Cap.SlopeDeg = Inclination(GroundDeg);
