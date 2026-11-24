@@ -76,6 +76,10 @@ namespace RammsLevel
 	constexpr double QuietSpeedCmS = 2.0;
 	/** The wanted tilt has arrived: within this (deg) of its goal, and still. */
 	constexpr double TiltArrivedDeg = 0.05;
+	/** ... or, of a goal that is itself a live estimate, as good as arrived:
+	 *  within TiltArrivedDeg and slower than this (deg/s). (At the tilt
+	 *  policy's 4 deg/s^2 that is what stops within the 0.05 deg.) */
+	constexpr double TiltArrivedRateDegPerSec = 0.5;
 	/** A release is done once the correction is under this (deg, Euclidean),
 	 *  the ride-height shift under this (cm) and the seat trim under this
 	 *  (deg): the offsets are then set exactly to zero. */
@@ -95,6 +99,13 @@ namespace RammsLevel
 	 *  is reported as being at reach. (The slack keeps a correction that
 	 *  merely rests on its limit from reading so.) */
 	constexpr double AxisLimitSlackDeg = 0.05;
+	/** The offsets' common height counts as having moved only from this much
+	 *  (cm): the last bit of the arithmetic of a mean that is zero is not a
+	 *  change of ride height. */
+	constexpr double RideStepSlackCm = 1.0e-9;
+	/** ... and when it does step (the legs that stand have changed), it picks
+	 *  the ride height's rate up, and loses it, over this long (s). */
+	constexpr double RideHeightRampSeconds = 0.25;
 
 	/**
 	 * The level assist's tuning. A plain mirror of the reflected
@@ -149,7 +160,9 @@ namespace RammsLevel
 		double MinBellyClearanceCm = 3.0;
 
 		/** How far (cm) the ride height may rise (Up) or sink (Down) from the
-		 *  stance's to make a plane fit, and how fast it moves (cm/s). */
+		 *  stance's to make a plane fit, and how fast it moves (cm/s): that
+		 *  shift, and the offsets' common height when the legs that stand
+		 *  change (0 or less: that one is then left to the legs' own rate). */
 		double RideHeightUpCm = 0.0;
 		double RideHeightDownCm = 0.0;
 		double RideHeightRateCmPerSec = 3.0;
@@ -184,9 +197,9 @@ namespace RammsLevel
 	};
 
 	/**
-	 * One levelled leg as the law sees it this tick. Everything but bSupport
-	 * and BaselineClearanceCm is an input the plant measures; those two are
-	 * filled by SupportMask.
+	 * One levelled leg as the law sees it this tick. Everything but bSupport,
+	 * BaselineClearanceCm and CarryShare is an input the plant measures; those
+	 * three are filled by SupportMask.
 	 *
 	 * A ganged pair of wheels on one actuator is ONE leg, at the middle of
 	 * the pair (y = 0 for a pair across the robot), with bRoll false.
@@ -217,6 +230,16 @@ namespace RammsLevel
 		 *  baseline wheel bottom, as SupportMask finds: for a lifted leg, the
 		 *  clearance the stance gives it. */
 		double BaselineClearanceCm = 0.0;
+		/** How far it counts as CARRYING the robot (0..1), as SupportMask
+		 *  finds: 1 with its wheel bottom level with the lowest baseline
+		 *  bottom, less in a straight line as its stance lifts it, 0 from the
+		 *  inner support band up. What MeasuredCorrection weighs each leg by
+		 *  (squared). Unlike bSupport it has no memory and no step: a leg
+		 *  being lifted off the ground, or set down, fades out of and into
+		 *  the measured correction. A plant that gives the support set itself
+		 *  need not give this (the law then takes 1 for a leg that stands and
+		 *  0 for one that does not). */
+		double CarryShare = 1.0;
 	};
 
 	/** A point of the robot's underside that must stay clear of the ground. */

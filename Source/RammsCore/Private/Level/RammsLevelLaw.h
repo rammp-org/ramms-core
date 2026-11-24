@@ -25,7 +25,7 @@
  *    differs from the last step's (the first step included) counts as
  *    bColdReset. The attitude is VALID when In.bAttitudeValid and
  *    In.AttitudeDeg, every number of every leg (its XY, heights, travel,
- *    rate, radius, clearance) and every number of every clearance point are
+ *    rate, radius, clearance, carry share) and every number of every clearance point are
  *    finite: one that is not would reach the terrain estimate through the
  *    plane fit and stay in it. (With a leg that is not a number nothing is
  *    allocated: an open-loop ramp holds its offsets, an adopt keeps none,
@@ -34,7 +34,13 @@
  * 1. SENSING, when valid: A = Attitude.Tick(In.AttitudeDeg, Dt,
  *    AttitudeFilterSeconds); G = Terrain.Tick(A, MeasuredCorrection(Legs),
  *    Dt, TerrainFilterSeconds); LossSeconds = 0. When not: both hold and
- *    LossSeconds += Dt.
+ *    LossSeconds += Dt. Legs here are In.Legs through SupportMask, going on
+ *    from the support set kept in the state (which this does not move on),
+ *    and DiscountLateLegs with the offsets last given (LastDz, as the last
+ *    step left it; zero while there are none);
+ *    or, with bSupportGiven, as given with CarryShare 1 for a leg that
+ *    stands and 0 for one that does not: MeasuredCorrection is the plane of
+ *    the legs that carry the robot.
  *
  * 2. THE ARBITER. FArbiter::Tick with In's bEnable, Mode, bYield, bResume,
  *    bResumeHasPlane, bColdReset (or step 0's), the validity above,
@@ -87,7 +93,7 @@
  *    b. Goal: Active, WantedTiltGoal(G, Legs, Points, Tuning). Releasing, G
  *       itself: the attitude of the baseline stance on this ground.
  *    c. Active only: Quiet.Tick(In.SpeedCmS, |A - W|, In.bStick,
- *       Tilt.HasArrived(Goal), Dt). While quiet, d to h are skipped: W, the
+ *       Tilt.IsNear(Goal), Dt). While quiet, d to h are skipped: W, the
  *       integral, C and Ride hold, Dz = LastDz and bWrite is false. The same
  *       on a step with Dt 0.
  *    d. W = Tilt.Tick(Goal, Dt, TiltRateDegPerSec, TiltAccelDegPerSec2) --
@@ -109,19 +115,30 @@
  *       bSaturated = Alloc.Fraction < 1, and then C := Alloc.AppliedDeg and
  *       Loop.BackCalculate(Slewed, Alloc.AppliedDeg): the base takes the
  *       rest, and W's goal has already been easing W towards that tilt.
- *    g2. The legs' rate has the last word: the offsets given go from LastDz
- *       towards Alloc.Dz as a whole, by the largest share (1 at most) that
+ *    g2. The last word on how fast the offsets move: they go from LastDz
+ *       towards Alloc.Dz as a whole. The slew cannot see the height term
+ *       (the support legs' mean, which jumps when the support set changes)
+ *       nor a fall of the allocation's share from one step to the next; this
+ *       does, in two parts. First the step's COMMON HEIGHT, the mean of
+ *       Alloc.Dz - LastDz over the support legs (over every leg when none
+ *       stands): zero while the same legs stand, and otherwise a change of
+ *       ride height, so it is given to every leg alike at no more than
+ *       RideHeightRateCmPerSec, a speed (HeightRateCmS) that is picked up
+ *       and lost over RideHeightRampSeconds and never more than can still
+ *       stop on what is left (FTiltTarget's rule, in one dimension); all of
+ *       it at once for a rate of 0 or less. Legs quick enough to make the
+ *       whole of it in one frame would all be told it at once, and legs
+ *       that do not answer alike pitch the base with it. Then what is left
+ *       goes by the largest share (1 at most) that
  *       keeps every leg within LegRateFraction of its MaxRateCmS over Dt
  *       (legs with no rate do not count; no limit for LegRateFraction <= 0).
- *       The slew cannot see the height term (the support legs' mean, which
- *       jumps when the support set changes) nor a fall of the allocation's
- *       share from one step to the next; this does. When it holds the
- *       offsets back, bRateLimited is set, RateUse takes the use it found,
- *       and C and Ride stay the allocation's: the offsets catch them up over
- *       the next steps. Dz = LastDz = the result; bWrite is true.
+ *       When either holds the offsets back, bRateLimited is set, RateUse
+ *       takes the leg-rate use the whole step asked, and C and Ride stay
+ *       the allocation's: the offsets catch them up over the next steps.
+ *       Dz = LastDz = the result; bWrite is true.
  *    h. Active: Divergence.Tick(|A - W|, A, MeasuredCorrection(Legs),
  *       Alloc.Fraction >= 1, Dt) (not while quiet). Releasing: ReleaseSeconds += Dt, and bReleaseOpen becomes
- *       true once Tilt.HasArrived(G) or ReleaseSeconds > ReleaseMaxSeconds:
+ *       true once Tilt.IsNear(G) or ReleaseSeconds > ReleaseMaxSeconds:
  *       what is left of C is then the integral's trim, which no ground
  *       explains, and it is ramped out open loop.
  *
@@ -304,6 +321,9 @@ namespace RammsLevel
 		FVector2D CorrectionDeg = FVector2D::ZeroVector;
 		/** The ride-height shift (cm, positive raises the chassis). */
 		double RideCm = 0.0;
+		/** How fast the offsets' common height is catching the allocation's
+		 *  up (cm/s; step g2), 0 when it has. */
+		double HeightRateCmS = 0.0;
 		/** The last offsets given, for the steps that hold them. */
 		FLegValues LastDz;
 		/** Who stood last step, for SupportMask's hysteresis; empty: no memory. */

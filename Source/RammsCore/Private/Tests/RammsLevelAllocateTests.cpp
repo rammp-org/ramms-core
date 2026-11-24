@@ -881,4 +881,178 @@ bool FRammsLevelFitPlaneLeavesHeightAndShapeOut::RunTest(const FString& Paramete
 	return true;
 }
 
+// Catches: the achieved correction fitted through legs that do not carry the
+// robot (a raised leg resting on its retract stop, or lagging in the air,
+// bends a fit through every leg: the terrain estimate then reads short of the
+// ground, the base settles short of level and a release stalls on it), no
+// fallback where the carrying legs do not span a direction, and a fit that
+// takes a nearly-in-line stance's noise for a slope.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelMeasuredCorrectionCarryingLegs,
+	"Ramms.Level.FitPlane.MeasuredCorrectionIsTheCarryingLegs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelMeasuredCorrectionCarryingLegs::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAllocateTests;
+	const FTuning Tuning;
+
+	// The front pair carried 6 cm clear, 0.3 cm short of its retract stop:
+	// the robot stands on the other four.
+	const auto FrontsRaised = []() {
+		TArray<FLegReach> Legs = SixWheels();
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			Legs[Index].BaseZ = -14.0;
+			Legs[Index].MeasuredZ = -14.0;
+			Legs[Index].MaxZ = -13.7;
+		}
+		return Legs;
+	};
+	{
+		// A nose-up slope taken out: the fronts are asked to retract, and stop.
+		TArray<FLegReach> Legs = FrontsRaised();
+		Stand(Legs, Tuning);
+		TestTrue(TEXT("raised: the fronts do not stand"), !Legs[0].bSupport && !Legs[1].bSupport && Legs[2].bSupport && Legs[5].bSupport);
+		TestTrue(TEXT("raised: ... and carry nothing, the others all of their share"), Legs[0].CarryShare == 0.0 && Legs[1].CarryShare == 0.0 && Legs[2].CarryShare == 1.0 && Legs[5].CarryShare == 1.0);
+		const FVector2D	  Wanted(2.0, -1.0);
+		const FAllocation A = AllocateFor(Legs, Wanted, Tuning);
+		if (TestEqual(TEXT("raised: an offset per leg"), A.Dz.Num(), Legs.Num()))
+		{
+			CheckNear(*this, TEXT("raised: all of the plane fits"), A.Fraction, 1.0, Tight);
+			CheckNear(*this, TEXT("raised: a front leg stops at its travel"), A.Dz[1], 0.3, Tight);
+			for (int32 Index = 0; Index < Legs.Num(); ++Index)
+			{
+				Legs[Index].MeasuredZ = Legs[Index].BaseZ + A.Dz[Index];
+			}
+			FVector2D Measured = RammsLevel::MeasuredCorrection(Legs);
+			CheckNear(*this, TEXT("raised, on their stop: the pitch the standing legs made"), Measured.X, Wanted.X, Tight);
+			CheckNear(*this, TEXT("raised, on their stop: the roll the standing legs made"), Measured.Y, Wanted.Y, Tight);
+
+			// ... and wherever the raised legs are on their way to.
+			Legs[0].MeasuredZ = Legs[0].BaseZ - 2.5;
+			Legs[1].MeasuredZ = Legs[1].BaseZ + 0.1;
+			Measured = RammsLevel::MeasuredCorrection(Legs);
+			CheckNear(*this, TEXT("raised, lagging: pitch"), Measured.X, Wanted.X, Tight);
+			CheckNear(*this, TEXT("raised, lagging: roll"), Measured.Y, Wanted.Y, Tight);
+		}
+	}
+	{
+		// A leg being lifted fades out of the plane; it does not drop out of
+		// it in one step. The front pair lags a stance ramp by 1 cm, on a
+		// robot whose offsets are all zero: what that reads as (0.64 deg on
+		// the ground) shrinks with the height the ramp has reached, no
+		// quarter centimetre of it taking more than half, and is nothing by
+		// the inner band (1 cm) -- well before the pair leaves the support
+		// set, at 2 cm.
+		double Last = 0.0;
+		for (int32 Step = 0; Step <= 9; ++Step)
+		{
+			const double	   LiftCm = 0.25 * Step;
+			TArray<FLegReach>  Legs = SixWheels();
+			const TArray<bool> Stood = { true, true, true, true, true, true };
+			for (int32 Index = 0; Index < 2; ++Index)
+			{
+				Legs[Index].BaseZ += LiftCm;
+				Legs[Index].MeasuredZ = Legs[Index].BaseZ - 1.0;
+			}
+			RammsLevel::SupportMask(Legs, Stood, Tuning);
+			CheckNear(*this, FString::Printf(TEXT("lifted %.2f cm: a front leg's share"), LiftCm), Legs[0].CarryShare, FMath::Max(0.0, 1.0 - LiftCm), Tight);
+			TestEqual(FString::Printf(TEXT("lifted %.2f cm: it stands up to the outer band"), LiftCm), Legs[0].bSupport, LiftCm <= 2.0);
+			const double Pitch = RammsLevel::MeasuredCorrection(Legs).X;
+			if (Step == 0)
+			{
+				TestTrue(TEXT("on the ground: a lagging front pair is in the plane"), Pitch < -0.6);
+			}
+			else
+			{
+				TestTrue(FString::Printf(TEXT("lifted %.2f cm: it counts for no more than at %.2f (%.3f deg, %.3f before)"), LiftCm, LiftCm - 0.25, Pitch, Last), FMath::Abs(Pitch) <= FMath::Abs(Last));
+				TestTrue(FString::Printf(TEXT("lifted %.2f cm: ... and for less by no more than half of it"), LiftCm), FMath::Abs(Pitch - Last) <= 0.32);
+			}
+			if (LiftCm >= 1.0)
+			{
+				CheckNear(*this, FString::Printf(TEXT("lifted %.2f cm: nothing of it is left"), LiftCm), Pitch, 0.0, Tight);
+			}
+			Last = Pitch;
+		}
+	}
+	{
+		// A leg being set down: its baseline is on the ground before its
+		// joint is. Until the joint has come down it stands on nothing, and
+		// its lateness is not a correction. The front pair's baseline is
+		// down, its joints 0.6 cm behind; every joint also sags 0.3 cm under
+		// the load, which is nobody's lateness.
+		TArray<FLegReach>			 Legs = SixWheels();
+		const RammsLevel::FLegValues Dz = { 0.5, 0.5, 0.0, 0.0, -0.5, -0.5 };
+		for (int32 Index = 0; Index < Legs.Num(); ++Index)
+		{
+			Legs[Index].MeasuredZ = Legs[Index].BaseZ + Dz[Index] + 0.3 + (Index < 2 ? 0.6 : 0.0);
+		}
+		Stand(Legs, Tuning);
+		const double Before = RammsLevel::MeasuredCorrection(Legs).X;
+		RammsLevel::DiscountLateLegs(Legs, Dz, Tuning);
+		CheckNear(*this, TEXT("set down: a late leg's share"), Legs[0].CarryShare, 0.4, Tight);
+		CheckNear(*this, TEXT("set down: a sag all round is not lateness"), Legs[4].CarryShare, 1.0, Tight);
+		const double After = RammsLevel::MeasuredCorrection(Legs).X;
+		const double TrueDeg = FMath::RadiansToDegrees(FMath::Atan(1.0 / 90.0));
+		TestTrue(FString::Printf(TEXT("set down: the late pair counts for less (%.3f deg off the plane, %.3f before)"), After - TrueDeg, Before - TrueDeg),
+			FMath::Abs(After - TrueDeg) < 0.6 * FMath::Abs(Before - TrueDeg) && FMath::Abs(Before - TrueDeg) > 0.3);
+		// ... and a leg late in LIFTING (its wheel below where it is told) is
+		// on the ground for as long as it is late: left alone.
+		Legs[0].CarryShare = 1.0;
+		Legs[0].MeasuredZ = Legs[0].BaseZ + Dz[0] - 0.6;
+		RammsLevel::DiscountLateLegs(Legs, Dz, Tuning);
+		CheckNear(*this, TEXT("lifting late: left alone"), Legs[0].CarryShare, 1.0, Tight);
+	}
+	{
+		// Only the centre pair stands (a line across the robot): the roll is
+		// theirs; fore and aft they say nothing, and the plane through every
+		// leg stands in.
+		TArray<FLegReach> Legs = SixWheels();
+		for (int32 Index = 0; Index < Legs.Num(); ++Index)
+		{
+			const bool bCentre = Index == 2 || Index == 3;
+			Legs[Index].bSupport = bCentre;
+			Legs[Index].CarryShare = bCentre ? 1.0 : 0.0;
+			Legs[Index].MeasuredZ = Legs[Index].BaseZ + RammsLevel::PlaneRise(Legs[Index].XY, true, bCentre ? FVector2D(0.0, 3.0) : FVector2D(2.0, 1.0));
+		}
+		const FVector2D Measured = RammsLevel::MeasuredCorrection(Legs);
+		CheckNear(*this, TEXT("a pair across: the roll is the pair's"), Measured.Y, 3.0, Tight);
+		CheckNear(*this, TEXT("a pair across: the pitch is every leg's"), Measured.X, 2.0, Tight);
+	}
+	{
+		// No leg is said to stand: the plane through every leg, as before.
+		TArray<FLegReach> Legs = SixWheels();
+		const FVector2D	  Plane(-3.0, 1.5);
+		for (FLegReach& Leg : Legs)
+		{
+			Leg.bSupport = false;
+			Leg.CarryShare = 0.0;
+			Leg.MeasuredZ = Leg.BaseZ + RammsLevel::PlaneRise(Leg.XY, true, Plane) + 0.4;
+		}
+		const FVector2D Measured = RammsLevel::MeasuredCorrection(Legs);
+		CheckNear(*this, TEXT("none stands: pitch"), Measured.X, Plane.X, Tight);
+		CheckNear(*this, TEXT("none stands: roll"), Measured.Y, Plane.Y, Tight);
+	}
+	{
+		// Three standing legs all but in line fore and aft (1 cm across in
+		// 90), the middle one 0.2 cm off the line; a raised pair either side
+		// following a roll of 2 deg. Across the line the three carry no
+		// information worth the name (0.2 cm in 1 is 11 deg): every leg's
+		// plane stands in there too.
+		TArray<FLegReach> Legs = { MakeLeg(45.0, 0.5), MakeLeg(0.0, -0.5), MakeLeg(-45.0, 0.5), MakeLeg(0.0, -27.0), MakeLeg(0.0, 27.0) };
+		const FVector2D	  Plane(1.0, 2.0);
+		for (int32 Index = 0; Index < Legs.Num(); ++Index)
+		{
+			Legs[Index].bSupport = Index < 3;
+			Legs[Index].CarryShare = Index < 3 ? 1.0 : 0.0;
+			Legs[Index].MeasuredZ = Legs[Index].BaseZ + RammsLevel::PlaneRise(Legs[Index].XY, true, Plane);
+		}
+		Legs[1].MeasuredZ += 0.2;
+		const FVector2D Measured = RammsLevel::MeasuredCorrection(Legs);
+		CheckNear(*this, TEXT("all but in line: the pitch along the line"), Measured.X, Plane.X, 0.05);
+		CheckNear(*this, TEXT("all but in line: the roll is not the line's noise"), Measured.Y, Plane.Y, 0.3);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

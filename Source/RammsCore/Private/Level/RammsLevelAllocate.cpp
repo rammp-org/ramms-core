@@ -19,6 +19,115 @@ namespace RammsLevel
 		 *  is at least this share of the larger one, and this much (cm^2). */
 		constexpr double SpreadRatioMin = 1.0e-6;
 		constexpr double SpreadMinCm2 = 1.0e-9;
+		/** MeasuredCorrection's own, stricter, ratio for the legs that stand:
+		 *  they must be at least a tenth as wide as they are long (a hundredth
+		 *  in spread) for the plane across them to be theirs. Narrower, and a
+		 *  millimetre of sag on one of them would read as degrees. */
+		constexpr double CarrySpreadRatioMin = 1.0e-2;
+
+		/** A plane fit as FitPlane makes it, with what MeasuredCorrection
+		 *  needs besides: each point counted by a weight (0 or more; FitPlane's
+		 *  Use is 1 or 0), the slopes as tangents, and the two principal
+		 *  directions of the points' spread with whether each is spanned. */
+		struct FPlaneFit
+		{
+			/** A point counted (some weight was over 0). */
+			bool bAny = false;
+			/** The slopes along x and y' (tangents), and the height at the origin. */
+			FVector2D Slope = FVector2D::ZeroVector;
+			double	  HeightCm = 0.0;
+			/** The spread's principal directions (unit vectors in x, y') and
+			 *  whether the points span each. An unspanned one has no slope. */
+			FVector2D Major = FVector2D(1.0, 0.0);
+			FVector2D Minor = FVector2D(0.0, 1.0);
+			bool	  bMajor = false;
+			bool	  bMinor = false;
+		};
+
+		FPlaneFit Fit(TConstArrayView<FVector2D> XY, TConstArrayView<double> Values, TConstArrayView<double> Weights, TConstArrayView<bool> Roll, double RatioMin)
+		{
+			FPlaneFit Out;
+
+			const int32 Num = FMath::Min(XY.Num(), Values.Num());
+			// (No weights: every point counts whole. Weights shorter than the
+			// points leave the points past their end out.)
+			const auto Weight = [&Weights](int32 Index) { return Weights.Num() == 0 ? 1.0 : (Weights.IsValidIndex(Index) ? FMath::Max(0.0, Weights[Index]) : 0.0); };
+			// A point roll does not reach takes x tan(pitch) only, so it sits at
+			// y' = 0 as far as the fit goes.
+			const auto Across = [&XY, &Roll](int32 Index) { return (Roll.Num() == 0 || !Roll.IsValidIndex(Index) || Roll[Index]) ? XY[Index].Y : 0.0; };
+
+			double Count = 0.0;
+			double MeanX = 0.0;
+			double MeanY = 0.0;
+			double MeanValue = 0.0;
+			for (int32 Index = 0; Index < Num; ++Index)
+			{
+				const double W = Weight(Index);
+				MeanX += W * XY[Index].X;
+				MeanY += W * Across(Index);
+				MeanValue += W * Values[Index];
+				Count += W;
+			}
+			if (!(Count > 0.0))
+			{
+				return Out;
+			}
+			Out.bAny = true;
+			MeanX /= Count;
+			MeanY /= Count;
+			MeanValue /= Count;
+
+			// About the centroid the height drops out, and what is left is a
+			// 2 x 2 problem: Spread * (slope x, slope y) = Moment.
+			double Sxx = 0.0;
+			double Sxy = 0.0;
+			double Syy = 0.0;
+			double Sxv = 0.0;
+			double Syv = 0.0;
+			for (int32 Index = 0; Index < Num; ++Index)
+			{
+				const double W = Weight(Index);
+				const double Dx = XY[Index].X - MeanX;
+				const double Dy = Across(Index) - MeanY;
+				const double Dv = Values[Index] - MeanValue;
+				Sxx += W * Dx * Dx;
+				Sxy += W * Dx * Dy;
+				Syy += W * Dy * Dy;
+				Sxv += W * Dx * Dv;
+				Syv += W * Dy * Dv;
+			}
+
+			// The spread's two principal directions. A direction the points do
+			// not span carries no information: dividing by its (near) zero spread
+			// would turn rounding into slope, so it gets none -- the pseudo-inverse.
+			const double Angle = 0.5 * FMath::Atan2(2.0 * Sxy, Sxx - Syy);
+			const double Cos = FMath::Cos(Angle);
+			const double Sin = FMath::Sin(Angle);
+			const double SpreadMajor = Sxx * Cos * Cos + 2.0 * Sxy * Cos * Sin + Syy * Sin * Sin;
+			const double SpreadMinor = Sxx * Sin * Sin - 2.0 * Sxy * Cos * Sin + Syy * Cos * Cos;
+			const double Larger = FMath::Max(SpreadMajor, SpreadMinor);
+			const auto	 Spanned = [Larger, RatioMin](double Spread) { return Spread >= SpreadMinCm2 && Spread >= RatioMin * Larger; };
+
+			Out.Major = FVector2D(Cos, Sin);
+			Out.Minor = FVector2D(-Sin, Cos);
+			Out.bMajor = Spanned(SpreadMajor);
+			Out.bMinor = Spanned(SpreadMinor);
+			if (Out.bMajor)
+			{
+				Out.Slope += Out.Major * ((Sxv * Cos + Syv * Sin) / SpreadMajor);
+			}
+			if (Out.bMinor)
+			{
+				Out.Slope += Out.Minor * ((-Sxv * Sin + Syv * Cos) / SpreadMinor);
+			}
+			Out.HeightCm = MeanValue - Out.Slope.X * MeanX - Out.Slope.Y * MeanY;
+			return Out;
+		}
+
+		FVector2D SlopeDeg(const FVector2D& Slope)
+		{
+			return FVector2D(FMath::RadiansToDegrees(FMath::Atan(Slope.X)), FMath::RadiansToDegrees(FMath::Atan(Slope.Y)));
+		}
 
 		/** The mean rise of the plane over the support legs (over every leg
 		 *  when none stands; 0 with no legs): what is taken off every leg so
@@ -235,94 +344,60 @@ namespace RammsLevel
 			Leg.BaselineClearanceCm = FMath::Max(0.0, Leg.BaseZ - Leg.RadiusCm - Lowest);
 			const bool bWas = bMemory && Was[LegIndex];
 			Leg.bSupport = Leg.BaselineClearanceCm <= (bWas ? StayCm : Tuning.SupportBandInCm);
+			// No memory in this one, so that it never steps; and gone by the
+			// inner band, the narrower: a leg drawn up off the ground is in
+			// the air from the first of its lift, whatever the set still says.
+			const double CarryCm = FMath::Min(Tuning.SupportBandInCm, StayCm);
+			Leg.CarryShare = CarryCm > 0.0 ? FMath::Clamp(1.0 - Leg.BaselineClearanceCm / CarryCm, 0.0, 1.0) : (Leg.BaselineClearanceCm <= 0.0 ? 1.0 : 0.0);
+		}
+	}
+
+	void DiscountLateLegs(TArrayView<FLegReach> Legs, TConstArrayView<double> Dz, const FTuning& Tuning)
+	{
+		const double CarryCm = FMath::Min(Tuning.SupportBandInCm, FMath::Max(Tuning.SupportBandInCm, Tuning.SupportBandOutCm));
+		// How far each wheel is above where it is told to be, and the least
+		// of that among the legs that carry: what they are all late by (a
+		// sag under the load, a stance being lowered) is nobody's lateness.
+		FLegValues Late;
+		double	   Least = 0.0;
+		bool	   bAny = false;
+		for (int32 LegIndex = 0; LegIndex < Legs.Num(); ++LegIndex)
+		{
+			const FLegReach& Leg = Legs[LegIndex];
+			Late.Add(FMath::Max(0.0, Leg.MeasuredZ - (Leg.BaseZ + (Dz.IsValidIndex(LegIndex) ? Dz[LegIndex] : 0.0))));
+			if (Leg.CarryShare > 0.0)
+			{
+				Least = bAny ? FMath::Min(Least, Late[LegIndex]) : Late[LegIndex];
+				bAny = true;
+			}
+		}
+		for (int32 LegIndex = 0; LegIndex < Legs.Num(); ++LegIndex)
+		{
+			FLegReach&	 Leg = Legs[LegIndex];
+			const double LateCm = Late[LegIndex] - Least;
+			if (LateCm > 0.0)
+			{
+				Leg.CarryShare = CarryCm > 0.0 ? FMath::Clamp(Leg.CarryShare - LateCm / CarryCm, 0.0, 1.0) : 0.0;
+			}
 		}
 	}
 
 	bool FitPlane(TConstArrayView<FVector2D> XY, TConstArrayView<double> Values, TConstArrayView<bool> Use, TConstArrayView<bool> Roll,
 		FVector2D& OutDeg, double& OutHeightCm)
 	{
-		OutDeg = FVector2D::ZeroVector;
-		OutHeightCm = 0.0;
-
-		const int32 Num = FMath::Min(XY.Num(), Values.Num());
-		const auto	Counts = [&Use](int32 Index) { return Use.Num() == 0 || (Use.IsValidIndex(Index) && Use[Index]); };
-		// A point roll does not reach takes x tan(pitch) only, so it sits at
-		// y' = 0 as far as the fit goes.
-		const auto Across = [&XY, &Roll](int32 Index) { return (Roll.Num() == 0 || !Roll.IsValidIndex(Index) || Roll[Index]) ? XY[Index].Y : 0.0; };
-
-		int32  Count = 0;
-		double MeanX = 0.0;
-		double MeanY = 0.0;
-		double MeanValue = 0.0;
-		for (int32 Index = 0; Index < Num; ++Index)
+		// (A Use shorter than the points leaves the points past its end out.)
+		FLegValues Weights;
+		if (Use.Num() > 0)
 		{
-			if (Counts(Index))
+			for (int32 Index = 0; Index < XY.Num(); ++Index)
 			{
-				MeanX += XY[Index].X;
-				MeanY += Across(Index);
-				MeanValue += Values[Index];
-				++Count;
+				Weights.Add(Use.IsValidIndex(Index) && Use[Index] ? 1.0 : 0.0);
 			}
 		}
-		if (Count == 0)
-		{
-			return false;
-		}
-		MeanX /= Count;
-		MeanY /= Count;
-		MeanValue /= Count;
-
-		// About the centroid the height drops out, and what is left is a
-		// 2 x 2 problem: Spread * (slope x, slope y) = Moment.
-		double Sxx = 0.0;
-		double Sxy = 0.0;
-		double Syy = 0.0;
-		double Sxv = 0.0;
-		double Syv = 0.0;
-		for (int32 Index = 0; Index < Num; ++Index)
-		{
-			if (Counts(Index))
-			{
-				const double Dx = XY[Index].X - MeanX;
-				const double Dy = Across(Index) - MeanY;
-				const double Dv = Values[Index] - MeanValue;
-				Sxx += Dx * Dx;
-				Sxy += Dx * Dy;
-				Syy += Dy * Dy;
-				Sxv += Dx * Dv;
-				Syv += Dy * Dv;
-			}
-		}
-
-		// The spread's two principal directions. A direction the points do
-		// not span carries no information: dividing by its (near) zero spread
-		// would turn rounding into slope, so it gets none -- the pseudo-inverse.
-		const double Angle = 0.5 * FMath::Atan2(2.0 * Sxy, Sxx - Syy);
-		const double Cos = FMath::Cos(Angle);
-		const double Sin = FMath::Sin(Angle);
-		const double SpreadMajor = Sxx * Cos * Cos + 2.0 * Sxy * Cos * Sin + Syy * Sin * Sin;
-		const double SpreadMinor = Sxx * Sin * Sin - 2.0 * Sxy * Cos * Sin + Syy * Cos * Cos;
-		const double Larger = FMath::Max(SpreadMajor, SpreadMinor);
-		const auto	 Spanned = [Larger](double Spread) { return Spread >= AllocateImpl::SpreadMinCm2 && Spread >= AllocateImpl::SpreadRatioMin * Larger; };
-
-		double SlopeX = 0.0;
-		double SlopeY = 0.0;
-		if (Spanned(SpreadMajor))
-		{
-			const double Along = (Sxv * Cos + Syv * Sin) / SpreadMajor;
-			SlopeX += Along * Cos;
-			SlopeY += Along * Sin;
-		}
-		if (Spanned(SpreadMinor))
-		{
-			const double Along = (-Sxv * Sin + Syv * Cos) / SpreadMinor;
-			SlopeX += -Along * Sin;
-			SlopeY += Along * Cos;
-		}
-
-		OutDeg = FVector2D(FMath::RadiansToDegrees(FMath::Atan(SlopeX)), FMath::RadiansToDegrees(FMath::Atan(SlopeY)));
-		OutHeightCm = MeanValue - SlopeX * MeanX - SlopeY * MeanY;
-		return true;
+		const AllocateImpl::FPlaneFit Fit = AllocateImpl::Fit(XY, Values, Weights, Roll, AllocateImpl::SpreadRatioMin);
+		OutDeg = AllocateImpl::SlopeDeg(Fit.Slope);
+		OutHeightCm = Fit.HeightCm;
+		return Fit.bAny;
 	}
 
 	FVector2D MeasuredCorrection(TConstArrayView<FLegReach> Legs)
@@ -330,16 +405,47 @@ namespace RammsLevel
 		TArray<FVector2D, TInlineAllocator<8>> XY;
 		FLegValues							   Moved;
 		TArray<bool, TInlineAllocator<8>>	   Roll;
+		FLegValues							   Carries;
 		for (const FLegReach& Leg : Legs)
 		{
 			XY.Add(Leg.XY);
 			Moved.Add(Leg.MeasuredZ - Leg.BaseZ);
 			Roll.Add(Leg.bRoll);
+			// (The square: a leg with leverage over the others keeps most of
+			// its say in a least-squares plane down to a small weight, and
+			// would lose it all in the last of its lift. Squared, it gives
+			// it up more evenly on the way.)
+			Carries.Add(FMath::Square(FMath::Clamp(Leg.CarryShare, 0.0, 1.0)));
 		}
-		FVector2D Deg = FVector2D::ZeroVector;
-		double	  HeightCm = 0.0;
-		FitPlane(XY, Moved, TConstArrayView<bool>(), Roll, Deg, HeightCm);
-		return Deg;
+		// The attitude the joints give the base is set by the legs it stands
+		// on. A leg carried clear of the ground changes nothing by where it
+		// is: one resting on its retract stop, or still on its way, is not
+		// part of the plane the base was moved by.
+		const AllocateImpl::FPlaneFit Carried = AllocateImpl::Fit(XY, Moved, Carries, Roll, AllocateImpl::CarrySpreadRatioMin);
+		FVector2D					  Slope = Carried.Slope;
+		if (!Carried.bAny || !Carried.bMajor || !Carried.bMinor)
+		{
+			// Where the standing legs say nothing (none stands; across a line
+			// of them), the plane through every leg stands in: what the legs
+			// were all told, as far as they have followed it.
+			const AllocateImpl::FPlaneFit All = AllocateImpl::Fit(XY, Moved, TConstArrayView<double>(), Roll, AllocateImpl::SpreadRatioMin);
+			if (!Carried.bAny)
+			{
+				Slope = All.Slope;
+			}
+			else
+			{
+				if (!Carried.bMajor)
+				{
+					Slope += Carried.Major * FVector2D::DotProduct(All.Slope, Carried.Major);
+				}
+				if (!Carried.bMinor)
+				{
+					Slope += Carried.Minor * FVector2D::DotProduct(All.Slope, Carried.Minor);
+				}
+			}
+		}
+		return AllocateImpl::SlopeDeg(Slope);
 	}
 
 	void RigidOffsets(TConstArrayView<FLegReach> Legs, const FVector2D& Deg, FLegValues& Out)

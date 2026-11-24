@@ -1608,4 +1608,226 @@ bool FRammsLevelLawReleaseTakenBack::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: the offsets' common height stepping as fast as the legs can go
+// when a leg leaves or joins the support set. On legs fast enough to make the
+// whole step inside one frame the leg-rate limit never binds, every standing
+// leg is told the step at once, and legs that do not answer alike pitch the
+// base with it: the ride height has its own, gentler rate.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawRideHeightSlews,
+	"Ramms.Level.Law.RideHeightSlewsThroughASupportChange",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawRideHeightSlews::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// Legs that move 60 cm/s: 0.8 of that is 3 cm a frame, more than any
+	// height term here.
+	FToy Toy(12.0);
+	for (FLegReach& Leg : Toy.Legs)
+	{
+		Leg.MaxRateCmS = 60.0;
+	}
+	Toy.GroundDeg = FVector2D(6.0, 0.0);
+	Toy.In.SpeedCmS = 40.0;
+	Toy.In.bStick = true;
+	FOutputs Out = Toy.Run(6.0);
+	TestTrue(TEXT("Levelled on 6 deg"), Inclination(Toy.Attitude()) <= 0.3);
+
+	// The ride height's rate, a frame of it; and a hair for the plane, which
+	// stands still here. It is picked up over RideHeightRampSeconds: the
+	// first frame's move is a frame's worth of that rise in speed.
+	const double MaxStepCm = Toy.Tuning.RideHeightRateCmPerSec * Frame + 0.01;
+	const double MaxFirstCm = Toy.Tuning.RideHeightRateCmPerSec * (Frame / RideHeightRampSeconds) * Frame + 0.01;
+	// A front leg's baseline drawn up 3 cm leaves the support set, and let
+	// down again joins it: either way the mean over the legs that stand
+	// moves by 4.73 / 5 = 0.95 cm.
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		const TCHAR*	 What = Pass == 0 ? TEXT("a leg leaves the support set") : TEXT("a leg joins the support set");
+		const FLegValues Before = Out.Dz;
+		const double	 Lift = Pass == 0 ? 3.0 : -3.0;
+		Toy.Legs[0].BaseZ += Lift;
+		Toy.Legs[0].MeasuredZ += Lift;
+		FLegValues Last = Before;
+		double	   MostStep = 0.0;
+		double	   FirstStep = 0.0;
+		double	   LastStep = 0.0;
+		bool	   bSaid = false;
+		for (int32 Index = 0; Index < 16; ++Index)
+		{
+			Out = Toy.Step(Frame);
+			LastStep = MaxDifference(Out.Dz, Last);
+			MostStep = FMath::Max(MostStep, LastStep);
+			FirstStep = Index == 0 ? LastStep : FirstStep;
+			bSaid = bSaid || (Index == 0 && Out.bRateLimited);
+			Last = Out.Dz;
+		}
+		TestTrue(FString::Printf(TEXT("%s: the height term did move"), What), FMath::Abs(Out.Dz[5] - Before[5]) > 0.9);
+		TestTrue(FString::Printf(TEXT("%s: ... at the ride height's rate, not the legs' (%.3f cm a frame at most, %.3f allowed)"), What, MostStep, MaxStepCm), MostStep <= MaxStepCm);
+		TestTrue(FString::Printf(TEXT("%s: ... picking that rate up from rest (%.3f cm in the first frame, %.3f allowed)"), What, FirstStep, MaxFirstCm), FirstStep <= MaxFirstCm && FirstStep > 0.0);
+		TestTrue(FString::Printf(TEXT("%s: ... and at rest again within the second (%.4f cm in the last frame)"), What, LastStep), LastStep <= 0.01 && !Out.bRateLimited);
+		TestTrue(FString::Printf(TEXT("%s: ... which the step said"), What), bSaid);
+		TestTrue(FString::Printf(TEXT("%s: the base is still level"), What), Inclination(Toy.Attitude()) <= 0.3);
+		Out = Toy.Run(2.0);
+	}
+
+	// With no ride-height rate the legs' own rate is the only limit, as it
+	// was: the step is made at once.
+	{
+		Toy.Tuning.RideHeightRateCmPerSec = 0.0;
+		const FLegValues Before = Out.Dz;
+		Toy.Legs[0].BaseZ += 3.0;
+		Toy.Legs[0].MeasuredZ += 3.0;
+		Out = Toy.Step(Frame);
+		TestTrue(TEXT("No ride-height rate: the legs' rate alone limits the step"), FMath::Abs(Out.Dz[5] - Before[5]) > 0.9);
+	}
+	return true;
+}
+
+// Catches: a release that waits out its time limit whenever the integral
+// holds a trim and the ground estimate is not perfectly still. The walk back
+// ends when the wanted attitude has reached the ground's; "reached" asked of a
+// live estimate as "exactly on it and not moving" never comes true on a real
+// base, whose attitude always moves in its last digits.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawReleaseLiveGround,
+	"Ramms.Level.Law.ReleaseArrivesOnAGroundEstimateThatIsNeverStill",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawReleaseLiveGround::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// Joints that reach 0.7 of their commands: the integral holds 2.6 deg of
+	// trim. The attitude reads 0.003 deg high and low by turns, as a
+	// simulator's does.
+	FToy Toy(12.0);
+	Toy.GroundDeg = FVector2D(6.0, 0.0);
+	Toy.JointShare = 0.7;
+	Toy.In.SpeedCmS = 40.0;
+	Toy.In.bStick = true;
+	Toy.Run(8.0);
+	TestTrue(TEXT("Levelled, with a trim in the integral"), Inclination(Toy.Attitude()) <= 0.25 && Toy.State.Loop.GetIntegral().X > 1.5);
+
+	Toy.In.bEnable = false;
+	FOutputs   Out;
+	double	   OpenAt = -1.0;
+	double	   OffAt = -1.0;
+	FRampWatch Watch;
+	for (int32 Index = 0; Index < 160 && OffAt < 0.0; ++Index)
+	{
+		Toy.ReadingOffsetDeg = FVector2D((Index % 2 == 0) ? 0.003 : -0.003, (Index % 3 == 0) ? -0.002 : 0.002);
+		Out = Toy.Step(Frame);
+		Watch.Feed(Out, Frame);
+		if (OpenAt < 0.0 && Out.bOpenLoop)
+		{
+			OpenAt = (Index + 1) * Frame;
+		}
+		if (Out.State == EState::Off)
+		{
+			OffAt = (Index + 1) * Frame;
+		}
+	}
+	// 6 deg back at 3 deg/s and 4 deg/s^2 is 2.75 s; then the trim, 2.6 deg
+	// of it, ramped out on the same policy in some 1.7 s.
+	TestTrue(FString::Printf(TEXT("The walk back ended when the wanted attitude reached the ground's (%.2f s), not at the time limit"), OpenAt), OpenAt > 2.0 && OpenAt <= 3.5);
+	TestTrue(FString::Printf(TEXT("... and the trim was ramped out after it (off %.2f s after the switch)"), OffAt), OffAt > OpenAt && OffAt <= 5.5);
+	TestTrue(FString::Printf(TEXT("... within the tilt policy (%.2f deg/s, %.2f deg/s2)"), Watch.MostRate, Watch.MostAccel), Watch.MostRate <= 3.0 + 1.0e-6 && Watch.MostAccel <= 4.0 + 1.0e-6);
+	TestTrue(TEXT("... onto the stance"), MaxSize(Toy.Offset) == 0.0);
+	return true;
+}
+
+// Catches: a robot parked on a slope past its legs' reach that is written to
+// for ever. There the wanted tilt's goal is worked out from the ground
+// estimate, which on a real base never stands quite still; the rest must not
+// wait for a goal that does.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawRestLiveGoal,
+	"Ramms.Level.Law.RestsPastReachOnAGroundEstimateThatIsNeverStill",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawRestLiveGoal::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// 4 cm of travel: 6 deg is 4.09 deg past what is planned of the legs,
+	// and the base keeps that. Parked; the attitude reads 0.003 deg high and
+	// low by turns.
+	FToy Toy(4.0);
+	Toy.GroundDeg = FVector2D(6.0, 0.0);
+	FOutputs Out;
+	int32	 Writes = 0;
+	bool	 bGoalMoved = false;
+	double	 LastGround = 0.0;
+	for (int32 Index = 0; Index < 16 * 9; ++Index)
+	{
+		Toy.ReadingOffsetDeg = FVector2D((Index % 2 == 0) ? 0.003 : -0.003, 0.0);
+		Out = Toy.Step(Frame);
+		if (Index >= 16 * 7)
+		{
+			Writes += Out.bWrite ? 1 : 0;
+			bGoalMoved = bGoalMoved || (Index > 16 * 7 && Out.GroundDeg.X != LastGround);
+			LastGround = Out.GroundDeg.X;
+		}
+	}
+	ExpectState(*this, TEXT("parked past reach"), Out, EState::Active);
+	TestTrue(TEXT("The base keeps what the legs cannot take out"), Out.WantedDeg.X > 3.5 && FMath::Abs(Toy.Attitude().X - Out.WantedDeg.X) <= 0.3);
+	TestTrue(TEXT("The ground estimate does go on moving in its last digits"), bGoalMoved);
+	TestTrue(TEXT("... and the robot rests all the same"), Out.bQuiet);
+	ExpectStatus(*this, TEXT("parked past reach"), Out, EStatus::Settled);
+	TestEqual(TEXT("... with nothing written in its last two seconds"), Writes, 0);
+	return true;
+}
+
+// Catches: the terrain estimate taking legs that do not carry the robot into
+// the correction it believes was made -- found from the baselines, or told by
+// the plant -- so that a raised leg's position reads as ground.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawTerrainCarryingLegs,
+	"Ramms.Level.Law.TerrainIsReadOffTheCarryingLegs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawTerrainCarryingLegs::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// The base reads 1 deg nose up; the four legs it stands on have made a
+	// correction of (2, -1): the ground is (3, -1). The front pair is
+	// somewhere else altogether.
+	const FVector2D Made(2.0, -1.0);
+	const FVector2D Reads(1.0, 0.0);
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		const TCHAR* What = Pass == 0 ? TEXT("raised by its baseline") : TEXT("said not to stand");
+		FToy		 Toy(12.0);
+		for (int32 Index = 0; Index < Toy.Legs.Num(); ++Index)
+		{
+			FLegReach& Leg = Toy.Legs[Index];
+			Leg.MeasuredZ = Leg.BaseZ + PlaneRise(Leg.XY, true, Made);
+			if (Index < 2)
+			{
+				if (Pass == 0)
+				{
+					Leg.BaseZ += 6.0;
+				}
+				else
+				{
+					Leg.bSupport = false;
+				}
+				Leg.MeasuredZ = Leg.BaseZ + (Index == 0 ? 0.3 : -2.0);
+			}
+		}
+		FInputs In;
+		In.bEnable = true;
+		In.Legs = Toy.Legs;
+		In.bSupportGiven = Pass == 1;
+		In.AttitudeDeg = Reads;
+		In.bAttitudeValid = true;
+		FState		   State;
+		const FOutputs Out = FLaw::Step(In, Frame, Toy.Tuning, State);
+		ExpectAction(*this, What, Out, EAction::StartFromAttitude);
+		TestTrue(FString::Printf(TEXT("%s: the ground is the attitude and the standing legs' plane (%.3f, %.3f)"), What, Out.GroundDeg.X, Out.GroundDeg.Y),
+			(Out.GroundDeg - (Reads + Made)).Size() <= 1.0e-6);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

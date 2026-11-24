@@ -1045,9 +1045,10 @@ bool FRammsLevelDryRunLegGain::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Catches: a terrain estimate that depends on the support set (it is a
-// difference from the baseline on every leg, so a wrong set must cost ride
-// height at most, never level).
+// Catches: a terrain estimate that a wrong support set bends (the legs the
+// law is told do not stand follow the plane all the same here, and a plane
+// through any of the legs that do is the same plane: a wrong set must cost
+// ride height at most, never level).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunWrongSupport,
 	"Ramms.Level.DryRun.WrongSupportSet",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1272,8 +1273,14 @@ bool FRammsLevelDryRunNoise::RunTest(const FString& Parameters)
 				Result.SteadyTiltRangeDeg, MostLegRangeCm, Result.SteadyLegRangeCm));
 			// The worst draw is rougher than the first (the table says by how
 			// much); a limit cycle, as the sweep's rows with a 0.1 s terrain
-			// filter show one, is 1.2 deg and a centimetre or more.
-			TestTrue(Label(Kit, Rate, TEXT("no limit cycle on any of five seeds")), MostRangeDeg <= 0.8 && MostLegRangeCm <= 0.7);
+			// filter show one, is 1.2 deg and a centimetre or more. (The
+			// robot with a raised pair reads 0.81 deg on its worst draw at
+			// 16 fps, where it read 0.65 while the raised pair was fitted
+			// into the achieved correction: that pair answers slowest, and
+			// with the sensor a frame late its lateness happened to stand in
+			// for the frame. The estimate is now exact for the legs that
+			// carry, and the late frame shows in full.)
+			TestTrue(Label(Kit, Rate, TEXT("no limit cycle on any of five seeds")), MostRangeDeg <= 0.9 && MostLegRangeCm <= 0.7);
 		}
 	}
 	return true;
@@ -2050,6 +2057,222 @@ bool FRammsLevelDryRunPreferencePastReach::RunTest(const FString& Parameters)
 					Last.Out.Status == EStatus::Settled || Last.Out.Status == EStatus::Levelling);
 			}
 		}
+	}
+	return true;
+}
+
+namespace RammsLevelDryRunTests
+{
+	/**
+	 * The six-wheeled robot standing on its centre and rear legs, as a stance
+	 * for driving on two axles does: the front pair carried 12 cm clear of the
+	 * ground and 0.3 cm short of its retract stop. Its centre of mass is moved
+	 * aft to sit well inside the four that stand.
+	 */
+	FKit RaisedFronts()
+	{
+		FKit Kit = SixWheel();
+		Kit.Name = TEXT("raised fronts");
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			Kit.Robot.Legs[Index].StanceZ = -18.0;
+			Kit.Robot.Legs[Index].MaxZ = -17.7;
+		}
+		Kit.Robot.CentreOfMass = FVector(-18.0, 0.0, 10.0);
+		return Kit;
+	}
+
+	/**
+	 * The six-wheeled robot with legs that can make a centimetre inside one
+	 * frame (60 cm/s), and that do not all answer alike: the rear pair picks
+	 * up speed a tenth as fast as the others.
+	 */
+	FKit QuickLegs()
+	{
+		FKit Kit = SixWheel();
+		Kit.Name = TEXT("quick legs");
+		for (int32 Index = 0; Index < Kit.Robot.Legs.Num(); ++Index)
+		{
+			Kit.Robot.Legs[Index].MaxRateCmS = 60.0;
+			Kit.Robot.Legs[Index].MaxAccelCmS2 = Index >= 4 ? 60.0 : 600.0;
+		}
+		Kit.Robot.CentreOfMass = FVector(-18.0, 0.0, 10.0);
+		return Kit;
+	}
+
+	/** When the law's state first was State at or after FromSeconds (s); -1 if never. */
+	double FirstTimeIn(const FResult& Result, EState State, double FromSeconds)
+	{
+		for (const FSample& Sample : Result.Trace)
+		{
+			if (Sample.Seconds >= FromSeconds && Sample.Out.State == State)
+			{
+				return Sample.Seconds;
+			}
+		}
+		return -1.0;
+	}
+} // namespace RammsLevelDryRunTests
+
+// Catches: a ground estimate bent by legs that do not carry the robot. A
+// raised leg asked to retract with the plane stops on its retract stop; fitted
+// with the rest it makes the correction read short, the base settles short of
+// level and never reads at rest, and a release walks to the wrong ground and
+// waits out its time limit.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunRaisedLegsOnStop,
+	"Ramms.Level.DryRun.RaisedLegsOnTheirStop",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunRaisedLegsOnStop::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FKit Kit = RaisedFronts();
+	struct FCase
+	{
+		const TCHAR* Name;
+		FVector2D	 GroundDeg;
+	};
+	// Nose up and the +Y side up are the ways that ask a raised front leg to
+	// retract; nose down is the control, where both extend freely.
+	const FCase Cases[4] = { { TEXT("nose up"), FVector2D(6.0, 0.0) }, { TEXT("cross"), FVector2D(0.0, 6.0) }, { TEXT("both"), FVector2D(4.0, -4.0) }, { TEXT("nose down"), FVector2D(-6.0, 0.0) } };
+	for (const FCase& Case : Cases)
+	{
+		const FGround Course = Plane(Case.GroundDeg.X, Case.GroundDeg.Y);
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.bEnabledAtStart = false;
+			Options.MaxSeconds = 24.0;
+			Options.bKeepTrace = true;
+			Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+			Options.Events.Add(MakeEvent(12.0, EEvent::Disable));
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, Case.Name, Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			if (Result.Trace.Num() == 0)
+			{
+				AddError(TEXT("no trace"));
+				continue;
+			}
+			const auto Say = [&](const TCHAR* What) { return FString::Printf(TEXT("%s, %s, %s: %s"), Kit.Name, Case.Name, FrameNames[Rate], What); };
+
+			const FVector2D StartDeg = Result.Trace[0].TrueAttitudeDeg;
+			TestTrue(Say(TEXT("parked on the slope, on four legs")), (StartDeg - Case.GroundDeg).Size() <= 0.3 && Result.Trace[0].Touching == 4);
+
+			const FSample* Levelled = nullptr;
+			bool		   bStopped = false;
+			for (const FSample& Sample : Result.Trace)
+			{
+				if (Sample.Seconds <= 11.9)
+				{
+					Levelled = &Sample;
+					// (At 0.3 cm from the stop; the command may ask past it.)
+					bStopped = bStopped || Sample.CommandZ[0] > Kit.Robot.Legs[0].MaxZ - 1.0e-6 || Sample.CommandZ[1] > Kit.Robot.Legs[1].MaxZ - 1.0e-6;
+				}
+			}
+			if (!Levelled)
+			{
+				continue;
+			}
+			if (Case.GroundDeg.X > 0.0 || Case.GroundDeg.Y != 0.0)
+			{
+				TestTrue(Say(TEXT("a raised leg was sent to its stop")), bStopped);
+			}
+			const double LevelDeg = PeakTiltBetween(Result, Kit.Tuning, 9.0, 11.9);
+			AddInfo(FString::Printf(TEXT("%s | %s | %s | level to %.2f deg; ground read as (%.2f, %.2f) of (%.2f, %.2f); off %.2f s after the switch"), Kit.Name, Case.Name, FrameNames[Rate],
+				LevelDeg, Levelled->Out.GroundDeg.X, Levelled->Out.GroundDeg.Y, StartDeg.X, StartDeg.Y, FirstTimeIn(Result, EState::Off, 12.0) - 12.0));
+			TestTrue(Say(TEXT("level, to the deadband")), LevelDeg <= 0.3);
+			TestEqual(Say(TEXT("... and at rest")), static_cast<int32>(Levelled->Out.Status), static_cast<int32>(EStatus::Settled));
+			// What the release walks back to.
+			TestTrue(Say(TEXT("the ground is read as it is")), (Levelled->Out.GroundDeg - StartDeg).Size() <= 0.25);
+
+			// Switched off: the tilt policy's walk back (6 deg at 3 deg/s, and
+			// 0.75 s to pick the rate up and lose it), not the 6 s time limit.
+			const double OffAt = FirstTimeIn(Result, EState::Off, 12.0);
+			TestTrue(Say(TEXT("switched off: back on the stance in the walk's own time")), OffAt >= 12.0 && OffAt - 12.0 <= 4.5);
+			TestTrue(Say(TEXT("... within the tilt policy")), Result.MaxTrueRateDegPerSec <= 3.5);
+			TestTrue(Say(TEXT("... every offset exactly zero")), Result.FinalMaxOffsetCm == 0.0);
+			TestNearlyEqual(Say(TEXT("... as it started")), Result.FinalTiltDeg, Inclination(StartDeg), 0.02);
+		}
+	}
+	return true;
+}
+
+// Catches: every standing leg's offset stepping in one frame when a drive
+// mode's stance ramp lifts legs off the ground, or sets them down, under a
+// levelled base (the mean the offsets are taken about jumps with the support
+// set): on legs quick enough to make the step inside a frame, and not all
+// alike, the base pitches with it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunStanceRampLiftsLegs,
+	"Ramms.Level.DryRun.StanceRampLiftsLegsWhileLevelling",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunStanceRampLiftsLegs::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FKit	  Kit = QuickLegs();
+	const FGround Course = Plane(-6.0, 0.0);
+	for (int32 Rate = 0; Rate < 3; ++Rate)
+	{
+		FOptions Options = MakeOptions(Kit, Rate);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 20.0;
+		Options.bKeepTrace = true;
+		// A switch to a drive mode it levels in, 3 s in: levelling starts at
+		// once, and 1.1 s later the mode's stance ramp draws the front pair
+		// up 10 cm. They leave the support set with some 3 deg of the slope
+		// taken out. Then the switch back, at 12 s: the release starts, and
+		// the front pair is set down again under it.
+		Options.Events.Add(MakeEvent(0.0, EEvent::ModeRelease, 3.0));
+		Options.Events.Add(MakeEvent(4.1, EEvent::StanceRamp, 1.25, 10.0, 0));
+		Options.Events.Add(MakeEvent(4.1, EEvent::StanceRamp, 1.25, 10.0, 1));
+		Options.Events.Add(MakeEvent(12.0, EEvent::ModeRelease, 100.0));
+		Options.Events.Add(MakeEvent(12.0, EEvent::StanceRamp, 1.25, -10.0, 0));
+		Options.Events.Add(MakeEvent(12.0, EEvent::StanceRamp, 1.25, -10.0, 1));
+		const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+		Report(*this, Kit, TEXT("stance ramp lifts the fronts"), Rate, Result);
+		ExpectSound(*this, Kit, Rate, Result);
+
+		// The legs the ramp does not move: how fast their commands went, and
+		// the base with them, frame to frame.
+		double MostLegRate[2] = { 0.0, 0.0 };
+		double MostBaseRate[2] = { 0.0, 0.0 };
+		double MostCommon[2] = { 0.0, 0.0 };
+		for (int32 Index = 1; Index < Result.Trace.Num(); ++Index)
+		{
+			const FSample& Now = Result.Trace[Index];
+			const FSample& Was = Result.Trace[Index - 1];
+			const int32	   Part = Now.Seconds < 11.0 ? 0 : 1;
+			double		   Common = 0.0;
+			for (int32 Leg = 2; Leg < 6; ++Leg)
+			{
+				const double Move = Now.CommandZ[Leg] - Was.CommandZ[Leg];
+				MostLegRate[Part] = FMath::Max(MostLegRate[Part], FMath::Abs(Move) / Options.FrameSeconds);
+				Common += 0.25 * Move;
+			}
+			MostCommon[Part] = FMath::Max(MostCommon[Part], FMath::Abs(Common) / Options.FrameSeconds);
+			MostBaseRate[Part] = FMath::Max(MostBaseRate[Part], (Now.TrueAttitudeDeg - Was.TrueAttitudeDeg).Size() / Options.FrameSeconds);
+		}
+		AddInfo(FString::Printf(TEXT("%s | stance ramp lifts the fronts | %s | lifting: legs %.1f cm/s, their mean %.1f cm/s, base %.1f deg/s a frame; setting down: %.1f, %.1f, %.1f; over 0.3 s %.2f deg/s"),
+			Kit.Name, FrameNames[Rate], MostLegRate[0], MostCommon[0], MostBaseRate[0], MostLegRate[1], MostCommon[1], MostBaseRate[1], Result.MaxTrueRateDegPerSec));
+		for (int32 Part = 0; Part < 2; ++Part)
+		{
+			const TCHAR* What = Part == 0 ? TEXT("lifting") : TEXT("setting down");
+			// The ride height's 3 cm/s, and a hair.
+			TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the standing legs' common height moves at the ride height's rate (%.2f cm/s)"), What, MostCommon[Part])),
+				MostCommon[Part] <= Kit.Tuning.RideHeightRateCmPerSec + 0.1);
+			// ... and the plane's own part on top: 3 deg/s on a 45 cm arm.
+			TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: no standing leg is stepped (%.2f cm/s)"), What, MostLegRate[Part])), MostLegRate[Part] <= 7.0);
+			TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("%s: the base is not jolted (%.2f deg/s in a frame)"), What, MostBaseRate[Part])), MostBaseRate[Part] <= 4.5);
+		}
+		TestTrue(Label(Kit, Rate, TEXT("within the tilt policy throughout")), Result.MaxTrueRateDegPerSec <= 3.5);
+		TestTrue(Label(Kit, Rate, TEXT("level on four legs before the switch back")), PeakTiltBetween(Result, Kit.Tuning, 9.5, 11.9) <= 0.5);
+		TestTrue(Label(Kit, Rate, TEXT("the fronts did leave the ground")), Result.Trace.Num() > 0 && Result.Trace.Last().Touching == 6 && Result.Trace[Result.Trace.Num() / 2].Touching == 4);
+		TestEqual(Label(Kit, Rate, TEXT("waiting at the end")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Suspended));
+		TestTrue(Label(Kit, Rate, TEXT("... every offset exactly zero")), Result.FinalMaxOffsetCm == 0.0);
 	}
 	return true;
 }

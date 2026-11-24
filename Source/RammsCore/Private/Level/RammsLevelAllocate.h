@@ -56,17 +56,42 @@
 namespace RammsLevel
 {
 	/**
-	 * Which legs stand: fills bSupport and BaselineClearanceCm of every leg.
-	 * A leg's wheel bottom is BaseZ - RadiusCm; Low is the lowest of them.
-	 * BaselineClearanceCm = bottom - Low. A leg that was a support leg (Was[i])
+	 * Which legs stand: fills bSupport, BaselineClearanceCm and CarryShare of
+	 * every leg. A leg's wheel bottom is BaseZ - RadiusCm; Low is the lowest of
+	 * them. BaselineClearanceCm = bottom - Low. A leg that was a support leg (Was[i])
 	 * stays one while that is at most Tuning.SupportBandOutCm; one that was
 	 * not becomes one at Tuning.SupportBandInCm or less. With Was empty (or
 	 * not the legs' length) there is no memory and every leg is judged by the
 	 * In band. Only baseline heights count: an offset never changes who stands.
 	 * (A leg that stood stays within the larger of the two bands, so a tuning
 	 * with Out under In cannot drop a leg inside the In band.)
+	 *
+	 * CarryShare = clamp(1 - BaselineClearanceCm / SupportBandInCm, 0, 1)
+	 * (with no band: 1 on the lowest bottom, 0 above it). It takes no memory,
+	 * so it never steps, and it is gone by the INNER band: a leg joins the
+	 * support set, and leaves it, with a share of 0. The set is kept wide so
+	 * that who stands does not flap; the share is narrow because a leg drawn
+	 * up off the ground is in the air from the first of its lift.
 	 */
 	void SupportMask(TArrayView<FLegReach> Legs, TConstArrayView<bool> Was, const FTuning& Tuning);
+
+	/**
+	 * A leg whose wheel is still ABOVE where it is told to be carries less:
+	 * each leg's CarryShare (as SupportMask left it) less L / SupportBandInCm,
+	 * not under 0. With late_i = max(0, MeasuredZ - (BaseZ + Dz[i])) (cm; Dz
+	 * the offsets the legs were last told, 0 for a leg past its end), L is
+	 * late_i less the least late_j among the legs whose share is over 0: what
+	 * they are all late by (a sag under the load, a stance being lowered) is
+	 * no leg's lateness.
+	 *
+	 * A leg being set down has not reached the ground when its baseline has:
+	 * until its joint has come down too it stands on nothing, and where it
+	 * is says nothing of the base. (A wheel BELOW where it is told, a leg
+	 * late in lifting, is left alone: it is on the ground for as long as it
+	 * is late, and its baseline's share is already going.) With no band a
+	 * late leg's share is 0.
+	 */
+	void DiscountLateLegs(TArrayView<FLegReach> Legs, TConstArrayView<double> Dz, const FTuning& Tuning);
 
 	/**
 	 * The least-squares plane through Values (cm) at XY (chassis cm):
@@ -94,11 +119,28 @@ namespace RammsLevel
 		TConstArrayView<bool> Roll, FVector2D& OutDeg, double& OutHeightCm);
 
 	/**
-	 * The correction the joints have actually achieved (deg): FitPlane over
-	 * ALL the legs of MeasuredZ - BaseZ, each leg's bRoll honoured, the height
-	 * dropped. It is a difference from the baseline on every leg, so it does
-	 * not depend on which wheels bear; servo sag, rate limits and travel stops
-	 * are in it. Zero with no legs.
+	 * The correction the joints have actually achieved (deg): the plane
+	 * through MeasuredZ - BaseZ of the legs that CARRY the robot, each weighed
+	 * by the square of its CarryShare, each leg's bRoll honoured, the height dropped. Servo
+	 * sag, rate limits and travel stops of the legs the robot stands on are in
+	 * it. A leg carried clear of the ground is not: where it is changes nothing
+	 * about the base's attitude, and one that rests on its retract stop, or
+	 * lags a stance ramp, would bend a plane fitted through every leg (the
+	 * terrain estimate then reads short of the ground). Legs must have been
+	 * through SupportMask, and DiscountLateLegs where the offsets are known
+	 * (or carry a CarryShare from whoever gave the set).
+	 *
+	 * It is FitPlane's least-squares plane with those weights (the square,
+	 * because a leg with leverage over the rest keeps most of its say down to
+	 * a small weight: squared, a leg being lifted gives it up more evenly), and
+	 * FitPlane's rule for a direction the points do not span, but stricter: a
+	 * direction counts as spanned by the carrying legs when its weighted
+	 * spread is at least 1e-2 of the larger one (the legs a tenth as wide as
+	 * they are long) and 1e-9 cm^2. Along a direction they do not span (one
+	 * carrying leg, two, several all but in line) the slope is that of
+	 * FitPlane's plane through EVERY leg, unweighted: what the legs were all
+	 * told, as far as they have followed it. With no share over 0 it is that
+	 * plane outright. Zero with no legs.
 	 */
 	FVector2D MeasuredCorrection(TConstArrayView<FLegReach> Legs);
 

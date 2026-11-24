@@ -23,6 +23,7 @@ namespace RammsLevel
 			State.CorrectionDeg = FVector2D::ZeroVector;
 			State.Loop.Reset();
 			State.RideCm = 0.0;
+			State.HeightRateCmS = 0.0;
 			State.LastDz.Init(0.0, NumLegs);
 			State.Fraction = 1.0;
 			State.ReachLeft = 1.0;
@@ -40,7 +41,7 @@ namespace RammsLevel
 		bool IsFinite(const FLegReach& Leg)
 		{
 			return IsFinite(Leg.XY) && FMath::IsFinite(Leg.BaseZ) && FMath::IsFinite(Leg.MeasuredZ) && FMath::IsFinite(Leg.MinZ) && FMath::IsFinite(Leg.MaxZ)
-				&& FMath::IsFinite(Leg.MaxRateCmS) && FMath::IsFinite(Leg.RadiusCm) && FMath::IsFinite(Leg.BaselineClearanceCm);
+				&& FMath::IsFinite(Leg.MaxRateCmS) && FMath::IsFinite(Leg.RadiusCm) && FMath::IsFinite(Leg.BaselineClearanceCm) && FMath::IsFinite(Leg.CarryShare);
 		}
 
 		bool IsFinite(const FClearancePoint& Point)
@@ -87,16 +88,33 @@ namespace RammsLevel
 			State.PrevGroundDeg = State.Terrain.Get();
 		}
 
-		/** The legs as the allocation needs them: who stands, and each lifted
-		 *  leg's clearance. Returns how many stand. */
-		int32 PrepareLegs(const FInputs& In, const FTuning& Tuning, FState& State, FLegs& OutLegs)
+		/** The legs with who stands, each lifted leg's clearance and how far
+		 *  each carries: found from the baselines, going on from the set in
+		 *  Was, and from how far each joint is behind the offset in Dz; or as
+		 *  the plant gave them. */
+		void MaskLegs(const FInputs& In, const FTuning& Tuning, TConstArrayView<bool> Was, TConstArrayView<double> Dz, FLegs& OutLegs)
 		{
 			OutLegs.Reset();
 			OutLegs.Append(In.Legs.GetData(), In.Legs.Num());
 			if (!In.bSupportGiven)
 			{
-				SupportMask(OutLegs, State.Support, Tuning);
+				SupportMask(OutLegs, Was, Tuning);
+				DiscountLateLegs(OutLegs, Dz, Tuning);
 			}
+			else
+			{
+				for (FLegReach& Leg : OutLegs)
+				{
+					Leg.CarryShare = Leg.bSupport ? 1.0 : 0.0;
+				}
+			}
+		}
+
+		/** The legs as the allocation needs them: who stands, and each lifted
+		 *  leg's clearance. Returns how many stand. */
+		int32 PrepareLegs(const FInputs& In, const FTuning& Tuning, FState& State, FLegs& OutLegs)
+		{
+			MaskLegs(In, Tuning, State.Support, State.LastDz, OutLegs);
 			// Kept either way, so the hysteresis has something to go on from
 			// when the plant stops giving the set.
 			State.Support.Reset();
@@ -116,37 +134,110 @@ namespace RammsLevel
 		 * when a leg joins or leaves them) and the allocation's cut at reach
 		 * (which can fall in one step when a baseline or the support set
 		 * moves). So the offsets go from the ones last given towards the
-		 * allocation's as a whole, by the share that keeps every leg within
-		 * LegRateFraction of its rate: a blend of two rigid planes is a rigid
-		 * plane. Returns whether it held them back; the use it found (before
-		 * the cut) is taken into InOutRateUse.
+		 * allocation's as a whole, in two parts.
+		 *
+		 * THE COMMON HEIGHT first: the mean, over the legs that stand (over
+		 * every leg when none does), of what the step asks. The allocation
+		 * keeps that mean at zero while the same legs stand, so it is the
+		 * height term catching up and nothing else, and it is a change of
+		 * ride height: it goes at the ride height's own rate
+		 * (RideHeightRateCmPerSec), picked up and lost again over
+		 * RideHeightRampSeconds, every leg alike, and the rest of it waits
+		 * for the next steps. Legs quick enough to make the whole of it inside
+		 * one frame would otherwise all be told it at once, and legs do not
+		 * all answer alike: the base heaves and pitches. InOutHeightRate is
+		 * how fast it is going (cm/s), kept from step to step. (No such rate,
+		 * 0 or less: the legs' rate below is the only limit on it.)
+		 *
+		 * THE LEGS' RATE then: what is left goes by the share that keeps every
+		 * leg within LegRateFraction of its rate. A blend of two rigid planes
+		 * is a rigid plane, and so is one moved by a common height.
+		 *
+		 * Returns whether either held the offsets back; the leg-rate use the
+		 * step asked (before any cut) is taken into InOutRateUse.
 		 */
-		bool LimitLegSteps(const FLegs& Legs, const FLegValues& From, FLegValues& InOutDz, double Dt, const FTuning& Tuning, double& InOutRateUse)
+		bool LimitLegSteps(const FLegs& Legs, const FLegValues& From, FLegValues& InOutDz, double Dt, const FTuning& Tuning, double& InOutRateUse,
+			double& InOutHeightRate)
 		{
-			if (Dt <= 0.0 || Tuning.LegRateFraction <= 0.0 || From.Num() != InOutDz.Num() || Legs.Num() != InOutDz.Num())
+			if (Dt <= 0.0 || From.Num() != InOutDz.Num() || Legs.Num() != InOutDz.Num() || Legs.Num() == 0)
 			{
 				return false;
 			}
 			double Use = 0.0;
+			double SupportSum = 0.0;
+			double AllSum = 0.0;
+			int32  SupportCount = 0;
 			for (int32 Index = 0; Index < Legs.Num(); ++Index)
 			{
+				const double Move = InOutDz[Index] - From[Index];
 				if (Legs[Index].MaxRateCmS > 0.0)
 				{
-					Use = FMath::Max(Use, FMath::Abs(InOutDz[Index] - From[Index]) / (Dt * Legs[Index].MaxRateCmS));
+					Use = FMath::Max(Use, FMath::Abs(Move) / (Dt * Legs[Index].MaxRateCmS));
+				}
+				AllSum += Move;
+				if (Legs[Index].bSupport)
+				{
+					SupportSum += Move;
+					++SupportCount;
 				}
 			}
 			InOutRateUse = FMath::Max(InOutRateUse, Use);
-			// (The hair: a plane the slew has just cut to the fraction exactly
-			// is not held back again over the last bit of the arithmetic.)
-			if (Use <= Tuning.LegRateFraction * (1.0 + 1.0e-9))
+
+			// The common height, at the ride height's rate: as fast as can
+			// still stop on what is asked, the speed changing no faster than
+			// brings it from rest to the rate in RideHeightRampSeconds.
+			const double Common = SupportCount > 0 ? SupportSum / SupportCount : AllSum / Legs.Num();
+			const double MaxRate = Tuning.RideHeightRateCmPerSec;
+			const double MaxChange = MaxRate > 0.0 ? MaxRate * Dt / RideHeightRampSeconds : 0.0;
+			double		 Held = 0.0;
+			if (MaxRate <= 0.0 || (FMath::Abs(Common) <= RideStepSlackCm && FMath::Abs(InOutHeightRate) <= MaxChange))
+			{
+				// Nothing to catch up (the mean of a plane about itself, to the
+				// last bit), or no rate to do it at: all of it, and at rest.
+				InOutHeightRate = 0.0;
+			}
+			else
+			{
+				const double Accel = MaxRate / RideHeightRampSeconds;
+				const double CanStop = FMath::Sqrt(FMath::Square(Accel * Dt) + 2.0 * Accel * FMath::Abs(Common)) - Accel * Dt;
+				const double Wanted = FMath::Sign(Common) * FMath::Min(MaxRate, CanStop);
+				InOutHeightRate += FMath::Clamp(Wanted - InOutHeightRate, -MaxChange, MaxChange);
+				double Given = InOutHeightRate * Dt;
+				if (Given * Common > 0.0 && FMath::Abs(Given) >= FMath::Abs(Common))
+				{
+					Given = Common;
+				}
+				Held = Common - Given;
+			}
+
+			// The legs' rate, on what is left.
+			double Share = 1.0;
+			if (Tuning.LegRateFraction > 0.0)
+			{
+				double LeftUse = 0.0;
+				for (int32 Index = 0; Index < Legs.Num(); ++Index)
+				{
+					if (Legs[Index].MaxRateCmS > 0.0)
+					{
+						LeftUse = FMath::Max(LeftUse, FMath::Abs(InOutDz[Index] - Held - From[Index]) / (Dt * Legs[Index].MaxRateCmS));
+					}
+				}
+				// (The hair: a plane the slew has just cut to the fraction
+				// exactly is not held back again over the last bit of the
+				// arithmetic.)
+				if (LeftUse > Tuning.LegRateFraction * (1.0 + 1.0e-9))
+				{
+					Share = Tuning.LegRateFraction / LeftUse;
+				}
+			}
+			if (Held == 0.0 && Share == 1.0)
 			{
 				return false;
 			}
-			const double Share = Tuning.LegRateFraction / Use;
 			for (int32 Index = 0; Index < Legs.Num(); ++Index)
 			{
 				const FLegReach& Leg = Legs[Index];
-				const double	 Dz = From[Index] + (InOutDz[Index] - From[Index]) * Share;
+				const double	 Dz = From[Index] + (InOutDz[Index] - Held - From[Index]) * Share;
 				// Allocate's last resort, kept: never past the travel.
 				InOutDz[Index] = FMath::Clamp(Dz, FMath::Min(0.0, Leg.MinZ - Leg.BaseZ), FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ));
 			}
@@ -204,8 +295,13 @@ namespace RammsLevel
 		if (bValid)
 		{
 			// The correction the joints have really made, not the one asked
-			// for: sag, rate limits and travel stops then cancel in G.
-			AchievedDeg = MeasuredCorrection(In.Legs);
+			// for: sag, rate limits and travel stops then cancel in G. Made by
+			// the legs the robot stands on: who they are is found here as the
+			// allocation will find it (the set kept in the state is not
+			// touched: that is PrepareLegs' to move on).
+			LawImpl::FLegs Sensed;
+			LawImpl::MaskLegs(In, Tuning, State.Support, State.LastDz, Sensed);
+			AchievedDeg = MeasuredCorrection(Sensed);
 			const FVector2D Filtered = State.Attitude.Tick(In.AttitudeDeg, Dt, Tuning.AttitudeFilterSeconds);
 			State.Terrain.Tick(Filtered, AchievedDeg, Dt, Tuning.TerrainFilterSeconds);
 			State.LossSeconds = 0.0;
@@ -250,6 +346,7 @@ namespace RammsLevel
 				// folded stays in the baselines but for this plane.
 				State.CorrectionDeg = In.ResumePlaneDeg;
 				State.RideCm = 0.0;
+				State.HeightRateCmS = 0.0;
 				State.SeatTrim.Zero();
 				LawImpl::ColdResume(State, In, AchievedDeg, bValid, Tuning);
 				bWantedSet = true;
@@ -331,7 +428,7 @@ namespace RammsLevel
 			const FVector2D GoalDeg = bActive ? WantedTiltGoal(GroundDeg, Legs, In.Points, Tuning) : GroundDeg;
 			if (bActive)
 			{
-				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, State.Tilt.HasArrived(GoalDeg), Dt, Tuning);
+				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, State.Tilt.IsNear(GoalDeg), Dt, Tuning);
 			}
 			// At rest nothing is written, so the servos simply hold; and a step
 			// in which no time passes advances nothing.
@@ -370,7 +467,7 @@ namespace RammsLevel
 					State.CorrectionDeg = Alloc.AppliedDeg;
 					State.Loop.BackCalculate(SlewedDeg, Alloc.AppliedDeg, Tuning);
 				}
-				State.bLegsBehind = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse);
+				State.bLegsBehind = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS);
 				State.bRateLimited = State.bRateLimited || State.bLegsBehind;
 				LawImpl::KeepAllocation(State, Alloc);
 				bWrite = true;
@@ -388,7 +485,9 @@ namespace RammsLevel
 					// is the ground's is the integral's trim, which no ground
 					// explains: it is ramped out open loop.
 					State.ReleaseSeconds += Dt;
-					if (State.Tilt.HasArrived(GroundDeg) || State.ReleaseSeconds > ReleaseMaxSeconds)
+					// ("Reached" as IsNear has it: the ground's attitude is an
+					// estimate that never stands quite still.)
+					if (State.Tilt.IsNear(GroundDeg) || State.ReleaseSeconds > ReleaseMaxSeconds)
 					{
 						State.bReleaseOpen = true;
 					}
@@ -421,7 +520,7 @@ namespace RammsLevel
 				State.RideCm = Alloc.HeightCm;
 				State.bSaturated = Alloc.Fraction < 1.0;
 				State.bAxisLimited = false;
-				State.bLegsBehind = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse);
+				State.bLegsBehind = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS);
 				State.bRateLimited = State.bRateLimited || State.bLegsBehind;
 				LawImpl::KeepAllocation(State, Alloc);
 				bWrite = true;

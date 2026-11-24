@@ -65,10 +65,11 @@ namespace RammsLevel
 
 	/**
 	 * The terrain estimate G = low-pass(A + c_meas, TerrainFilterSeconds): A
-	 * the filtered attitude, c_meas the correction the joints have achieved
-	 * (MeasuredCorrection). The base reads A with c_meas applied, so without it
-	 * it would read A + c_meas -- whatever the correction is, and however far
-	 * the joints are behind their commands: the same ground gives the same G.
+	 * the filtered attitude, c_meas the correction the joints of the legs it
+	 * stands on have achieved (MeasuredCorrection). The base reads A with
+	 * c_meas applied, so without it it would read A + c_meas -- whatever the
+	 * correction is, and however far the joints are behind their commands:
+	 * the same ground gives the same G.
 	 * The filter is FAttitudeFilter's.
 	 */
 	class FTerrainEstimate
@@ -157,6 +158,14 @@ namespace RammsLevel
 		FVector2D GetRate() const { return Rate; }
 		/** Within TiltArrivedDeg of GoalDeg and not moving. */
 		bool HasArrived(const FVector2D& GoalDeg) const { return (GoalDeg - Wanted).Size() < TiltArrivedDeg && Rate.IsNearlyZero(1e-6); }
+		/**
+		 * As good as there: within TiltArrivedDeg of GoalDeg and slower than
+		 * TiltArrivedRateDegPerSec. For a goal that is a live estimate (the
+		 * ground's attitude, or a goal worked out from it): a real base's
+		 * attitude moves in its last digits for ever, W follows the goal with
+		 * it, and "not moving" never comes true.
+		 */
+		bool IsNear(const FVector2D& GoalDeg) const { return (GoalDeg - Wanted).Size() < TiltArrivedDeg && Rate.Size() < TiltArrivedRateDegPerSec; }
 
 	private:
 		FVector2D Wanted = FVector2D::ZeroVector;

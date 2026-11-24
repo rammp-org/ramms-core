@@ -128,7 +128,9 @@ struct RAMMSCORE_API FRammsLevelTuning
 	float MinBellyClearanceCm = 3.0f;
 
 	/** How far (cm) the ride height may rise (Up) or sink (Down) from the
-	 *  stance's to make a correction fit, and how fast it moves (cm/s). */
+	 *  stance's to make a correction fit, and how fast it moves (cm/s): that
+	 *  shift, and the legs' common height when a stance change lifts legs off
+	 *  the ground or sets them down under a levelled base. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level|Ride Height", meta = (ClampMin = "0.0"))
 	float RideHeightUpCm = 0.0f;
 
