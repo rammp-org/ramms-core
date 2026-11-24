@@ -22,6 +22,7 @@ URammsDifferentialDriveController::URammsDifferentialDriveController()
 	PlantedStance.LinkageHeightCm = 12.7f;
 
 	Carry = MakePimpl<RammsDrive::FCarry>();
+	SpeedRequests = MakePimpl<RammsDrive::FSpeedScaleRequests>();
 	HoldLeft = MakePimpl<RammsDrive::FTorqueHold>();
 	HoldRight = MakePimpl<RammsDrive::FTorqueHold>();
 	LeftAngleSource = MakePimpl<RammsDrive::FWheelAngle>();
@@ -778,6 +779,9 @@ void URammsDifferentialDriveController::UpdateVelocityControl(float DeltaTime)
 	{
 		VelocityCommand = URammsDifferentialDriveLibrary::JoystickToDifferentialDrive(DriveInput, MaxVelocity, InputDeadZone);
 	}
+	// Asked to go slower (SetDriveSpeedScale): both sides alike, after the
+	// stick's own mix and its top speed, so the curve is the one steered.
+	RammsDrive::ScaleWheelSpeeds(VelocityCommand.LeftCommand, VelocityCommand.RightCommand, SpeedRequests->Get(Now()));
 
 	// Convert linear velocities to angular velocities
 	float LeftTargetAngularVel = VelocityCommand.LeftCommand / WheelRadius;
@@ -1527,6 +1531,9 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 	ControlDriveInput = FVector2D::ZeroVector;
 	bHeldForStance = false;
 	bHoldInactive = false;
+	// Nobody's request to go slower outlives a change of mode: whoever asked
+	// was asking of the drive as it was.
+	SpeedRequests->Reset();
 	EndCarry();
 	// Standing down while holding the robot: what the hold held, for a hold
 	// of these wheels through the switch to carry on with
@@ -1557,6 +1564,19 @@ void URammsDifferentialDriveController::SetDriveModeActive(bool bActive)
 			}
 		}
 	}
+}
+
+void URammsDifferentialDriveController::SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds)
+{
+	if (bDriveModeActive)
+	{
+		SpeedRequests->Set(Requester, Scale01, HoldSeconds, Now());
+	}
+}
+
+float URammsDifferentialDriveController::GetDriveSpeedScale() const
+{
+	return static_cast<float>(SpeedRequests->Get(Now()));
 }
 
 FRammsDriveMotion URammsDifferentialDriveController::GetCarriableMotion(const FRammsDriveMotion& Motion) const

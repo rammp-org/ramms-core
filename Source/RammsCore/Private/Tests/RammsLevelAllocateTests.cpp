@@ -276,6 +276,7 @@ bool FRammsLevelAllocateShiftsHeightForReach::RunTest(const FString& Parameters)
 		const FAllocation A = AllocateFor(Legs, Wanted, Tuning);
 		TestTrue(TEXT("no allowance: the plane is scaled back"), A.Fraction < 0.9);
 		CheckNear(*this, TEXT("no allowance: no shift"), A.HeightCm, 0.0, Tight);
+		CheckNear(*this, TEXT("no allowance: no reach left"), A.ReachLeft, 0.0, Tight);
 	}
 	Tuning.RideHeightUpCm = 3.0;
 	{
@@ -291,6 +292,13 @@ bool FRammsLevelAllocateShiftsHeightForReach::RunTest(const FString& Parameters)
 			CheckNear(*this, TEXT("raised: still one plane"), WorstOffPlane(Legs, A), 0.0, Tight);
 		}
 		CheckNear(*this, TEXT("raised: the fronts' margin is the travel left"), A.MinMarginCm, 0.5, 1.0e-6);
+		// The reach left counts the ride height still free. Within the travel
+		// the wanted tilt is planned with (2 cm of soft zone kept back) the
+		// fronts have no retraction of their own: all 2.36 cm the plane needs
+		// comes off the 3 cm the chassis may rise, and the plane would fit
+		// 3 / 2.36 times over.
+		CheckNear(*this, TEXT("raised: the reach left is the ride height still free"), A.ReachLeft, 1.0 - Rise / 3.0, 0.01);
+		TestTrue(TEXT("raised: ... and what would stop it is a leg's travel"), A.NearestLimit == RammsLevel::EReachLimit::LegTravel);
 	}
 	{
 		// The shift may only move 0.5 cm this tick: the plane waits for it.

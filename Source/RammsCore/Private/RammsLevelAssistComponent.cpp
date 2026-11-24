@@ -69,6 +69,9 @@ namespace RammsLevel
 		FVector2D PreferenceDeg = FVector2D::ZeroVector;
 		/** This component holds the base's command offset layer. */
 		bool bClaimed = false;
+		/** The drive modes its speed scale went to on the last tick, to take
+		 *  it back from the moment levelling stops. */
+		TArray<TWeakObjectPtr<UObject>, TInlineAllocator<2>> SlowedModes;
 		/** CannotLevel is a claim that was refused (something else held the
 		 *  layer): worth trying again when the rider next switches on. */
 		bool bClaimRefused = false;
@@ -432,6 +435,7 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 	// --- the active drive mode's kind ---
 	In.Mode = EMode::Allowed;
 	R.bModeNotLevelled = false;
+	TArray<UActorComponent*, TInlineAllocator<2>> Driving;
 	if (const UObject* Taker = R.Taker.Get())
 	{
 		// A taker holds the legs from its YieldTo until it hands back, or
@@ -480,6 +484,12 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 				continue;
 			}
 			bAnyActive = true;
+			// Whoever drives the robot now may be asked to go slower -- but
+			// never a mode that takes the legs (a crossing runs its own pace).
+			if (Mode->IsDriveModeActive() && !DisabledModeIds.Contains(Id))
+			{
+				Driving.Add(Component);
+			}
 			if (!DisabledModeIds.Contains(Id) && (EnabledModeIds.IsEmpty() || EnabledModeIds.Contains(Id)))
 			{
 				continue;
@@ -561,8 +571,34 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 		R.Plant->ZeroOffsets();
 		ReleaseMotors();
 	}
-	// Out.SpeedScale is shown (level.speed_scale) and not yet sent to the
-	// drive mode; Out.SeatTrimDeg is worked out and not yet put on the seat.
+	// --- the drive's pace ---
+	// While the legs carry a correction, whoever drives is asked to keep to
+	// the speed the legs can follow the ground at: every tick, to stand half a
+	// second, so that it lapses by itself if this stops. Never while something
+	// has taken the legs; and taken back at once when levelling stops, rather
+	// than left to run out.
+	const bool bSlows = R.Law.Arbiter.HasOffsets() && In.Mode != EMode::Taken && !bYield;
+	for (const TWeakObjectPtr<UObject>& Was : R.SlowedModes)
+	{
+		IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Was.Get());
+		if (Mode && !(bSlows && Driving.Contains(Was.Get())))
+		{
+			Mode->SetDriveSpeedScale(SpeedScaleRequester(), 1.0f, 0.0f);
+		}
+	}
+	R.SlowedModes.Reset();
+	if (bSlows)
+	{
+		for (UActorComponent* Component : Driving)
+		{
+			if (IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Component))
+			{
+				Mode->SetDriveSpeedScale(SpeedScaleRequester(), static_cast<float>(Out.SpeedScale), SpeedScaleHoldSeconds);
+				R.SlowedModes.Add(Component);
+			}
+		}
+	}
+	// Out.SeatTrimDeg is worked out and not yet put on the seat.
 	R.Last = Out;
 }
 

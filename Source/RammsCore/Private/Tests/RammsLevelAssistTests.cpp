@@ -1506,6 +1506,87 @@ bool FRammsLevelLegPlantReleasedMotor::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a speed scale that is worked out and shown and never reaches the drive; one sent to a mode while a curb
+// crossing has the legs (the crossing runs its own pace), or left standing on the drive after levelling has stopped;
+// and one sent to a mode that is not driving.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistSlowsTheDrive,
+	"Ramms.Level.Assist.AsksTheDriveToGoSlowerWhileLevelling",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistSlowsTheDrive::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	FLevelRig R;
+	if (!TestTrue(TEXT("the made-up robot with a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	// The mode driving the robot: never begun (it drives nothing here), active as it is made.
+	URammsHolonomicDriveController* Drive = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+	IRammsDriveMode*				DriveMode = Drive;
+	IRammsDriveMode*				CurbMode = R.Curb;
+	const float						Dt = 1.0f / 30.0f;
+	R.GroundDeg = FVector2D(3.0, 1.0);
+	R.PoseChassis(R.GroundDeg);
+
+	// Off: nothing is asked of the drive.
+	R.Frames(5, Dt);
+	TestEqual(TEXT("off: the drive at full speed"), Drive->GetDriveSpeedScale(), 1.0f);
+	R.Level->SetAssistEnabled(true);
+	R.Frames(150, Dt);
+	TestTrue(TEXT("levelling, level"), R.State() == EState::Active && (R.GroundDeg - R.CorrectionDeg()).Size() <= 0.3);
+	TestEqual(TEXT("level, nothing turning: the drive at full speed"), Drive->GetDriveSpeedScale(), 1.0f);
+
+	// The ground steps by more than the legs can follow in a frame: the scale comes down, and the drive has it on
+	// every frame.
+	R.GroundDeg += FVector2D(2.5, 0.0);
+	R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+	float LeastAsked = 1.0f;
+	int32 Differing = 0;
+	for (int32 Index = 0; Index < 12; ++Index)
+	{
+		R.Frame(Dt);
+		const float Shown = R.Control(RammsLevel::SpeedScaleControlId());
+		LeastAsked = FMath::Min(LeastAsked, Drive->GetDriveSpeedScale());
+		Differing += FMath::IsNearlyEqual(Drive->GetDriveSpeedScale(), Shown, 1.0e-6f) ? 0 : 1;
+	}
+	TestTrue(*FString::Printf(TEXT("the drive is asked to go slower (%.2f)"), LeastAsked), LeastAsked < 0.9f && LeastAsked >= R.Level->Tuning.MinSpeedScale - 1.0e-4f);
+	TestEqual(TEXT("... by what level.speed_scale shows, on every frame"), Differing, 0);
+	TestTrue(TEXT("(still asked as the crossing begins)"), Drive->GetDriveSpeedScale() < 1.0f);
+
+	// A curb crossing takes the legs: what was asked of the drive is taken back in the same call, and nothing is
+	// asked while the crossing has them.
+	R.Level->YieldTo(R.Curb);
+	TestEqual(TEXT("yielded: the drive is let go at once"), Drive->GetDriveSpeedScale(), 1.0f);
+	CurbMode->SetDriveModeActive(true);
+	R.Frames(4, Dt);
+	TestTrue(TEXT("(the crossing has the legs)"), R.State() == EState::Yielded);
+	TestEqual(TEXT("during the crossing: nothing asked of the drive"), Drive->GetDriveSpeedScale(), 1.0f);
+	CurbMode->SetDriveModeActive(false);
+	R.Level->ResumeFrom(R.Curb, nullptr);
+	R.Frames(150, Dt);
+	TestTrue(TEXT("handed back: levelling again"), R.State() == EState::Active);
+
+	// A mode that is not driving is asked nothing; and when levelling stops, what was asked is taken back.
+	DriveMode->SetDriveModeActive(false);
+	R.GroundDeg += FVector2D(-2.5, 0.0);
+	R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+	R.Frames(3, Dt);
+	TestTrue(TEXT("(the scale is down again)"), R.Control(RammsLevel::SpeedScaleControlId()) < 1.0f);
+	TestEqual(TEXT("a mode that is not driving is asked nothing"), Drive->GetDriveSpeedScale(), 1.0f);
+	DriveMode->SetDriveModeActive(true);
+	R.Frame(Dt);
+	TestTrue(TEXT("driving again: asked"), Drive->GetDriveSpeedScale() < 1.0f);
+	R.Level->SetAssistEnabled(false);
+	R.Frame(Dt);
+	TestTrue(TEXT("switched off: still asked while the base is given back"), R.State() == EState::Releasing && Drive->GetDriveSpeedScale() < 1.0f);
+	R.Frames(300, Dt);
+	TestTrue(TEXT("off"), R.State() == EState::Off);
+	TestEqual(TEXT("off: the drive at full speed"), Drive->GetDriveSpeedScale(), 1.0f);
+	return true;
+}
+
 // Catches: a level assist that, merely by being on the robot, changes the order the robot's components tick in (the
 // curb's frame-locked runs would no longer repeat); one that makes a component ticking during physics its prerequisite
 // (the engine starts a tick in the latest group among its prerequisites, so the level assist and the robot base behind

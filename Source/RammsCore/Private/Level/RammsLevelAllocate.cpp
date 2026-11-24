@@ -671,14 +671,23 @@ namespace RammsLevel
 		// How near the plane applied is to whatever would stop it: a leg's
 		// travel, a lifted wheel's clearance, the underside's, an axis' limit.
 		// The first of them on a tie.
-		const auto Take = [&Out](double Used, double Most, double RoomCm, EReachLimit Kind) {
-			const double Left = Most > 0.0 ? FMath::Clamp(1.0 - Used / Most, 0.0, 1.0) : 0.0;
-			if (Left < Out.ReachLeft)
-			{
-				Out.ReachLeft = Left;
-				Out.NearestLimit = Kind;
-			}
-			Out.MinMarginCm = FMath::Min(Out.MinMarginCm, FMath::Max(0.0, RoomCm));
+		// (The legs' and the underside's limits apart from the axes': the ride
+		// height can make room at the first, and never at the second.)
+		double		LegsLeft = 1.0;
+		EReachLimit LegsKind = EReachLimit::None;
+		double		AxisLeft = 1.0;
+		const auto	Take = [&Out, &LegsLeft, &LegsKind, &AxisLeft](double Used, double Most, double RoomCm, EReachLimit Kind) {
+			 const double Left = Most > 0.0 ? FMath::Clamp(1.0 - Used / Most, 0.0, 1.0) : 0.0;
+			 if (Kind == EReachLimit::AxisLimit)
+			 {
+				 AxisLeft = FMath::Min(AxisLeft, Left);
+			 }
+			 else if (Left < LegsLeft)
+			 {
+				 LegsLeft = Left;
+				 LegsKind = Kind;
+			 }
+			 Out.MinMarginCm = FMath::Min(Out.MinMarginCm, FMath::Max(0.0, RoomCm));
 		};
 		Out.MinMarginCm = TravelMargin(Legs, Out.Dz);
 		for (int32 LegIndex = 0; LegIndex < Legs.Num(); ++LegIndex)
@@ -761,6 +770,30 @@ namespace RammsLevel
 				Take(UsedDeg, MostDeg[Axis], RoomCm, EReachLimit::AxisLimit);
 			}
 		}
+		// With a ride-height allowance the shares above are of the limits at
+		// the shift in use, and the shift is only ever as large as puts the
+		// nearest of them ON its limit: they would read "none left" from the
+		// moment the ride height began to help, however much of it was still
+		// to come. So the legs' share is also taken along the plane itself:
+		// how many times the plane applied would still fit with the shift
+		// free (within the planned travel, as the wanted tilt is), and the
+		// larger of the two is the reach left.
+		if ((RideHi > 0.0 || RideLo < 0.0) && LegsLeft < 1.0 && Out.AppliedDeg.Size() > ReachMinCorrectionDeg)
+		{
+			const double	FurtherTimes = 16.0;
+			const FVector2D FurtherDeg = ClampAxes(Out.AppliedDeg * FurtherTimes, Tuning.MaxCorrectionDeg);
+			const FReach	Further = AllocateReach(Legs, Points, FurtherDeg, Tuning, FMath::Max(0.0, Tuning.SoftZoneCm));
+			const double	FitsTimes = Further.Share * FurtherDeg.Size() / Out.AppliedDeg.Size();
+			const double	WithRide = FitsTimes > 1.0 ? 1.0 - 1.0 / FitsTimes : 0.0;
+			if (WithRide > LegsLeft)
+			{
+				LegsLeft = WithRide;
+				LegsKind = Further.Limit != EReachLimit::None ? Further.Limit : LegsKind;
+			}
+		}
+		// (The first of the list on a tie: the axes' limits come last.)
+		Out.ReachLeft = FMath::Min(LegsLeft, AxisLeft);
+		Out.NearestLimit = Out.ReachLeft >= 1.0 ? EReachLimit::None : (LegsLeft <= AxisLeft ? LegsKind : EReachLimit::AxisLimit);
 		return Out;
 	}
 

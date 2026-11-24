@@ -32,6 +32,12 @@ namespace RammsLevel
 		return FName("level.reach");
 	}
 
+	FName SpeedScaleRequester()
+	{
+		static const FName Name(TEXT("level"));
+		return Name;
+	}
+
 	FName SpeedScaleControlId()
 	{
 		return FName("level.speed_scale");

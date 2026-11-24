@@ -247,6 +247,58 @@ namespace RammsDrive
 	/** The motion a holonomic drive's normalised command asks for. */
 	FRammsDriveMotion HolonomicMotion(const FVector& Command, double MaxLinearCmS, double MaxYawDegS);
 
+	/** The least a drive mode's speed scale goes (IRammsDriveMode::
+	 *  SetDriveSpeedScale): a request slows the robot, it never stops it. */
+	constexpr double MinDriveSpeedScale = 0.1;
+	/** The longest a request stands without being renewed (s), whatever its
+	 *  requester asks: one that stops asking is gone within this. */
+	constexpr double MaxDriveSpeedScaleHoldSeconds = 2.0;
+
+	/**
+	 * The requests to go slower a drive mode holds (IRammsDriveMode::
+	 * SetDriveSpeedScale), on the mode's own clock (simulated time where
+	 * there is one).
+	 *
+	 * Set: Requester's request becomes Scale01, held within
+	 * [MinDriveSpeedScale, 1], until Now + HoldSeconds (no longer than
+	 * MaxDriveSpeedScaleHoldSeconds). A scale of 1 or more, one that is not a
+	 * number, or a HoldSeconds of 0 or less withdraws Requester's request.
+	 * Get: the least of the requests still standing at Now, 1 with none. A
+	 * request stands while its Set time <= Now < its end: one whose time has
+	 * run out is dropped, and so is one made at a later time than Now (the
+	 * clock was set back: a simulation reset, and nothing asked before it
+	 * stands).
+	 */
+	struct FSpeedScaleRequests
+	{
+		void   Set(FName Requester, double Scale01, double HoldSeconds, double Now);
+		double Get(double Now);
+		/** Every request dropped: the mode stood down, or took over. */
+		void  Reset() { Requests.Reset(); }
+		int32 Num() const { return Requests.Num(); }
+
+	private:
+		struct FRequest
+		{
+			FName  Requester;
+			double Scale = 1.0;
+			double SetAt = 0.0;
+			double Until = 0.0;
+		};
+		TArray<FRequest, TInlineAllocator<2>> Requests;
+	};
+
+	/** A motion at Scale of its pace: forward, sideways and turning alike, so
+	 *  the path is the same one. The motion itself at a Scale of 1 or more. */
+	FRammsDriveMotion ScaledMotion(const FRammsDriveMotion& Motion, double Scale);
+
+	/** A differential drive's two wheel speeds at Scale of their pace: both
+	 *  alike, so the curve driven is the same one. Untouched at a Scale of 1
+	 *  or more. (After the stick's own mix and its limit, not before: a stick
+	 *  held in a corner, whose mix is cut back to the top speed, would
+	 *  otherwise not be slowed at all until the scale was under that cut.) */
+	void ScaleWheelSpeeds(float& InOutLeft, float& InOutRight, double Scale);
+
 	/**
 	 * A motion handed to a mode as it takes over, and how far through
 	 * carrying it the mode is: held while its operator keeps commanding what

@@ -157,19 +157,32 @@ namespace RammsLevel
 		 * 0 or less: the legs' rate below is the only limit on it.)
 		 *
 		 * THE LEGS' RATE then: what is left goes by the share that keeps every
-		 * leg within LegRateFraction of its rate. A blend of two rigid planes
-		 * is a rigid plane, and so is one moved by a common height.
+		 * leg that counts within LegRateFraction of its rate. A blend of two
+		 * rigid planes is a rigid plane, and so is one moved by a common
+		 * height. The legs that count are the ones the robot stands on, and a
+		 * lifted leg being brought UP (it is carried with the plane to keep
+		 * its clearance, and late in coming up it loses some). A lifted leg
+		 * being let DOWN does not count: where it is changes nothing about
+		 * the base, and held to its pace the legs that carry the robot would
+		 * unwind a correction at a fraction of what they can do. It is given
+		 * its own rate instead, on its own, and catches the plane up after
+		 * (bOutLiftedBehind: an offset is then short of the allocation's,
+		 * which a release must wait for, and no reason to hold the integral).
 		 *
-		 * Returns whether either held the offsets back; the leg-rate use the
-		 * step asked (before any cut) is taken into InOutRateUse.
+		 * Returns whether either held the PLANE back; the leg-rate use the
+		 * step asked of the legs that count (before any cut) is taken into
+		 * InOutRateUse.
 		 */
 		bool LimitLegSteps(const FLegs& Legs, const FLegValues& From, FLegValues& InOutDz, double Dt, const FTuning& Tuning, double& InOutRateUse,
-			double& InOutHeightRate)
+			double& InOutHeightRate, bool& bOutLiftedBehind)
 		{
+			bOutLiftedBehind = false;
 			if (Dt <= 0.0 || From.Num() != InOutDz.Num() || Legs.Num() != InOutDz.Num() || Legs.Num() == 0)
 			{
 				return false;
 			}
+			// A lifted leg let down is not the plane's business.
+			const auto Counts = [&Legs](int32 Index, double Move) { return Legs[Index].bSupport || Move > 0.0; };
 			double Use = 0.0;
 			double SupportSum = 0.0;
 			double AllSum = 0.0;
@@ -177,7 +190,7 @@ namespace RammsLevel
 			for (int32 Index = 0; Index < Legs.Num(); ++Index)
 			{
 				const double Move = InOutDz[Index] - From[Index];
-				if (Legs[Index].MaxRateCmS > 0.0)
+				if (Legs[Index].MaxRateCmS > 0.0 && Counts(Index, Move))
 				{
 					Use = FMath::Max(Use, FMath::Abs(Move) / (Dt * Legs[Index].MaxRateCmS));
 				}
@@ -224,9 +237,10 @@ namespace RammsLevel
 				double LeftUse = 0.0;
 				for (int32 Index = 0; Index < Legs.Num(); ++Index)
 				{
-					if (Legs[Index].MaxRateCmS > 0.0)
+					const double Move = InOutDz[Index] - Held - From[Index];
+					if (Legs[Index].MaxRateCmS > 0.0 && Counts(Index, Move))
 					{
-						LeftUse = FMath::Max(LeftUse, FMath::Abs(InOutDz[Index] - Held - From[Index]) / (Dt * Legs[Index].MaxRateCmS));
+						LeftUse = FMath::Max(LeftUse, FMath::Abs(Move) / (Dt * Legs[Index].MaxRateCmS));
 					}
 				}
 				// (The hair: a plane the slew has just cut to the fraction
@@ -237,18 +251,32 @@ namespace RammsLevel
 					Share = Tuning.LegRateFraction / LeftUse;
 				}
 			}
-			if (Held == 0.0 && Share == 1.0)
-			{
-				return false;
-			}
+			const bool bPlaneHeld = Held != 0.0 || Share != 1.0;
 			for (int32 Index = 0; Index < Legs.Num(); ++Index)
 			{
 				const FLegReach& Leg = Legs[Index];
-				const double	 Dz = From[Index] + (InOutDz[Index] - Held - From[Index]) * Share;
+				double			 Move = (InOutDz[Index] - Held - From[Index]) * Share;
+				// A lifted leg let down goes at its own rate, whatever the
+				// plane's: the rest of its way waits for the next steps.
+				bool bOwnPace = false;
+				if (!Counts(Index, Move) && Leg.MaxRateCmS > 0.0 && Tuning.LegRateFraction > 0.0)
+				{
+					const double Most = Tuning.LegRateFraction * Leg.MaxRateCmS * Dt;
+					if (-Move > Most * (1.0 + 1.0e-9))
+					{
+						Move = -Most;
+						bOwnPace = true;
+						bOutLiftedBehind = true;
+					}
+				}
+				if (!bPlaneHeld && !bOwnPace)
+				{
+					continue; // the allocation's own, to the last bit
+				}
 				// Allocate's last resort, kept: never past the travel.
-				InOutDz[Index] = FMath::Clamp(Dz, FMath::Min(0.0, Leg.MinZ - Leg.BaseZ), FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ));
+				InOutDz[Index] = FMath::Clamp(From[Index] + Move, FMath::Min(0.0, Leg.MinZ - Leg.BaseZ), FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ));
 			}
-			return true;
+			return bPlaneHeld;
 		}
 
 		/** Keep an allocation's figures for the steps that reuse them. */
@@ -337,8 +365,6 @@ namespace RammsLevel
 
 		// What the last step left, for "is anything moving" further down.
 		const FVector2D PrevGroundDeg = State.PrevGroundDeg;
-		const FVector2D PrevCorrectionDeg = State.CorrectionDeg;
-		const FVector2D PrevWantedDeg = State.Tilt.Get();
 
 		// The offsets a hand-back left on the legs, where it says.
 		bool bResumeDz = In.bResume && In.bResumeHasPlane && In.ResumeDz.Num() == NumLegs && NumLegs > 0;
@@ -499,10 +525,8 @@ namespace RammsLevel
 
 		bool bQuiet = false;
 		bool bWrite = bCleared;
-		// The legs' rate use: the slew's alone (what the ground asks of the
-		// legs, which is the speed cap's business), and with the offsets' own
-		// taken in (what is reported).
-		double SlewUse = 0.0;
+		// The legs' rate use, as reported: the slew's, with the offsets' own
+		// taken in where that is larger.
 		double RateUse = 0.0;
 		if (bClosed)
 		{
@@ -537,8 +561,11 @@ namespace RammsLevel
 				State.bShort = Goal.ShortDeg > (State.bShort ? AtReachOffDeg : AtReachOnDeg);
 				State.GoalLimit = Goal.Limit;
 				// No rest while something moves the stance under the offsets:
-				// nothing would be written, and the base would go with it.
-				const bool bMayRest = State.Tilt.IsNear(GoalDeg) && !bBaselinesMoving;
+				// nothing would be written, and the base would go with it. Nor
+				// while an offset is still on its way to the allocation's (a
+				// lifted leg being let down at its own pace): it would be left
+				// where the rest found it.
+				const bool bMayRest = State.Tilt.IsNear(GoalDeg) && !bBaselinesMoving && !State.bLegsBehind;
 				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - State.Tilt.Get()).Size(), In.bStick, bMayRest, Dt, Tuning);
 				bAboutToRest = bMayRest && !In.bStick && In.SpeedCmS < QuietSpeedCmS;
 			}
@@ -579,8 +606,7 @@ namespace RammsLevel
 				const FVector2D AskedDeg = ClampAxes(RawDeg, Tuning.MaxCorrectionDeg);
 				State.bAxisLimited = FMath::Abs(RawDeg.X - AskedDeg.X) > AxisLimitSlackDeg || FMath::Abs(RawDeg.Y - AskedDeg.Y) > AxisLimitSlackDeg;
 
-				const FVector2D SlewedDeg = SlewCorrection(Legs, State.CorrectionDeg, AskedDeg, Dt, Tuning.MaxCorrectionRateDegPerSec, Tuning, SlewUse, State.bRateLimited);
-				RateUse = SlewUse;
+				const FVector2D SlewedDeg = SlewCorrection(Legs, State.CorrectionDeg, AskedDeg, Dt, Tuning.MaxCorrectionRateDegPerSec, Tuning, RateUse, State.bRateLimited);
 
 				FAllocation Alloc = Allocate(Legs, In.Points, SlewedDeg, Tuning, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
 				State.RideCm = Alloc.HeightCm;
@@ -594,8 +620,10 @@ namespace RammsLevel
 					State.CorrectionDeg = Alloc.AppliedDeg;
 					State.Loop.BackCalculate(SlewedDeg, Alloc.AppliedDeg, Tuning);
 				}
-				State.bLegsBehind = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS);
-				State.bRateLimited = State.bRateLimited || State.bLegsBehind;
+				bool	   bLiftedBehind = false;
+				const bool bPlaneHeld = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS, bLiftedBehind);
+				State.bLegsBehind = bPlaneHeld || bLiftedBehind;
+				State.bRateLimited = State.bRateLimited || bPlaneHeld;
 				LawImpl::KeepAllocation(State, Alloc);
 				bWrite = true;
 
@@ -642,15 +670,16 @@ namespace RammsLevel
 				// attitude uses; the correction follows it within the legs'
 				// own limits and no plane rate of its own.
 				const FVector2D PathDeg = State.Ramp.Tick(FVector2D::ZeroVector, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
-				State.CorrectionDeg = SlewCorrection(Legs, State.CorrectionDeg, PathDeg, Dt, 0.0, Tuning, SlewUse, State.bRateLimited);
-				RateUse = SlewUse;
+				State.CorrectionDeg = SlewCorrection(Legs, State.CorrectionDeg, PathDeg, Dt, 0.0, Tuning, RateUse, State.bRateLimited);
 
 				FAllocation Alloc = Allocate(Legs, In.Points, State.CorrectionDeg, Tuning, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
 				State.RideCm = Alloc.HeightCm;
 				State.bSaturated = Alloc.Fraction < 1.0;
 				State.bAxisLimited = false;
-				State.bLegsBehind = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS);
-				State.bRateLimited = State.bRateLimited || State.bLegsBehind;
+				bool	   bLiftedBehind = false;
+				const bool bPlaneHeld = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS, bLiftedBehind);
+				State.bLegsBehind = bPlaneHeld || bLiftedBehind;
+				State.bRateLimited = State.bRateLimited || bPlaneHeld;
 				LawImpl::KeepAllocation(State, Alloc);
 				bWrite = true;
 			}
@@ -696,16 +725,32 @@ namespace RammsLevel
 		const bool bPastReach = bActive && (State.Fraction < 1.0 || State.bAxisLimited) && OffReferenceDeg > Tuning.MaxTiltDeg;
 		if (bActive || Now == EState::Releasing || bRamping)
 		{
-			bool bMoving = false;
-			if (Dt > 0.0 && !bWantedSet)
+			// The cap goes by how fast the ground turns under the robot against
+			// how fast the legs can turn the correction: now, and when the
+			// slope the robot stands on ends (FSpeedScale). Nothing in it looks
+			// at how much reach is left: standing at a limit is not a turn.
+			FSpeedCapInputs Cap;
+			Cap.ErrorDeg = ErrorDeg;
+			Cap.bPastReach = bPastReach;
+			Cap.SpeedCmS = In.SpeedCmS;
+			if (State.Terrain.IsSeeded() && bLegsValid)
 			{
-				const double Moved = FMath::Max3((GroundDeg - PrevGroundDeg).Size(), (State.CorrectionDeg - PrevCorrectionDeg).Size(), (WantedDeg - PrevWantedDeg).Size());
-				bMoving = Moved > SpeedCapMovingDegPerSec * Dt;
+				Cap.SlopeDeg = Inclination(GroundDeg);
+				Cap.SpanCm = StandingSpanCm(Legs);
+				// Not the ground's doing: an estimate just seeded afresh, and
+				// one that a stance being changed is turning.
+				Cap.bGroundRateKnown = Dt > 0.0 && bValid && !bWantedSet && !bBaselinesMoving;
+				if (Cap.bGroundRateKnown)
+				{
+					Cap.GroundRateDegPerSec = (GroundDeg - PrevGroundDeg) / Dt;
+				}
+				// What the legs can turn the correction at: the lesser of the
+				// way the slope would be taken out and the way the ground is
+				// turning now, where there is either.
+				const double Along[2] = { PlaneRateDegPerSec(Legs, GroundDeg, Tuning), PlaneRateDegPerSec(Legs, Cap.GroundRateDegPerSec, Tuning) };
+				Cap.LegsDegPerSec = Along[0] > 0.0 && Along[1] > 0.0 ? FMath::Min(Along[0], Along[1]) : FMath::Max(Along[0], Along[1]);
 			}
-			// (The slew's use, not the offsets': a height term catching up
-			// after a support change is not the ground outrunning the legs,
-			// and driving slower would not help it.)
-			State.SpeedScale.Tick(ErrorDeg, State.MinMarginCm, bMoving, bQuiet ? 0.0 : SlewUse, bPastReach, Dt, Tuning);
+			State.SpeedScale.Tick(Cap, Dt, Tuning);
 		}
 		else if (Now != EState::Holding)
 		{

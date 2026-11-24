@@ -20,6 +20,12 @@ namespace RammsLevel
 {
 	/** Where the level assist's controls sit among the contributors'. */
 	constexpr int32 ControlOrder = 6;
+	/** The drive-speed scale is sent to the active drive mode every tick
+	 *  (IRammsDriveMode::SetDriveSpeedScale, as this requester), to stand this
+	 *  long (s of simulated time): a level assist that stops ticking, or
+	 *  stops levelling, leaves no cap behind for longer. */
+	constexpr float SpeedScaleHoldSeconds = 0.5f;
+	FName			SpeedScaleRequester();
 
 	/** level.assist: the Off/On switch. */
 	FName AssistControlId();

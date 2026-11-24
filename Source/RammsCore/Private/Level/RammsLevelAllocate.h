@@ -263,6 +263,17 @@ namespace RammsLevel
 	 * Shares within 0..1, rooms 0 or more. ReachLeft is the least share (1
 	 * with none), NearestLimit whose it is (the first of the list on a tie),
 	 * MinMarginCm the least room (NoTravelMarginCm with none). RateUse is left 0.
+	 *
+	 * With a ride-height allowance (RideHeightUpCm or RideHeightDownCm over 0)
+	 * the first three kinds' shares are of limits at the shift in use, and the
+	 * shift is never larger than puts the nearest of them on its limit: they
+	 * read "none left" from the moment the ride height begins to help. So
+	 * their least share is then the larger of that and 1 - 1 / N, N being how
+	 * many times the plane applied would still fit with the shift free
+	 * (AllocateReach of the plane times 16, held to the per-axis limits, with
+	 * ExtraMarginCm = Tuning.SoftZoneCm); NearestLimit is then what stops that
+	 * larger plane. The axes' shares are as above. MinMarginCm is unchanged:
+	 * the room at the shift in use.
 	 */
 	FAllocation Allocate(TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points, const FVector2D& CorrectionDeg,
 		const FTuning& Tuning, double PrevRideCm, double MaxRideStepCm);

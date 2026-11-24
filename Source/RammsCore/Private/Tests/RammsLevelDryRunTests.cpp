@@ -78,6 +78,10 @@ namespace RammsLevelDryRunTests
 		 *  runaway stops at the limit and not at the legs' reach. */
 		double BackwardsGroundDeg = 0.0;
 		double BackwardsLimitDeg = 0.0;
+		/** How far apart the legs it stands on are (cm; the lesser of fore and
+		 *  aft and across, as the law takes it): the speed cap keeps it to the
+		 *  speed at which a grade's end turns the ground 6 deg/s under them. */
+		double SpanCm = 0.0;
 	};
 
 	/** The six-wheeled robot: four corner legs and two centre legs. */
@@ -99,6 +103,8 @@ namespace RammsLevelDryRunTests
 		Kit.StallAtSeconds = 2.2;
 		Kit.BackwardsGroundDeg = 3.0;
 		Kit.BackwardsLimitDeg = 8.0;
+		// 90 cm fore and aft, 54 across.
+		Kit.SpanCm = 54.0;
 		return Kit;
 	}
 
@@ -124,6 +130,8 @@ namespace RammsLevelDryRunTests
 		Kit.StallAtSeconds = 3.0;
 		Kit.BackwardsGroundDeg = -3.0;
 		Kit.BackwardsLimitDeg = 7.0;
+		// The drive wheels to the rear pair, 40 cm; 56 across.
+		Kit.SpanCm = 40.0;
 		return Kit;
 	}
 
@@ -1659,7 +1667,10 @@ bool FRammsLevelDryRunAtSpeed::RunTest(const FString& Parameters)
 				// their rate for half a second and the drive slowed for it.
 				// That is where a law that only reacts runs out.
 				TestTrue(Label(Kit, Rate, TEXT("the peak through the break")), Result.PeakTiltDeg <= SpeedPeakShare * Kit.GradeDeg);
-				TestTrue(Label(Kit, Rate, TEXT("most of the speed kept")), Result.MeanSpeedCmS >= 0.6 * Speeds[SpeedIndex]);
+				// (On the grade the drive is kept to the speed its end can be
+				// taken at: the ground turning 6 deg/s under the standing legs.)
+				const double GradeSpeedCmS = FMath::Min(Speeds[SpeedIndex], 6.0 * Kit.SpanCm / Kit.GradeDeg);
+				TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("most of the speed kept (%.1f of %.1f cm/s)"), Result.MeanSpeedCmS, GradeSpeedCmS)), Result.MeanSpeedCmS >= 0.8 * GradeSpeedCmS);
 			}
 			TestTrue(Label(Kit, Rate, TEXT("the faster the break is taken, the further the base is left behind")), Peaks[1] > Peaks[0] && Peaks[2] > Peaks[1]);
 		}
@@ -3016,6 +3027,353 @@ bool FRammsLevelDryRunModeSwitch::RunTest(const FString& Parameters)
 				TestTrue(Say(TEXT("out"), TEXT("... every offset exactly zero, on the ground's attitude")), Result.FinalMaxOffsetCm == 0.0 && FMath::Abs(Result.FinalTiltDeg - Off.FinalTiltDeg) <= 0.02);
 				TestEqual(Say(TEXT("out"), TEXT("on its corners")), Result.Trace.Num() > 0 ? Result.Trace.Last().Touching : 0, 4);
 			}
+		}
+	}
+	return true;
+}
+
+namespace RammsLevelDryRunTests
+{
+	/** The rider's tilt-rate limit the courses are scored against (deg/s, the
+	 *  base's attitude over 0.3 s). */
+	constexpr double RiderRateLimitDegPerSec = 4.0;
+
+	/**
+	 * The six-wheeled robot on its centre and rear legs (RaisedFronts) as a
+	 * robot with a top speed has it: the legs it stands on quick, so that the
+	 * correction's own rate (Tuning.MaxCorrectionRateDegPerSec) is what binds
+	 * them; the raised front pair slow to change height (near the top of its
+	 * swing a leg's wheel hardly moves with its joint), and three times as far
+	 * from the middle of the standing legs as they are.
+	 */
+	FKit QuickOnFour()
+	{
+		FKit Kit = RaisedFronts();
+		Kit.Name = TEXT("quick on four");
+		for (int32 Index = 0; Index < Kit.Robot.Legs.Num(); ++Index)
+		{
+			Kit.Robot.Legs[Index].MaxRateCmS = Index < 2 ? 10.0 : 60.0;
+			Kit.Robot.Legs[Index].MaxAccelCmS2 = 600.0;
+		}
+		return Kit;
+	}
+
+	/** How far apart the legs that robot stands on are, fore and aft (cm). */
+	constexpr double OnFourSpanCm = 45.0;
+
+	/** The rider through a stretch of a course, from a trace. */
+	struct FPassage
+	{
+		/** The most the base was off the wanted attitude (deg). */
+		double PeakDeg = 0.0;
+		/** The fastest the base was turned over 0.3 s (deg/s). */
+		double RateDegPerSec = 0.0;
+		/** The least speed scale, and the mean speed (cm/s). */
+		double LeastScale = 1.0;
+		double MeanSpeedCmS = 0.0;
+		/** The most reach left and the least (FOutputs::ReachLeft). */
+		double LeastReachLeft = 1.0;
+		int32  Frames = 0;
+	};
+
+	/** The frames whose travel is from FromCm to ToCm. */
+	FPassage PassageBetween(const FResult& Result, const FTuning& Tuning, double FromCm, double ToCm, double TickSeconds)
+	{
+		FPassage	Out;
+		double		SpeedSum = 0.0;
+		const int32 Window = FMath::Max(1, FMath::RoundToInt32(0.3 / TickSeconds));
+		for (int32 Index = 0; Index < Result.Trace.Num(); ++Index)
+		{
+			const FSample& Sample = Result.Trace[Index];
+			if (Sample.TravelCm < FromCm || Sample.TravelCm > ToCm)
+			{
+				continue;
+			}
+			Out.PeakDeg = FMath::Max(Out.PeakDeg, Inclination(Sample.TrueAttitudeDeg - Tuning.LevelReferenceDeg));
+			if (Index >= Window)
+			{
+				Out.RateDegPerSec = FMath::Max(Out.RateDegPerSec, (Sample.TrueAttitudeDeg - Result.Trace[Index - Window].TrueAttitudeDeg).Size() / (Window * TickSeconds));
+			}
+			Out.LeastScale = FMath::Min(Out.LeastScale, Sample.Out.SpeedScale);
+			Out.LeastReachLeft = FMath::Min(Out.LeastReachLeft, Sample.Out.ReachLeft);
+			SpeedSum += Sample.SpeedCmS;
+			++Out.Frames;
+		}
+		Out.MeanSpeedCmS = Out.Frames > 0 ? SpeedSum / Out.Frames : 0.0;
+		return Out;
+	}
+
+	/** A place on a course where the ground turns under the robot. */
+	struct FSeam
+	{
+		const TCHAR* Name;
+		/** Where the leading standing wheels meet it (cm of travel), and how
+		 *  long the turn itself is (cm; 0: a sharp break). */
+		double AtCm;
+		double LengthCm;
+		/** The rider is to be kept inside the tilt-rate limit through it. */
+		bool bWithinRate;
+	};
+
+	struct FReachCourse
+	{
+		const TCHAR*  Name;
+		FGround		  Ground;
+		TArray<FSeam> Seams;
+		double		  DistanceCm;
+		/** A stretch of steady slope (cm of travel, from and to; none: 0, 0). */
+		FVector2D SteadyCm = FVector2D::ZeroVector;
+	};
+
+	TArray<FReachCourse> ReachCourses()
+	{
+		TArray<FReachCourse> Out;
+		{
+			// 6 deg up, 6 deg down: the ground turns 12 deg under the robot at the top.
+			FReachCourse&	Course = Out.AddDefaulted_GetRef();
+			const FVector2D Knots[3] = { { 150.0, 0.0 }, { 650.0, Rise(500.0, 6.0) }, { 1150.0, 0.0 } };
+			Course.Name = TEXT("12 deg crest");
+			Course.Ground = Profile(MakeArrayView(Knots));
+			Course.Seams = { { TEXT("onto the grade"), 150.0, 0.0, false }, { TEXT("the crest"), 650.0, 0.0, false }, { TEXT("off the grade"), 1150.0, 0.0, true } };
+			Course.DistanceCm = 1450.0;
+		}
+		{
+			// 6 deg up to a landing.
+			FReachCourse&	Course = Out.AddDefaulted_GetRef();
+			const FVector2D Knots[2] = { { 150.0, 0.0 }, { 650.0, Rise(500.0, 6.0) } };
+			Course.Name = TEXT("6 deg break");
+			Course.Ground = Profile(MakeArrayView(Knots));
+			Course.Seams = { { TEXT("onto the grade"), 150.0, 0.0, false }, { TEXT("onto the landing"), 650.0, 0.0, true } };
+			Course.DistanceCm = 950.0;
+		}
+		{
+			// A cross fall of 6 deg that changes sides within 40 cm.
+			FReachCourse& Course = Out.AddDefaulted_GetRef();
+			Course.Name = TEXT("warp");
+			Course.Ground = Warp(6.0, 400.0, 200.0);
+			Course.Seams = { { TEXT("the twist"), 400.0, 200.0, true } };
+			Course.DistanceCm = 900.0;
+		}
+		{
+			// 8 deg up to a landing: nose up, the raised wheels' clearance
+			// gives this robot 8.26 deg.
+			FReachCourse&	Course = Out.AddDefaulted_GetRef();
+			const FVector2D Knots[2] = { { 150.0, 0.0 }, { 750.0, Rise(600.0, 8.0) } };
+			Course.Name = TEXT("8 deg ramp at the end of reach");
+			Course.Ground = Profile(MakeArrayView(Knots));
+			Course.Seams = { { TEXT("onto the ramp"), 150.0, 0.0, false }, { TEXT("onto the landing"), 750.0, 0.0, true } };
+			Course.DistanceCm = 1050.0;
+			Course.SteadyCm = FVector2D(450.0, 740.0);
+		}
+		return Out;
+	}
+} // namespace RammsLevelDryRunTests
+
+// Catches: a drive-speed cap that does not earn its keep. With the cap applied
+// to the drive (the dry run's plant takes the law's speed scale), at a robot's
+// full speed and at twice it, with a body that pitches under its own changes
+// of speed: the rider through every seam no worse than with the switch off;
+// inside the tilt-rate limit where the ground could be known to be about to
+// turn (the end of a slope the robot is levelled on); a ramp at the end of the
+// legs' reach driven without sitting on the cap's floor; and what it costs in
+// speed, reported.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSpeedCap,
+	"Ramms.Level.DryRun.SpeedCapThroughCrestBreakWarpAndRamp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSpeedCap::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	const FKit				   Kit = QuickOnFour();
+	const TArray<FReachCourse> Courses = ReachCourses();
+	const int32				   Rates[2] = { 0, 2 };
+	for (const FReachCourse& Course : Courses)
+	{
+		for (const double Speed : { 60.0, 120.0 })
+		{
+			for (const int32 Rate : Rates)
+			{
+				// Levelled where it stands for five seconds, then driven.
+				FOptions Options = MakeOptions(Kit, Rate);
+				Options.SpeedCmS = 0.0;
+				Options.DistanceCm = Course.DistanceCm;
+				Options.MaxSeconds = 90.0;
+				Options.PitchPerAccelDeg = BodyPitchPerAccel;
+				Options.bKeepTrace = true;
+				Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, Speed));
+				FOptions OffOptions = Options;
+				OffOptions.bEnabledAtStart = false;
+				const FResult Off = DryRun::Run(Kit.Robot, Course.Ground, OffOptions);
+				const FResult Result = DryRun::Run(Kit.Robot, Course.Ground, Options);
+				const FString Case = FString::Printf(TEXT("%s at %.0f cm/s"), Course.Name, Speed);
+				Report(*this, Kit, *Case, Rate, Result);
+				ExpectSound(*this, Kit, Rate, Result);
+				const auto Say = [&](const TCHAR* Where, const FString& What) { return FString::Printf(TEXT("%s, %s, %s: %s"), *Case, Where, FrameNames[Rate], *What); };
+				TestTrue(Say(TEXT("the course"), TEXT("driven to its end")), Result.TravelCm >= Course.DistanceCm && Off.TravelCm >= Course.DistanceCm);
+
+				// What it cost: the time from the stick to the end, against the
+				// same switched off.
+				const double Kept = Result.Seconds > 5.0 ? (Off.Seconds - 5.0) / (Result.Seconds - 5.0) : 0.0;
+				AddInfo(FString::Printf(TEXT("%s | %s | speed kept %.2f (%.1f s against %.1f switched off), least speed scale %.2f, least speed %.1f cm/s"), *Case, FrameNames[Rate], Kept, Result.Seconds - 5.0,
+					Off.Seconds - 5.0, Result.MinSpeedScale, Result.MinSpeedCmS));
+				TestTrue(Say(TEXT("the course"), FString::Printf(TEXT("never slowed to a stop (%.1f cm/s at least)"), Result.MinSpeedCmS)), Result.MinSpeedCmS >= 0.2 * Speed * Kit.Tuning.MinSpeedScale);
+				// The raised pair is let down behind the plane where it is slow,
+				// never left low: it stays off the ground all the way.
+				int32 MostTouching = 0;
+				for (const FSample& Sample : Result.Trace)
+				{
+					MostTouching = FMath::Max(MostTouching, Sample.Touching);
+				}
+				TestEqual(Say(TEXT("the course"), TEXT("the raised wheels never touch the ground")), MostTouching, 4);
+
+				for (const FSeam& Seam : Course.Seams)
+				{
+					// From just before the leading wheels meet it until the legs
+					// have had a second and more to catch it up.
+					const double   From = Seam.AtCm - 20.0;
+					const double   To = Seam.AtCm + Seam.LengthCm + OnFourSpanCm + 100.0;
+					const FPassage On = PassageBetween(Result, Kit.Tuning, From, To, Options.FrameSeconds);
+					const FPassage Was = PassageBetween(Off, Kit.Tuning, From, To, Options.FrameSeconds);
+					AddInfo(FString::Printf(TEXT("%s | %s | %s | rider %.2f deg at %.1f deg/s; switched off %.2f at %.1f; through it at %.1f cm/s (off %.1f), least speed scale %.2f"), *Case, Seam.Name, FrameNames[Rate],
+						On.PeakDeg, On.RateDegPerSec, Was.PeakDeg, Was.RateDegPerSec, On.MeanSpeedCmS, Was.MeanSpeedCmS, On.LeastScale));
+					TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider no further off than switched off (%.2f against %.2f deg)"), On.PeakDeg, Was.PeakDeg)), On.PeakDeg <= Was.PeakDeg + 0.1);
+					TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider turned no faster than switched off (%.1f against %.1f deg/s)"), On.RateDegPerSec, Was.RateDegPerSec)),
+						On.RateDegPerSec <= Was.RateDegPerSec + 0.1);
+					if (Seam.bWithinRate)
+					{
+						TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider inside the tilt-rate limit (%.1f deg/s)"), On.RateDegPerSec)), On.RateDegPerSec <= RiderRateLimitDegPerSec);
+					}
+				}
+
+				if (Course.SteadyCm.Y > Course.SteadyCm.X)
+				{
+					// A steady slope at the end of reach: the rider level, and
+					// the drive not held on the cap's floor for standing at a limit.
+					const FPassage Steady = PassageBetween(Result, Kit.Tuning, Course.SteadyCm.X, Course.SteadyCm.Y, Options.FrameSeconds);
+					AddInfo(FString::Printf(TEXT("%s | the steady slope | %s | rider %.2f deg, reach left %.2f, speed scale %.2f at least, %.1f cm/s"), *Case, FrameNames[Rate], Steady.PeakDeg, Steady.LeastReachLeft,
+						Steady.LeastScale, Steady.MeanSpeedCmS));
+					TestTrue(Say(TEXT("the steady slope"), TEXT("at the end of the legs' reach")), Steady.LeastReachLeft <= 0.1);
+					TestTrue(Say(TEXT("the steady slope"), FString::Printf(TEXT("the rider level (%.2f deg)"), Steady.PeakDeg)), Steady.PeakDeg <= 0.5);
+					// Driven at the speed its end can be taken at -- the ground
+					// may turn 6 deg/s under legs 45 cm apart, and 8 deg come
+					// back in 45 cm at 33.75 cm/s -- whatever the stick asks,
+					// and no slower for the reach being used up.
+					TestEqual(Say(TEXT("the steady slope"), FString::Printf(TEXT("driven at the speed its end can be taken at (%.1f cm/s)"), Steady.MeanSpeedCmS)), Steady.MeanSpeedCmS, 6.0 * OnFourSpanCm / 8.0, 1.0);
+					TestTrue(Say(TEXT("the steady slope"), FString::Printf(TEXT("the drive not on the cap's floor (%.2f)"), Steady.LeastScale)), Steady.LeastScale > Kit.Tuning.MinSpeedScale + 0.02);
+				}
+			}
+		}
+	}
+
+	// Standing on a slope near the end of reach, the switch thrown: nothing
+	// is turning under the robot, and the drive is not slowed.
+	for (const int32 Rate : Rates)
+	{
+		FOptions Options = MakeOptions(Kit, Rate);
+		Options.SpeedCmS = 0.0;
+		Options.bEnabledAtStart = false;
+		Options.MaxSeconds = 10.0;
+		Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+		const FResult Result = DryRun::Run(Kit.Robot, Plane(7.0, 0.0), Options);
+		Report(*this, Kit, TEXT("switched on standing on 7 deg"), Rate, Result);
+		ExpectSound(*this, Kit, Rate, Result);
+		TestTrue(Label(Kit, Rate, TEXT("switched on standing on 7 deg: level")), Result.FinalTiltDeg <= 0.3);
+		TestTrue(Label(Kit, Rate, TEXT("... near the end of reach")), Result.MinReachLeft <= 0.2);
+		TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("... and the drive never slowed for it (%.2f)"), Result.MinSpeedScale)), Result.MinSpeedScale >= 0.99);
+	}
+	return true;
+}
+
+// Catches: a ride-height allowance that buys no reach (the wanted tilt planned
+// without it, or the shift never asked for), one that is taken in a step, one
+// that is kept once the slope no longer needs it, and one that sets the wheels
+// it was meant to keep clear on the ground.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunRideHeight,
+	"Ramms.Level.DryRun.RideHeightBuysReachPastTheRaisedWheels",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunRideHeight::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+
+	// As RaisedWheelsClearanceIsSaid: nose up, the raised front pair may be
+	// asked 9.8 cm, 67.5 cm ahead of the middle of the four that stand: 8.26
+	// deg. Every cm the chassis is raised is a cm more for that pair: with
+	// 3 cm allowed, 12.8 cm, 10.74 deg. On 10 deg the plane asks the pair
+	// 11.9 cm, so 2.1 cm of the allowance is used.
+	const double NeededCm = 67.5 * FMath::Tan(FMath::DegreesToRadians(10.0)) - 9.8;
+	for (const int32 Rate : { 0, 2 })
+	{
+		FKit Kit = QuickOnFour();
+		Kit.Tuning.RideHeightUpCm = 3.0;
+		{
+			// Parked on 10 deg, the switch thrown.
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.bEnabledAtStart = false;
+			Options.MaxSeconds = 16.0;
+			Options.bKeepTrace = true;
+			Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+			FOptions NoneOptions = Options;
+			NoneOptions.Tuning.RideHeightUpCm = 0.0;
+			const FResult None = DryRun::Run(Kit.Robot, Plane(10.0, 0.0), NoneOptions);
+			const FResult Result = DryRun::Run(Kit.Robot, Plane(10.0, 0.0), Options);
+			Report(*this, Kit, TEXT("10 deg nose up, 3 cm of ride height allowed"), Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			if (!TestTrue(Label(Kit, Rate, TEXT("a trace")), Result.Trace.Num() > 1))
+			{
+				continue;
+			}
+			double MostRideStep = 0.0;
+			int32  MostTouching = 0;
+			for (int32 Index = 1; Index < Result.Trace.Num(); ++Index)
+			{
+				MostRideStep = FMath::Max(MostRideStep, FMath::Abs(Result.Trace[Index].Out.RideCm - Result.Trace[Index - 1].Out.RideCm));
+				MostTouching = FMath::Max(MostTouching, Result.Trace[Index].Touching);
+			}
+			const FSample& Last = Result.Trace.Last();
+			AddInfo(FString::Printf(TEXT("%s | 10 deg nose up, parked | %s | with no allowance %.2f deg off level; with 3 cm %.2f, the chassis raised %.2f cm (%.2f needed), %.3f cm a frame at most, status %d, level.reach %.2f"),
+				Kit.Name, FrameNames[Rate], None.FinalTiltDeg, Result.FinalTiltDeg, Last.Out.RideCm, NeededCm, MostRideStep, static_cast<int32>(Last.Out.Status), Last.Out.ReachLeft));
+			TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("(with no allowance the base is left %.2f deg off)"), None.FinalTiltDeg)), None.FinalTiltDeg >= 1.4);
+			TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("with 3 cm allowed: level (%.2f deg)"), Result.FinalTiltDeg)), Result.FinalTiltDeg <= 0.3);
+			TestEqual(Label(Kit, Rate, TEXT("... the chassis raised by what the raised wheels needed, and no more")), Last.Out.RideCm, NeededCm, 0.25);
+			TestTrue(Label(Kit, Rate, TEXT("... at the ride height's rate, never in a step")), MostRideStep <= Kit.Tuning.RideHeightRateCmPerSec * Options.FrameSeconds + 1.0e-6);
+			TestTrue(Label(Kit, Rate, TEXT("... inside reach: nothing to say, and at rest")), Last.Out.Status == EStatus::Settled);
+			// (11.9 of the 12.8 cm the raised wheels may now be asked.)
+			TestEqual(Label(Kit, Rate, TEXT("... level.reach reads the ride height still free")), Last.Out.ReachLeft, 1.0 - (NeededCm + 9.8) / 12.8, 0.02);
+			TestEqual(Label(Kit, Rate, TEXT("... the raised wheels off the ground all the way")), MostTouching, 4);
+			// The legs that stand were all let out by it: the base is higher.
+			TestTrue(Label(Kit, Rate, TEXT("... the standing legs let out by it")), (Last.CommandZ[2] + Last.CommandZ[4]) * 0.5 - (-30.0) <= -NeededCm + 0.3);
+		}
+		{
+			// Driven up a 10 deg ramp at a walk and onto its landing: level on
+			// the ramp, and the ride height given back on the flat.
+			const FVector2D Knots[2] = { { 150.0, 0.0 }, { 650.0, Rise(500.0, 10.0) } };
+			const FGround	Course = Profile(MakeArrayView(Knots));
+			FOptions		Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 30.0;
+			Options.DistanceCm = 1000.0;
+			Options.MaxSeconds = 90.0;
+			Options.bKeepTrace = true;
+			const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+			Report(*this, Kit, TEXT("a 10 deg ramp, 3 cm of ride height allowed"), Rate, Result);
+			ExpectSound(*this, Kit, Rate, Result);
+			const FPassage OnRamp = PassageBetween(Result, Kit.Tuning, 400.0, 640.0, Options.FrameSeconds);
+			double		   MostRide = 0.0;
+			int32		   MostTouching = 0;
+			for (const FSample& Sample : Result.Trace)
+			{
+				MostRide = FMath::Max(MostRide, Sample.Out.RideCm);
+				MostTouching = FMath::Max(MostTouching, Sample.Touching);
+			}
+			AddInfo(FString::Printf(TEXT("%s | a 10 deg ramp at 30 cm/s | %s | on the ramp %.2f deg off at most, the chassis raised %.2f cm at most; at the end %.2f deg off, raised %.2f cm"), Kit.Name, FrameNames[Rate],
+				OnRamp.PeakDeg, MostRide, Result.FinalTiltDeg, Result.Trace.Num() > 0 ? Result.Trace.Last().Out.RideCm : 0.0));
+			TestTrue(Label(Kit, Rate, *FString::Printf(TEXT("the ramp: level on it (%.2f deg)"), OnRamp.PeakDeg)), OnRamp.PeakDeg <= 0.5);
+			TestEqual(Label(Kit, Rate, TEXT("the ramp: the chassis raised by what it needed")), MostRide, NeededCm, 0.4);
+			TestTrue(Label(Kit, Rate, TEXT("the landing: level")), Result.SteadyResidualDeg <= 0.3);
+			TestTrue(Label(Kit, Rate, TEXT("the landing: the ride height given back")), Result.Trace.Num() > 0 && FMath::Abs(Result.Trace.Last().Out.RideCm) <= 0.02);
+			TestEqual(Label(Kit, Rate, TEXT("the raised wheels off the ground all the way")), MostTouching, 4);
 		}
 	}
 	return true;

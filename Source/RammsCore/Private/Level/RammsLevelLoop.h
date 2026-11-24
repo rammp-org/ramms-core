@@ -365,10 +365,22 @@ namespace RammsLevel
 	 *     no limit for MaxRateDegPerSec <= 0).
 	 *  2. Each leg's move is RigidOffsets(From + Step) - RigidOffsets(From).
 	 *     OutRateUse = the largest |move| / (Dt MaxRateCmS) over every leg
-	 *     with MaxRateCmS > 0: the share of its rate the plane asks of the
-	 *     busiest leg, measured here, before the next cut, and so able to pass
-	 *     1. Above Tuning.LegRateFraction the Step is scaled by
+	 *     that counts and has MaxRateCmS > 0: the share of its rate the plane
+	 *     asks of the busiest leg, measured here, before the next cut, and so
+	 *     able to pass 1. Above Tuning.LegRateFraction the Step is scaled by
 	 *     LegRateFraction / OutRateUse.
+	 *     A leg the robot stands on counts for all of its move. A LIFTED leg
+	 *     (bSupport false) counts only for the part of its move that takes it
+	 *     UP, and that it can make: both ends of the move held inside its
+	 *     travel (Allocate's own clamp) first. Where a lifted leg is changes
+	 *     nothing about the base's attitude; it is carried with the plane to
+	 *     keep its clearance, and only a leg late in coming UP loses any. One
+	 *     that is being let down, or that rests on its stop and is not moving
+	 *     at all, must not hold the whole plane back: carried far ahead of the
+	 *     legs that stand, it would be the busiest leg by far, and the
+	 *     correction would unwind at a fraction of what those legs can do. (A
+	 *     lifted leg let down faster than it can go is told so all the same,
+	 *     at its own rate: FLaw::Step's g2.)
 	 *  3. Soft zone: for each support leg moving towards a limit of the
 	 *     constraint set (Lo_i or Hi_i of RammsLevelAllocate.h, ExtraMarginCm
 	 *     0) with less than Tuning.SoftZoneCm to go from where From puts it
@@ -389,6 +401,22 @@ namespace RammsLevel
 	 */
 	FVector2D SlewCorrection(TConstArrayView<FLegReach> Legs, const FVector2D& FromDeg, const FVector2D& ToDeg, double Dt,
 		double MaxRateDegPerSec, const FTuning& Tuning, double& OutRateUse, bool& bOutLimited);
+
+	/**
+	 * How fast (deg/s) the legs the robot stands on can turn the correction
+	 * plane along DirDeg (a direction over pitch and roll; its length does not
+	 * matter): the plane's own rate, Tuning.MaxCorrectionRateDegPerSec, and no
+	 * faster than keeps the busiest of those legs within Tuning.LegRateFraction
+	 * of its MaxRateCmS (RigidOffsets of a degree along DirDeg gives each
+	 * leg's cm per degree). The legs that count are the support legs (every
+	 * leg when none stands): a lifted leg holds the plane back only while it
+	 * is being brought up (SlewCorrection), which is not what the ground can
+	 * be followed at in general. 0: nothing limits it (no plane rate, and no
+	 * counting leg with a rate, or no LegRateFraction), or DirDeg is zero.
+	 * Legs must have been through SupportMask. What the speed cap takes for
+	 * the rate the ground may turn at.
+	 */
+	double PlaneRateDegPerSec(TConstArrayView<FLegReach> Legs, const FVector2D& DirDeg, const FTuning& Tuning);
 
 	/**
 	 * The seat's trim (deg; positive pitches the seat nose up against the
@@ -423,40 +451,129 @@ namespace RammsLevel
 		double Trim = 0.0;
 	};
 
+	/** What the drive-speed cap is told each tick. */
+	struct FSpeedCapInputs
+	{
+		/** The size of A - W (deg, Euclidean, no deadband). */
+		double ErrorDeg = 0.0;
+		/** The slope the robot stands on (deg): the terrain estimate's
+		 *  inclination. What the legs will have to turn the correction by
+		 *  when that slope ends. */
+		double SlopeDeg = 0.0;
+		/** How fast the terrain estimate moved over this tick (deg/s, pitch
+		 *  and roll), and whether that is the ground's doing: not on a tick
+		 *  that reseeded the estimate, nor while the legs' own baselines move
+		 *  (a stance being changed turns it with the ground standing still). */
+		FVector2D GroundRateDegPerSec = FVector2D::ZeroVector;
+		bool	  bGroundRateKnown = false;
+		/** How far apart the legs the robot stands on are (cm; StandingSpanCm):
+		 *  a break in the ground has passed under the robot once it has moved
+		 *  that far. */
+		double SpanCm = 0.0;
+		/** How fast the legs can turn the correction (deg/s;
+		 *  PlaneRateDegPerSec); 0: nothing limits them. */
+		double LegsDegPerSec = 0.0;
+		/** The chassis' speed over the ground as measured (cm/s). */
+		double SpeedCmS = 0.0;
+		/** The legs are stopped with the base beyond the tilt policy. */
+		bool bPastReach = false;
+	};
+
 	/**
 	 * The drive-speed cap: a scale on the rider's stick, 1 down to
-	 * Tuning.MinSpeedScale and never 0, the least of three terms:
-	 *  - error: 1 at ErrorDeg <= SpeedCapErrorDeg, the floor at
-	 *    SpeedCapErrorFullDeg or more, a straight line between; the floor
-	 *    outright with bPastReach;
-	 *  - reach: 1 at MinMarginCm >= SpeedCapMarginFullCm, the floor at
-	 *    SpeedCapMarginFloorCm or less, a straight line between -- counted
-	 *    only while bMoving and for SpeedCapMovingHoldSeconds after it was
-	 *    last true (else 1): a steady slope at the limit does not stay slow;
-	 *  - rate: for RateUse above LegRateFraction, LegRateFraction / RateUse,
-	 *    not under the floor.
-	 * The scale falls towards that at SpeedScaleFallPerSec and rises at
-	 * Tuning.SpeedScaleRisePerSec. It starts at 1. The floor is
+	 * Tuning.MinSpeedScale and never 0.
+	 *
+	 * WHAT IT SLOWS FOR. The legs take a turn of the ground out by turning the
+	 * correction, at no more than their own rate; what the ground turns
+	 * faster than that, the rider gets. The ground turns under the robot only
+	 * as the robot moves over it -- by its speed times the ground's curvature
+	 * -- so the drive is slowed until the ground turns at a rate the legs can
+	 * follow:
+	 *
+	 *   Follow = min(Cap.FollowMaxDegPerSec, Cap.FollowShare * LegsDegPerSec)
+	 *            (the first alone with no leg rate known)
+	 *
+	 * The scale is the least of four terms, each from 1 down to the floor:
+	 *  - THE TURN NOW: with Turn the low-pass (Cap.TurnFilterSeconds) of
+	 *    GroundRateDegPerSec (towards zero on a tick it is not known):
+	 *    Driven * Follow / |Turn|. Driven is the scale as the drive has had
+	 *    time to answer it (a first-order lag, Cap.DriveLagSeconds): the
+	 *    ground turns in proportion to the speed, so that is the scale at
+	 *    which it would turn at Follow. (Over 1, and so nothing, while the
+	 *    ground turns slower than that at the speed there is.)
+	 *  - THE SLOPE'S END: the robot is levelled on a slope of SlopeDeg, and
+	 *    where that slope ends the ground comes back to level within one
+	 *    span's travel: it will turn SlopeDeg / SpanCm for every cm. That is
+	 *    the one turn of the ground that can be known before it comes, so the
+	 *    speed it can be followed at, ExitSpeed = Follow * SpanCm / SlopeDeg,
+	 *    is kept to from the start: ExitSpeed / FreeSpeed. (The slope counts
+	 *    as steep as it has been until the robot has moved
+	 *    Cap.SlopeHeldSpans spans on from there: half way through its end the
+	 *    slope left is half, and so is the way left to lose it in, so the
+	 *    drive is not let go into the break.) FreeSpeed is the
+	 *    speed the rider's stick is asking for: the low-pass
+	 *    (Cap.FreeSpeedFilterSeconds) of |SpeedCmS| / Driven, taken only while
+	 *    the robot moves (Cap.MinSpeedCmS) -- the speed as measured, so a
+	 *    robot that is not getting the speed its stick asks (a drive at its
+	 *    torque limit on a steep ramp) is not slowed for a speed it does not
+	 *    have. No such term standing still, on level ground, or with no span.
+	 *  - THE ERROR, as a backstop for what those two do not see: 1 at
+	 *    ErrorDeg <= SpeedCapErrorDeg, the floor at SpeedCapErrorFullDeg or
+	 *    more, a straight line between.
+	 *  - PAST REACH: the floor outright with bPastReach.
+	 * Standing at a limit is no reason to be slow, and nothing here looks at
+	 * how much reach is left: a steady slope at the very end of the legs'
+	 * travel is driven at its ExitSpeed like any other.
+	 *
+	 * The scale falls towards that at Cap.FallPerSec -- and no faster than
+	 * brakes the robot at Cap.BrakeCmS2 (Cap.BrakeCmS2 / FreeSpeed per s) --
+	 * and rises at Tuning.SpeedScaleRisePerSec. It starts at 1. The floor is
 	 * clamp(MinSpeedScale, 0.01, 1): a tuning of 0 still leaves a crawl.
+	 *
+	 * WHAT IT CANNOT DO. It reacts: a break the robot meets at speed from
+	 * level ground (nothing levelled yet, so nothing known to end) has turned
+	 * the ground for a tick or two before anything here moves, and the drive
+	 * takes as long again to slow. On a robot standing on two axles the first
+	 * sign of a break is the base's own pitch, when the leading axle is on it;
+	 * no leg meets it sooner. Slowing early for those takes looking ahead.
 	 */
 	class FSpeedScale
 	{
 	public:
-		void Reset() { *this = FSpeedScale(); }
-		/**
-		 * One tick; returns the scale. ErrorDeg is the size of A - W (deg,
-		 * Euclidean, no deadband); MinMarginCm is TravelMargin; RateUse is
-		 * SlewCorrection's.
-		 */
-		double Tick(double ErrorDeg, double MinMarginCm, bool bMoving, double RateUse, bool bPastReach, double Dt, const FTuning& Tuning);
+		/** Its own tuning; a test or the dry run may change it. */
+		FSpeedCapTuning Cap;
+
+		/** Forget (the tuning stays): full speed. */
+		void Reset()
+		{
+			const FSpeedCapTuning Kept = Cap;
+			*this = FSpeedScale();
+			Cap = Kept;
+		}
+		/** One tick; returns the scale. */
+		double Tick(const FSpeedCapInputs& In, double Dt, const FTuning& Tuning);
 		/** One tick with nothing to cap for: the scale rises towards 1. */
 		double Relax(double Dt, const FTuning& Tuning);
 		double Get() const { return Scale; }
+		/** The speed the rider's stick is taken to ask for (cm/s), the
+		 *  ground's turning rate as filtered (deg/s), and the last tick's
+		 *  Follow (deg/s) and ExitSpeed (cm/s; 0: no such term). */
+		double	  GetFreeSpeedCmS() const { return FreeSpeed; }
+		FVector2D GetTurnDegPerSec() const { return Turn; }
+		double	  GetFollowDegPerSec() const { return Follow; }
+		double	  GetExitSpeedCmS() const { return ExitSpeed; }
 
 	private:
-		double Scale = 1.0;
-		/** How long ago bMoving was last true (s); large at the start. */
-		double SinceMoving = 1.0e6;
+		double	  Scale = 1.0;
+		double	  Driven = 1.0;
+		double	  FreeSpeed = 0.0;
+		FVector2D Turn = FVector2D::ZeroVector;
+		double	  Follow = 0.0;
+		double	  ExitSpeed = 0.0;
+		/** The steepest the slope has been of late (deg), and how far the
+		 *  robot has moved since it was (cm). */
+		double Steepest = 0.0;
+		double SinceSteepestCm = 0.0;
 	};
 
 	/**

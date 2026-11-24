@@ -399,6 +399,63 @@ namespace RammsDrive
 			Scale(Motion.YawRateDegPerSecond, MaxYawDegS));
 	}
 
+	void FSpeedScaleRequests::Set(FName Requester, double Scale01, double HoldSeconds, double Now)
+	{
+		const int32 Found = Requests.IndexOfByPredicate([Requester](const FRequest& Request) { return Request.Requester == Requester; });
+		// Nothing to ask (full speed, no time, not a number): its last request goes.
+		if (!FMath::IsFinite(Scale01) || !FMath::IsFinite(HoldSeconds) || !FMath::IsFinite(Now) || Scale01 >= 1.0 || HoldSeconds <= 0.0)
+		{
+			if (Found != INDEX_NONE)
+			{
+				Requests.RemoveAtSwap(Found);
+			}
+			return;
+		}
+		FRequest& Request = Found != INDEX_NONE ? Requests[Found] : Requests.AddDefaulted_GetRef();
+		Request.Requester = Requester;
+		Request.Scale = FMath::Clamp(Scale01, MinDriveSpeedScale, 1.0);
+		Request.SetAt = Now;
+		Request.Until = Now + FMath::Min(HoldSeconds, MaxDriveSpeedScaleHoldSeconds);
+	}
+
+	double FSpeedScaleRequests::Get(double Now)
+	{
+		double Least = 1.0;
+		for (int32 Index = Requests.Num() - 1; Index >= 0; --Index)
+		{
+			const FRequest& Request = Requests[Index];
+			if (!(Now >= Request.SetAt && Now < Request.Until))
+			{
+				// Run out, or made before the clock was set back.
+				Requests.RemoveAtSwap(Index);
+				continue;
+			}
+			Least = FMath::Min(Least, Request.Scale);
+		}
+		return Least;
+	}
+
+	FRammsDriveMotion ScaledMotion(const FRammsDriveMotion& Motion, double Scale)
+	{
+		if (!(Scale < 1.0))
+		{
+			return Motion;
+		}
+		const float Share = static_cast<float>(FMath::Max(Scale, MinDriveSpeedScale));
+		return FRammsDriveMotion(Motion.ForwardCmPerSecond * Share, Motion.RightCmPerSecond * Share, Motion.YawRateDegPerSecond * Share);
+	}
+
+	void ScaleWheelSpeeds(float& InOutLeft, float& InOutRight, double Scale)
+	{
+		if (!(Scale < 1.0))
+		{
+			return;
+		}
+		const float Share = static_cast<float>(FMath::Max(Scale, MinDriveSpeedScale));
+		InOutLeft *= Share;
+		InOutRight *= Share;
+	}
+
 	FRammsDriveMotion HolonomicMotion(const FVector& Command, double MaxLinearCmS, double MaxYawDegS)
 	{
 		return FRammsDriveMotion(static_cast<float>(Command.X * MaxLinearCmS), static_cast<float>(Command.Y * MaxLinearCmS),

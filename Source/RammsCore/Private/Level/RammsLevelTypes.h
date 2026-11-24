@@ -62,14 +62,6 @@ namespace RammsLevel
 	constexpr double NoTravelMarginCm = 1.0e6;
 	/** The seat trim ignores a base pitch smaller than this (deg). */
 	constexpr double SeatTrimDeadbandDeg = 0.2;
-	/** The speed cap's reach term: full speed with this much travel left
-	 *  (cm), the floor with this little. */
-	constexpr double SpeedCapMarginFullCm = 3.0;
-	constexpr double SpeedCapMarginFloorCm = 0.5;
-	/** ... counted only while the terrain estimate, the correction or the
-	 *  wanted tilt moves faster than this (deg/s), and this long (s) after. */
-	constexpr double SpeedCapMovingDegPerSec = 0.5;
-	constexpr double SpeedCapMovingHoldSeconds = 1.0;
 	/** The speed scale falls no faster than this (per s). */
 	constexpr double SpeedScaleFallPerSec = 2.0;
 	/** At rest: the chassis slower than this (cm/s). */
@@ -263,6 +255,59 @@ namespace RammsLevel
 		double BodyAccelStartCmS2 = 150.0;
 		double BodyAccelFullCmS2 = 300.0;
 		double BodySettleSeconds = 0.5;
+	};
+
+	/**
+	 * The drive-speed cap's own figures (FSpeedScale). Not part of FTuning, as
+	 * FGroundTuning is not: FTuning mirrors the reflected tuning member for
+	 * member, and what a robot does bring to the cap (how fast its legs turn
+	 * the correction, how far apart they stand) is read off the legs.
+	 *
+	 * The cap is about one thing: how fast the GROUND turns under the robot,
+	 * against how fast the legs can turn the correction to take it out. The
+	 * ground turns only as the robot moves over it -- its turning rate is the
+	 * robot's speed times the ground's curvature -- so there is a speed the
+	 * legs can follow, and the drive is slowed to it.
+	 */
+	struct FSpeedCapTuning
+	{
+		/** The ground may turn under the robot at this share of the rate the
+		 *  legs can turn the correction at: the rest is theirs to take out
+		 *  what the law's own delay let through. */
+		double FollowShare = 0.8;
+		/** ... and no faster than this (deg/s) however quick the legs are: a
+		 *  turn of the ground is answered a tick or two after it is read
+		 *  (the terrain estimate's own filter, a command interval), what it
+		 *  turns by in that time the rider gets, and when the turn ends the
+		 *  legs take that back out in a few tenths of a second. At 6 deg/s
+		 *  the base is left about a degree behind, and closing that is still
+		 *  inside the rider's 4 deg/s; at 8 it was not (the dry run's slope
+		 *  ends, RammsLevelDryRunTests). */
+		double FollowMaxDegPerSec = 6.0;
+		/** A slope that has begun to end counts as steep as it was until the
+		 *  robot has moved this many spans on: the break is not past the legs
+		 *  until then, and the drive is not let go into it. */
+		double SlopeHeldSpans = 1.5;
+		/** The ground's turning rate is the terrain estimate's, low-passed
+		 *  over this long (s): one tick's change of an estimate is mostly its
+		 *  sensor's noise. */
+		double TurnFilterSeconds = 0.2;
+		/** How long the drive is taken to need to answer the scale (s), and
+		 *  the low-pass (s) on the speed the rider's stick is asking for
+		 *  (the speed measured over the scale the drive has answered). */
+		double DriveLagSeconds = 0.15;
+		double FreeSpeedFilterSeconds = 0.3;
+		/** The scale falls no faster than this (per s) ... */
+		double FallPerSec = SpeedScaleFallPerSec;
+		/** ... and no faster than brakes the robot this hard (cm/s^2; 0 or
+		 *  less: no such limit): FGroundTuning::BodyAccelStartCmS2, the
+		 *  braking from which the law stops taking the base's pitch for the
+		 *  ground's. A cap that braked harder would blind the very estimate
+		 *  it slows the robot for. */
+		double BrakeCmS2 = 150.0;
+		/** Slower than this (cm/s) the robot is not being driven anywhere:
+		 *  the speed its stick asks for is not worked out from it. */
+		double MinSpeedCmS = 2.0;
 	};
 
 	/**

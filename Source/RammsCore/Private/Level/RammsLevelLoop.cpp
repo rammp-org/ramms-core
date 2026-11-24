@@ -42,6 +42,21 @@ namespace RammsLevel
 		{
 			return FMath::Clamp(Tuning.MinSpeedScale, 0.01, 1.0);
 		}
+
+		/** How much of a leg's move from offset From to offset To (cm) counts
+		 *  against its rate when the correction plane is slewed: all of it for
+		 *  a leg the robot stands on; for a lifted leg, only what takes it up
+		 *  (positive retracts) between the two ends held inside its travel. */
+		double LoopCountedMove(const FLegReach& Leg, double From, double To)
+		{
+			if (Leg.bSupport)
+			{
+				return FMath::Abs(To - From);
+			}
+			const double Low = FMath::Min(0.0, Leg.MinZ - Leg.BaseZ);
+			const double High = FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ);
+			return FMath::Max(0.0, FMath::Clamp(To, Low, High) - FMath::Clamp(From, Low, High));
+		}
 	} // namespace
 
 	FVector2D FAttitudeFilter::Tick(const FVector2D& MeasuredDeg, double Dt, double Seconds)
@@ -350,13 +365,17 @@ namespace RammsLevel
 		}
 
 		// 2. The busiest leg's share of its own rate. Measured before the cut,
-		// so the speed cap sees how much faster the ground asks than the legs
-		// can give. Every cut scales the whole step: the plane stays rigid.
+		// so that what is reported says how much faster the loop asks than
+		// the legs can give. Every cut scales the whole step: the plane stays
+		// rigid.
+		// A lifted leg counts only for what brings it UP, within its travel:
+		// let down, or resting on its stop, it is no reason to hold the legs
+		// that carry the robot back (the header says why).
 		for (int32 i = 0; i < Legs.Num(); ++i)
 		{
 			if (Legs[i].MaxRateCmS > 0.0)
 			{
-				OutRateUse = FMath::Max(OutRateUse, FMath::Abs(After[i] - Before[i]) / (Dt * Legs[i].MaxRateCmS));
+				OutRateUse = FMath::Max(OutRateUse, LoopCountedMove(Legs[i], Before[i], After[i]) / (Dt * Legs[i].MaxRateCmS));
 			}
 		}
 		// (A fraction of 0 or less would stop the plane for good; it is read
@@ -437,7 +456,39 @@ namespace RammsLevel
 		return Trim;
 	}
 
-	double FSpeedScale::Tick(double ErrorDeg, double MinMarginCm, bool bMoving, double RateUse, bool bPastReach, double Dt, const FTuning& Tuning)
+	double PlaneRateDegPerSec(TConstArrayView<FLegReach> Legs, const FVector2D& DirDeg, const FTuning& Tuning)
+	{
+		const double Size = DirDeg.Size();
+		if (Size <= 1.0e-12)
+		{
+			return 0.0;
+		}
+		// Each leg's cm for a degree of plane along the direction.
+		FLegValues PerDegree;
+		RigidOffsets(Legs, DirDeg / Size, PerDegree);
+		bool bAnyStands = false;
+		for (const FLegReach& Leg : Legs)
+		{
+			bAnyStands = bAnyStands || Leg.bSupport;
+		}
+		// The busiest counting leg's seconds per degree at its whole rate.
+		double SecondsPerDegree = 0.0;
+		for (int32 Index = 0; Index < Legs.Num() && Index < PerDegree.Num(); ++Index)
+		{
+			if ((Legs[Index].bSupport || !bAnyStands) && Legs[Index].MaxRateCmS > 0.0)
+			{
+				SecondsPerDegree = FMath::Max(SecondsPerDegree, FMath::Abs(PerDegree[Index]) / Legs[Index].MaxRateCmS);
+			}
+		}
+		double Rate = Tuning.LegRateFraction > 0.0 && SecondsPerDegree > 0.0 ? Tuning.LegRateFraction / SecondsPerDegree : 0.0;
+		if (Tuning.MaxCorrectionRateDegPerSec > 0.0)
+		{
+			Rate = Rate > 0.0 ? FMath::Min(Rate, Tuning.MaxCorrectionRateDegPerSec) : Tuning.MaxCorrectionRateDegPerSec;
+		}
+		return Rate;
+	}
+
+	double FSpeedScale::Tick(const FSpeedCapInputs& In, double Dt, const FTuning& Tuning)
 	{
 		if (Dt <= 0.0)
 		{
@@ -445,28 +496,79 @@ namespace RammsLevel
 		}
 		const double Floor = LoopSpeedFloor(Tuning);
 
-		// Error: the base is off what it should be, so go slower until the
-		// legs have caught up.
-		double Target = bPastReach ? Floor : LoopRamp(ErrorDeg, Tuning.SpeedCapErrorDeg, 1.0, Tuning.SpeedCapErrorFullDeg, Floor);
-
-		// Reach: little travel left, and the ground still changing. Standing
-		// or driving steadily at the limit is no reason to stay slow.
-		SinceMoving = bMoving ? 0.0 : SinceMoving + Dt;
-		if (SinceMoving <= SpeedCapMovingHoldSeconds)
+		// The scale as the drive has had time to answer it, and from that the
+		// speed the rider's stick is asking for: the speed there is, over the
+		// share of it the drive is being let have.
+		Driven += (Scale - Driven) * LoopFilterShare(Dt, Cap.DriveLagSeconds);
+		const double Speed = FMath::IsFinite(In.SpeedCmS) ? FMath::Abs(In.SpeedCmS) : 0.0;
+		if (Speed >= Cap.MinSpeedCmS)
 		{
-			Target = FMath::Min(Target, LoopRamp(MinMarginCm, SpeedCapMarginFloorCm, Floor, SpeedCapMarginFullCm, 1.0));
+			const double Asked = Speed / FMath::Max(Driven, Floor);
+			// (The first of it whole: a robot already under way when the cap
+			// starts is not let run on while a filter finds its speed.)
+			FreeSpeed = FreeSpeed > 0.0 ? FreeSpeed + (Asked - FreeSpeed) * LoopFilterShare(Dt, Cap.FreeSpeedFilterSeconds) : Asked;
+		}
+		else
+		{
+			FreeSpeed = 0.0;
 		}
 
-		// Rate: the ground asks the legs for more than their rate, so the
-		// drive slows by as much.
-		if (Tuning.LegRateFraction > 0.0 && RateUse > Tuning.LegRateFraction)
+		// How fast the ground is turning under the robot, and how fast it may.
+		const FVector2D Rate = In.bGroundRateKnown && FMath::IsFinite(In.GroundRateDegPerSec.X) && FMath::IsFinite(In.GroundRateDegPerSec.Y) ? In.GroundRateDegPerSec : FVector2D::ZeroVector;
+		Turn += (Rate - Turn) * LoopFilterShare(Dt, Cap.TurnFilterSeconds);
+		Follow = FMath::Max(0.0, Cap.FollowMaxDegPerSec);
+		if (In.LegsDegPerSec > 0.0)
 		{
-			Target = FMath::Min(Target, FMath::Max(Floor, Tuning.LegRateFraction / RateUse));
+			Follow = FMath::Min(Follow, FMath::Max(0.0, Cap.FollowShare) * In.LegsDegPerSec);
 		}
+
+		// The error, as the backstop; past reach, the floor outright.
+		double Target = In.bPastReach ? Floor : LoopRamp(In.ErrorDeg, Tuning.SpeedCapErrorDeg, 1.0, Tuning.SpeedCapErrorFullDeg, Floor);
+
+		// The ground turning now faster than the legs can follow: the speed is
+		// what turns it, so the scale that would turn it at their rate.
+		// (No threshold: at just their rate the scale holds where it is, and
+		// under it the term is over 1 and binds nothing.)
+		const double Turning = Turn.Size();
+		if (Follow > 0.0 && Turning > 1.0e-9)
+		{
+			Target = FMath::Min(Target, Driven * Follow / Turning);
+		}
+
+		// The slope the robot is levelled on will end, and the ground then
+		// comes back by all of it inside one span's travel: no faster than
+		// that can be followed.
+		// (The slope as it was when it began to end, until the robot is well
+		// past where it did: half way through a break the slope left is half,
+		// and so is the way left to lose it in.)
+		const double Slope = FMath::IsFinite(In.SlopeDeg) ? FMath::Max(0.0, In.SlopeDeg) : 0.0;
+		SinceSteepestCm += Speed * Dt;
+		if (Slope >= Steepest || Speed < Cap.MinSpeedCmS || In.SpanCm <= 0.0 || SinceSteepestCm > Cap.SlopeHeldSpans * In.SpanCm)
+		{
+			Steepest = Slope;
+			SinceSteepestCm = 0.0;
+		}
+		ExitSpeed = 0.0;
+		if (Follow > 0.0 && Steepest > 0.0 && In.SpanCm > 0.0)
+		{
+			ExitSpeed = Follow * In.SpanCm / Steepest;
+			if (FreeSpeed > ExitSpeed)
+			{
+				Target = FMath::Min(Target, ExitSpeed / FreeSpeed);
+			}
+		}
+		Target = FMath::Clamp(Target, Floor, 1.0);
 
 		if (Target < Scale)
 		{
-			Scale = FMath::Max(Target, Scale - SpeedScaleFallPerSec * Dt);
+			// Down no faster than brakes the robot as hard as the ground's
+			// estimate still believes the base's attitude through.
+			double Fall = FMath::Max(0.0, Cap.FallPerSec);
+			if (Cap.BrakeCmS2 > 0.0 && FreeSpeed > 0.0)
+			{
+				Fall = FMath::Min(Fall, Cap.BrakeCmS2 / FreeSpeed);
+			}
+			Scale = FMath::Max(Target, Scale - Fall * Dt);
 		}
 		else
 		{
@@ -481,7 +583,12 @@ namespace RammsLevel
 		{
 			return Scale;
 		}
-		SinceMoving += Dt;
+		// Nothing is being levelled: what the ground was doing is forgotten.
+		Driven += (Scale - Driven) * LoopFilterShare(Dt, Cap.DriveLagSeconds);
+		Turn = FVector2D::ZeroVector;
+		ExitSpeed = 0.0;
+		Steepest = 0.0;
+		SinceSteepestCm = 0.0;
 		Scale = FMath::Min(1.0, Scale + FMath::Max(0.0, Tuning.SpeedScaleRisePerSec) * Dt);
 		return Scale;
 	}

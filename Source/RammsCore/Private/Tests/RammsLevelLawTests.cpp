@@ -1099,54 +1099,267 @@ bool FRammsLevelLawIntegralGates::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Catches: the speed cap's reach term not fed the legs' travel margin (the
-// drive would run a leg into its limit at full speed on a steepening slope).
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawSpeedNearLimit,
-	"Ramms.Level.Law.SpeedDropsNearALimitWhileTheGroundChanges",
+// Catches: a drive slowed for how little of the legs' travel is left (a robot
+// on a steady ramp at the end of its reach would crawl for good); and the
+// cap's own terms not fed from the law -- the terrain estimate's turning
+// rate, and the slope with the standing legs' span and their rate.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawSpeedCap,
+	"Ramms.Level.Law.SpeedCapGoesByTheGroundsTurnNotTheReachLeft",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FRammsLevelLawSpeedNearLimit::RunTest(const FString& Parameters)
+bool FRammsLevelLawSpeedCap::RunTest(const FString& Parameters)
 {
 	using namespace RammsLevelLawTests;
 
-	// 5 cm of travel either way: planned reach (0.5 margin and 2 soft zone
-	// off) 2.5 cm at 45 cm, 3.18 deg. The ground steepens at 1 deg/s to 3.1
-	// deg: inside reach, level all the way, the legs at a twelfth of their
-	// rate -- nothing but the travel left (2.56 cm of 5 at the end, under
-	// the 3 where the cap starts) asks the drive to slow.
-	FToy Toy(5.0);
-	Toy.In.SpeedCmS = 40.0;
-	Toy.In.bStick = true;
-	FOutputs Out = Toy.Run(1.0);
-	double	 LeastScale = 1.0;
-	double	 MostError = 0.0;
-	double	 MostUse = 0.0;
-	double	 LeastFraction = 1.0;
-	bool	 bPast = false;
-	while (Toy.GroundDeg.X < 3.1)
 	{
-		Toy.GroundDeg.X = FMath::Min(3.1, Toy.GroundDeg.X + 1.0 * Frame);
-		Out = Toy.Step(Frame);
+		// 5 cm of travel either way: planned reach (0.5 margin and 2 soft zone
+		// off) 2.5 cm at 45 cm, 3.18 deg. The ground steepens at 1 deg/s to
+		// 3.1 deg: inside reach, level all the way, and at the end the legs
+		// have 2.56 cm of their 5 left. That is no reason to slow.
+		FToy Toy(5.0);
+		Toy.In.SpeedCmS = 40.0;
+		Toy.In.bStick = true;
+		FOutputs Out = Toy.Run(1.0);
+		double	 LeastScale = 1.0;
+		double	 MostError = 0.0;
+		while (Toy.GroundDeg.X < 3.1)
+		{
+			Toy.GroundDeg.X = FMath::Min(3.1, Toy.GroundDeg.X + 1.0 * Frame);
+			Out = Toy.Step(Frame);
+			LeastScale = FMath::Min(LeastScale, Out.SpeedScale);
+			MostError = FMath::Max(MostError, Out.ErrorDeg);
+		}
+		Out = Toy.Run(4.0);
 		LeastScale = FMath::Min(LeastScale, Out.SpeedScale);
-		MostError = FMath::Max(MostError, Out.ErrorDeg);
-		MostUse = FMath::Max(MostUse, Out.RateUse);
-		LeastFraction = FMath::Min(LeastFraction, Out.Fraction);
-		bPast = bPast || Out.Status == EStatus::PastReach || Out.Status == EStatus::AtReach;
+		TestTrue(TEXT("Near a limit: level all the way"), MostError < 0.5 && Out.Fraction >= 1.0);
+		TestTrue(TEXT("Near a limit: the legs are within 3 cm of their travel"), Out.MinMarginCm < 3.0 && Out.MinMarginCm > 2.0 && Out.ReachLeft < 0.1);
+		TestTrue(FString::Printf(TEXT("Near a limit: the drive is not slowed for it (%.3f)"), LeastScale), LeastScale >= 1.0 - 1.0e-9);
 	}
-	for (int32 Index = 0; Index < 8; ++Index)
+	{
+		// Legs with travel to spare, and a ground that turns under the robot:
+		// at 4.5 deg/s the legs follow (the ground may turn at 6), at 7.5 it
+		// outruns what they are asked, with the base still inside a degree.
+		for (const double TurnDegPerSec : { 4.5, 7.5 })
+		{
+			FToy Toy(20.0);
+			Toy.In.SpeedCmS = 40.0;
+			Toy.In.bStick = true;
+			FOutputs Out = Toy.Run(1.0);
+			double	 LeastScale = 1.0;
+			double	 MostError = 0.0;
+			for (int32 Index = 0; Index < 20; ++Index)
+			{
+				Toy.GroundDeg.X += TurnDegPerSec * Frame;
+				Out = Toy.Step(Frame);
+				LeastScale = FMath::Min(LeastScale, Out.SpeedScale);
+				MostError = FMath::Max(MostError, Out.ErrorDeg);
+			}
+			TestTrue(FString::Printf(TEXT("The ground turning at %.1f deg/s: the error under where its own term binds (%.2f deg)"), TurnDegPerSec, MostError), MostError < Toy.Tuning.SpeedCapErrorDeg);
+			TestNearlyEqual(FString::Printf(TEXT("The ground turning at %.1f deg/s: the cap has its rate"), TurnDegPerSec), Toy.State.SpeedScale.GetTurnDegPerSec().X, TurnDegPerSec, 0.3);
+			TestNearlyEqual(FString::Printf(TEXT("The ground turning at %.1f deg/s: what the legs can follow"), TurnDegPerSec), Toy.State.SpeedScale.GetFollowDegPerSec(), 6.0, 1.0e-6);
+			if (TurnDegPerSec < 6.0)
+			{
+				TestTrue(FString::Printf(TEXT("... which the legs can follow: full speed (%.3f)"), LeastScale), LeastScale >= 1.0 - 1.0e-9);
+			}
+			else
+			{
+				TestTrue(FString::Printf(TEXT("... which outruns the legs: the drive is slowed (%.3f)"), LeastScale), LeastScale < 0.9 && LeastScale >= Toy.Tuning.MinSpeedScale - 1.0e-9);
+			}
+		}
+	}
+	{
+		// What turns the estimate without the ground turning is not the cap's
+		// business: a stance being changed under the legs, and an estimate
+		// seeded afresh. (The cap here takes one tick's turn whole, and the
+		// legs to follow only half a degree a second, so that a single frame
+		// of either would show; the robot stands, its stick held, so that no
+		// slope's end is in it.)
+		FToy Toy(20.0);
+		Toy.State.SpeedScale.Cap.TurnFilterSeconds = 0.0;
+		Toy.State.SpeedScale.Cap.FollowMaxDegPerSec = 0.5;
+		Toy.In.SpeedCmS = 0.0;
+		Toy.In.bStick = true;
+		FOutputs Out = Toy.Run(2.0);
+		TestTrue(TEXT("(level ground, standing steady: full speed)"), Out.SpeedScale >= 1.0 - 1.0e-9);
+		// The rear pair's baselines drawn up a quarter of a centimetre a frame:
+		// the stance turns nose up under the robot, 2.5 deg/s, the ground
+		// standing still. (The toy's base reads what its ground says, so the
+		// stance's turn is put there.)
+		const FVector2D Before = Out.GroundDeg;
+		double			LeastScale = 1.0;
+		for (int32 Index = 0; Index < 6; ++Index)
+		{
+			for (int32 Leg = 4; Leg < 6; ++Leg)
+			{
+				Toy.Legs[Leg].BaseZ += 0.25;
+				Toy.Legs[Leg].MeasuredZ += 0.25;
+			}
+			Toy.GroundDeg.X += FMath::RadiansToDegrees(FMath::Atan(0.25 / 90.0));
+			Out = Toy.Step(Frame);
+			LeastScale = FMath::Min(LeastScale, Out.SpeedScale);
+		}
+		TestTrue(TEXT("A stance being changed: the estimate turns with it"), (Out.GroundDeg - Before).Size() > 0.4);
+		TestTrue(FString::Printf(TEXT("... and the drive is not slowed for it (%.3f)"), LeastScale), LeastScale >= 1.0 - 1.0e-9);
+		// Put somewhere else, on ground 4 deg steeper across: the estimate is
+		// seeded there in one frame, which is no turn of the ground.
+		Toy.Run(3.0);
+		Toy.GroundDeg.Y += 4.0;
+		Toy.In.bColdReset = true;
+		Out = Toy.Step(Frame);
+		TestTrue(TEXT("Put somewhere else: the estimate is seeded there at once"), FMath::Abs(Out.GroundDeg.Y - Toy.GroundDeg.Y) < 0.5);
+		TestTrue(FString::Printf(TEXT("... and the drive is not slowed for that (%.3f)"), Out.SpeedScale), Out.SpeedScale >= 1.0 - 1.0e-9);
+	}
+	{
+		// A steady 9 deg under legs 54 cm apart (the lesser of the stance's two
+		// extents) that turn the correction at 10 deg/s: where it ends the
+		// ground turns 9 deg in 54 cm, which can be followed (at 6 deg/s) at
+		// 36 cm/s. The toy's drive answers the scale as the cap takes a drive to.
+		const auto Settle = [](FToy& Toy, double StickCmS) {
+			double	 Driven = Toy.State.SpeedScale.Get();
+			FOutputs Out;
+			for (int32 Index = 0; Index < 160; ++Index)
+			{
+				Driven += (Toy.State.SpeedScale.Get() - Driven) * FMath::Min(1.0, Frame / Toy.State.SpeedScale.Cap.DriveLagSeconds);
+				Toy.In.SpeedCmS = StickCmS * Driven;
+				Out = Toy.Step(Frame);
+			}
+			return Out;
+		};
+		FToy Toy(20.0);
+		Toy.GroundDeg = FVector2D(9.0, 0.0);
+		Toy.In.bStick = true;
+		FOutputs Out = Settle(Toy, 30.0);
+		TestTrue(TEXT("9 deg: level"), Out.ErrorDeg < 0.3 && Out.Fraction >= 1.0);
+		TestNearlyEqual(TEXT("9 deg: the speed its end can be taken at"), Toy.State.SpeedScale.GetExitSpeedCmS(), 36.0, 0.5);
+		TestTrue(TEXT("9 deg at 30 cm/s: full speed"), Out.SpeedScale >= 1.0 - 1.0e-9);
+		Out = Settle(Toy, 72.0);
+		TestNearlyEqual(TEXT("9 deg, the stick asking 72 cm/s: half"), Out.SpeedScale, 0.5, 0.02);
+		// Standing on it: nothing turns, nothing will.
+		Out = Settle(Toy, 0.0);
+		TestTrue(TEXT("9 deg, standing: full speed"), Out.SpeedScale >= 1.0 - 1.0e-9);
+
+		// Slow legs: 2 cm/s, of which the law asks 1.6, 45 cm from the middle
+		// of the stance in pitch. The ground may turn at 0.8 of what that
+		// turns the correction at, and a 4 deg grade's end is taken slower
+		// for it.
+		FToy Slow(20.0);
+		for (FLegReach& Leg : Slow.Legs)
+		{
+			Leg.MaxRateCmS = 2.0;
+		}
+		Slow.GroundDeg = FVector2D(4.0, 0.0);
+		Slow.In.bStick = true;
+		Settle(Slow, 10.0);
+		const double LegsDegPerSec = 0.8 * 2.0 / (45.0 * FMath::Tan(FMath::DegreesToRadians(1.0)));
+		TestNearlyEqual(TEXT("Slow legs: the ground may turn at 0.8 of what they turn the correction at"), Slow.State.SpeedScale.GetFollowDegPerSec(), 0.8 * LegsDegPerSec, 1.0e-3);
+		TestNearlyEqual(TEXT("Slow legs: the speed a 4 deg grade's end can be taken at"), Slow.State.SpeedScale.GetExitSpeedCmS(), 0.8 * LegsDegPerSec * 54.0 / 4.0, 0.5);
+	}
+	return true;
+}
+
+// Catches: legs carried off the ground holding the whole plane to their pace
+// while they are let down (the correction then unwinds at a fraction of what
+// the legs that stand can do, and at a crest the base falls further forward
+// than with no levelling at all); such a leg told to go faster than it can;
+// its catching up taken for the legs being outrun (the integral held all the
+// while); and a release that ends, and steps it, before it is back.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawLiftedLegs,
+	"Ramms.Level.Law.LiftedLegsAreLetDownAtTheirOwnPace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawLiftedLegs::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLawTests;
+
+	// On centre and rear legs, quick ones; the front pair carried 12 cm clear
+	// with travel both ways, and slow: 2 cm/s, of which the law asks 1.6.
+	FToy Toy(12.0);
+	for (int32 Index = 0; Index < Toy.Legs.Num(); ++Index)
+	{
+		FLegReach& Leg = Toy.Legs[Index];
+		Leg.MaxRateCmS = Index < 2 ? 2.0 : 60.0;
+		if (Index < 2)
+		{
+			Leg.BaseZ = Leg.MeasuredZ = -18.0;
+			Leg.MaxZ = -10.0;
+			// (For the toy's own attitude: the law finds who stands itself.)
+			Leg.bSupport = false;
+			Leg.CarryShare = 0.0;
+		}
+	}
+	const double OwnStepCm = Toy.Tuning.LegRateFraction * 2.0 * Frame;
+	const double FrontArmCm = 67.5; // ahead of the middle of the four that stand
+	const auto	 FrontAt = [FrontArmCm](double Deg) { return FrontArmCm * FMath::Tan(FMath::DegreesToRadians(Deg)); };
+
+	// Nose up 6 deg: the front pair must come UP 7.1 cm to keep clear, and
+	// while it does the plane waits for it (4.4 s at its pace).
+	Toy.GroundDeg = FVector2D(6.0, 0.0);
+	FOutputs Out = Toy.Run(2.0);
+	TestTrue(TEXT("Brought up: the plane is held to the front pair's pace"), Out.AppliedDeg.X < 4.5 && Out.bRateLimited);
+	Out = Toy.Run(8.0);
+	TestTrue(TEXT("Nose up: level"), Inclination(Toy.Attitude()) <= 0.25);
+	TestNearlyEqual(TEXT("Nose up: the front pair where the plane has it"), Out.Dz[0], FrontAt(Out.AppliedDeg.X), 0.05);
+
+	// The ground turns to 6 deg nose down. The legs that stand unwind the
+	// correction at the plane's own 10 deg/s; the front pair is let down
+	// 14 cm behind them, at its own pace.
+	Toy.GroundDeg = FVector2D(-6.0, 0.0);
+	double MostFall = 0.0;
+	double Last = Out.Dz[0];
+	bool   bFreeWhileBehind = false;
+	for (int32 Index = 0; Index < 32; ++Index)
 	{
 		Out = Toy.Step(Frame);
-		LeastScale = FMath::Min(LeastScale, Out.SpeedScale);
+		MostFall = FMath::Max(MostFall, Last - Out.Dz[0]);
+		Last = Out.Dz[0];
+		if (Index == 23)
+		{
+			TestTrue(FString::Printf(TEXT("Let down: 1.5 s on the correction is unwound (%.2f deg)"), Out.AppliedDeg.X), Out.AppliedDeg.X <= -5.0);
+			TestTrue(TEXT("... with the front pair still far behind"), Out.Dz[0] > FrontAt(Out.AppliedDeg.X) + 3.0);
+		}
+		// The plane has arrived and only the front pair is on its way: that is
+		// not the legs being outrun.
+		bFreeWhileBehind = bFreeWhileBehind || (Index >= 26 && !Out.bRateLimited && Out.Dz[0] > FrontAt(Out.AppliedDeg.X) + 1.0);
 	}
-	TestTrue(TEXT("The error never reached where its own term binds"), MostError < Toy.Tuning.SpeedCapErrorDeg);
-	TestTrue(TEXT("... nor the legs' rate"), MostUse < Toy.Tuning.LegRateFraction);
-	TestTrue(TEXT("... nor the reach"), LeastFraction >= 1.0 && !bPast);
-	TestTrue(TEXT("The legs are within 3 cm of their travel"), Out.MinMarginCm < SpeedCapMarginFullCm && Out.MinMarginCm > 2.0);
-	// 0.25 + 0.75 (2.56 - 0.5) / 2.5 = 0.87.
-	TestTrue(FString::Printf(TEXT("The drive is slowed by the travel left, and by no more (%.3f)"), LeastScale), LeastScale <= 0.92 && LeastScale >= 0.82);
-	// The ground stops changing: a second later the cap lets go.
-	Out = Toy.Run(4.0);
-	TestTrue(TEXT("A steady slope near the limit does not stay slow"), Out.SpeedScale > 0.99);
+	TestTrue(FString::Printf(TEXT("Let down: the front pair never asked faster than its own pace (%.3f of %.3f cm a frame)"), MostFall, OwnStepCm), MostFall <= OwnStepCm * 1.001);
+	TestTrue(TEXT("... and at that pace"), MostFall >= OwnStepCm * 0.99);
+	TestTrue(TEXT("Its catching up is not the legs being outrun"), bFreeWhileBehind);
+	TestTrue(FString::Printf(TEXT("Let down: 2 s on the base is all but level (%.2f deg)"), Inclination(Toy.Attitude())), Inclination(Toy.Attitude()) <= 1.0);
+	// (Standing still and level all the while: no rest is declared on a leg
+	// that is still on its way.)
+	Out = Toy.Run(10.0);
+	TestNearlyEqual(TEXT("Nose down: the front pair has caught the plane up"), Out.Dz[0], FrontAt(Out.AppliedDeg.X), 0.05);
+	TestTrue(TEXT("Nose down: level"), Inclination(Toy.Attitude()) <= 0.25);
+
+	// Nose up again, then switched off: the correction goes out within the
+	// tilt policy, faster than the front pair can be let down, and the
+	// release waits for it rather than stepping it home.
+	Toy.GroundDeg = FVector2D(6.0, 0.0);
+	Out = Toy.Run(14.0);
+	TestNearlyEqual(TEXT("Nose up again: the front pair where the plane has it"), Out.Dz[0], FrontAt(Out.AppliedDeg.X), 0.05);
+	Toy.In.bEnable = false;
+	MostFall = 0.0;
+	Last = Out.Dz[0];
+	double PlaneOutAt = -1.0;
+	double OffAt = -1.0;
+	for (int32 Index = 0; Index < 16 * 12 && OffAt < 0.0; ++Index)
+	{
+		Out = Toy.Step(Frame);
+		MostFall = FMath::Max(MostFall, Last - Out.Dz[0]);
+		Last = Out.Dz[0];
+		if (PlaneOutAt < 0.0 && Out.AppliedDeg.Size() < 0.01)
+		{
+			PlaneOutAt = Index * Frame;
+		}
+		if (Out.State == EState::Off)
+		{
+			OffAt = Index * Frame;
+		}
+	}
+	TestTrue(FString::Printf(TEXT("Switched off: the correction is out in the tilt policy's time (%.2f s)"), PlaneOutAt), PlaneOutAt > 0.0 && PlaneOutAt <= 3.5);
+	TestTrue(FString::Printf(TEXT("... the front pair let down at its own pace all the way (%.3f cm a frame at most)"), MostFall), MostFall <= OwnStepCm * 1.001);
+	TestTrue(FString::Printf(TEXT("... and off only once it is back (%.2f s)"), OffAt), OffAt >= PlaneOutAt + 0.5);
+	TestTrue(TEXT("... every offset exactly zero"), MaxSize(Out.Dz) == 0.0);
 	return true;
 }
 
@@ -1299,10 +1512,12 @@ bool FRammsLevelLawAxisLimit::RunTest(const FString& Parameters)
 {
 	using namespace RammsLevelLawTests;
 
-	// Plenty of travel; roll capped at 6 deg.
+	// Plenty of travel; roll capped at 6 deg. (At a pace the ends of these
+	// slopes could be taken at: the speed cap has no business here but for
+	// the slope past reach.)
 	FToy Toy(40.0);
 	Toy.Tuning.MaxCorrectionDeg = FVector2D(15.0, 6.0);
-	Toy.In.SpeedCmS = 40.0;
+	Toy.In.SpeedCmS = 15.0;
 	Toy.In.bStick = true;
 
 	// 9 deg of cross fall: the cap takes 6 and the base is planned to keep 3,

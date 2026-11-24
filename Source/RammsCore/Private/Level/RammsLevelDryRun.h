@@ -81,6 +81,12 @@ namespace RammsLevel::DryRun
 	 *  +X, then a plane rising at Deg straight away from that line: wheels
 	 *  cross it one at a time, and pitch and roll come on together. */
 	FGround Fold(double Deg, double FoldYawDeg, double X0);
+	/** A cross fall that changes sides: rising tan(Deg) along +Y up to X0,
+	 *  falling as much from X0 + LengthCm on, and twisting in a straight line
+	 *  (of the cross fall's angle) between the two. The same height along the X
+	 *  axis everywhere: a robot driven along it is rolled from one side to the
+	 *  other, wheel pair by wheel pair. */
+	FGround Warp(double Deg, double X0, double LengthCm);
 
 	// ---- the made-up robot ----
 

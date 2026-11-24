@@ -74,10 +74,22 @@ namespace RammsLevel
  * selector's stance ramp is left only a ride height to change and the base
  * stays level through it.
  *
- * Not yet, each with its seam in place: the speed scale is worked out and
- * shown (level.speed_scale) but no drive mode is asked to slow; the seat trim
- * is worked out but the seat's tilt motor is not moved; the ride height stays
- * the stance's.
+ * The drive's pace: while the legs carry a correction, the drive mode that is
+ * driving is asked every tick to keep to the speed scale the law works out
+ * (IRammsDriveMode::SetDriveSpeedScale, to stand half a second of simulated
+ * time; level.speed_scale shows it): the speed at which the ground turns under
+ * the robot no faster than its legs can follow. Never a mode that takes the
+ * legs (a curb crossing runs its own pace), and taken back at once when
+ * levelling stops or yields.
+ *
+ * The ride height: with Tuning.RideHeightUpCm / RideHeightDownCm above 0 the
+ * chassis is raised or lowered from the stance's height, at
+ * RideHeightRateCmPerSec, where that makes a correction fit that would not
+ * otherwise (a wheel the stance carries off the ground kept clear of a slope
+ * rising ahead), and brought back when it is no longer needed.
+ *
+ * Not yet, with its seam in place: the seat trim is worked out but the seat's
+ * tilt motor is not moved.
  */
 /**
  * Keeps the rider level on sloping ground by adding one rigid plane of offsets to the legs' commands (see the

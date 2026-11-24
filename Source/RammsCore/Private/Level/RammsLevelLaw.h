@@ -114,6 +114,9 @@
  *       Tilt.IsNear(Goal) and the baselines standing still, Dt). While
  *       quiet, d to h are skipped: W, the integral, C and Ride hold, Dz =
  *       LastDz and bWrite is false. The same on a step with Dt 0.
+ *       Nor is there a rest while an offset is still on its way to the
+ *       allocation's (g2: a lifted leg being let down at its own pace would
+ *       be left where the rest found it).
  *       The baselines stand still unless In.bStanceChanging, or a leg's
  *       BaseZ is more than BaselineStillCm from where it was last found
  *       still (it is then taken as found, for every leg that has a
@@ -170,11 +173,22 @@
  *       whole of it in one frame would all be told it at once, and legs
  *       that do not answer alike pitch the base with it. Then what is left
  *       goes by the largest share (1 at most) that
- *       keeps every leg within LegRateFraction of its MaxRateCmS over Dt
- *       (legs with no rate do not count; no limit for LegRateFraction <= 0).
- *       When either holds the offsets back, bRateLimited is set, RateUse
- *       takes the leg-rate use the whole step asked, and C and Ride stay
- *       the allocation's: the offsets catch them up over the next steps.
+ *       keeps every leg that COUNTS within LegRateFraction of its MaxRateCmS
+ *       over Dt (legs with no rate do not count; no limit for
+ *       LegRateFraction <= 0). The legs that count are the support legs and
+ *       a lifted leg being brought up; a lifted leg being let DOWN does not
+ *       (SlewCorrection's rule, and its reason: such a leg must not hold the
+ *       legs that carry the robot to its pace) and is instead given at most
+ *       LegRateFraction of its own rate, on its own, catching the plane up
+ *       over the next steps.
+ *       When the common height or the share holds the offsets back,
+ *       bRateLimited is set, RateUse takes the leg-rate use the whole step
+ *       asked of the legs that count, and C and Ride stay the allocation's:
+ *       the offsets catch them up over the next steps. A lifted leg on its
+ *       own pace does not set bRateLimited (the legs that level the base are
+ *       not outrun, and the integral goes on trimming), but it does count as
+ *       an offset not yet arrived: a release is not done, and no rest is
+ *       declared, until it is.
  *       Dz = LastDz = the result; bWrite is true.
  *    h. Active: Divergence.Tick(|A - W|, A, MeasuredCorrection(Legs),
  *       Alloc.Fraction >= 1, Dt) (not while quiet). Releasing: ReleaseSeconds += Dt
@@ -207,13 +221,17 @@
  *    takes the trim out too, and waits for it.)
  *
  * 5. SPEED SCALE. In Active, Releasing and Faulted not yet latched:
- *    SpeedScale.Tick(|A - W|, Alloc.MinMarginCm, bMoving, the slew's rate
- *    use, bPastReach, Dt) -- the slew's own (step f), not g2's: offsets
- *    catching up after a support change are not the ground outrunning the
- *    legs, and driving slower would not help them -- bMoving being that G, C or W moved faster than
- *    SpeedCapMovingDegPerSec over this step (Euclidean, against the values
- *    the last step left; false with Dt 0), bPastReach as the status below.
- *    While quiet the last allocation's margin and a RateUse of 0 are used. In
+ *    SpeedScale.Tick (FSpeedScale) with the error |A - W|, bPastReach as the
+ *    status below, In.SpeedCmS, and, once the terrain estimate is seeded and
+ *    the legs are numbers: the slope Inclination(G); the standing legs' span
+ *    StandingSpanCm(Legs); the ground's turning rate (G less the G the last
+ *    step left, over Dt), known only on a step that takes time with a valid
+ *    attitude, whose action did not seed the estimate afresh, and on which no
+ *    baseline is moving (a stance being changed turns G with the ground
+ *    standing still); and what the legs can turn the correction at, the
+ *    lesser of PlaneRateDegPerSec along G and along that turning rate (of
+ *    those that are not 0). Nothing in it is how much reach is left: a robot
+ *    standing, or driving steadily, at a limit is not slowed for it. In
  *    Holding it holds. Elsewhere SpeedScale.Relax.
  *
  * 6. OUTPUTS and the status, the first that applies:
@@ -230,8 +248,7 @@
  *    ReachLimit names what stops it: the allocation's own limit where its
  *    share is under 1, else the goal's (step b), else the per-axis limit,
  *    else whatever the allocation found nearest. ReachLeft (level.reach) and
- *    MinMarginCm (the speed cap's reach term) are of the nearest limit of
- *    any kind (FAllocation).
+ *    MinMarginCm are of the nearest limit of any kind (FAllocation).
  *
  * The rest follows from the pieces:
  *  - ENABLE is bumpless: on the first Active step W is the attitude as
@@ -261,10 +278,11 @@ namespace RammsLevel
 		FVector2D AttitudeDeg = FVector2D::ZeroVector;
 		bool	  bAttitudeValid = true;
 		/** The chassis' speed over the ground as measured (cm/s, 0 or more):
-		 *  for the rest at standstill, and for how far the ground can have
+		 *  for the rest at standstill, for how far the ground can have
 		 *  turned (the distance travelled, and how hard the base is being
-		 *  braked or driven off: FGroundGate). Whether the rider's stick is
-		 *  off centre: for the rest. */
+		 *  braked or driven off: FGroundGate), and for the speed cap (the
+		 *  speed the slope's end can be taken at is held against it). Whether
+		 *  the rider's stick is off centre: for the rest. */
 		double SpeedCmS = 0.0;
 		bool   bStick = false;
 		/** The stance is being changed under the legs (a drive mode switch in
@@ -335,7 +353,8 @@ namespace RammsLevel
 		double RideCm = 0.0;
 		/** The seat trim (deg, positive nose up against the chassis). */
 		double SeatTrimDeg = 0.0;
-		/** The drive-speed scale (MinSpeedScale..1). */
+		/** The drive-speed scale (MinSpeedScale..1): the share of the speed
+		 *  the rider asks that the drive should give (FSpeedScale). */
 		double SpeedScale = 1.0;
 
 		/** Inclination(A) (deg): the base's total tilt; level.tilt. */
@@ -429,7 +448,8 @@ namespace RammsLevel
 		bool   bReleaseOpen = false;
 		/** How long the attitude has been missing (s). */
 		double LossSeconds = 0.0;
-		/** G as the last step left it, for the speed cap's "moving". */
+		/** G as the last step left it, for how fast the ground is turning
+		 *  (the speed cap's). */
 		FVector2D PrevGroundDeg = FVector2D::ZeroVector;
 		/** The legs' count at the last step; INDEX_NONE before the first. */
 		int32 LegCount = INDEX_NONE;

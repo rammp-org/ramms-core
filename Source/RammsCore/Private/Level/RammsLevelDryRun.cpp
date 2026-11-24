@@ -301,6 +301,14 @@ namespace RammsLevel::DryRun
 		return [TanRise, AwayX, AwayY, X0](double X, double Y) { return FMath::Max(0.0, (X - X0) * AwayX + Y * AwayY) * TanRise; };
 	}
 
+	FGround Warp(double Deg, double X0, double LengthCm)
+	{
+		return [Deg, X0, LengthCm](double X, double Y) {
+			const double Along = LengthCm > 0.0 ? FMath::Clamp((X - X0) / LengthCm, 0.0, 1.0) : (X < X0 ? 0.0 : 1.0);
+			return Y * FMath::Tan(FMath::DegreesToRadians(Deg * (1.0 - 2.0 * Along)));
+		};
+	}
+
 	FRobot MakeSixWheelRobot()
 	{
 		FRobot			Robot;

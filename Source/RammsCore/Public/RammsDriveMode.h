@@ -191,4 +191,29 @@ public:
 	{
 		return 0.0f;
 	}
+
+	// --- Being asked to go slower -------------------------------------------------
+
+	/**
+	 * A layer that is not driving asks this mode to go slower for a while: the
+	 * level assist, while the ground turns under the robot faster than its
+	 * legs can follow. Scale01 (0..1) is the share of the speed its operator
+	 * asks for that the mode should give, forward and turn alike, so the path
+	 * the operator steers is kept and only the pace along it changes. It is a
+	 * request, not a command: it stands for HoldSeconds of simulated time and
+	 * then lapses, so whoever makes it renews it every tick for as long as it
+	 * holds, and a requester that stops (switched off, torn down, yielding to
+	 * a crossing) leaves nothing behind. A mode with several requesters gives
+	 * the least of the live requests; a new request from the same Requester
+	 * replaces its last, and one with a scale of 1 or no HoldSeconds withdraws
+	 * it.
+	 *
+	 * A request never stops the robot: a mode keeps a floor under the scale,
+	 * and an operator holding the stick always moves. It is not a brake, and
+	 * nothing to hold a robot still with. A mode that is not active takes no
+	 * request, and a mode drops every request when it stands down or takes
+	 * over. The default ignores it: a mode that runs its own speed (a curb
+	 * crossing) is not slowed by anyone.
+	 */
+	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) {}
 };
