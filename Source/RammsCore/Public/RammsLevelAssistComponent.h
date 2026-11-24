@@ -33,7 +33,10 @@ namespace RammsLevel
  * (RammsLevel::FLaw::Step, with its state machine RammsLevel::FArbiter): each
  * tick the shell reads the chassis' attitude and the legs (a plant,
  * RammsLevel::IPlant, picked by which sibling describes the robot: the Gen2
- * curb controller's legs today), tells the law the switch, the active drive
+ * curb controller's legs, or the Gen1 curb controller's lifts -- two drive
+ * wheels each lifted alone, which take the roll, and two pairs of small wheels
+ * each lifted as one, on a robot whose seat is fixed to its chassis, so that
+ * the legs level the rider in pitch and in roll), tells the law the switch, the active drive
  * mode's kind and anything a curb controller has asked (YieldTo, ResumeFrom),
  * and carries out what comes back: the legs' offsets, and the one-shot actions
  * that touch motors (claim, fold, zero, release).
@@ -203,7 +206,11 @@ public:
 	 * command this leaves it.
 	 *
 	 * With no NextStance, and nothing written since its YieldTo (a take-over
-	 * refused before it began), everything is put back exactly as it was.
+	 * refused before it began, or one that put every leg back where it found
+	 * it), the legs' commands and offsets are put back exactly as they were;
+	 * and the law with them, as if nothing had been asked -- unless the base
+	 * stands turned from where the YieldTo found it (the taker moved the robot
+	 * onto other ground): the plane on the legs is then taken up as below.
 	 * Otherwise levelling goes on from the pose Taker left, no motor told
 	 * anything: the plane by which the pose differs from NextStance (the
 	 * stance the legs are about to be ramped to; with none, from the commands
@@ -291,8 +298,10 @@ private:
 
 	/** One step of the law over Dt, the motors' part of what it answers
 	 *  carried out. bYield / bResume: a taker's call, made now; Adoption: the
-	 *  plane a hand-back took back out of the legs' commands (AdoptPose). */
-	void StepLaw(double Dt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption = nullptr);
+	 *  plane a hand-back took back out of the legs' commands (AdoptPose);
+	 *  HandingBack: the taker making a hand-back in this call, whose own
+	 *  drive mode, still the active one, is no reason to let go or stand by. */
+	void StepLaw(double Dt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption = nullptr, const UObject* HandingBack = nullptr);
 
 	/** A hand-back's plane, taken back out of the legs' commands: against
 	 *  NextStance, or with none against the commands the last fold remembered.

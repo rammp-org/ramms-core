@@ -136,6 +136,12 @@ namespace RammsLevel::DryRun
 		TArray<FClearancePoint> Points;
 		/** It has a seat tilt (FInputs::bSeat). */
 		bool bSeat = false;
+		/** Its stances do not stand level in its own frame (wheels of unlike
+		 *  sizes on lifts set to unlike heights): who stands is then judged
+		 *  from the flat ground the stance rests on by its centre of mass
+		 *  (StanceGround fills FLegReach::StanceGroundZ, as a plant of that
+		 *  kind does), not from the lowest wheel in the chassis' frame. */
+		bool bStanceRests = false;
 	};
 
 	/**

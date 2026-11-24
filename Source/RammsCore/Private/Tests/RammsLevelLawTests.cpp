@@ -1738,9 +1738,9 @@ bool FRammsLevelLawNotANumberLeg::RunTest(const FString& Parameters)
 
 	const double	   Bad = std::numeric_limits<double>::quiet_NaN();
 	const double	   Huge = std::numeric_limits<double>::infinity();
-	const TCHAR* const Names[7] = { TEXT("a leg's x"), TEXT("a leg's y"), TEXT("a leg's travel"), TEXT("a leg's rate"), TEXT("a leg's radius"), TEXT("a leg's measured height"),
-		TEXT("a point's height") };
-	for (int32 Which = 0; Which < 7; ++Which)
+	const TCHAR* const Names[8] = { TEXT("a leg's x"), TEXT("a leg's y"), TEXT("a leg's travel"), TEXT("a leg's rate"), TEXT("a leg's radius"), TEXT("a leg's measured height"),
+		TEXT("the ground under a leg's stance"), TEXT("a point's height") };
+	for (int32 Which = 0; Which < 8; ++Which)
 	{
 		FToy Toy(12.0);
 		Toy.GroundDeg = FVector2D(4.0, 3.0);
@@ -1775,6 +1775,9 @@ bool FRammsLevelLawNotANumberLeg::RunTest(const FString& Parameters)
 					break;
 				case 5:
 					Legs[4].MeasuredZ = Bad;
+					break;
+				case 6:
+					Legs[2].StanceGroundZ = Bad;
 					break;
 				default:
 					Points[0].UndersideZ = Bad;

@@ -384,10 +384,14 @@ namespace RammsLevel
 		{
 			return;
 		}
-		double Lowest = Legs[0].BaseZ - Legs[0].RadiusCm;
+		// Each wheel bottom over the flat ground the stance rests on: over a
+		// level plane (StanceGroundZ 0 on every leg) for a robot whose stance
+		// stands level in its own frame, where the lowest bottom is the ground.
+		const auto OverGround = [](const FLegReach& Leg) { return Leg.BaseZ - Leg.RadiusCm - Leg.StanceGroundZ; };
+		double	   Lowest = OverGround(Legs[0]);
 		for (const FLegReach& Leg : Legs)
 		{
-			Lowest = FMath::Min(Lowest, Leg.BaseZ - Leg.RadiusCm);
+			Lowest = FMath::Min(Lowest, OverGround(Leg));
 		}
 		// Two bands, so a leg hovering at the edge of one does not flip in
 		// and out of the support set tick by tick.
@@ -396,7 +400,7 @@ namespace RammsLevel
 		for (int32 LegIndex = 0; LegIndex < Legs.Num(); ++LegIndex)
 		{
 			FLegReach& Leg = Legs[LegIndex];
-			Leg.BaselineClearanceCm = FMath::Max(0.0, Leg.BaseZ - Leg.RadiusCm - Lowest);
+			Leg.BaselineClearanceCm = FMath::Max(0.0, OverGround(Leg) - Lowest);
 			const bool bWas = bMemory && Was[LegIndex];
 			Leg.bSupport = Leg.BaselineClearanceCm <= (bWas ? StayCm : Tuning.SupportBandInCm);
 			// No memory in this one, so that it never steps; and gone by the
@@ -405,6 +409,98 @@ namespace RammsLevel
 			const double CarryCm = FMath::Min(Tuning.SupportBandInCm, StayCm);
 			Leg.CarryShare = CarryCm > 0.0 ? FMath::Clamp(1.0 - Leg.BaselineClearanceCm / CarryCm, 0.0, 1.0) : (Leg.BaselineClearanceCm <= 0.0 ? 1.0 : 0.0);
 		}
+	}
+
+	bool StanceGround(TArrayView<FLegReach> Legs, TConstArrayView<double> PairHalfTrackCm, const FVector2D& CentreOfMassXY)
+	{
+		for (FLegReach& Leg : Legs)
+		{
+			Leg.StanceGroundZ = 0.0;
+		}
+		if (!FMath::IsFinite(CentreOfMassXY.X) || !FMath::IsFinite(CentreOfMassXY.Y))
+		{
+			return false;
+		}
+		// Where each wheel meets the ground: one point a leg, or the two
+		// wheels of a pair, which are at one height on the chassis.
+		struct FContact
+		{
+			FVector2D XY;
+			double	  Z;
+		};
+		TArray<FContact, TInlineAllocator<12>> Contacts;
+		const auto							   HalfTrackOf = [&PairHalfTrackCm](int32 Leg) {
+			return PairHalfTrackCm.IsValidIndex(Leg) && FMath::IsFinite(PairHalfTrackCm[Leg]) ? FMath::Max(0.0, PairHalfTrackCm[Leg]) : 0.0;
+		};
+		for (int32 Index = 0; Index < Legs.Num(); ++Index)
+		{
+			const FLegReach& Leg = Legs[Index];
+			const double	 Half = HalfTrackOf(Index);
+			const double	 Z = Leg.BaseZ - Leg.RadiusCm;
+			if (Half > 0.0)
+			{
+				Contacts.Add({ Leg.XY - FVector2D(0.0, Half), Z });
+				Contacts.Add({ Leg.XY + FVector2D(0.0, Half), Z });
+			}
+			else
+			{
+				Contacts.Add({ Leg.XY, Z });
+			}
+		}
+		// The flat ground a rigid robot rests on touches three of them, has
+		// none of the others under it, and holds the centre of mass between
+		// the three. With this few wheels every three are tried.
+		const int32 Num = Contacts.Num();
+		for (int32 A = 0; A < Num; ++A)
+		{
+			for (int32 B = A + 1; B < Num; ++B)
+			{
+				for (int32 C = B + 1; C < Num; ++C)
+				{
+					const FVector2D AB = Contacts[B].XY - Contacts[A].XY;
+					const FVector2D AC = Contacts[C].XY - Contacts[A].XY;
+					const double	Cross = AB.X * AC.Y - AB.Y * AC.X;
+					if (!FMath::IsFinite(Cross) || FMath::Abs(Cross) < StanceGroundMinAreaCm2)
+					{
+						continue; // in a line: no plane
+					}
+					// The plane z = Za + Sx (x - xa) + Sy (y - ya) through the three.
+					const double Za = Contacts[A].Z;
+					const double Dab = Contacts[B].Z - Za;
+					const double Dac = Contacts[C].Z - Za;
+					const double Sx = (Dab * AC.Y - Dac * AB.Y) / Cross;
+					const double Sy = (Dac * AB.X - Dab * AC.X) / Cross;
+					const auto	 PlaneAt = [&](const FVector2D& XY) { return Za + Sx * (XY.X - Contacts[A].XY.X) + Sy * (XY.Y - Contacts[A].XY.Y); };
+					// The centre of mass between them (on an edge counts).
+					const FVector2D AP = CentreOfMassXY - Contacts[A].XY;
+					const double	U = (AP.X * AC.Y - AP.Y * AC.X) / Cross;
+					const double	V = (AB.X * AP.Y - AB.Y * AP.X) / Cross;
+					if (!(U >= -StanceGroundSlack && V >= -StanceGroundSlack && U + V <= 1.0 + StanceGroundSlack))
+					{
+						continue;
+					}
+					bool bUnder = false;
+					for (int32 Other = 0; Other < Num && !bUnder; ++Other)
+					{
+						bUnder = Other != A && Other != B && Other != C && !(Contacts[Other].Z >= PlaneAt(Contacts[Other].XY) - StanceGroundSlack);
+					}
+					if (bUnder)
+					{
+						continue;
+					}
+					for (int32 Index = 0; Index < Legs.Num(); ++Index)
+					{
+						// Under a pair: under whichever of its two wheels the
+						// ground is nearer (that one meets it first).
+						FLegReach&	 Leg = Legs[Index];
+						const double Half = HalfTrackOf(Index);
+						Leg.StanceGroundZ = Half > 0.0 ? FMath::Max(PlaneAt(Leg.XY - FVector2D(0.0, Half)), PlaneAt(Leg.XY + FVector2D(0.0, Half))) : PlaneAt(Leg.XY);
+					}
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	void DiscountLateLegs(TArrayView<FLegReach> Legs, TConstArrayView<double> Dz, const FTuning& Tuning)

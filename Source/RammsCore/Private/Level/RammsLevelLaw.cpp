@@ -85,7 +85,8 @@ namespace RammsLevel
 		bool IsFinite(const FLegReach& Leg)
 		{
 			return IsFinite(Leg.XY) && FMath::IsFinite(Leg.BaseZ) && FMath::IsFinite(Leg.MeasuredZ) && FMath::IsFinite(Leg.MinZ) && FMath::IsFinite(Leg.MaxZ)
-				&& FMath::IsFinite(Leg.MaxRateCmS) && FMath::IsFinite(Leg.RadiusCm) && FMath::IsFinite(Leg.BaselineClearanceCm) && FMath::IsFinite(Leg.CarryShare);
+				&& FMath::IsFinite(Leg.MaxRateCmS) && FMath::IsFinite(Leg.RadiusCm) && FMath::IsFinite(Leg.BaselineClearanceCm) && FMath::IsFinite(Leg.CarryShare)
+				&& FMath::IsFinite(Leg.StanceGroundZ);
 		}
 
 		bool IsFinite(const FClearancePoint& Point)

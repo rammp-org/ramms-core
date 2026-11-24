@@ -506,6 +506,12 @@ namespace RammsLevel::DryRun
 			}
 		}
 		const int32 NumBottoms = Bottoms.Num();
+		// (Each leg's half track, 0 for a single wheel: for where its stance rests.)
+		FLegValues PairHalfTracks;
+		for (const FRobotLeg& Leg : Robot.Legs)
+		{
+			PairHalfTracks.Add(Leg.PairHalfTrackCm);
+		}
 		// The wheel's true height: the joint's, but for a leg whose real
 		// travel is not what the law believes.
 		const auto PlaceBottoms = [&]() {
@@ -529,6 +535,12 @@ namespace RammsLevel::DryRun
 				Reach.MaxRateCmS = Leg.MaxRateCmS;
 				Reach.RadiusCm = Leg.RadiusCm;
 				Reach.bRoll = Leg.bRoll;
+			}
+			if (Robot.bStanceRests)
+			{
+				// As a plant of that kind: where the flat ground its baselines
+				// rest on lies under each leg.
+				StanceGround(OutLegs, PairHalfTracks, FVector2D(Robot.CentreOfMass));
 			}
 		};
 
@@ -700,6 +712,22 @@ namespace RammsLevel::DryRun
 					for (int32 Index = 0; Index < NumLegs; ++Index)
 					{
 						StanceZ.Add(Robot.Legs[Index].StanceZ);
+					}
+					if (Robot.bStanceRests)
+					{
+						// Who stands in the stance is judged on the ground the
+						// STANCE rests on, not the pose the taker left (as the
+						// level assist's component asks its plant).
+						FLawLegs InStance = Legs;
+						for (int32 Index = 0; Index < NumLegs; ++Index)
+						{
+							InStance[Index].BaseZ = StanceZ[Index];
+						}
+						StanceGround(InStance, PairHalfTracks, FVector2D(Robot.CentreOfMass));
+						for (int32 Index = 0; Index < NumLegs; ++Index)
+						{
+							Legs[Index].StanceGroundZ = InStance[Index].StanceGroundZ;
+						}
 					}
 					if (!bTakenCold && PlanAdoption(Legs, StanceZ, Robot.Points, Tuning, Adoption))
 					{

@@ -76,6 +76,34 @@ namespace RammsLevel
 	void SupportMask(TArrayView<FLegReach> Legs, TConstArrayView<bool> Was, const FTuning& Tuning);
 
 	/**
+	 * Where the flat ground a robot rests on lies under each leg when it
+	 * stands on its BASELINES, for a robot whose stances do not stand level in
+	 * its own frame: fills every leg's StanceGroundZ, which SupportMask then
+	 * judges who stands by. The robot as a rigid body on a flat floor: the
+	 * plane that touches three wheel bottoms (BaseZ - RadiusCm) that are not
+	 * in a line, has no other bottom under it, and holds the centre of mass
+	 * (CentreOfMassXY, chassis frame, cm) between the three. A leg that is a
+	 * pair of wheels across the robot (PairHalfTrackCm[i] over 0: its wheels
+	 * at XY -+ (0, that)) meets the ground at either wheel, and its
+	 * StanceGroundZ is the ground under the wheel that would meet it first.
+	 * PairHalfTrackCm may be empty or short: legs past its end are single
+	 * wheels.
+	 *
+	 * The legs that carry are then exactly on that ground, and every other is
+	 * over it by the clearance its stance gives it -- whichever way the stance
+	 * leans on the flat, and whichever legs the centre of mass puts the robot
+	 * on (move it across an axle and the robot rocks onto the other end: the
+	 * plane changes, and a leg's height over it changes without a step). Only
+	 * baselines count, as in SupportMask.
+	 *
+	 * False, with every StanceGroundZ 0 (the lowest bottom is then the ground,
+	 * as for a robot that stands level), when there is no such plane: fewer
+	 * than three wheels, all in a line, or a centre of mass outside every three
+	 * that could hold it (a robot that would tip over).
+	 */
+	bool StanceGround(TArrayView<FLegReach> Legs, TConstArrayView<double> PairHalfTrackCm, const FVector2D& CentreOfMassXY);
+
+	/**
 	 * A leg whose wheel is still ABOVE where it is told to be carries less:
 	 * each leg's CarryShare (as SupportMask left it) less L / SupportBandInCm,
 	 * not under 0. With late_i = max(0, MeasuredZ - (BaseZ + Dz[i])) (cm; Dz

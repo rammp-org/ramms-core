@@ -7,6 +7,7 @@
 #include "Templates/UniquePtr.h"
 
 class URammsCurbNegotiationController;
+class URammsRammpGen1CurbController;
 class URammsRobotBaseComponent;
 struct FRammsDriveStance;
 
@@ -103,6 +104,19 @@ namespace RammsLevel
 		 * the law then holds.
 		 */
 		virtual bool MeasureLegs(FPlantLegs& OutLegs) = 0;
+
+		/**
+		 * Where the flat ground lies under each leg (FLegReach::StanceGroundZ
+		 * of Legs, the legs of the last MeasureLegs in its order) with the
+		 * legs at the heights Z (cm) in place of their baselines: for judging
+		 * who stands in a stance the legs are not in (a hand-back's, which is
+		 * measured in the pose the taker left). Nothing for a robot whose
+		 * stances stand level in its own frame (every leg's is 0, as
+		 * MeasureLegs leaves it); one whose stances do not gives the ground
+		 * the robot would rest on there, as its MeasureLegs does for the
+		 * baselines.
+		 */
+		virtual void RestLegsAt(TConstArrayView<double> Z, TArrayView<FLegReach> Legs) const {}
 
 		/** The underside points the law keeps clear of the ground, each asking
 		 *  Tuning.MinBellyClearanceCm. */
@@ -215,4 +229,20 @@ namespace RammsLevel
 	 * who holds the base's command offset layer (the level assist).
 	 */
 	TUniquePtr<IPlant> MakeLegPlant(URammsRobotBaseComponent& Base, const URammsCurbNegotiationController& Curb, const UObject* Layer);
+
+	/**
+	 * The plant of a robot with two drive wheels that are each lifted alone
+	 * and two pairs of small wheels that are each lifted as one (the Gen1
+	 * kind): four legs -- drive left, drive right, the rear pair, the front
+	 * pair -- each on one lift motor whose angle sets its wheels' height by a
+	 * table. Roll reaches the two drive legs only. Its geometry is not copied:
+	 * the tables, the lift motors, the bodies, the lifts' speeds, the frame's
+	 * underside and the mass model are read from Curb, the sibling curb
+	 * controller's Config, which the robot's own asset script authors. The
+	 * wheels' places on the chassis are read from the bodies every tick, so
+	 * the drive wheels are levelled where their translators have them; the
+	 * translators, the wheels and their hubs are never commanded. Layer is who
+	 * holds the base's command offset layer (the level assist).
+	 */
+	TUniquePtr<IPlant> MakeGen1Plant(URammsRobotBaseComponent& Base, const URammsRammpGen1CurbController& Curb, const UObject* Layer);
 } // namespace RammsLevel

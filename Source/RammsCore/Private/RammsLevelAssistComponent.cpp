@@ -15,6 +15,7 @@
 #include "RammsCurbNegotiationController.h"
 #include "RammsDriveMode.h"
 #include "RammsDriveModeSelector.h"
+#include "RammsRammpGen1CurbController.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
 #include "RammsSeatMechanismController.h"
@@ -99,6 +100,10 @@ namespace RammsLevel
 		TOptional<FState>	PreYieldLaw;
 		TOptional<FOutputs> PreYieldLast;
 		bool				bFoldedMotors = false;
+		/** The chassis' attitude as that YieldTo read it (deg), where it could:
+		 *  a hand-back that finds every leg as it was folded, and the base
+		 *  turned from this, is on other ground than the take-over began on. */
+		TOptional<FVector2D> PreYieldAttitudeDeg;
 		/** The seat's trim was folded into the seat's command since that
 		 *  YieldTo (YieldSeatTo): the take-over is then past undoing exactly. */
 		bool bSeatYielded = false;
@@ -278,16 +283,19 @@ void URammsLevelAssistComponent::ResolveRobot()
 	R.bResolveTried = true;
 	AActor*					  Owner = GetOwner();
 	URammsRobotBaseComponent* Base = EnsureBase();
-	// Which sibling describes the robot picks the kind of plant. Today: the
-	// Gen2 curb controller's legs.
+	// Which sibling describes the robot picks the kind of plant: the Gen2 curb
+	// controller's legs (wheels on crank-driven linkages, the attitude read
+	// off the corner pivots), or the Gen1 curb controller's config (two drive
+	// wheels and two pairs on lifts, the attitude the chassis body's own).
 	const URammsCurbNegotiationController* Curb = Owner ? Owner->FindComponentByClass<URammsCurbNegotiationController>() : nullptr;
-	if (!Base || !Curb)
+	const URammsRammpGen1CurbController*   Gen1Curb = Owner && !Curb ? Owner->FindComponentByClass<URammsRammpGen1CurbController>() : nullptr;
+	if (!Base || (!Curb && !Gen1Curb))
 	{
 		R.CannotLevel = TEXT("no robot description");
 	}
 	else
 	{
-		TUniquePtr<RammsLevel::IPlant> Plant = RammsLevel::MakeLegPlant(*Base, *Curb, this);
+		TUniquePtr<RammsLevel::IPlant> Plant = Curb ? RammsLevel::MakeLegPlant(*Base, *Curb, this) : RammsLevel::MakeGen1Plant(*Base, *Gen1Curb, this);
 		FString						   Why;
 		if (!Plant->Resolve(Why))
 		{
@@ -300,7 +308,14 @@ void URammsLevelAssistComponent::ResolveRobot()
 		else
 		{
 			R.Plant = MoveTemp(Plant);
-			R.Attitude = MakeUnique<RammsLevel::FPivotAttitudeSource>(*Base, *Curb);
+			if (Curb)
+			{
+				R.Attitude = MakeUnique<RammsLevel::FPivotAttitudeSource>(*Base, *Curb);
+			}
+			else
+			{
+				R.Attitude = MakeUnique<RammsLevel::FBodyAttitudeSource>(*Base, *Gen1Curb);
+			}
 		}
 	}
 	if (!R.CannotLevel.IsEmpty())
@@ -404,7 +419,7 @@ void URammsLevelAssistComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	}
 }
 
-void URammsLevelAssistComponent::StepLaw(double ClockDt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption)
+void URammsLevelAssistComponent::StepLaw(double ClockDt, bool bYield, bool bResume, const RammsLevel::FAdoption* Adoption, const UObject* HandingBack)
 {
 	using namespace RammsLevel;
 	FAssistRuntime& R = *Runtime;
@@ -575,6 +590,15 @@ void URammsLevelAssistComponent::StepLaw(double ClockDt, bool bYield, bool bResu
 				continue;
 			}
 			bAnyActive = true;
+			if (HandingBack && Component == HandingBack)
+			{
+				// A taker handing the legs back from inside its own mode, which
+				// is the active one for this call still (it selects the mode it
+				// hands the robot to straight after): that mode is no reason
+				// to give the base back or to stand by. What was put back as it
+				// was goes on as it was.
+				continue;
+			}
 			// Whoever drives the robot now may be asked to go slower -- but
 			// never a mode that takes the legs (a crossing runs its own pace).
 			if (Mode->IsDriveModeActive() && !DisabledModeIds.Contains(Id))
@@ -792,6 +816,12 @@ void URammsLevelAssistComponent::YieldTo(const UObject* Taker)
 	R.PreYieldLaw = R.Law;
 	R.PreYieldLast = R.Last;
 	R.bFoldedMotors = R.bClaimed;
+	R.PreYieldAttitudeDeg.Reset();
+	RammsLevel::FAttitude Attitude;
+	if (R.Attitude && R.Attitude->Read(Attitude))
+	{
+		R.PreYieldAttitudeDeg = Attitude.Deg;
+	}
 	R.bSeatYielded = false;
 	if (R.bClaimed)
 	{
@@ -835,6 +865,10 @@ bool URammsLevelAssistComponent::AdoptPose(const FRammsDriveStance* NextStance, 
 	{
 		return false;
 	}
+	// Who stands in that stance is judged on the ground the robot would rest
+	// on THERE, not in the pose the taker left (a plant whose stances do not
+	// stand level in the chassis' own frame says where that is).
+	R.Plant->RestLegsAt(StanceZ, Legs);
 	// (The tuning as the last tick made it: the preference where it was held.)
 	R.Plant->ClearancePoints(R.LawTuning, R.Points);
 	bool bAdopted = false;
@@ -898,8 +932,36 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 	// stood no longer says what the seat carries.)
 	if (!NextStance && !R.bSeatYielded && R.PreYieldLaw.IsSet() && (!R.bFoldedMotors || (R.bClaimed && R.Plant->Unfold())))
 	{
-		// Refused before anything was written: the baselines, the offsets and
-		// the law exactly as they were, as if nothing had been asked.
+		// Nothing was written since the fold: the baselines and the offsets
+		// are exactly as they were before it. Whether the LAW may go on as it
+		// stood depends on where the robot is. A taker that puts every leg
+		// back where it found it may have moved the robot meanwhile (a curb
+		// crossing ends on the kerb's other side): the base then stands turned
+		// from where it was, on ground the law has never seen. As it stood the
+		// law would hold the old ground for true and take the new attitude for
+		// a knock: it creeps off it at a standing robot's small rate, the rider
+		// left tilted meanwhile. So the plane on the legs is taken up as any
+		// hand-back's: the wanted attitude starts from the one the base has and
+		// walks to level at the rider's pace, and the offsets go on from what
+		// the legs carry (a ride height among them), nothing stepping.
+		const RammsLevel::FState& Was = *R.PreYieldLaw;
+		RammsLevel::FAttitude	  Now;
+		const bool				  bTurned = R.bFoldedMotors && Was.Arbiter.HasOffsets() && R.PreYieldAttitudeDeg.IsSet() && R.Attitude && R.Attitude->Read(Now)
+			&& RammsLevel::Inclination(Now.Deg - *R.PreYieldAttitudeDeg) > R.LawTuning.SettleErrorDeg;
+		if (bTurned)
+		{
+			RammsLevel::FAdoption Kept;
+			Kept.PlaneDeg = Kept.FittedDeg = Was.CorrectionDeg;
+			Kept.Dz = Was.LastDz;
+			R.PreYieldLaw.Reset();
+			R.PreYieldLast.Reset();
+			R.HandBackLeftDeg.Reset();
+			StepLaw(0.0, false, true, &Kept, Taker);
+			return;
+		}
+		// Refused before it began, or ended where it began: the baselines, the
+		// offsets and the law exactly as they were, as if nothing had been
+		// asked.
 		R.Law = *R.PreYieldLaw;
 		R.Last = R.PreYieldLast.Get(R.Last);
 		R.PreYieldLaw.Reset();
@@ -907,7 +969,7 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 		// (The drive was let go as the legs were yielded: it is asked again
 		// for the scale it had, in the same call. A step in which no time
 		// passes advances nothing else.)
-		StepLaw(0.0, false, false);
+		StepLaw(0.0, false, false, nullptr, Taker);
 		return;
 	}
 	R.PreYieldLaw.Reset();
@@ -932,7 +994,7 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 	{
 		R.HandBackLeftDeg = Adoption.FittedDeg - Adoption.PlaneDeg;
 	}
-	StepLaw(0.0, false, true, bAdopted ? &Adoption : nullptr);
+	StepLaw(0.0, false, true, bAdopted ? &Adoption : nullptr, Taker);
 }
 
 bool URammsLevelAssistComponent::GetHandBackTurnDeg(FVector2D& OutLeftDeg) const

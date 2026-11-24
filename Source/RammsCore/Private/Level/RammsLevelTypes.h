@@ -129,6 +129,12 @@ namespace RammsLevel
 	 *  walk or a knock wound into the integral otherwise leaves the base
 	 *  resting anywhere inside the deadband, most often on its edge. */
 	constexpr double RestTrimDeadbandDeg = 0.05;
+	/** StanceGround: three legs span a plane only when the triangle between
+	 *  them is at least this large (cm^2, twice its area); and a wheel bottom
+	 *  counts as on a plane, and the centre of mass as between three legs,
+	 *  to within this (cm; a share of the triangle). */
+	constexpr double StanceGroundMinAreaCm2 = 1.0;
+	constexpr double StanceGroundSlack = 1.0e-6;
 	/** PlanAdoption's rounds: the offsets a plane leaves decide which legs
 	 *  stand, which decides the offsets. Who stands does not move with a
 	 *  height every leg shares, so the second round already agrees with the
@@ -441,6 +447,16 @@ namespace RammsLevel
 		 *  need not give this (the law then takes 1 for a leg that stands and
 		 *  0 for one that does not). */
 		double CarryShare = 1.0;
+		/** Where the flat ground the robot rests on, standing on its
+		 *  baselines, lies under this leg's wheel (cm, z in the chassis frame;
+		 *  only the differences between legs count): an input, the plant's.
+		 *  0 on every leg for a robot whose stances stand level in its own
+		 *  frame, where the lowest wheel bottom is the ground. A robot whose
+		 *  stances do not (wheels of unlike sizes on lifts set to unlike
+		 *  heights, standing nose up or nose down on the flat) gives the
+		 *  plane it rests on (StanceGround): SupportMask judges who stands by
+		 *  each wheel bottom's height over this, not over the lowest of them. */
+		double StanceGroundZ = 0.0;
 	};
 
 	/** A point of the robot's underside that must stay clear of the ground. */
