@@ -300,4 +300,120 @@ bool FRammsDriveSpeedScaleControllers::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a drive controller that reads its requests against anything but the simulation's clock (the game world's,
+// which stands still on this rig and runs ahead of a slow simulator: a request would never lapse, or lapse early; a
+// constant), one that holds a request for good while it drives, and one that keeps a request from before the
+// simulation was set back. The requests' own arithmetic is Ramms.Drive.SpeedScale.Expires; this is the controllers
+// using it, on a backend whose clock moves.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsDriveSpeedScaleOnTheClock,
+	"Ramms.Drive.SpeedScale.ControllersLetRequestsLapseOnSimulatedTime",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsDriveSpeedScaleOnTheClock::RunTest(const FString& Parameters)
+{
+	using namespace RammsCommandOffsetTests;
+	const FName				Level(TEXT("level"));
+	const float				Dt = 0.05f;
+	const TCHAR* const		Ids[4] = { TEXT("wheel_fl"), TEXT("wheel_fr"), TEXT("wheel_rl"), TEXT("wheel_rr") };
+	TArray<FRammsMotorSpec> Specs;
+	Specs.Add(MotorRow(TEXT("left_motor"), ERammsActuatorType::Torque));
+	Specs.Add(MotorRow(TEXT("right_motor"), ERammsActuatorType::Torque));
+	for (const TCHAR* Id : Ids)
+	{
+		Specs.Add(MotorRow(Id, ERammsActuatorType::Velocity));
+	}
+	FRig R(Specs);
+	if (!TestTrue(TEXT("a made-up base"), R.IsReady()))
+	{
+		return false;
+	}
+	// The backend keeps a clock, as a simulator does. The game world's stands at zero on this rig.
+	R.Log->SimTime = 200.0;
+	// One and the same course for both drives: what each asks of its wheels at a time, as one number per wheel.
+	const auto Course = [this, &R, Level](const TCHAR* Name, IRammsDriveMode* Mode, TFunctionRef<float()> Scale, TFunctionRef<TArray<double>()> Asked) {
+		const auto Say = [Name](const TCHAR* What) { return FString::Printf(TEXT("%s: %s"), Name, What); };
+		const auto At = [&R, &Asked](double Seconds) {
+			R.Log->SimTime = Seconds;
+			return Asked();
+		};
+		const auto Same = [](const TArray<double>& A, const TArray<double>& B, double Share) {
+			// (Every wheel at that share of what it was asked at full speed, and at least one of them driven.)
+			bool bSame = A.Num() == B.Num() && A.Num() > 0;
+			bool bDriven = false;
+			for (int32 Index = 0; bSame && Index < A.Num(); ++Index)
+			{
+				bSame = FMath::IsNearlyEqual(A[Index], Share * B[Index], 1.0e-4);
+				bDriven = bDriven || FMath::Abs(B[Index]) > 0.5;
+			}
+			return bSame && bDriven;
+		};
+		At(200.0);
+		const TArray<double> Full = At(200.05);
+		TestTrue(Say(TEXT("(driven)")), Same(Full, Full, 1.0));
+		// Asked at 200.05 s to keep to half for half a second.
+		Mode->SetDriveSpeedScale(Level, 0.5f, 0.5f);
+		TestTrue(Say(TEXT("0.3 s on: the wheels at half")), Same(At(200.35), Full, 0.5) && Scale() == 0.5f);
+		TestTrue(Say(TEXT("0.6 s on, not renewed: lapsed, the wheels at full speed")), Same(At(200.65), Full, 1.0) && Scale() == 1.0f);
+		// Renewed while it stands: it goes on standing.
+		Mode->SetDriveSpeedScale(Level, 0.5f, 0.5f);
+		At(201.0);
+		Mode->SetDriveSpeedScale(Level, 0.5f, 0.5f);
+		TestTrue(Say(TEXT("renewed 0.35 s on: still at half 0.4 s after that")), Same(At(201.4), Full, 0.5));
+		TestTrue(Say(TEXT("... and lapsed half a second after the renewal")), Same(At(201.55), Full, 1.0));
+		// The simulation set back under a request that stands: it is from another run, and is dropped.
+		Mode->SetDriveSpeedScale(Level, 0.5f, 0.5f);
+		TestTrue(Say(TEXT("(standing)")), Same(At(201.6), Full, 0.5));
+		At(150.0);
+		TestTrue(Say(TEXT("the clock set back: the request is dropped")), Same(At(150.05), Full, 1.0) && Scale() == 1.0f);
+		Mode->SetDriveModeActive(false);
+	};
+	{
+		URammsDifferentialDriveController* Drive = NewObject<URammsDifferentialDriveController>(R.Actor, TEXT("Differential"));
+		Drive->ControlMode = EDriveControlMode::VelocityControl;
+		Drive->MaxVelocity = 60.0f;
+		Drive->WheelRadius = 10.0f;
+		Drive->TrackWidth = 50.0f;
+		Drive->MaxTurningSpeed = 40.0f;
+		Drive->bHoldWhenIdle = false;
+		FRig::BeginPlayOf(*Drive);
+		static_cast<IRammsDriveMode*>(Drive)->SetDriveModeActive(true);
+		Course(
+			TEXT("differential"), Drive, [Drive]() { return Drive->GetDriveSpeedScale(); },
+			[Drive, Dt]() {
+				Drive->SetExternalDriveInput(FVector2D(0.5, 1.0));
+				Drive->TickComponent(Dt, LEVELTICK_All, nullptr);
+				return TArray<double>{ Drive->GetLeftWheelState().TargetAngularVelocity, Drive->GetRightWheelState().TargetAngularVelocity };
+			});
+	}
+	{
+		URammsHolonomicDriveController* Drive = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+		const FVector2D					Places[4] = { { 30.0, -25.0 }, { 30.0, 25.0 }, { -30.0, -25.0 }, { -30.0, 25.0 } };
+		const float						Rolls[4] = { 45.0f, -45.0f, -45.0f, 45.0f };
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			FRammsOmniWheelSpec& Omni = Drive->Drive.Wheels.AddDefaulted_GetRef();
+			Omni.MotorId = Ids[Index];
+			Omni.Position = Places[Index];
+			Omni.RollDirectionDeg = Rolls[Index];
+		}
+		Drive->bHoldWhenIdle = false;
+		FRig::BeginPlayOf(*Drive);
+		Course(
+			TEXT("holonomic"), Drive, [Drive]() { return Drive->GetDriveSpeedScale(); },
+			[Drive, Dt, &R, &Ids]() {
+				Drive->SetDriveCommand(FVector(1.0, 0.5, 0.3));
+				Drive->TickComponent(Dt, LEVELTICK_All, nullptr);
+				TArray<double> Out;
+				for (const TCHAR* Id : Ids)
+				{
+					float Rate = 0.0f;
+					R.Base->GetMotorVelocityCommand(Id, Rate);
+					Out.Add(Rate);
+				}
+				return Out;
+			});
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

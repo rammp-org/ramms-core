@@ -103,7 +103,8 @@ namespace RammsLevel
 	 * span; so the reading is followed only that fast:
 	 *
 	 *   allowance (deg/s) = Trust * (Tuning.SettleDegPerSec
-	 *                                + TurnDegPerCm * |SpeedCmS|)
+	 *                                + TurnDegPerCm * |SpeedCmS|
+	 *                                + |Value| * |YawRateDegPerSec| pi / 180)
 	 *                     + ExplainedDeg / Dt
 	 *   Value moves towards RawGroundDeg by at most allowance * Dt (Euclidean
 	 *   over pitch and roll)
@@ -112,7 +113,12 @@ namespace RammsLevel
 	 * gives Tuning.BreakDeg / StandingSpanCm). ExplainedDeg is how far the
 	 * legs' own baselines can have turned the stance this tick
 	 * (BaselineTurnDeg): a stance being ramped moves the reading with the ground
-	 * standing still, and by exactly that. Trust (0..1) is how far the
+	 * standing still, and by exactly that. YawRateDegPerSec is how fast the
+	 * chassis is turning about the vertical: a robot turning on the spot on a
+	 * slope of |Value| deg sees that slope swing from pitch into roll in its
+	 * own frame, by the slope times the angle turned, with no distance
+	 * travelled at all -- and legs that are not sent after it leave the base
+	 * to tilt by the whole slope in a quarter turn. Trust (0..1) is how far the
 	 * attitude is believed to be the ground's at all: with the base's speed
 	 * changing by a (cm/s^2, from one tick's SpeedCmS to the next) it is at
 	 * most 1 for |a| <= BodyAccelStartCmS2, 0 for |a| >= BodyAccelFullCmS2
@@ -147,7 +153,7 @@ namespace RammsLevel
 			bHasSpeed = false;
 		}
 		/** One tick; returns the ground as far as it can have turned (deg). */
-		FVector2D Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt);
+		FVector2D Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt, double YawRateDegPerSec = 0.0);
 
 		FVector2D Get() const { return Value; }
 		bool	  IsSeeded() const { return bSeeded; }
@@ -464,6 +470,13 @@ namespace RammsLevel
 		void Zero()
 		{
 			Trim = 0.0;
+			bBehind = false;
+		}
+		/** The seat carries TrimDeg as an offset already (one taken back out
+		 *  of its own command, or left on it): gone on from, with no motion. */
+		void Set(double TrimDeg)
+		{
+			Trim = TrimDeg;
 			bBehind = false;
 		}
 		/** One tick; returns the trim (deg). */

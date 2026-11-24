@@ -283,6 +283,12 @@ namespace RammsLevel
 	{
 		/** The plane taken out (deg): the correction levelling goes on with. */
 		FVector2D PlaneDeg = FVector2D::ZeroVector;
+		/** The whole plane by which the pose differs from the stance (deg), as
+		 *  fitted: PlaneDeg where all of it could be taken out. What is left
+		 *  of it (FittedDeg - PlaneDeg: past the per-axis limit, or past the
+		 *  legs' reach) stays in the baselines, and the stance ramp turns the
+		 *  base by that much. */
+		FVector2D FittedDeg = FVector2D::ZeroVector;
 		/** Each leg's baseline height once the plane is out of it (cm), and the
 		 *  offset that leaves on the leg (cm, positive retracts): the pose's
 		 *  height less that baseline. The two together are the pose: nothing

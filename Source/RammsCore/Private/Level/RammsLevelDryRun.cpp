@@ -461,7 +461,9 @@ namespace RammsLevel::DryRun
 		FTuning	  Tuning = Options.Tuning;
 		FVector2D Reference = Options.Tuning.LevelReferenceDeg;
 		FVector2D Preference = Options.PreferenceDeg;
-		Tuning.LevelReferenceDeg = Reference + SplitPreference(Preference, Robot.bSeat, Tuning.bSeatCoversTransients).BaseDeg;
+		// (The seat's room as the run begins: about a seat nobody has tilted.)
+		Tuning.LevelReferenceDeg = Reference
+			+ SplitPreference(Preference, Robot.bSeat, Tuning.bSeatCoversTransients, FMath::Min(0.0, -Options.SeatRoomDeg), FMath::Max(0.0, Options.SeatRoomDeg), Tuning.SeatTrimMaxDeg).BaseDeg;
 		const double FrameSeconds = FMath::Max(Options.FrameSeconds, 1.0e-3);
 		const double Tick = FMath::Clamp(Options.PhysicsStepSeconds, 1.0e-4, FrameSeconds);
 		const int32	 PoseEvery = FMath::Max(1, FMath::RoundToInt32(Options.PoseStepSeconds / Tick));
@@ -560,6 +562,7 @@ namespace RammsLevel::DryRun
 		bool		  bTaken = false;
 		double		  TakenUntil = 0.0;
 		bool		  bTakenCold = false;
+		bool		  bTakenLeavesSeat = false;
 		double		  TakenRampSeconds = 0.0;
 		double		  ChangingUntil = -1.0;
 		double		  WrongUntil = -1.0;
@@ -742,6 +745,7 @@ namespace RammsLevel::DryRun
 								bYield = true;
 								TakenUntil = Time + FMath::Max(Event.Seconds, FrameSeconds);
 								bTakenCold = Event.bCold;
+								bTakenLeavesSeat = Event.bLeaveSeat;
 								TakenRampSeconds = Event.RampSeconds;
 							}
 							break;
@@ -789,15 +793,20 @@ namespace RammsLevel::DryRun
 				// A taker brings the rider to their own setting: what a fold
 				// left in the seat's own command goes back out of it, at the
 				// tilt policy's rate.
-				if (bTaken && SeatBaseline != 0.0)
+				// (Or never commands the seat at all: bLeaveSeat.)
+				if (bTaken && SeatBaseline != 0.0 && !bTakenLeavesSeat)
 				{
 					const double Most = FMath::Max(0.0, Tuning.TiltRateDegPerSec) * FrameSeconds;
 					SeatBaseline -= FMath::Clamp(SeatBaseline, -Most, Most);
 					bSeatMoved = true;
 				}
 
-				// Where the rider's preference is held: as the component splits it.
-				const FPreferenceSplit Split = SplitPreference(Preference, Robot.bSeat, Tuning.bSeatCoversTransients);
+				// Where the rider's preference is held: as the component splits
+				// it, the seat's room about where the rider has it (its own
+				// command).
+				const double		   SeatLowDeg = FMath::Min(0.0, -Options.SeatRoomDeg - SeatBaseline);
+				const double		   SeatHighDeg = FMath::Max(0.0, Options.SeatRoomDeg - SeatBaseline);
+				const FPreferenceSplit Split = SplitPreference(Preference, Robot.bSeat, Tuning.bSeatCoversTransients, SeatLowDeg, SeatHighDeg, Tuning.SeatTrimMaxDeg);
 				Tuning.LevelReferenceDeg = Reference + Split.BaseDeg;
 
 				// The sensor.
@@ -842,9 +851,10 @@ namespace RammsLevel::DryRun
 				In.bStick = SpeedCommand != 0.0;
 				In.bSeat = Robot.bSeat;
 				In.SeatPreferenceDeg = Split.SeatDeg;
-				// (Its room is about where the rider has it: its own command.)
-				In.SeatTrimLowDeg = FMath::Min(0.0, -Options.SeatRoomDeg - SeatBaseline);
-				In.SeatTrimHighDeg = FMath::Max(0.0, Options.SeatRoomDeg - SeatBaseline);
+				In.SeatTrimLowDeg = SeatLowDeg;
+				In.SeatTrimHighDeg = SeatHighDeg;
+				// (What the seat carries as an offset, as a plant reads it back.)
+				In.SeatTrimOnDeg = SeatOffset;
 				In.bEnable = bEnable;
 				In.Mode = bTaken ? EMode::Taken : (Time < ReleaseUntil - TimeHair ? EMode::Release : EMode::Allowed);
 				In.bYield = bYield;
@@ -863,9 +873,17 @@ namespace RammsLevel::DryRun
 						Baseline[Index] += Offset[Index];
 						Offset[Index] = 0.0;
 					}
-					// ... and the seat's trim into the seat's own command.
-					SeatBaseline += SeatOffset;
-					SeatOffset = 0.0;
+					// ... and the seat's trim into the seat's own command, where
+					// the taker takes the seat too (it then walks that command
+					// back to the rider's own setting, above). One that never
+					// commands the seat, and a take-over nobody announced, leave
+					// the trim on the seat as it is: the law, which holds none
+					// meanwhile, goes on from it when it starts again.
+					if (bTaken && !bTakenLeavesSeat)
+					{
+						SeatBaseline += SeatOffset;
+						SeatOffset = 0.0;
+					}
 				}
 				if (Out.bWrite && Out.Dz.Num() == NumLegs)
 				{

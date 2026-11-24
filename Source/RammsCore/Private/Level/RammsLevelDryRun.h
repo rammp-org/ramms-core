@@ -45,7 +45,12 @@
  *    true attitude with the seat's tilt added to its pitch. A take-over's
  *    fold puts the trim into the seat's own command, which the taker then
  *    walks back to zero at the tilt policy's rate (as a crossing brings the
- *    rider to their own setting).
+ *    rider to their own setting) -- or, with FDryEvent::bLeaveSeat, the
+ *    taker never commands the seat at all and the trim stays on it. That
+ *    taker is this harness's own: what it shows is the law's bookkeeping
+ *    through a fold and a hand-back, not what a curb controller, a stance
+ *    ramp or the seat's own controller does with the seat (those are tried
+ *    on the component, RammsLevelAssistTests.cpp).
  *  - Pose, every PoseStepSeconds: SolveRest over the wheels' true bottoms.
  *    Floating wheels, three-point stances and rocking come out of that; the
  *    attitude is NOT a fit through the wheels. A kick (below) is added to
@@ -284,6 +289,16 @@ namespace RammsLevel::DryRun
 		 *  ramp that follows the hand-back takes (s; 0: none). */
 		bool   bCold = false;
 		double RampSeconds = 0.0;
+		/** FoldAdopt: the taker never commands the seat (a crossing called off
+		 *  before it ran, a curb mode picked by hand and handed straight
+		 *  back). The seat's trim then stays on the seat as it is for the
+		 *  whole take-over, and the law, which holds none meanwhile, goes on
+		 *  from it at the hand-back (FInputs::SeatTrimOnDeg): as the level
+		 *  assist's component does. Without it the taker takes the seat with
+		 *  the legs: the trim is folded into the seat's own command, which the
+		 *  taker walks back to the rider's own setting at the tilt policy's
+		 *  rate while it has the robot. */
+		bool bLeaveSeat = false;
 	};
 
 	struct FOptions

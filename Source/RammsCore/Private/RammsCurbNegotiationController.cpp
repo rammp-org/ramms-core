@@ -989,6 +989,15 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 	{
 		SeatState.CmdAngles = FVector2D(Base->GetMotorValue(Seat.Linkage.ProximalMotorA), Base->GetMotorValue(Seat.Linkage.ProximalMotorB));
 		SeatState.bCmd = true;
+		// The crossing takes the seat now, with the legs it already has: a level assist that was levelling puts its seat
+		// trim into the tilt's own command first (the motor told nothing), so that the command read back below is where
+		// the seat stands. Until this, the trim was still on the seat as the level assist left it -- a crossing that
+		// never gets here (called off before it ran) has not touched the seat at all.
+		URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+		if (LevelAssist && !Seat.TiltMotor.IsNone())
+		{
+			LevelAssist->YieldSeatTo(this);
+		}
 		// The rider's attitude as the crossing found it -- level in the
 		// outdoor stance, or wherever the seat's own controls had tilted it --
 		// from the motors' commands where they have them (a loaded servo sits
@@ -1006,16 +1015,14 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		// pitch read back is only where the rider is now.)
 		const bool	 bTilts = Start.bValid && !Seat.TiltMotor.IsNone();
 		const double Found = bTilts ? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) : 0.0;
-		// A level assist that was levelling folded its seat trim into the tilt's
-		// command as this crossing took the legs: the command then holds the
-		// rider's own setting AND that trim (their preference, a slope past the
-		// legs' reach made up). The setting is the one without it; where the
-		// rider is now (the reference the level-in starts from, below) is the
+		// With the level assist's seat trim folded into it (above), the command
+		// holds the rider's own setting AND that trim (their preference, a slope
+		// past the legs' reach made up). The setting is the one without it; where
+		// the rider is now (the reference the level-in starts from, below) is the
 		// one with it, so nothing steps.
-		const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
-		const double							FoldedTrim = bTilts && LevelAssist ? FMath::DegreesToRadians(static_cast<double>(LevelAssist->GetFoldedSeatTrimDeg())) : 0.0;
-		float									Now[3] = { 0.0f, 0.0f, 0.0f };
-		const bool								bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
+		const double FoldedTrim = bTilts && LevelAssist ? FMath::DegreesToRadians(static_cast<double>(LevelAssist->GetFoldedSeatTrimDeg())) : 0.0;
+		float		 Now[3] = { 0.0f, 0.0f, 0.0f };
+		const bool	 bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
 			&& !Seat.TiltMotor.IsNone() && Base->GetMotorCommand(Seat.TiltMotor, Now[2]);
 		// (Less the trim, the tilt may well be commanded as the last crossing
 		// left it: the kept setting is then the rider's.)
@@ -5871,14 +5878,17 @@ float URammsCurbNegotiationController::GetStanceChangeMinSeconds() const
 	{
 		return 0.0f;
 	}
-	if (const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this); LevelAssist && LevelAssist->IsLevelling())
+	FVector2D LeftDeg = FVector2D::ZeroVector;
+	if (const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this); LevelAssist && LevelAssist->GetHandBackTurnDeg(LeftDeg))
 	{
-		// The level assist has the legs back and is levelling: the stance ramp no longer turns the base to the ground's
-		// attitude (the assist carries the pose's plane on, and moves the rider itself, within its own tilt policy).
-		// What a stage must leave time for is the turn from the attitude the base has to the one the assist holds it
-		// at: none, straight after a hand-back. (Measured this tick only while a crossing is being stepped.)
-		const double Turn = LastSimTime >= 0.0 ? (LevelAssist->GetTargetAttitudeDeg() - FVector2D(MeasuredPitchDeg, MeasuredRollDeg)).Size() : 0.0;
-		return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(Turn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
+		// The level assist has the legs back and carries the pose's plane on as its offsets: the stance ramp no longer
+		// turns the base to the ground's attitude. What it does still turn the base by is what of that plane the assist
+		// could NOT take out of the legs' commands (a slope past what it may correct in that stance: the crossing's own
+		// level reach is the larger). The ramp is timed for that turn, within the same tilt limits: nothing where the
+		// whole plane was taken out.
+		// (A level assist that took nothing back out at the hand-back, though it is on, falls through to the turn to the
+		// ground's attitude below: the whole pose is then in the commands the ramp takes to the stance.)
+		return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(LeftDeg.Size(), Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
 	}
 	if (!bStanceAttitudeKnown || !ActiveTerrain.bValid)
 	{

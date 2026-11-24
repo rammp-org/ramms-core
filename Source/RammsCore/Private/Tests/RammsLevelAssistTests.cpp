@@ -18,10 +18,14 @@
 #include "Curb/RammsCurbSeat.h"
 #include "Level/RammsLevelAttitude.h"
 #include "Level/RammsLevelControls.h"
+#include "Level/RammsLevelLaw.h"
 #include "Level/RammsLevelPlant.h"
 #include "Level/RammsLevelTypes.h"
 #include "Ramms4BarKinematics.h"
 #include "RammsCurbNegotiationController.h"
+#include "RammsDifferentialDriveController.h"
+#include "RammsDriveHandOver.h"
+#include "RammsDriveModeSelector.h"
 #include "RammsHolonomicDriveController.h"
 #include "RammsLevelAssistComponent.h"
 #include "Tests/RammsCommandOffsetRig.h"
@@ -81,6 +85,11 @@ namespace RammsLevelAssistTests
 		Specs.Add(MotorRow(TEXT("seat_tilt"), ERammsActuatorType::Position, FVector2D(-0.6, 0.9)));
 		// (One that no offset can go on, for a seat described with it.)
 		Specs.Add(MotorRow(TEXT("wheel_free"), ERammsActuatorType::Velocity));
+		// (The six legs' wheels, which a curb controller stops and lets go as a crossing ends.)
+		for (const TCHAR* Id : { TEXT("wheel_fl"), TEXT("wheel_fr"), TEXT("wheel_cl"), TEXT("wheel_cr"), TEXT("wheel_rl"), TEXT("wheel_rr") })
+		{
+			Specs.Add(MotorRow(Id, ERammsActuatorType::Velocity));
+		}
 		return Specs;
 	}
 
@@ -170,6 +179,10 @@ namespace RammsLevelAssistTests
 		URammsLevelAssistComponent*		 Level = nullptr;
 		/** The slope the robot stands on (deg; pitch, roll): what it reads with no correction on. */
 		FVector2D GroundDeg = FVector2D::ZeroVector;
+		/** Which way the chassis faces (deg about the vertical, from +X towards +Y) and where it is (cm): a test that
+		 *  turns the robot or drives it moves these before it poses the chassis. */
+		double	YawDeg = 0.0;
+		FVector Origin = FVector(0.0, 0.0, 30.0);
 
 		explicit FLevelRig(bool bWithCurb = true, bool bWithLevel = true, bool bStartOn = false, bool bWithSeat = false)
 			: FRig(bWithSeat ? SixLegAndSeatMotors() : SixLegMotors())
@@ -296,10 +309,11 @@ namespace RammsLevelAssistTests
 		{
 			const double  P = FMath::DegreesToRadians(Deg.X);
 			const double  R = FMath::DegreesToRadians(Deg.Y);
-			const FVector Forward(FMath::Cos(P), 0.0, FMath::Sin(P));
-			const FVector Side(0.0, FMath::Cos(R), FMath::Sin(R));
+			const double  Y0 = FMath::DegreesToRadians(YawDeg);
+			const FVector Forward(FMath::Cos(P) * FMath::Cos(Y0), FMath::Cos(P) * FMath::Sin(Y0), FMath::Sin(P));
+			const FVector Side(-FMath::Cos(R) * FMath::Sin(Y0), FMath::Cos(R) * FMath::Cos(Y0), FMath::Sin(R));
 			auto		  Place = [&](FName Crank, double X, double Y) {
-				 Log->Transforms.Add(Crank, FTransform(FVector(0.0, 0.0, 30.0) + Forward * X + Side * Y));
+				 Log->Transforms.Add(Crank, FTransform(Origin + Forward * X + Side * Y));
 			};
 			Place(CrankFL, CornerX - 25.0, -CornerY);
 			Place(CrankFR, CornerX - 25.0, CornerY);
@@ -1644,6 +1658,22 @@ bool FRammsLevelAssistSlowsTheDrive::RunTest(const FString& Parameters)
 	R.Frames(300, Dt);
 	TestTrue(TEXT("off"), R.State() == EState::Off);
 	TestEqual(TEXT("off: the drive at full speed"), Drive->GetDriveSpeedScale(), 1.0f);
+
+	// A mode it is told never to level in is not asked to go slower either, though it is the one driving: such a
+	// mode keeps its own pace (a crossing does), and the base is only given back to it. (That a mode which is not
+	// driving is asked nothing is, in the end, the drive's own doing: it takes no request while it is not active,
+	// Ramms.Drive.SpeedScale.ModesTakeAndDropRequests. The level assist not sending it one is belt and braces, and
+	// cannot be told apart from here.)
+	R.Level->SetAssistEnabled(true);
+	R.Frames(150, Dt);
+	R.GroundDeg += FVector2D(2.5, 0.0);
+	R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+	R.Frames(3, Dt);
+	TestTrue(TEXT("(levelling, the drive asked to go slower again)"), R.State() == EState::Active && Drive->GetDriveSpeedScale() < 1.0f);
+	R.Level->DisabledModeIds.Add(DriveMode->GetDriveModeId());
+	R.Frame(Dt);
+	TestTrue(TEXT("(a mode it never levels in drives: the base is being given back)"), R.State() == EState::Releasing && R.Control(RammsLevel::SpeedScaleControlId()) < 1.0f);
+	TestEqual(TEXT("... and that mode is not asked to go slower"), Drive->GetDriveSpeedScale(), 1.0f);
 	return true;
 }
 
@@ -2583,52 +2613,96 @@ bool FRammsLevelLegPlantSeatTrim::RunTest(const FString& Parameters)
 	Plant->ApplySeatTrim(4.0);
 	R.Tick();
 
-	// A fold: the trim into the tilt's own command, the motor told nothing, and the taker told how much.
+	// A fold of the legs leaves the seat alone: whoever takes the legs has not taken the seat.
 	const float Told = R.Effective(SeatTilt);
 	const float Before = R.Baseline(SeatTilt);
+	const float OffsetOn = R.Base->GetMotorCommandOffset(SeatTilt);
 	TestEqual(TEXT("before a fold nothing is folded"), Plant->FoldedSeatTrimDeg(), 0.0, 0.0);
+	TestEqual(TEXT("... and the seat carries its trim"), Plant->SeatTrimOnDeg(), 4.0, 1.0e-4);
 	const int32 Pushes = R.Log->CountFor(SeatTilt);
 	Plant->Fold();
 	R.Tick();
-	TestEqual(TEXT("the fold told the tilt motor nothing"), R.Log->CountFor(SeatTilt), Pushes);
+	TestEqual(TEXT("the legs' fold told the tilt motor nothing"), R.Log->CountFor(SeatTilt), Pushes);
+	TestTrue(TEXT("the legs' fold leaves the seat's command and its trim as they were, to the bit"), SameBits(R.Baseline(SeatTilt), Before) && SameBits(R.Base->GetMotorCommandOffset(SeatTilt), OffsetOn));
+	TestEqual(TEXT("... and nothing of the trim is in the seat's command"), Plant->FoldedSeatTrimDeg(), 0.0, 0.0);
+	TestTrue(TEXT("the legs' fold undone with a trim on the seat"), Plant->Unfold());
+	TestTrue(TEXT("... which is on it still"), SameBits(R.Base->GetMotorCommandOffset(SeatTilt), OffsetOn));
+
+	// The seat taken too: the trim into the tilt's own command, the motor told nothing, and the taker told how much.
+	Plant->FoldSeatTrim();
+	R.Tick();
+	TestEqual(TEXT("the seat's fold told the tilt motor nothing"), R.Log->CountFor(SeatTilt), Pushes);
 	TestTrue(TEXT("folded: the tilt's command is what it was told"), SameBits(R.Baseline(SeatTilt), Told) && R.Base->GetMotorCommandOffset(SeatTilt) == 0.0f);
 	TestEqual(TEXT("folded: the trim that went into the command"), Plant->FoldedSeatTrimDeg(), 4.0, 1.0e-4);
-	// A second fold with nothing on (a take-over on top of one the tick's backstop had folded for): still in there.
-	Plant->Fold();
+	TestEqual(TEXT("folded: the seat carries none as an offset"), Plant->SeatTrimOnDeg(), 0.0, 0.0);
+	// Folded again with nothing on: still in there. With more on: added to.
+	Plant->FoldSeatTrim();
 	TestEqual(TEXT("folded again with nothing on: the first fold's trim is in the command still"), Plant->FoldedSeatTrimDeg(), 4.0, 1.0e-4);
-	// ... and undoing that second, empty fold leaves it there.
-	TestTrue(TEXT("the empty fold undone"), Plant->Unfold());
-	TestEqual(TEXT("the empty fold undone: the first fold's trim is in the command still"), Plant->FoldedSeatTrimDeg(), 4.0, 1.0e-4);
-	// The taker commands the tilt: the trim is no longer in its command.
+	TestTrue(TEXT("measured"), Plant->MeasureLegs(Legs));
+	TestTrue(TEXT("ready"), Plant->SeatTrimRange(Own, Low, High));
+	Plant->ApplySeatTrim(1.0);
+	R.Tick();
+	const int32 PushesFolded = R.Log->CountFor(SeatTilt);
+	Plant->FoldSeatTrim();
+	TestEqual(TEXT("a second trim folded on top of the first: both are in the command"), Plant->FoldedSeatTrimDeg(), 5.0, 1.0e-4);
+	// Handed back by a taker that never wrote the tilt after all: taken back out, the motor told nothing.
+	const float ToldFolded = R.Effective(SeatTilt);
+	TestTrue(TEXT("the folded trim taken back out"), Plant->UnfoldSeatTrim());
+	TestEqual(TEXT("taken back out: the seat's command is the rider's own again"), static_cast<double>(R.Baseline(SeatTilt)), static_cast<double>(Before), 1.0e-6);
+	TestTrue(TEXT("... what the tilt is told the same, to the bit"), SameBits(R.Effective(SeatTilt), ToldFolded));
+	TestEqual(TEXT("... the trim its offset again"), Plant->SeatTrimOnDeg(), 5.0, 1.0e-4);
+	TestEqual(TEXT("... and nothing folded any more"), Plant->FoldedSeatTrimDeg(), 0.0, 0.0);
+	TestFalse(TEXT("nothing more to take back out"), Plant->UnfoldSeatTrim());
+	R.Tick();
+	TestEqual(TEXT("... and the tilt motor told nothing by either"), R.Log->CountFor(SeatTilt), PushesFolded);
+	// The taker commands the tilt: the trim is no longer in its command, and cannot be taken back out.
+	Plant->FoldSeatTrim();
 	R.Base->SetMotorCommand(SeatTilt, 0.1f);
 	TestEqual(TEXT("the taker commanded the tilt: nothing of the trim is in its command"), Plant->FoldedSeatTrimDeg(), 0.0, 0.0);
+	TestFalse(TEXT("... and there is none to take back out"), Plant->UnfoldSeatTrim());
+	TestTrue(TEXT("... the taker's command stands"), SameBits(R.Baseline(SeatTilt), 0.1f));
 
-	// Folded with a trim on and undone at once (a take-over refused): an offset again, to the bit, and nothing folded.
+	// Nose down: the command without the folded trim is the rider's own setting.
 	R.StandSeat(0.25f, -0.15f, Before);
 	TestTrue(TEXT("measured"), Plant->MeasureLegs(Legs));
 	TestTrue(TEXT("ready"), Plant->SeatTrimRange(Own, Low, High));
 	Plant->ApplySeatTrim(-3.0);
-	const float OffsetOn = R.Base->GetMotorCommandOffset(SeatTilt);
-	Plant->Fold();
+	Plant->FoldSeatTrim();
 	TestEqual(TEXT("folded: nose down this time"), Plant->FoldedSeatTrimDeg(), -3.0, 1.0e-4);
 	TestEqual(TEXT("... and the command without it is the rider's own setting"),
 		RammsCurb::SeatTiltLessTrim(RigSeat(), R.Baseline(SeatTilt), FMath::DegreesToRadians(Plant->FoldedSeatTrimDeg())), static_cast<double>(Before), 1.0e-6);
-	TestTrue(TEXT("unfolded"), Plant->Unfold());
-	TestTrue(TEXT("unfolded: the seat's command as it was, to the bit, and its trim an offset again"),
-		SameBits(R.Baseline(SeatTilt), Before) && FMath::IsNearlyEqual(R.Base->GetMotorCommandOffset(SeatTilt), OffsetOn, 1.0e-6f));
-	TestEqual(TEXT("unfolded: nothing is folded"), Plant->FoldedSeatTrimDeg(), 0.0, 0.0);
+	TestTrue(TEXT("taken back out"), Plant->UnfoldSeatTrim());
 	Plant->ApplySeatTrim(0.0);
 
-	// The backstop: a trim on a tilt left alone is folded, and reported.
-	TestTrue(TEXT("measured"), Plant->MeasureLegs(Legs));
-	TestTrue(TEXT("ready"), Plant->SeatTrimRange(Own, Low, High));
-	Plant->ApplySeatTrim(2.0);
-	R.Tick();
-	TestTrue(TEXT("measured again"), Plant->MeasureLegs(Legs));
-	int32 Folded = 0, Zeroed = 0;
-	Plant->FoldOrZero(Folded, Zeroed);
-	TestTrue(TEXT("the backstop folded the seat's trim"), Folded == 1 && Zeroed == 0 && R.Base->GetMotorCommandOffset(SeatTilt) == 0.0f);
-	TestEqual(TEXT("... and says how much"), Plant->FoldedSeatTrimDeg(), 2.0, 1.0e-4);
+	// The backstop (a mode took the legs and nobody said): the seat's trim is neither folded nor dropped, whether its
+	// own command stands still or something goes on writing it (the seat's controller rewrites it every tick).
+	for (const bool bRewritten : { false, true })
+	{
+		TestTrue(TEXT("measured"), Plant->MeasureLegs(Legs));
+		TestTrue(TEXT("ready"), Plant->SeatTrimRange(Own, Low, High));
+		Plant->ApplySeatTrim(2.0);
+		const double Dz[6] = { 0.5, 0.5, 0.0, 0.0, -0.5, -0.5 };
+		Plant->ApplyOffsets(Dz);
+		R.Tick();
+		if (bRewritten)
+		{
+			R.Base->SetMotorCommand(SeatTilt, Before + 1.0e-4f);
+		}
+		TestTrue(TEXT("measured again"), Plant->MeasureLegs(Legs));
+		const float SeatOffset = R.Base->GetMotorCommandOffset(SeatTilt);
+		const float SeatCommand = R.Baseline(SeatTilt);
+		int32		Folded = 0, Zeroed = 0;
+		Plant->FoldOrZero(Folded, Zeroed);
+		const TCHAR* const Case = bRewritten ? TEXT("the seat's command rewritten") : TEXT("the seat's command left alone");
+		TestTrue(*FString::Printf(TEXT("the backstop, %s: the legs' offsets are folded (%d, %d)"), Case, Folded, Zeroed), Folded == 4 && Zeroed == 0 && R.Base->GetMotorCommandOffset(CrankFL) == 0.0f);
+		TestTrue(*FString::Printf(TEXT("the backstop, %s: the seat's trim stays on it, its command as it was, to the bit"), Case),
+			SameBits(R.Base->GetMotorCommandOffset(SeatTilt), SeatOffset) && SameBits(R.Baseline(SeatTilt), SeatCommand));
+		TestEqual(*FString::Printf(TEXT("the backstop, %s: nothing of the trim is in the seat's command"), Case), Plant->FoldedSeatTrimDeg(), 0.0, 0.0);
+		Plant->ApplySeatTrim(0.0);
+		R.Stand();
+		R.StandSeat(0.25f, -0.15f, Before);
+	}
+	Plant->ZeroOffsets();
 	R.Base->ReleaseCommandOffsetLayer(R.Layer());
 
 	// A seat with no tilt motor, or one that is not a position motor: no seat trim, and the legs are levelled all the same.
@@ -2703,28 +2777,56 @@ bool FRammsLevelAssistSeat::RunTest(const FString& Parameters)
 	TestEqual(TEXT("... level.rider_tilt with both"), static_cast<double>(R.Control(RammsLevel::RiderTiltControlId())),
 		RammsLevel::Inclination(FVector2D(SeatPitchDeg(R, true) + Base.X, -2.0)), 0.25);
 
-	// A take-over: the trim into the seat's own command, nothing told, and the taker told how much.
+	// A take-over of the legs: the seat is not taken with them. Its trim stays on it, to the bit, and is still shown.
 	const float ToldBefore = R.Effective(SeatTilt);
 	const float OffsetBefore = R.Base->GetMotorCommandOffset(SeatTilt);
 	const int32 Pushes = R.Log->CountFor(SeatTilt);
 	TestEqual(TEXT("nothing is folded while levelling"), R.Level->GetFoldedSeatTrimDeg(), 0.0f);
 	R.Level->YieldTo(R.Curb);
-	TestTrue(TEXT("yielded: the seat's trim is in its command, no offset left"), R.State() == EState::Yielded && SameBits(R.Baseline(SeatTilt), ToldBefore) && R.Base->GetMotorCommandOffset(SeatTilt) == 0.0f);
-	TestEqual(TEXT("... the seat told nothing"), R.Log->CountFor(SeatTilt), Pushes);
-	TestEqual(TEXT("... and the taker is told the trim folded into it"), static_cast<double>(R.Level->GetFoldedSeatTrimDeg()), 3.0, 0.2);
-	TestEqual(TEXT("... level.seat_trim reads none"), R.Control(RammsLevel::SeatTrimControlId()), 0.0f);
+	TestTrue(TEXT("yielded: the seat's own command and its trim as they were, to the bit"),
+		R.State() == EState::Yielded && SameBits(R.Baseline(SeatTilt), -0.1f) && SameBits(R.Base->GetMotorCommandOffset(SeatTilt), OffsetBefore));
+	TestEqual(TEXT("... nothing of the trim in the seat's command"), R.Level->GetFoldedSeatTrimDeg(), 0.0f);
+	TestEqual(TEXT("... level.seat_trim still reads it"), static_cast<double>(R.Control(RammsLevel::SeatTrimControlId())), 3.0, 0.2);
 
 	// Refused before it began: exactly as it was.
 	R.Level->ResumeFrom(R.Curb, nullptr);
 	TestTrue(TEXT("refused: levelling again"), R.State() == EState::Active);
-	TestTrue(TEXT("... the seat's own command back to the bit"), SameBits(R.Baseline(SeatTilt), -0.1f));
-	TestTrue(TEXT("... what it is told the same, to the bit, and its trim an offset again"),
-		SameBits(R.Effective(SeatTilt), ToldBefore) && FMath::IsNearlyEqual(R.Base->GetMotorCommandOffset(SeatTilt), OffsetBefore, 1.0e-6f));
+	TestTrue(TEXT("... the seat's own command and its trim as they were, to the bit"), SameBits(R.Baseline(SeatTilt), -0.1f) && SameBits(R.Base->GetMotorCommandOffset(SeatTilt), OffsetBefore));
+	TestEqual(TEXT("... and the seat told nothing"), R.Log->CountFor(SeatTilt), Pushes);
+	R.Frames(10);
+	TestEqual(TEXT("... the preferred pitch on the seat still, once"), SeatPitchDeg(R, true) - SeatPitchDeg(R, false), 3.0, 0.2);
+
+	// Taken again, and this taker takes the seat too: the trim into the seat's own command, nothing told, and the
+	// taker told how much.
+	const float ToldAgain = R.Effective(SeatTilt);
+	const int32 PushesAgain = R.Log->CountFor(SeatTilt);
+	R.Level->YieldTo(R.Curb);
+	R.Level->YieldSeatTo(R.Curb);
+	TestTrue(TEXT("the seat taken: its trim is in its command, no offset left"), R.State() == EState::Yielded && SameBits(R.Baseline(SeatTilt), ToldAgain) && R.Base->GetMotorCommandOffset(SeatTilt) == 0.0f);
+	TestEqual(TEXT("... the seat told nothing"), R.Log->CountFor(SeatTilt), PushesAgain);
+	TestEqual(TEXT("... and the taker is told the trim folded into it"), static_cast<double>(R.Level->GetFoldedSeatTrimDeg()), 3.0, 0.2);
+	TestEqual(TEXT("... level.seat_trim reads none"), R.Control(RammsLevel::SeatTrimControlId()), 0.0f);
+
+	// Called off with the seat never written after all (no stance to go to): levelling goes on, the trim taken back
+	// out of the seat's command and held once, nothing told.
+	R.Level->ResumeFrom(R.Curb, nullptr);
+	TestTrue(TEXT("called off: levelling again"), R.State() == EState::Active);
+	TestEqual(TEXT("... the seat's own command the rider's again"), static_cast<double>(R.Baseline(SeatTilt)), -0.1, 1.0e-6);
+	TestTrue(TEXT("... what it is told the same, to the bit"), SameBits(R.Effective(SeatTilt), ToldAgain));
 	TestEqual(TEXT("... nothing folded any more"), R.Level->GetFoldedSeatTrimDeg(), 0.0f);
-	TestEqual(TEXT("... and still the seat told nothing"), R.Log->CountFor(SeatTilt), Pushes);
+	TestEqual(TEXT("... the seat told nothing by the hand-back"), R.Log->CountFor(SeatTilt), PushesAgain);
+	double SeatMoved = 0.0;
+	for (int32 Index = 0; Index < 60; ++Index)
+	{
+		R.Frame();
+		SeatMoved = FMath::Max(SeatMoved, static_cast<double>(FMath::Abs(R.Effective(SeatTilt) - ToldAgain)));
+	}
+	TestTrue(*FString::Printf(TEXT("... nor moved after it (%.5f rad at most)"), SeatMoved), SeatMoved <= 1.0e-3);
+	TestEqual(TEXT("... and the preferred pitch held once, not twice"), SeatPitchDeg(R, true) - SeatPitchDeg(R, false), 3.0, 0.2);
 
 	// Taken for good: once the taker commands the tilt, none of the trim is in its command.
 	R.Level->YieldTo(R.Curb);
+	R.Level->YieldSeatTo(R.Curb);
 	R.Base->SetMotorCommand(SeatTilt, 0.05f);
 	TestEqual(TEXT("the taker has commanded the tilt: nothing of the trim is left in it"), R.Level->GetFoldedSeatTrimDeg(), 0.0f);
 
@@ -2844,6 +2946,945 @@ bool FRammsLevelControlsSeatStatus::RunTest(const FString& Parameters)
 	Facts.OffReferenceDeg = 0.4;
 	Facts.RiderOffDeg = 0.1;
 	TestEqual(TEXT("under a degree either way"), StatusLine(Facts, Severity), FString(TEXT("At the end of levelling reach: a raised wheel would come too near the ground")));
+	return true;
+}
+
+/** The automation tests' way to the curb controller's private steps (declared a friend in its header): the end of a
+ *  crossing and the seat's take-over, which no public call reaches without a whole crossing run in a simulator. */
+struct FRammsCurbControllerTestAccess
+{
+	/** As BeginNegotiation leaves the controller once a crossing has begun: in one of a crossing's phases, nothing
+	 *  waiting to be handed straight back, the mode it came from remembered. */
+	static void BeginAsCrossing(URammsCurbNegotiationController& Curb, FName CameFrom)
+	{
+		Curb.PreviousModeId = CameFrom;
+		Curb.Phase = ERammsCurbPhase::Approach;
+		Curb.bHandBackPending = false;
+	}
+	static void	  Finish(URammsCurbNegotiationController& Curb, ERammsCurbPhase EndPhase, const TCHAR* Why) { Curb.Finish(EndPhase, Why); }
+	static void	  CancelByRider(URammsCurbNegotiationController& Curb) { Curb.CancelByRider(TEXT("the test's rider let the stick go")); }
+	static void	  HandLegsBackFor(URammsCurbNegotiationController& Curb, FName Next) { Curb.HandLegsBackFor(Next); }
+	static bool	  ResolveSeat(URammsCurbNegotiationController& Curb, FString& OutWhy) { return Curb.ResolveSeat(OutWhy); }
+	static void	  CommandSeat(URammsCurbNegotiationController& Curb, double X) { Curb.CommandSeat(X); }
+	static double SeatZeroX(const URammsCurbNegotiationController& Curb) { return Curb.SeatState.ZeroPivot.X; }
+	static double SeatPitchOwnDeg(const URammsCurbNegotiationController& Curb) { return FMath::RadiansToDegrees(Curb.SeatState.PitchOwn); }
+	static double SeatPitchRefDeg(const URammsCurbNegotiationController& Curb) { return FMath::RadiansToDegrees(Curb.SeatState.PitchRef); }
+	/** The base's pitch as the crossing's seat hears it (rad): what the tilt makes up for. */
+	static void SetBasePitchRad(URammsCurbNegotiationController& Curb, float Rad) { Curb.SeatPitchRad = Rad; }
+	/** What a crossing remembers for its hand-back's stance ramp: level ground under the robot, the base level on it
+	 *  now, and a drive stance that stood StanceDeg off that ground as the crossing began. */
+	static void SetStanceOverLevelGround(URammsCurbNegotiationController& Curb, const FVector2D& StanceDeg)
+	{
+		Curb.ActiveTerrain = FRammsCurbTerrain();
+		Curb.ActiveTerrain.bValid = true;
+		Curb.bStanceAttitudeKnown = true;
+		Curb.StanceAttitudeOverGround = StanceDeg;
+		Curb.MeasuredPitchDeg = 0.0f;
+		Curb.MeasuredRollDeg = 0.0f;
+	}
+};
+
+namespace RammsLevelAssistTests
+{
+	/** The curb controller's spare on a hand-back's stance ramp (its HandBackRampSpare). */
+	constexpr double RampSpare = 1.35;
+
+	/** The stance the rig's legs stand in, every leg by its motors as they are commanded now (call it while they stand
+	 *  as FLevelRig::Stand left them): one a mode selector can ramp on a robot with no control surface. With
+	 *  SeatTiltTarget, the seat's tilt is part of the stance too. */
+	FRammsDriveStance MotorStance(const FLevelRig& R, TOptional<float> SeatTiltTarget = TOptional<float>())
+	{
+		FRammsDriveStance Stance;
+		for (const FName& Id : FLevelRig::LegMotors())
+		{
+			FRammsStanceMotorTarget& Target = Stance.MotorTargets.AddDefaulted_GetRef();
+			Target.MotorId = Id;
+			Target.Target = R.Baseline(Id);
+		}
+		if (SeatTiltTarget.IsSet())
+		{
+			FRammsStanceMotorTarget& Target = Stance.MotorTargets.AddDefaulted_GetRef();
+			Target.MotorId = SeatTilt;
+			Target.Target = SeatTiltTarget.GetValue();
+		}
+		return Stance;
+	}
+
+	/** One frame on the backend's clock: the mode selector's tick where there is one, the level assist's, the base's,
+	 *  and the chassis where the ground and the legs' whole pose put it. */
+	void FrameOnClock(const FLevelRig& R, URammsDriveModeSelector* Selector, float Dt = 1.0f / 30.0f)
+	{
+		R.Log->SimTime += Dt;
+		if (Selector != nullptr)
+		{
+			Selector->TickComponent(Dt, LEVELTICK_All, nullptr);
+		}
+		R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+		R.Tick(Dt);
+		R.PoseChassis(R.GroundDeg - PoseDeg(R));
+	}
+
+	/** What the level assist adds to the seat (deg): the platform's pitch as its tilt is told, less as its own command
+	 *  has it. */
+	double SeatTrimDeg(const FLevelRig& R)
+	{
+		return SeatPitchDeg(R, true) - SeatPitchDeg(R, false);
+	}
+} // namespace RammsLevelAssistTests
+
+// Catches: the end of a crossing (URammsCurbNegotiationController::Finish, the main path: done, cancelled, refused at
+// rest) switching the mode without handing the legs to the level assist first, or after; the mode selector's stance
+// ramp started from the levelled joints rather than from the commands the hand-back left (the adopted plane ramped
+// away); the level assist starting while the selector is still changing the stance (it is told by the selector itself,
+// on this robot's own components); and a stance ramp not timed for the turn it really makes: about none where the
+// whole of the pose's plane went into the offsets, the tilt limits' time where part of it is past what the level
+// assist may carry and stays in the commands.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistCrossingEnd,
+	"Ramms.Level.Assist.CrossingEndHandsBackThroughTheSelector",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistCrossingEnd::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	const float			Dt = 1.0f / 30.0f;
+	const TArray<FName> Ids = FLevelRig::LegMotors();
+	for (const bool bPast : { false, true })
+	{
+		const auto Say = [bPast](const TCHAR* What) {
+			return FString::Printf(TEXT("%s: %s"), bPast ? TEXT("a slope past what may be carried") : TEXT("a slope within reach"), What);
+		};
+		FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+		if (!TestTrue(Say(TEXT("the made-up robot with a level assist")), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+		{
+			return false;
+		}
+		R.Log->SimTime = 100.0;
+		R.StandSeat(0.0f, 0.0f, 0.0f);
+		const FRammsDriveStance			Stance = MotorStance(R);
+		URammsHolonomicDriveController* Holonomic = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+		IRammsDriveMode*				HolonomicMode = Holonomic;
+		IRammsDriveMode*				CurbMode = R.Curb;
+		URammsDriveModeSelector*		Selector = NewObject<URammsDriveModeSelector>(R.Actor, TEXT("Selector"));
+		FRig::BeginPlayOf(*Selector);
+		Holonomic->LiftedStance = Stance;
+		const FName HolonomicId = HolonomicMode->GetDriveModeId();
+		R.GroundDeg = FVector2D(3.0, -2.0);
+		R.PoseChassis(R.GroundDeg);
+
+		// The drive mode selected from a pose that is not its stance (the corner cranks a little way off), so that its
+		// stance is brought in over a second; the switch thrown meanwhile. Levelling waits for the selector to be done.
+		for (const FName& Crank : { CrankFL, CrankFR, CrankRL, CrankRR })
+		{
+			R.Base->SetMotorCommand(Crank, 0.05f);
+		}
+		R.Tick();
+		TestTrue(Say(TEXT("the drive mode is selected")), Selector->SetActiveMode(HolonomicId));
+		R.Level->SetAssistEnabled(true);
+		int32 SwitchFrames = 0, StartedEarly = 0;
+		while (Selector->IsSwitchingMode() && SwitchFrames < 600)
+		{
+			FrameOnClock(R, Selector, Dt);
+			++SwitchFrames;
+			StartedEarly += Selector->IsSwitchingMode() && (R.State() == EState::Active || R.CorrectionDeg().Size() > 1.0e-6) ? 1 : 0;
+		}
+		TestTrue(Say(*FString::Printf(TEXT("(the stance took %d frames to bring in)"), SwitchFrames)), SwitchFrames >= 20 && SwitchFrames < 600);
+		TestEqual(Say(TEXT("levelling does not start while the selector is changing the stance")), StartedEarly, 0);
+		for (int32 Index = 0; Index < 200; ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+		}
+		const FVector2D Levelled = R.CorrectionDeg();
+		if (!TestTrue(Say(TEXT("levelled on the slope once it is done")), R.State() == EState::Active && (R.GroundDeg - Levelled).Size() <= 0.1))
+		{
+			return false;
+		}
+
+		// A crossing takes the legs, as BeginNegotiation does, and leaves the base level, 1.5 cm lower.
+		R.Level->YieldTo(R.Curb);
+		TestTrue(Say(TEXT("the curb mode is selected")), Selector->SetActiveMode(CurbMode->GetDriveModeId()));
+		FRammsCurbControllerTestAccess::BeginAsCrossing(*R.Curb, HolonomicId);
+		TestTrue(Say(TEXT("a crossing has the robot")), CurbMode->IsDriveModeActive() && !HolonomicMode->IsDriveModeActive() && R.Curb->IsNegotiating());
+		LowerBase(R, 1.5);
+		if (bPast)
+		{
+			// (The crossing's own level reach is the larger: it ends level on a slope the level assist may carry only
+			// part of in the stance it hands back to.)
+			R.Level->Tuning.MaxCorrectionDeg = FVector2D(1.0, 15.0);
+		}
+		for (int32 Index = 0; Index < 10; ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+		}
+		TestTrue(Say(TEXT("standing by, the base level in the crossing's pose")), R.State() == EState::Yielded && (R.GroundDeg - PoseDeg(R)).Size() <= 0.1);
+		TMap<FName, float> Told;
+		for (const FName& Id : Ids)
+		{
+			Told.Add(Id, R.Effective(Id));
+		}
+		const int32 Before = R.LegPushes();
+
+		// The crossing ends: Done.
+		FRammsCurbControllerTestAccess::Finish(*R.Curb, ERammsCurbPhase::Done, TEXT("crossed"));
+		TestTrue(Say(TEXT("the robot is handed back to the mode it came from, through the selector")),
+			!CurbMode->IsDriveModeActive() && HolonomicMode->IsDriveModeActive() && Selector->GetActiveModeId() == HolonomicId && Selector->IsSwitchingMode());
+		TestTrue(Say(TEXT("... and the legs to the level assist first: levelling at once")), R.State() == EState::Active && R.Level->IsLevelling());
+		TestEqual(Say(TEXT("no leg motor was told anything by it")), R.LegPushes(), Before);
+		for (const FName& Id : Ids)
+		{
+			TestEqual(Say(*FString::Printf(TEXT("%s: commanded as it was"), *Id.ToString())), R.Effective(Id), Told[Id], 1.0e-6f);
+		}
+		const FVector2D Adopted = R.CorrectionDeg();
+		FVector2D		Left(100.0, 100.0);
+		const bool		bLeft = R.Level->GetHandBackTurnDeg(Left);
+		const FVector2D ExpectedLeft = bPast ? FVector2D(2.0, 0.0) : FVector2D::ZeroVector;
+		AddInfo(Say(*FString::Printf(TEXT("the offsets carry (%.3f, %.3f) deg of the pose's (3, -2); (%.3f, %.3f) left in the commands"), Adopted.X, Adopted.Y, Left.X, Left.Y)));
+		TestTrue(Say(TEXT("the offsets carry what of the plane the level assist may")), (Adopted - (R.GroundDeg - ExpectedLeft)).Size() <= 0.1);
+		TestTrue(Say(TEXT("... and it says what is left in the commands for the ramp to turn the base by")), bLeft && (Left - ExpectedLeft).Size() <= 0.1);
+
+		// The selector's ramp: timed for the turn it makes, and the base no further off level than that turn.
+		const double TurnSeconds = RampSpare * RammsDrive::StanceTurnSeconds(ExpectedLeft.Size(), R.Curb->Tuning.TiltRateDegPerSec, R.Curb->Tuning.TiltAccelDegPerSec2);
+		const double Expected = FMath::Max(static_cast<double>(Selector->StanceRampSeconds), TurnSeconds);
+		double		 Seconds = 0.0, MostOff = 0.0, Fastest = 0.0;
+		FVector2D	 Was = R.GroundDeg - PoseDeg(R);
+		while (Selector->IsSwitchingMode() && Seconds < 30.0)
+		{
+			FrameOnClock(R, Selector, Dt);
+			Seconds += Dt;
+			const FVector2D Now = R.GroundDeg - PoseDeg(R);
+			Fastest = FMath::Max(Fastest, (Now - Was).Size() / Dt);
+			MostOff = FMath::Max(MostOff, Now.Size());
+			Was = Now;
+		}
+		AddInfo(Say(*FString::Printf(TEXT("the stance ramp took %.2f s (%.2f expected); the base at most %.3f deg off level, turning at %.2f deg/s at most"), Seconds, Expected, MostOff, Fastest)));
+		TestTrue(Say(TEXT("the stance ramp is timed for the turn it makes")), Seconds >= Expected - 0.1 && Seconds <= Expected + 0.4);
+		if (bPast)
+		{
+			TestTrue(Say(TEXT("(the base turns by what was left in the commands)")), MostOff >= 1.5 && MostOff <= 2.3);
+			TestTrue(Say(TEXT("... well inside the tilt rate")), Fastest <= 0.6 * R.Curb->Tuning.TiltRateDegPerSec);
+		}
+		else
+		{
+			TestTrue(Say(TEXT("level through the stance ramp")), MostOff <= 0.2);
+		}
+		for (const FRammsStanceMotorTarget& Target : Stance.MotorTargets)
+		{
+			TestEqual(Say(*FString::Printf(TEXT("%s: its command is the stance's"), *Target.MotorId.ToString())), R.Baseline(Target.MotorId), Target.Target, 1.0e-6f);
+		}
+		for (int32 Index = 0; Index < 150; ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+		}
+		if (!bPast)
+		{
+			TestTrue(Say(TEXT("level on the stance, the offsets holding it")), (R.GroundDeg - R.CorrectionDeg()).Size() <= 0.1);
+			TestEqual(Say(TEXT("at rest")), R.Status(), FString(TEXT("Level, at rest")));
+		}
+	}
+	return true;
+}
+
+// Catches: a hand-back's stance ramp timed by anything but the turn the ramp will make. Four hand-backs to the same
+// stance from a crossing that remembers a drive stance 4 deg off the ground: the whole plane taken into the offsets
+// (no turn); part of it past what the level assist may carry (that part); nothing taken back though the level assist
+// is on and levelling again (the whole turn to the ground's attitude: the mode selector applies no stance the legs
+// could be read against, so every bit of the pose is in the commands); and the level assist off (the same).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistStanceTime,
+	"Ramms.Level.Assist.StanceChangeTimedForWhatTheRampTurns",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistStanceTime::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	enum class ECase : uint8
+	{
+		Whole,
+		Part,
+		None,
+		Off
+	};
+	for (const ECase Case : { ECase::Whole, ECase::Part, ECase::None, ECase::Off })
+	{
+		const TCHAR* const Name = Case == ECase::Whole ? TEXT("the whole plane adopted") : Case == ECase::Part ? TEXT("part of the plane adopted")
+			: Case == ECase::None																			   ? TEXT("nothing adopted, levelling on")
+																											   : TEXT("the level assist off");
+		const auto		   Say = [Name](const TCHAR* What) { return FString::Printf(TEXT("%s: %s"), Name, What); };
+		FLevelRig		   R;
+		if (!TestTrue(Say(TEXT("the made-up robot with a level assist")), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+		{
+			return false;
+		}
+		URammsHolonomicDriveController* Holonomic = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+		IRammsDriveMode*				HolonomicMode = Holonomic;
+		IRammsDriveMode*				CurbMode = R.Curb;
+		Holonomic->LiftedStance = RigStance();
+		HolonomicMode->SetDriveModeActive(false);
+		HolonomicMode->SetDriveModeActive(true);
+		if (Case == ECase::None)
+		{
+			// A mode selector that applies no stance at all: there is nothing the legs are about to be taken to.
+			URammsDriveModeSelector* Selector = NewObject<URammsDriveModeSelector>(R.Actor, TEXT("Selector"));
+			FRig::BeginPlayOf(*Selector);
+			Selector->bApplyLinkageStance = false;
+		}
+		R.GroundDeg = FVector2D(3.0, -2.0);
+		R.PoseChassis(R.GroundDeg);
+		R.Level->SetAssistEnabled(Case != ECase::Off);
+		for (int32 Index = 0; Index < 150; ++Index)
+		{
+			FrameOnPose(R);
+		}
+		R.Level->YieldTo(R.Curb);
+		HolonomicMode->SetDriveModeActive(false);
+		CurbMode->SetDriveModeActive(true);
+		FRammsCurbControllerTestAccess::SetStanceOverLevelGround(*R.Curb, FVector2D(4.0, 0.0));
+		if (Case == ECase::Part)
+		{
+			R.Level->Tuning.MaxCorrectionDeg = FVector2D(1.0, 15.0);
+		}
+		for (int32 Index = 0; Index < 3; ++Index)
+		{
+			FrameOnPose(R);
+		}
+		TMap<FName, float> Was;
+		for (const FName& Id : FLevelRig::LegMotors())
+		{
+			Was.Add(Id, R.Baseline(Id));
+		}
+		FRammsCurbControllerTestAccess::HandLegsBackFor(*R.Curb, HolonomicMode->GetDriveModeId());
+		const double Seconds = CurbMode->GetStanceChangeMinSeconds();
+		const auto	 TimeFor = [&R](double TurnDeg) { return RampSpare * RammsDrive::StanceTurnSeconds(TurnDeg, R.Curb->Tuning.TiltRateDegPerSec, R.Curb->Tuning.TiltAccelDegPerSec2); };
+		AddInfo(Say(*FString::Printf(TEXT("the stance change is given %.2f s at least (a 4 deg turn takes %.2f, a 2 deg one %.2f)"), Seconds, TimeFor(4.0), TimeFor(2.0))));
+		switch (Case)
+		{
+			case ECase::Whole:
+				TestTrue(Say(TEXT("levelling again")), R.State() == EState::Active && R.Level->IsLevelling());
+				TestEqual(Say(TEXT("the ramp turns the base by nothing: no time asked")), Seconds, 0.0, 0.05);
+				break;
+			case ECase::Part:
+				TestTrue(Say(TEXT("levelling again")), R.State() == EState::Active && R.Level->IsLevelling());
+				TestEqual(Say(TEXT("the ramp turns the base by the 2 deg left in the commands: timed for that")), Seconds, TimeFor(2.0), 0.08);
+				break;
+			case ECase::None:
+			{
+				FVector2D Left;
+				TestTrue(Say(TEXT("levelling again, from nothing")), R.State() == EState::Active && R.Level->IsLevelling() && R.CorrectionDeg().Size() <= 1.0e-6);
+				TestFalse(Say(TEXT("... and it says no plane was taken back out")), R.Level->GetHandBackTurnDeg(Left));
+				for (const FName& Id : FLevelRig::LegMotors())
+				{
+					TestTrue(Say(*FString::Printf(TEXT("%s: its command as the crossing left it"), *Id.ToString())), SameBits(R.Baseline(Id), Was[Id]));
+				}
+				TestEqual(Say(TEXT("the whole pose is in the commands: timed for the turn to the ground's attitude")), Seconds, TimeFor(4.0), 1.0e-3);
+				break;
+			}
+			default:
+				TestTrue(Say(TEXT("still off")), R.State() == EState::Off && !R.Level->IsLevelling());
+				TestEqual(Say(TEXT("timed for the turn to the ground's attitude, as with no level assist")), Seconds, TimeFor(4.0), 1.0e-3);
+				break;
+		}
+	}
+	return true;
+}
+
+// Catches: a seat trim that does not survive a take-over by something that never takes the seat. A crossing called off
+// before it ran (the rider let go while the plan was awaited: CancelByRider, the same hand-back a refusal at rest
+// makes) hands back to a drive mode whose stance names the seat's tilt: the trim must neither be stepped off the seat
+// (the stance ramp started from a command that still held it), nor ramped out, nor walked in a second time on top of
+// a command that still holds it. And a mode that takes the legs with nobody saying so (the tick's backstop) while the
+// seat's own controller goes on rewriting the tilt's command every tick: the trim must not be dropped in one write.
+// (The seat's controller itself is not on this rig: what it does to the tilt's command while it holds the seat is.)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistSeatKept,
+	"Ramms.Level.Assist.SeatTrimKeptWhereTheTakerNeverTakesTheSeat",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistSeatKept::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	const float Dt = 1.0f / 30.0f;
+	{
+		FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+		if (!TestTrue(TEXT("the made-up robot with a seat and a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+		{
+			return false;
+		}
+		R.Log->SimTime = 100.0;
+		R.StandSeat(0.0f, 0.0f, 0.0f);
+		// The drive mode's stance names the seat's tilt: 0.08 rad.
+		const float						StanceTilt = 0.08f;
+		const FRammsDriveStance			Stance = MotorStance(R, StanceTilt);
+		URammsHolonomicDriveController* Holonomic = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+		IRammsDriveMode*				HolonomicMode = Holonomic;
+		IRammsDriveMode*				CurbMode = R.Curb;
+		URammsDriveModeSelector*		Selector = NewObject<URammsDriveModeSelector>(R.Actor, TEXT("Selector"));
+		FRig::BeginPlayOf(*Selector);
+		Holonomic->LiftedStance = Stance;
+		const FName HolonomicId = HolonomicMode->GetDriveModeId();
+		TestTrue(TEXT("the drive mode is selected"), Selector->SetActiveMode(HolonomicId));
+		for (int32 Index = 0; Index < 600 && Selector->IsSwitchingMode(); ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+		}
+		TestTrue(TEXT("(its stance is in: the seat's tilt where it names it)"), !Selector->IsSwitchingMode() && SameBits(R.Baseline(SeatTilt), StanceTilt));
+		// The rider tilts the seat themselves, and prefers 3 deg back; the robot stands on a slope.
+		R.Base->SetMotorCommand(SeatTilt, -0.1f);
+		static_cast<IRammsControlContributor*>(R.Level)->ApplyControl(RammsLevel::PreferencePitchControlId(), 3.0f);
+		R.GroundDeg = FVector2D(3.0, -2.0);
+		R.PoseChassis(R.GroundDeg);
+		R.Level->SetAssistEnabled(true);
+		for (int32 Index = 0; Index < 300; ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+		}
+		if (!TestTrue(*FString::Printf(TEXT("levelled, the seat pitched back by the preferred 3 deg (%.2f)"), SeatTrimDeg(R)), R.State() == EState::Active && FMath::IsNearlyEqual(SeatTrimDeg(R), 3.0, 0.2)))
+		{
+			return false;
+		}
+
+		// A crossing takes the legs, and waits for its plan: it never commands the seat.
+		R.Level->YieldTo(R.Curb);
+		TestTrue(TEXT("the curb mode is selected"), Selector->SetActiveMode(CurbMode->GetDriveModeId()));
+		FRammsCurbControllerTestAccess::BeginAsCrossing(*R.Curb, HolonomicId);
+		const float ToldSeat = R.Effective(SeatTilt);
+		const int32 SeatPushes = R.Log->CountFor(SeatTilt);
+		int32		Moved = 0;
+		for (int32 Index = 0; Index < 15; ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+			Moved += SameBits(R.Effective(SeatTilt), ToldSeat) ? 0 : 1;
+		}
+		TestTrue(TEXT("(the crossing has the legs)"), R.State() == EState::Yielded && CurbMode->IsDriveModeActive());
+		TestEqual(TEXT("while the crossing has the legs and not the seat: the seat's tilt is told the same, to the bit"), Moved, 0);
+		TestEqual(TEXT("... and told nothing"), R.Log->CountFor(SeatTilt), SeatPushes);
+		TestTrue(TEXT("... its own command the rider's, the trim on top of it still"), SameBits(R.Baseline(SeatTilt), -0.1f) && R.Level->GetFoldedSeatTrimDeg() == 0.0f);
+		TestEqual(TEXT("... which level.seat_trim still shows"), static_cast<double>(R.Control(RammsLevel::SeatTrimControlId())), 3.0, 0.2);
+
+		// The rider lets go before the crossing has run: handed back, the stance ramped in by the selector.
+		FRammsCurbControllerTestAccess::CancelByRider(*R.Curb);
+		TestTrue(TEXT("called off: handed back through the selector, levelling again at once"),
+			R.State() == EState::Active && HolonomicMode->IsDriveModeActive() && !CurbMode->IsDriveModeActive() && Selector->IsSwitchingMode());
+		TestEqual(TEXT("the hand-back did not move the seat"), R.Effective(SeatTilt), ToldSeat, 1.0e-6f);
+		double LeastTrim = SeatTrimDeg(R), MostTrim = LeastTrim, BiggestStep = 0.0;
+		float  Last = R.Effective(SeatTilt);
+		int32  After = 0;
+		for (int32 Index = 0; Index < 900 && After < 90; ++Index)
+		{
+			FrameOnClock(R, Selector, Dt);
+			After += Selector->IsSwitchingMode() ? 0 : 1;
+			LeastTrim = FMath::Min(LeastTrim, SeatTrimDeg(R));
+			MostTrim = FMath::Max(MostTrim, SeatTrimDeg(R));
+			BiggestStep = FMath::Max(BiggestStep, static_cast<double>(FMath::Abs(R.Effective(SeatTilt) - Last)));
+			Last = R.Effective(SeatTilt);
+		}
+		AddInfo(FString::Printf(TEXT("through the hand-back and the stance ramp: the seat's trim between %.2f and %.2f deg, its tilt told %.4f rad more or less from one frame to the next at most"), LeastTrim, MostTrim, BiggestStep));
+		TestTrue(TEXT("the trim stays on the seat throughout: never stepped off, never ramped out, never twice"), LeastTrim >= 2.7 && MostTrim <= 3.3);
+		// (The stance takes the seat's own command 0.18 rad, over a second at least, on a curve 1.5 times as steep at
+		// its middle as a straight line: 0.009 rad a frame.)
+		TestTrue(TEXT("the seat's tilt never stepped"), BiggestStep <= 0.012);
+		TestTrue(TEXT("the seat's own command ends where the stance names it"), SameBits(R.Baseline(SeatTilt), StanceTilt));
+	}
+	{
+		// The backstop, with the seat's own controller holding the seat.
+		FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+		if (!TestTrue(TEXT("the made-up robot with a seat and a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+		{
+			return false;
+		}
+		AddExpectedMessagePlain(TEXT("took the legs without yielding"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+		R.StandSeat(0.0f, 0.0f, -0.1f);
+		URammsHolonomicDriveController* Holonomic = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+		IRammsDriveMode*				HolonomicMode = Holonomic;
+		IRammsDriveMode*				CurbMode = R.Curb;
+		Holonomic->LiftedStance = RigStance();
+		HolonomicMode->SetDriveModeActive(false);
+		HolonomicMode->SetDriveModeActive(true);
+		static_cast<IRammsControlContributor*>(R.Level)->ApplyControl(RammsLevel::PreferencePitchControlId(), 3.0f);
+		R.GroundDeg = FVector2D(3.0, -2.0);
+		R.PoseChassis(R.GroundDeg);
+		R.Level->SetAssistEnabled(true);
+		// (What the seat's controller does to the tilt's command while it holds the seat: writes it again every tick,
+		// from a measured angle that is never the same twice.)
+		int32	   Frame = 0;
+		const auto SeatControllerHolds = [&R, &Frame]() { R.Base->SetMotorCommand(SeatTilt, -0.1f + (++Frame % 2 == 0 ? 1.0e-5f : -1.0e-5f)); };
+		for (int32 Index = 0; Index < 300; ++Index)
+		{
+			SeatControllerHolds();
+			R.Frame(Dt);
+		}
+		if (!TestTrue(*FString::Printf(TEXT("levelled, the seat pitched back by the preferred 3 deg (%.2f)"), SeatTrimDeg(R)), R.State() == EState::Active && FMath::IsNearlyEqual(SeatTrimDeg(R), 3.0, 0.2)))
+		{
+			return false;
+		}
+		const float ToldSeat = R.Effective(SeatTilt);
+		// The curb mode picked by hand: nobody yields, and the level assist's own tick stands by for it.
+		HolonomicMode->SetDriveModeActive(false);
+		CurbMode->SetDriveModeActive(true);
+		SeatControllerHolds();
+		R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+		R.Tick(Dt);
+		TestTrue(TEXT("unannounced: standing by, the legs' offsets folded"), R.State() == EState::Yielded && R.CorrectionDeg().Size() <= 1.0e-6);
+		TestEqual(TEXT("... the seat's tilt told what it was (the trim not dropped)"), R.Effective(SeatTilt), ToldSeat, 1.0e-4f);
+		TestTrue(TEXT("... the trim still on the seat, none of it in the seat's command"), R.Base->GetMotorCommandOffset(SeatTilt) != 0.0f && R.Level->GetFoldedSeatTrimDeg() == 0.0f);
+		// With nothing to cross it hands straight back; levelling goes on with the trim it finds on the seat.
+		R.Curb->RegisterComponent();
+		SeatControllerHolds();
+		R.Curb->TickComponent(Dt, LEVELTICK_All, nullptr);
+		TestTrue(TEXT("handed straight back: levelling again"), R.State() == EState::Active && HolonomicMode->IsDriveModeActive());
+		double LeastTrim = SeatTrimDeg(R), MostTrim = LeastTrim;
+		for (int32 Index = 0; Index < 90; ++Index)
+		{
+			SeatControllerHolds();
+			R.Frame(Dt);
+			LeastTrim = FMath::Min(LeastTrim, SeatTrimDeg(R));
+			MostTrim = FMath::Max(MostTrim, SeatTrimDeg(R));
+		}
+		AddInfo(FString::Printf(TEXT("a take-over nobody announced, the seat's controller holding the seat: the trim between %.2f and %.2f deg throughout"), LeastTrim, MostTrim));
+		TestTrue(TEXT("the trim stays on the seat throughout"), LeastTrim >= 2.7 && MostTrim <= 3.3);
+
+		// Switched off while something has the legs, which hands them back in the same frame: the trim is walked off
+		// the seat, not dropped with the legs' correction, and the seat's motor is let go only once it is.
+		HolonomicMode->SetDriveModeActive(false);
+		CurbMode->SetDriveModeActive(true);
+		R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+		R.Tick(Dt);
+		TestTrue(TEXT("(standing by again, the trim on the seat)"), R.State() == EState::Yielded && FMath::IsNearlyEqual(SeatTrimDeg(R), 3.0, 0.3));
+		R.Level->SetAssistEnabled(false);
+		R.Curb->TickComponent(Dt, LEVELTICK_All, nullptr);
+		TestTrue(TEXT("switched off and handed back: off, the trim still on the seat"), R.State() == EState::Off && HolonomicMode->IsDriveModeActive() && FMath::IsNearlyEqual(SeatTrimDeg(R), 3.0, 0.3));
+		double FastestDegPerSec = 0.0, WasTrim = SeatTrimDeg(R);
+		int32  FramesToZero = 0;
+		for (int32 Index = 0; Index < 150; ++Index)
+		{
+			R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+			R.Tick(Dt);
+			FastestDegPerSec = FMath::Max(FastestDegPerSec, FMath::Abs(SeatTrimDeg(R) - WasTrim) / Dt);
+			WasTrim = SeatTrimDeg(R);
+			FramesToZero += FMath::Abs(WasTrim) > 1.0e-6 ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("switched off while standing by: the trim walked off the seat in %d frames, at %.2f deg/s at most"), FramesToZero, FastestDegPerSec));
+		TestTrue(TEXT("switched off: the trim goes at the tilt policy's rate"), FastestDegPerSec <= R.Level->Tuning.TiltRateDegPerSec * 1.05 && FramesToZero >= 25);
+		TestTrue(TEXT("... to nothing, and the level assist is then off"), R.Base->GetMotorCommandOffset(SeatTilt) == 0.0f && R.State() == EState::Off);
+		const int32 Count = R.Log->CountFor(SeatTilt);
+		R.Base->SetMotorCommand(SeatTilt, -0.1f);
+		TestEqual(TEXT("... its motors let go (a command to the seat's tilt is told at once again)"), R.Log->CountFor(SeatTilt), Count + 1);
+	}
+	return true;
+}
+
+// Catches: a crossing that takes the seat without the level assist's trim being put into the seat's command first
+// (the trim then stays under the crossing's commands for the whole crossing), or after it has read the command; the
+// rider's own setting read with the trim still in it (the rider is brought to the wrong pitch as the base levels in);
+// the pitch the crossing first holds taken without the trim (the rider stepped by it at take-over); and a retry that
+// no longer finds the seat as the last crossing left it because a trim was folded on top. Also pins when each of the
+// crossing's seat commands is told: the two link motors at once, the tilt, which the level assist holds an offset
+// layer on, at the robot base's tick of the same frame, bare.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistCrossingSeat,
+	"Ramms.Level.Assist.CrossingTakesTheSeatWithItsTrim",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistCrossingSeat::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+	if (!TestTrue(TEXT("the made-up robot with a seat and a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	IRammsDriveMode* CurbMode = R.Curb;
+	// The rider has the seat tilted 0.1 rad back themselves and prefers 3 deg more.
+	R.StandSeat(0.0f, 0.0f, -0.1f);
+	static_cast<IRammsControlContributor*>(R.Level)->ApplyControl(RammsLevel::PreferencePitchControlId(), 3.0f);
+	R.GroundDeg = FVector2D(2.0, 1.0);
+	R.PoseChassis(R.GroundDeg);
+	R.Level->SetAssistEnabled(true);
+	R.Frames(300);
+	const double Own = SeatPitchDeg(R, false);
+	const double With = SeatPitchDeg(R, true);
+	if (!TestTrue(*FString::Printf(TEXT("levelled: the rider's own %.2f deg, %.2f with the preferred 3"), Own, With), R.State() == EState::Active && FMath::IsNearlyEqual(With - Own, 3.0, 0.2)))
+	{
+		return false;
+	}
+
+	// The crossing takes the legs, and, when it first commands the seat, the seat.
+	R.Level->YieldTo(R.Curb);
+	CurbMode->SetDriveModeActive(true);
+	FString Why;
+	if (!TestTrue(TEXT("the seat resolves"), FRammsCurbControllerTestAccess::ResolveSeat(*R.Curb, Why)))
+	{
+		AddError(Why);
+		return false;
+	}
+	const double X = FRammsCurbControllerTestAccess::SeatZeroX(*R.Curb);
+	const int32	 TiltPushes = R.Log->CountFor(SeatTilt);
+	const int32	 LinkPushes = R.Log->CountFor(SeatA);
+	FRammsCurbControllerTestAccess::CommandSeat(*R.Curb, X);
+	TestTrue(TEXT("the crossing has the seat: nothing of the level assist's is left under its command"), R.Base->GetMotorCommandOffset(SeatTilt) == 0.0f);
+	TestEqual(TEXT("the rider's own setting is the one without the trim"), FRammsCurbControllerTestAccess::SeatPitchOwnDeg(*R.Curb), Own, 1.0e-3);
+	TestEqual(TEXT("the pitch the crossing first holds is where the rider is, trim and all"), FRammsCurbControllerTestAccess::SeatPitchRefDeg(*R.Curb), With, 1.0e-3);
+	TestEqual(TEXT("... so its first command leaves the platform where it was"), SeatPitchDeg(R, false), With, 1.0e-3);
+	// When each is told.
+	TestEqual(TEXT("the seat's link motors are told at once"), R.Log->CountFor(SeatA), LinkPushes + 1);
+	TestEqual(TEXT("the tilt, under the level assist's offset layer, not yet"), R.Log->CountFor(SeatTilt), TiltPushes);
+	R.Tick();
+	TestEqual(TEXT("... but at the robot base's tick of the same frame, once"), R.Log->CountFor(SeatTilt), TiltPushes + 1);
+	TestTrue(TEXT("... the crossing's command, bare"), SameBits(R.Log->LastFor(SeatTilt), R.Baseline(SeatTilt)));
+
+	// The base pitches under the crossing and the tilt makes up for it; the crossing stops there, and the level
+	// assist, handed the legs back, puts its trim on again over the seat as the crossing left it.
+	FRammsCurbControllerTestAccess::SetBasePitchRad(*R.Curb, 0.05f);
+	FRammsCurbControllerTestAccess::CommandSeat(*R.Curb, X);
+	R.Tick();
+	TestEqual(TEXT("(the tilt makes up for the base's pitch)"), SeatPitchDeg(R, false), With - FMath::RadiansToDegrees(0.05), 1.0e-3);
+	TestEqual(TEXT("(the crossing has moved the tilt: none of the trim counts as in its command any more)"), R.Level->GetFoldedSeatTrimDeg(), 0.0f);
+	const float LeftAt = R.Baseline(SeatTilt);
+	CurbMode->SetDriveModeActive(false);
+	R.Level->ResumeFrom(R.Curb, nullptr);
+	R.Frames(300);
+	TestTrue(*FString::Printf(TEXT("handed back: levelling, the trim on again (%.2f) over the seat as the crossing left it"), SeatTrimDeg(R)),
+		R.State() == EState::Active && FMath::IsNearlyEqual(SeatTrimDeg(R), 3.0, 0.2) && SameBits(R.Baseline(SeatTilt), LeftAt));
+
+	// Tried again: the seat still stands as that crossing left it, so the setting kept is the rider's -- not the pitch
+	// read back, which has the crossing's making-up in it, nor that with the trim.
+	R.Level->YieldTo(R.Curb);
+	CurbMode->SetDriveModeActive(true);
+	TestTrue(TEXT("the seat resolves again"), FRammsCurbControllerTestAccess::ResolveSeat(*R.Curb, Why));
+	FRammsCurbControllerTestAccess::SetBasePitchRad(*R.Curb, 0.0f);
+	const double WithAgain = SeatPitchDeg(R, true);
+	FRammsCurbControllerTestAccess::CommandSeat(*R.Curb, X);
+	TestEqual(TEXT("tried again: the rider's own setting is the one the last crossing held"), FRammsCurbControllerTestAccess::SeatPitchOwnDeg(*R.Curb), Own, 1.0e-3);
+	TestEqual(TEXT("... and the platform is left where it was"), SeatPitchDeg(R, false), WithAgain, 1.0e-3);
+	TestTrue(TEXT("(which is not the setting: the last crossing's making-up and the trim are in it)"), FMath::Abs(WithAgain - Own) > 0.1);
+	return true;
+}
+
+// Catches: a drive mode that drives the seat's tilt, and no leg, taken for one that has taken the legs. Levelling does
+// not run in that mode (it is not named for it), so the base is given back to its stance: gently, within the tilt
+// policy, as for any mode that leaves the legs alone -- not folded into the legs' commands at once as for a crossing,
+// with a warning that somebody forgot to yield.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistSeatDrivingMode,
+	"Ramms.Level.Assist.AModeThatDrivesTheSeatHasNotTakenTheLegs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistSeatDrivingMode::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+	if (!TestTrue(TEXT("the made-up robot with a seat and a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	R.StandSeat(0.0f, 0.0f, 0.0f);
+	URammsHolonomicDriveController* Holonomic = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+	IRammsDriveMode*				HolonomicMode = Holonomic;
+	HolonomicMode->SetDriveModeActive(false);
+	HolonomicMode->SetDriveModeActive(true);
+	// A made-up mode that says it drives the seat's tilt motor (and a wheel): never begun, it drives nothing here.
+	URammsDifferentialDriveController* SeatDriver = NewObject<URammsDifferentialDriveController>(R.Actor, TEXT("SeatDriver"));
+	IRammsDriveMode*				   SeatDriverMode = SeatDriver;
+	SeatDriver->LeftMotorId = SeatTilt;
+	SeatDriver->RightMotorId = TEXT("wheel_free");
+	SeatDriverMode->SetDriveModeActive(false);
+	R.Level->EnabledModeIds = { HolonomicMode->GetDriveModeId() };
+	R.GroundDeg = FVector2D(3.0, -2.0);
+	R.PoseChassis(R.GroundDeg);
+	R.Level->SetAssistEnabled(true);
+	R.Frames(200);
+	const FVector2D Levelled = R.CorrectionDeg();
+	if (!TestTrue(TEXT("levelled in the mode it is named for"), R.State() == EState::Active && (R.GroundDeg - Levelled).Size() <= 0.2))
+	{
+		return false;
+	}
+	HolonomicMode->SetDriveModeActive(false);
+	SeatDriverMode->SetDriveModeActive(true);
+	TArray<FName> Claimed;
+	static_cast<IRammsControlContributor*>(SeatDriver)->GetClaimedMotorIds(Claimed);
+	TestTrue(TEXT("(that mode says it drives the seat's tilt, and no leg motor)"), Claimed.Contains(SeatTilt) && !Claimed.ContainsByPredicate([](const FName& Id) { return FLevelRig::LegMotors().Contains(Id); }));
+	R.Frame();
+	TestTrue(TEXT("a mode that drives the seat's tilt: the base is given back gently, the legs not folded for it"), R.State() == EState::Releasing);
+	TestTrue(TEXT("... the plane still in the offsets a frame on"), (R.CorrectionDeg() - Levelled).Size() <= 0.3);
+	return true;
+}
+
+// Catches: a fore/aft preference the seat has no room for dropped instead of being held by the legs: a trim limit
+// under the preference's own, and a seat the rider has tilted to near its stop.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistPreferencePastTheSeat,
+	"Ramms.Level.Assist.PreferenceTheSeatHasNoRoomForIsTheLegs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistPreferencePastTheSeat::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	using RammsLevel::FPreferenceSplit;
+	using RammsLevel::SplitPreference;
+	// The split itself.
+	{
+		const FPreferenceSplit Fits = SplitPreference(FVector2D(3.0, -2.0), true, true, -40.0, 30.0, 8.0);
+		TestTrue(TEXT("a preference the seat has room for: the pitch in the seat, the roll in the base"), Fits.SeatDeg == 3.0 && Fits.BaseDeg.Equals(FVector2D(0.0, -2.0), 0.0));
+		const FPreferenceSplit Limit = SplitPreference(FVector2D(8.0, -2.0), true, true, -40.0, 30.0, 3.0);
+		TestTrue(TEXT("past the trim's limit: the limit in the seat, the rest in the base"), Limit.SeatDeg == 3.0 && Limit.BaseDeg.Equals(FVector2D(5.0, -2.0), 1.0e-12));
+		const FPreferenceSplit Room = SplitPreference(FVector2D(-6.0, 0.0), true, true, -1.5, 30.0, 8.0);
+		TestTrue(TEXT("past the seat's own room, nose down: what fits in the seat, the rest in the base"), Room.SeatDeg == -1.5 && Room.BaseDeg.Equals(FVector2D(-4.5, 0.0), 1.0e-12));
+		const FPreferenceSplit NoRoom = SplitPreference(FVector2D(4.0, 1.0), true, true, -10.0, 0.0, 8.0);
+		TestTrue(TEXT("a seat on its stop that way: all of it in the base"), NoRoom.SeatDeg == 0.0 && NoRoom.BaseDeg.Equals(FVector2D(4.0, 1.0), 0.0));
+		const FPreferenceSplit NoSeat = SplitPreference(FVector2D(4.0, 1.0), false, true, -40.0, 30.0, 8.0);
+		const FPreferenceSplit TrimOff = SplitPreference(FVector2D(4.0, 1.0), true, false, -40.0, 30.0, 8.0);
+		TestTrue(TEXT("no seat, or its trim switched off: all of it in the base"),
+			NoSeat.SeatDeg == 0.0 && NoSeat.BaseDeg.Equals(FVector2D(4.0, 1.0), 0.0) && TrimOff.SeatDeg == 0.0 && TrimOff.BaseDeg.Equals(FVector2D(4.0, 1.0), 0.0));
+		const FPreferenceSplit NotANumber = SplitPreference(FVector2D(4.0, 1.0), true, true, NAN, 30.0, 8.0);
+		TestTrue(TEXT("a room that is not a number is no seat: all of it in the base"), NotANumber.SeatDeg == 0.0 && NotANumber.BaseDeg.Equals(FVector2D(4.0, 1.0), 0.0));
+	}
+	// On the robot: the rider gets the whole preference either way.
+	for (const bool bByTheLimit : { true, false })
+	{
+		const TCHAR* const Name = bByTheLimit ? TEXT("a trim limit of 3 deg") : TEXT("a seat tilted to near its stop");
+		FLevelRig		   R(/*bWithCurb=*/true, /*bWithLevel=*/true, /*bStartOn=*/false, /*bWithSeat=*/true);
+		if (!TestTrue(TEXT("the made-up robot with a seat and a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+		{
+			return false;
+		}
+		// (The made-up tilt motor stops at -0.6 rad, which is 0.6 rad of platform pitch nose up: tilted to -0.55 rad
+		// by its rider, the seat has under 3 deg left that way.)
+		R.StandSeat(0.0f, 0.0f, bByTheLimit ? 0.0f : -0.55f);
+		if (bByTheLimit)
+		{
+			R.Level->Tuning.SeatTrimMaxDeg = 3.0f;
+		}
+		R.GroundDeg = FVector2D(-2.0, 1.0);
+		R.PoseChassis(R.GroundDeg);
+		static_cast<IRammsControlContributor*>(R.Level)->ApplyControl(RammsLevel::PreferencePitchControlId(), 7.0f);
+		R.Level->SetAssistEnabled(true);
+		R.Frames(450);
+		const FVector2D Base = R.GroundDeg - R.CorrectionDeg();
+		const double	Trim = SeatTrimDeg(R);
+		AddInfo(FString::Printf(TEXT("%s, 7 deg preferred: the seat holds %.2f deg, the base %.2f; the rider %.2f"), Name, Trim, Base.X, Base.X + Trim));
+		TestTrue(*FString::Printf(TEXT("%s: levelling"), Name), R.State() == EState::Active);
+		TestTrue(*FString::Printf(TEXT("%s: the seat holds what it has room for, and no more"), Name), Trim >= 2.0 && Trim <= 3.1);
+		TestEqual(FString::Printf(TEXT("%s: the rider is pitched back by the whole 7 deg they asked for"), Name), Base.X + Trim, 7.0, 0.3);
+		TestEqual(FString::Printf(TEXT("%s: the roll is level"), Name), Base.Y, 0.0, 0.2);
+	}
+	return true;
+}
+
+// Catches: the drive's speed request dropped in one tick when levelling stops, with the scale still under 1 (the
+// commanded speed steps up to full); the drive then left at full speed while level.speed_scale shows something else;
+// and, levelling begun again soon after a take-over, a drive at full speed asked for a part of it in one go.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistSpeedScaleLetGo,
+	"Ramms.Level.Assist.DriveLetGoGentlyWhenLevellingStops",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistSpeedScaleLetGo::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	FLevelRig R;
+	if (!TestTrue(TEXT("the made-up robot with a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	URammsHolonomicDriveController* Drive = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+	IRammsDriveMode*				CurbMode = R.Curb;
+	const float						Dt = 1.0f / 30.0f;
+	R.Log->SimTime = 50.0;
+	// Driven along a 9 deg slope at 150 cm/s (the chassis moved by hand): the cap holds the speed the slope's end can
+	// be taken at for as long as the robot stands on it, whatever is left to correct.
+	const auto DriveOn = [&R, Dt]() {
+		R.Log->SimTime += Dt;
+		R.Origin.X += 150.0 * Dt;
+		R.Frame(Dt);
+	};
+	R.GroundDeg = FVector2D(9.0, 0.0);
+	R.PoseChassis(R.GroundDeg);
+	R.Level->SetAssistEnabled(true);
+	for (int32 Index = 0; Index < 240; ++Index)
+	{
+		DriveOn();
+	}
+	const float Held = Drive->GetDriveSpeedScale();
+	if (!TestTrue(*FString::Printf(TEXT("levelled and driving on the slope, the drive held to a part of its speed (%.2f)"), Held), R.State() == EState::Active && Held < 0.95f))
+	{
+		return false;
+	}
+
+	// Switched off while driving: the base is given back, and then the drive -- at the scale's own rise, never in a step.
+	R.Level->SetAssistEnabled(false);
+	const double Rise = R.Level->Tuning.SpeedScaleRisePerSec * Dt + 1.0e-4;
+	float		 Was = Held;
+	double		 BiggestRise = 0.0;
+	int32		 Differing = 0, FramesReleasing = 0, FramesAfter = 0;
+	float		 AtTheEnd = 1.0f;
+	for (int32 Index = 0; Index < 600 && Drive->GetDriveSpeedScale() < 1.0f; ++Index)
+	{
+		const bool bWasReleasing = R.State() == EState::Releasing || Index == 0;
+		DriveOn();
+		const float Now = Drive->GetDriveSpeedScale();
+		BiggestRise = FMath::Max(BiggestRise, static_cast<double>(Now - Was));
+		Differing += FMath::IsNearlyEqual(Now, R.Control(RammsLevel::SpeedScaleControlId()), 1.0e-6f) ? 0 : 1;
+		if (R.State() == EState::Releasing)
+		{
+			++FramesReleasing;
+		}
+		else
+		{
+			if (bWasReleasing)
+			{
+				AtTheEnd = Was;
+			}
+			++FramesAfter;
+		}
+		Was = Now;
+	}
+	AddInfo(FString::Printf(TEXT("switched off at a scale of %.2f: the release took %d frames and ended with the scale at %.2f; the drive was let go over %d more; it rose %.4f a frame at most (the scale's own rise is %.4f)"), Held, FramesReleasing, AtTheEnd,
+		FramesAfter, BiggestRise, Rise));
+	TestTrue(TEXT("(the release ended with the scale still under 1)"), R.State() == EState::Off && FramesReleasing > 0 && AtTheEnd < 0.95f);
+	TestTrue(TEXT("the drive's scale never steps up: it rises at the scale's own rate, through the end of the release"), BiggestRise <= Rise);
+	TestEqual(TEXT("... and is what level.speed_scale shows on every frame until it is 1"), Differing, 0);
+	TestEqual(TEXT("... which it then is, the request withdrawn"), Drive->GetDriveSpeedScale(), 1.0f);
+
+	// Levelling again, slowed again; a crossing takes the legs for a moment and hands them back: the drive, let go at
+	// once for the crossing, is not asked for a part of its speed in one go when levelling goes on.
+	R.Level->SetAssistEnabled(true);
+	for (int32 Index = 0; Index < 240; ++Index)
+	{
+		DriveOn();
+	}
+	const float HeldAgain = Drive->GetDriveSpeedScale();
+	TestTrue(*FString::Printf(TEXT("levelling again, the drive held again (%.2f)"), HeldAgain), R.State() == EState::Active && HeldAgain < 0.95f);
+	// (A take-over refused in the same call changes nothing: the drive keeps the scale it had.)
+	R.Level->YieldTo(R.Curb);
+	R.Level->ResumeFrom(R.Curb, nullptr);
+	TestEqual(TEXT("a take-over refused at once: the drive keeps its scale"), Drive->GetDriveSpeedScale(), HeldAgain);
+	R.Level->YieldTo(R.Curb);
+	CurbMode->SetDriveModeActive(true);
+	TestEqual(TEXT("a crossing takes the legs: the drive is let go at once"), Drive->GetDriveSpeedScale(), 1.0f);
+	DriveOn();
+	TestEqual(TEXT("... and level.speed_scale says so"), R.Control(RammsLevel::SpeedScaleControlId()), 1.0f);
+	CurbMode->SetDriveModeActive(false);
+	const FRammsDriveStance Stance = RigStance();
+	R.Level->ResumeFrom(R.Curb, &Stance);
+	DriveOn();
+	const float First = Drive->GetDriveSpeedScale();
+	AddInfo(FString::Printf(TEXT("handed back two frames later: the first scale asked of the drive is %.3f"), First));
+	TestTrue(TEXT("handed back a moment later: the drive is slowed again from full speed, not stepped down to where it was"), R.State() == EState::Active && First > 0.5f * (1.0f + HeldAgain));
+	return true;
+}
+
+// Catches: a robot turning on the spot on a slope left to tilt (the slope swings from pitch into roll in the chassis'
+// own frame with no distance travelled, and a ground estimate that follows the ground only as fast as the robot
+// travels over it does not see it), and then held to its slowest by the error that leaves.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistTurnOnASlope,
+	"Ramms.Level.Assist.LevelThroughATurnOnTheSpotOnASlope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistTurnOnASlope::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	FLevelRig R;
+	if (!TestTrue(TEXT("the made-up robot with a level assist"), R.IsReady() && R.Level != nullptr && R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	URammsHolonomicDriveController* Drive = NewObject<URammsHolonomicDriveController>(R.Actor, TEXT("Holonomic"));
+	const float						Dt = 1.0f / 30.0f;
+	// A 5 deg slope rising along the world's +X. Facing YawDeg off that, the chassis reads its pitch as the slope's
+	// rise along its heading and its roll as the rise across it.
+	const double SlopeDeg = 5.0;
+	const auto	 Ground = [SlopeDeg](double YawDeg) {
+		  const double Yaw = FMath::DegreesToRadians(YawDeg);
+		  return FVector2D(SlopeDeg * FMath::Cos(Yaw), -SlopeDeg * FMath::Sin(Yaw));
+	};
+	R.GroundDeg = Ground(R.YawDeg);
+	R.PoseChassis(R.GroundDeg);
+	R.Level->SetAssistEnabled(true);
+	R.Frames(200, Dt);
+	if (!TestTrue(TEXT("levelled on the slope, facing up it"), R.State() == EState::Active && (R.GroundDeg - R.CorrectionDeg()).Size() <= 0.2 && Drive->GetDriveSpeedScale() == 1.0f))
+	{
+		return false;
+	}
+	// Turned on the spot, the stick asking 60 deg/s: the drive turns at that times the scale it is asked to keep to.
+	// About the middle of its corner pivots, which is where the level assist reads the robot's place: that point
+	// goes nowhere at all, so nothing but the turn itself says the ground is turning. (The pivots' middle is 25 cm
+	// behind the chassis' own origin on this robot.)
+	const double PivotsBehindCm = 25.0;
+	const auto	 Place = [&R, PivotsBehindCm]() {
+		  const double Yaw = FMath::DegreesToRadians(R.YawDeg);
+		  R.Origin = FVector(PivotsBehindCm * (FMath::Cos(Yaw) - 1.0), PivotsBehindCm * FMath::Sin(Yaw), 30.0);
+	};
+	const double AskedDegPerSec = 60.0;
+	double		 MostOff = 0.0, LeastScale = 1.0, ScaleSum = 0.0, Turned = 0.0;
+	const int32	 Frames = 180;
+	for (int32 Index = 0; Index < Frames; ++Index)
+	{
+		const double Scale = Drive->GetDriveSpeedScale();
+		R.YawDeg += AskedDegPerSec * Scale * Dt;
+		Turned += AskedDegPerSec * Scale * Dt;
+		R.GroundDeg = Ground(R.YawDeg);
+		Place();
+		R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+		R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+		R.Tick(Dt);
+		R.PoseChassis(R.GroundDeg - R.CorrectionDeg());
+		MostOff = FMath::Max(MostOff, (R.GroundDeg - R.CorrectionDeg()).Size());
+		LeastScale = FMath::Min(LeastScale, Scale);
+		ScaleSum += Scale;
+	}
+	AddInfo(FString::Printf(TEXT("turned on the spot on %.0f deg, 60 deg/s asked, for %.0f s: turned %.0f deg; the base at most %.2f deg off level; the drive's scale %.2f at least, %.2f on average (its floor is %.2f)"), SlopeDeg, Frames * Dt, Turned, MostOff,
+		LeastScale, ScaleSum / Frames, R.Level->Tuning.MinSpeedScale));
+	TestTrue(TEXT("still levelling"), R.State() == EState::Active);
+	TestTrue(TEXT("the base stays level through the turn"), MostOff <= 1.0);
+	TestTrue(TEXT("the turn is not slowed for it: the legs can follow this"), ScaleSum / Frames >= 0.9 && LeastScale >= 0.75);
+	TestTrue(TEXT("(it turned most of the way round)"), Turned >= 200.0);
+	return true;
+}
+
+// Catches: a hand-back's plane taken against a stance the mode selector will not apply as given: a linkage it leaves
+// out of every stance (its leg stays where it is commanded, and must not be taken for one about to go to the stance's
+// height), and a selector that applies no stance at all (nothing is about to move: there is no plane to take).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLegPlantStanceHeights,
+	"Ramms.Level.LegPlant.StanceHeightsAsTheSelectorAppliesThem",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLegPlantStanceHeights::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/false);
+	if (!TestTrue(TEXT("the made-up robot on the recording backend"), R.IsReady()))
+	{
+		return false;
+	}
+	TUniquePtr<RammsLevel::IPlant> Plant = RammsLevel::MakeLegPlant(*R.Base, *R.Curb, R.Layer());
+	FString						   Why;
+	RammsLevel::FPlantLegs		   Legs;
+	if (!TestTrue(TEXT("resolved, measured"), Plant->Resolve(Why) && Plant->MeasureLegs(Legs)))
+	{
+		return false;
+	}
+	// A stance 2 cm higher at the centre legs than where they stand, the corner cranks as they are.
+	FRammsDriveStance Stance = RigStance();
+	Stance.LinkageHeightCm = static_cast<float>(StanceZ + 2.0);
+	RammsLevel::FLegValues Z;
+	TestTrue(TEXT("no selector on the robot: the stance as given"), Plant->StanceHeights(Stance, Z) && Z.Num() == 6);
+	if (Z.Num() == 6)
+	{
+		TestEqual(TEXT("a corner leg: at its crank's stance angle"), Z[0], StanceZ, 0.01);
+		TestEqual(TEXT("the left centre leg: at the stance's linkage height"), Z[2], StanceZ + 2.0, 1.0e-4);
+		TestEqual(TEXT("the right centre leg: the same"), Z[3], StanceZ + 2.0, 1.0e-4);
+	}
+	URammsDriveModeSelector* Selector = NewObject<URammsDriveModeSelector>(R.Actor, TEXT("Selector"));
+	FRig::BeginPlayOf(*Selector);
+	Selector->StanceExcludedLinkages = { R.Left->GetFName() };
+	TestTrue(TEXT("a selector that leaves the left linkage out of every stance"), Plant->StanceHeights(Stance, Z) && Z.Num() == 6);
+	if (Z.Num() == 6)
+	{
+		TestEqual(TEXT("the left centre leg stays where it is commanded"), Z[2], StanceZ, 0.01);
+		TestEqual(TEXT("the right centre leg goes to the stance's linkage height"), Z[3], StanceZ + 2.0, 1.0e-4);
+	}
+	Selector->bApplyLinkageStance = false;
+	TestFalse(TEXT("a selector that applies no stance: there is none to read the legs against"), Plant->StanceHeights(Stance, Z));
 	return true;
 }
 

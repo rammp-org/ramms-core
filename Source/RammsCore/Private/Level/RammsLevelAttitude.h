@@ -25,6 +25,11 @@ namespace RammsLevel
 		/** A point fixed on the chassis, in the world (cm): for how fast the
 		 *  robot is moving and whether it was picked up and put elsewhere. */
 		FVector Position = FVector::ZeroVector;
+		/** The chassis' heading, a horizontal unit vector in the world: for how
+		 *  fast the robot is turning about the vertical (a turn on a slope
+		 *  swings the slope from pitch into roll with no distance travelled).
+		 *  Zero where the source does not know it. */
+		FVector2D Heading = FVector2D::ZeroVector;
 	};
 
 	class IAttitudeSource

@@ -60,7 +60,19 @@ namespace RammsLevel
  * by itself (a knock, braking) is not answered: a seat sent after it arrives
  * as the base comes back. level.tilt is the base's tilt; level.rider_tilt the
  * rider's, with the seat's own setting and the trim; level.seat_trim the
- * trim. On a robot with no such seat the whole preference is the base's.
+ * trim. On a robot with no such seat the whole preference is the base's, and
+ * so is whatever of the fore/aft preference the seat has no room for (its
+ * trim limit, a seat the rider has tilted near its stop): the preference is
+ * held, by the legs where the seat cannot, and never dropped.
+ * A take-over of the legs (a crossing, a mode that drives them) leaves the
+ * trim on the seat as it is: whoever takes the legs has not taken the seat.
+ * It is folded into the seat's own command only when the taker takes the
+ * seat itself (YieldSeatTo), and levelling goes on from whatever the seat
+ * still carries when the legs come back. Switched off while standing by, the
+ * trim is walked off the seat at the tilt policy's rate, never dropped.
+ * A robot turning on the spot on a slope sees the slope swing from pitch into
+ * roll with no distance travelled; the chassis' turning rate is read with its
+ * attitude so that the legs follow that as they follow ground driven over.
  *
  * Where it levels: in the drive modes of EnabledModeIds (empty: every mode)
  * that are not in DisabledModeIds. A mode it does not level in that takes the
@@ -79,6 +91,14 @@ namespace RammsLevel
  * tick during physics) is NOT made a prerequisite: that would move this
  * tick, and the base's behind it, out of the group before physics. What such
  * a writer commands in its own tick is told a frame late, with its offset.
+ * It also means that, for as long as the layer is held (a crossing it stands
+ * by for included: the layer is kept, with every offset zero or folded), a
+ * command to a levelled motor -- a leg's, the seat's tilt -- is told at the
+ * robot base's tick of that frame and not in the call that wrote it, while a
+ * command to any other motor (a wheel, the seat's two link motors) is told at
+ * once as ever. A simulator stepped once a frame after every tick has run
+ * (frame-locked) sees them all before its next step; one stepping freely on
+ * its own thread may take one step between the two.
  *
  * A drive mode switch: levelling is not begun, and a release does not begin
  * to give the base back, while the mode selector is still changing the stance
@@ -99,7 +119,9 @@ namespace RammsLevel
  * time; level.speed_scale shows it): the speed at which the ground turns under
  * the robot no faster than its legs can follow. Never a mode that takes the
  * legs (a curb crossing runs its own pace), and taken back at once when
- * levelling stops or yields.
+ * levelling yields. When levelling stops (switched off, a mode it does not
+ * level in) the request goes on with the scale as it rises back to 1, and
+ * only then lapses: dropped at once it would step the drive up to full speed.
  *
  * The ride height: with Tuning.RideHeightUpCm / RideHeightDownCm above 0 the
  * chassis is raised or lowered from the stance's height, at
@@ -156,9 +178,22 @@ public:
 	 * own: the offsets go into the baselines now, the motors told nothing, so
 	 * that the commands Taker reads are the pose the robot is in. Call before
 	 * reading any command. Levelling then stands by until ResumeFrom, or until
-	 * Taker's drive mode is no longer active.
+	 * Taker's drive mode is no longer active. The legs only: the seat's trim
+	 * stays on the seat, as it is, until Taker takes the seat too
+	 * (YieldSeatTo) or levelling goes on from it.
 	 */
 	void YieldTo(const UObject* Taker);
+
+	/**
+	 * Taker, which has the legs, is about to command the seat's tilt with a
+	 * command of its own (a crossing holding the rider's pitch): the seat's
+	 * trim goes into the tilt's own command now, the motor told nothing, and
+	 * GetFoldedSeatTrimDeg says how much. Call before reading the tilt's
+	 * command. Nothing while levelling is not standing by, with no trim on,
+	 * and on a robot with no seat. A taker that never commands the seat never
+	 * calls this, and the trim is then still on the seat when it hands back.
+	 */
+	void YieldSeatTo(const UObject* Taker);
 
 	/**
 	 * Taker gives the legs back. Call before the drive mode it hands the robot
@@ -189,12 +224,27 @@ public:
 	 *  the seat holds, on a robot whose seat tilts.) */
 	FVector2D GetTargetAttitudeDeg() const;
 
-	/** The seat trim (deg, nose up against the chassis) that a YieldTo folded
-	 *  into the seat tilt's own command and that is in it still: what a taker
-	 *  takes off the pitch it reads back to have the rider's own setting. 0
-	 *  once anything has commanded the tilt since, after a hand-back that
-	 *  undid the fold, and on a robot with no seat. */
+	/** The seat trim (deg, nose up against the chassis) that a YieldSeatTo
+	 *  folded into the seat tilt's own command and that is in it still: what
+	 *  a taker takes off the pitch it reads back to have the rider's own
+	 *  setting. 0 once the tilt's command is no longer the one the fold left
+	 *  (something has moved the seat since), after a hand-back that took it
+	 *  back out, and on a robot with no seat. */
 	float GetFoldedSeatTrimDeg() const;
+
+	/**
+	 * After a ResumeFrom with a NextStance, until this component next ticks:
+	 * how much of the plane by which the pose differed from that stance was
+	 * left in the legs' commands (deg; pitch, roll), which is what the stance
+	 * ramp that follows will turn the base by. Zero where the whole plane was
+	 * taken back out (the ramp then changes a ride height and no attitude);
+	 * the rest where the plane was past what levelling may carry (its
+	 * per-axis limit, the legs' reach in that stance). False, OutLeftDeg
+	 * untouched, when that hand-back took no plane back out at all (the whole
+	 * pose is in the commands still: the ramp turns the base to the ground's
+	 * attitude, as with no level assist), or none was made.
+	 */
+	bool GetHandBackTurnDeg(FVector2D& OutLeftDeg) const;
 
 	/** The switch (level.assist). Refused, staying off, on a robot that cannot
 	 *  be levelled. */
@@ -247,6 +297,16 @@ private:
 	 *  False, with nothing changed, when there is none to take (switched off,
 	 *  not standing by, the legs' offsets not held) or it cannot be worked out. */
 	bool AdoptPose(const FRammsDriveStance* NextStance, RammsLevel::FAdoption& OutAdoption);
+
+	/** A seat trim that was folded into the seat tilt's command for a taker
+	 *  that never wrote the tilt after all, taken back out as the seat's
+	 *  offset (while on, standing by, the offsets held). False when there was
+	 *  none to take. */
+	bool TakeBackSeatTrim();
+
+	/** The seat's trim as shown (level.seat_trim): the law's while it levels,
+	 *  and what is still on the seat while it stands by. */
+	double SeatTrimShownDeg() const;
 
 	UPROPERTY(Transient)
 	mutable TObjectPtr<URammsRobotBaseComponent> BaseComponent = nullptr;

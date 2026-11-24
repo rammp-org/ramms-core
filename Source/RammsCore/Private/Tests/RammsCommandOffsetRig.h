@@ -108,6 +108,9 @@ namespace RammsCommandOffsetTests
 		bool bProfiles = true;
 		/** Where a motor's joint is in the world, where a test puts one; else at the world's origin. */
 		TMap<FName, FTransform> Transforms;
+		/** The backend's simulation clock (s), where a test keeps one; under 0, as a backend that has none (everything
+		 *  then goes by the game world's clock, which on this rig stands at zero). */
+		double SimTime = -1.0;
 
 		/** How many commands or profile targets Motor was given. */
 		int32 CountFor(FName Motor) const
@@ -154,7 +157,8 @@ namespace RammsCommandOffsetTests
 			const float* Value = Log->Told.Find(MotorId);
 			return Value ? *Value : 0.0f;
 		}
-		virtual float GetVelocity(FName) const override { return 0.0f; }
+		virtual float  GetVelocity(FName) const override { return 0.0f; }
+		virtual double GetSimulationTime() const override { return Log->SimTime; }
 		virtual bool  ReleaseMotor(FName MotorId) override
 		{
 			FPush P;

@@ -236,9 +236,11 @@ bool FRammsCurbSeatPitchRef::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Catches: a level assist's folded seat trim taken off the tilt's command with the wrong sign for the motor's sense
-// (the rider's own setting then read 2 trims off), and a retry after a stopped crossing no longer finding the seat as
-// that crossing left it because a trim was folded on top.
+// Catches, in the two functions themselves (RammsCurb::SeatTiltLessTrim, SeatOwnPitchAtTakeOver): a level assist's
+// folded seat trim taken off the tilt's command with the wrong sign for the motor's sense (the rider's own setting then
+// read 2 trims off), and a retry after a stopped crossing no longer finding the seat as that crossing left it because a
+// trim was folded on top. Whether the curb controller calls them, and with what (CommandSeat), is not reached from
+// here: that is Ramms.Level.Assist.CrossingTakesTheSeatWithItsTrim.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsCurbSeatTiltLessTrim, "Ramms.Curb.Seat.TiltLessTrim",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

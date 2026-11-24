@@ -99,6 +99,9 @@ namespace RammsLevel
 		TOptional<FState>	PreYieldLaw;
 		TOptional<FOutputs> PreYieldLast;
 		bool				bFoldedMotors = false;
+		/** The seat's trim was folded into the seat's command since that
+		 *  YieldTo (YieldSeatTo): the take-over is then past undoing exactly. */
+		bool bSeatYielded = false;
 
 		/** The physics clock and the chassis at the last tick. */
 		double	LastSimTime = -1.0;
@@ -106,6 +109,15 @@ namespace RammsLevel
 		bool	bHasPosition = false;
 		double	SpeedCmS = 0.0;
 		bool	bColdReset = false;
+		/** The chassis' heading at the last tick, and how fast it was turning
+		 *  about the vertical then (deg/s). */
+		FVector2D LastHeading = FVector2D::ZeroVector;
+		double	  YawRateDegPerSec = 0.0;
+		/** The last hand-back to a stance took a plane back out of the legs'
+		 *  commands, and left this much of the pose's plane in them (deg) for
+		 *  the stance ramp to turn the base by. Unset: no such hand-back since
+		 *  the last tick, or one that took nothing back. */
+		TOptional<FVector2D> HandBackLeftDeg;
 		/** The active drive mode is one it does not level in; the mode
 		 *  selector is changing the stance (both for the status). */
 		bool bModeNotLevelled = false;
@@ -117,6 +129,10 @@ namespace RammsLevel
 		bool   bSeat = false;
 		double SeatOwnDeg = 0.0;
 		double SeatPreferenceDeg = 0.0;
+		/** The trim the seat carried as an offset when the last tick read it
+		 *  (deg): what is shown while the law holds none of its own (standing
+		 *  by for a taker that has the legs and not the seat). */
+		double SeatTrimOnDeg = 0.0;
 	};
 } // namespace RammsLevel
 
@@ -335,6 +351,8 @@ void URammsLevelAssistComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	{
 		return;
 	}
+	// A hand-back's figures are for the mode switch made in the same call.
+	R.HandBackLeftDeg.Reset();
 	if (ThisTickFunction && !R.bGroupSaid)
 	{
 		// Written to run before physics, with the base behind it: a
@@ -400,14 +418,20 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 			const double Moved = FVector::Dist(Attitude.Position, R.LastPosition);
 			R.bColdReset |= Moved > PoseJumpCm;
 			R.SpeedCmS = Moved / Dt;
+			// How fast the heading turned: on a slope that swings the ground
+			// from pitch into roll under a robot that has gone nowhere.
+			const bool bHeadings = !Attitude.Heading.IsNearlyZero() && !R.LastHeading.IsNearlyZero();
+			R.YawRateDegPerSec = bHeadings ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector2D::DotProduct(Attitude.Heading, R.LastHeading), -1.0, 1.0))) / Dt : 0.0;
 		}
 		if (Dt > 0.0 || !R.bHasPosition)
 		{
 			R.LastPosition = Attitude.Position;
+			R.LastHeading = Attitude.Heading;
 			R.bHasPosition = true;
 		}
 	}
 	In.SpeedCmS = R.SpeedCmS;
+	In.YawRateDegPerSec = R.YawRateDegPerSec;
 	In.bColdReset = R.bColdReset;
 	R.bColdReset = false;
 
@@ -424,22 +448,55 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 		R.Legs = R.LastLegs;
 		In.bAttitudeValid = false;
 	}
+	// --- a taker that was yielded to ---
+	// It holds the legs from its YieldTo until it hands back, or until its
+	// drive mode, once active, no longer is. (It yields before it selects its
+	// mode: it has until this component's next tick.) Looked at before the
+	// seat is read: a taker that has gone may have left a trim in the seat's
+	// command, which is taken back out here.
+	bool bTakerHolds = false;
+	if (const UObject* Taker = R.Taker.Get())
+	{
+		const IRammsDriveMode* TakerMode = Cast<IRammsDriveMode>(const_cast<UObject*>(Taker));
+		const bool			   bActive = !TakerMode || TakerMode->IsDriveModeActive();
+		R.bTakerSeenActive |= TakerMode && bActive;
+		bTakerHolds = bActive || (!R.bTakerSeenActive && R.TakerTicks < 1);
+		if (!bTakerHolds)
+		{
+			// It let go without handing back (a crossing stopped, its mode
+			// left by hand): levelling starts again cold from what it left --
+			// but for the seat's trim, which goes on from what the seat still
+			// carries (one folded for a taker that never wrote the seat's tilt
+			// is taken back out first).
+			R.Taker.Reset();
+			R.TakerNested = 0;
+			R.PreYieldLaw.Reset();
+			R.PreYieldLast.Reset();
+			TakeBackSeatTrim();
+			R.Plant->ForgetFold();
+		}
+	}
+
 	// --- the seat, and where the rider's preference is held ---
 	// A seat whose tilt can take a trim holds the pitch the rider prefers; the
 	// base then stays on its own reference and keeps its legs' reach for the
-	// ground. The roll, and the pitch where no seat can hold it, are the
-	// base's: part of what level means for it.
+	// ground. The roll, the pitch where no seat can hold it, and what of the
+	// pitch the seat has no room for, are the base's: part of what level means
+	// for it.
 	double SeatLowDeg = 0.0;
 	double SeatHighDeg = 0.0;
 	R.SeatOwnDeg = 0.0;
 	R.bSeat = R.Plant->HasSeat() && R.Plant->SeatTrimRange(R.SeatOwnDeg, SeatLowDeg, SeatHighDeg);
-	const FPreferenceSplit Preference = SplitPreference(GetPreferenceDeg(), R.bSeat, Tuning.bSeatCoversTransients);
+	const FPreferenceSplit Preference = SplitPreference(GetPreferenceDeg(), R.bSeat, Tuning.bSeatCoversTransients, SeatLowDeg, SeatHighDeg, Tuning.SeatTrimMaxDeg);
 	R.SeatPreferenceDeg = Preference.SeatDeg;
 	R.LawTuning = MakeTuning(Tuning, Preference.BaseDeg);
 	In.bSeat = R.bSeat;
 	In.SeatPreferenceDeg = Preference.SeatDeg;
 	In.SeatTrimLowDeg = SeatLowDeg;
 	In.SeatTrimHighDeg = SeatHighDeg;
+	// (What the seat carries as an offset now: a start goes on from it.)
+	R.SeatTrimOnDeg = R.bSeat ? R.Plant->SeatTrimOnDeg() : 0.0;
+	In.SeatTrimOnDeg = R.SeatTrimOnDeg;
 
 	R.Plant->ClearancePoints(R.LawTuning, R.Points);
 	In.Legs = R.Legs;
@@ -458,28 +515,9 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 	In.Mode = EMode::Allowed;
 	R.bModeNotLevelled = false;
 	TArray<UActorComponent*, TInlineAllocator<2>> Driving;
-	if (const UObject* Taker = R.Taker.Get())
+	if (bTakerHolds)
 	{
-		// A taker holds the legs from its YieldTo until it hands back, or
-		// until its drive mode, once active, no longer is. (It yields before
-		// it selects its mode: it has until this component's next tick.)
-		const IRammsDriveMode* TakerMode = Cast<IRammsDriveMode>(const_cast<UObject*>(Taker));
-		const bool			   bActive = !TakerMode || TakerMode->IsDriveModeActive();
-		R.bTakerSeenActive |= TakerMode && bActive;
-		if (bActive || (!R.bTakerSeenActive && R.TakerTicks < 1))
-		{
-			In.Mode = EMode::Taken;
-		}
-		else
-		{
-			// It let go without handing back (a crossing stopped, its mode
-			// left by hand): levelling starts again cold from what it left.
-			R.Taker.Reset();
-			R.TakerNested = 0;
-			R.PreYieldLaw.Reset();
-			R.PreYieldLast.Reset();
-			R.Plant->ForgetFold();
-		}
+		In.Mode = EMode::Taken;
 	}
 	if (Owner)
 	{
@@ -577,7 +615,19 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 	}
 	else if (Out.Action == EAction::Clear && R.bClaimed)
 	{
-		R.Plant->ZeroOffsets();
+		// A reset (time ran backwards, the robot put elsewhere) throws all of
+		// it away at once, and so does the end of a release, which has walked
+		// the seat's trim out with the rest (what is left is under the law's
+		// own "done"). Any other clear gives up the legs' correction and
+		// leaves a trim still on the seat to be walked off it below.
+		if (In.bColdReset || FMath::Abs(R.Plant->SeatTrimOnDeg()) <= 2.0 * ReleaseDoneDeg)
+		{
+			R.Plant->ZeroOffsets();
+		}
+		else
+		{
+			R.Plant->ZeroLegOffsets();
+		}
 	}
 	else if (R.bClaimed && bLegs && Out.Dz.Num() == R.Legs.Num() && (Out.bWrite || (R.Law.Arbiter.HasOffsets() && R.Plant->OffsetsLost())))
 	{
@@ -592,11 +642,34 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 			R.Plant->ApplySeatTrim(Out.SeatTrimDeg);
 		}
 	}
-	if (!Out.bClaim && R.bClaimed && !(bYield && R.bFoldedMotors))
+	// --- a trim left on the seat while the law holds none ---
+	// Whoever takes the legs has not taken the seat: the seat's trim stays on
+	// it through a take-over, as it is, and levelling goes on from it at the
+	// hand-back (the law's start takes up what the seat carries). Only when
+	// nothing will take it up -- switched off while something had the legs --
+	// does it go out here: at the tilt policy's rate, as every deliberate
+	// change of the rider's attitude, never in one write.
+	bool bSeatTrimLeft = false;
+	if (R.bClaimed && R.bSeat && !Out.bClaim)
+	{
+		const double OnDeg = R.Plant->SeatTrimOnDeg();
+		if (OnDeg != 0.0)
+		{
+			const double StepDeg = FMath::Max(0.0, static_cast<double>(Tuning.TiltRateDegPerSec)) * Dt;
+			const double LeftDeg = FMath::Abs(OnDeg) <= StepDeg || Tuning.TiltRateDegPerSec <= 0.0f ? 0.0 : OnDeg - FMath::Sign(OnDeg) * StepDeg;
+			if (Dt > 0.0)
+			{
+				R.Plant->ApplySeatTrim(LeftDeg);
+			}
+			bSeatTrimLeft = Dt <= 0.0 || LeftDeg != 0.0;
+		}
+	}
+	if (!Out.bClaim && R.bClaimed && !(bYield && R.bFoldedMotors) && !bSeatTrimLeft)
 	{
 		// (Not inside a YieldTo that folded: the taker may yet be refused,
 		// and putting the baselines back as they were needs the layer. The
-		// offsets are zero meanwhile, and the next tick lets go.)
+		// offsets are zero meanwhile, and the next tick lets go. Nor while a
+		// trim is still being walked off the seat: letting go drops it.)
 		R.Plant->ZeroOffsets();
 		ReleaseMotors();
 	}
@@ -604,9 +677,12 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 	// While the legs carry a correction, whoever drives is asked to keep to
 	// the speed the legs can follow the ground at: every tick, to stand half a
 	// second, so that it lapses by itself if this stops. Never while something
-	// has taken the legs; and taken back at once when levelling stops, rather
-	// than left to run out.
-	const bool bSlows = R.Law.Arbiter.HasOffsets() && In.Mode != EMode::Taken && !bYield;
+	// has taken the legs (a crossing runs its own pace, and the law's scale is
+	// then full again too). When levelling stops the request is not dropped
+	// while the scale is still under 1: the drive would step up to full speed
+	// in one tick. The law goes on raising it at its own rate, and the request
+	// goes with it until it is back at 1.
+	const bool bSlows = (R.Law.Arbiter.HasOffsets() || Out.SpeedScale < 1.0) && In.Mode != EMode::Taken && !bYield;
 	for (const TWeakObjectPtr<UObject>& Was : R.SlowedModes)
 	{
 		IRammsDriveMode* Mode = Cast<IRammsDriveMode>(Was.Get());
@@ -628,6 +704,26 @@ void URammsLevelAssistComponent::StepLaw(double Dt, bool bYield, bool bResume, c
 		}
 	}
 	R.Last = Out;
+	if (R.bSeat && R.bClaimed)
+	{
+		R.SeatTrimOnDeg = R.Plant->SeatTrimOnDeg();
+	}
+}
+
+double URammsLevelAssistComponent::SeatTrimShownDeg() const
+{
+	// The law's own while it levels; else whatever is on the seat still.
+	const RammsLevel::FAssistRuntime& R = *Runtime;
+	return R.Law.Arbiter.HasOffsets() ? R.Last.SeatTrimDeg : (R.bClaimed ? R.SeatTrimOnDeg : 0.0);
+}
+
+bool URammsLevelAssistComponent::TakeBackSeatTrim()
+{
+	RammsLevel::FAssistRuntime& R = *Runtime;
+	// Only a level assist that is on, holds the offsets and stands by: one
+	// switched off meanwhile leaves the commands as the taker has them, the
+	// seat's with the legs'.
+	return R.Plant && R.bClaimed && R.bSwitch && R.CannotLevel.IsEmpty() && R.Law.Arbiter.GetState() == RammsLevel::EState::Yielded && R.Plant->UnfoldSeatTrim();
 }
 
 void URammsLevelAssistComponent::YieldTo(const UObject* Taker)
@@ -645,14 +741,18 @@ void URammsLevelAssistComponent::YieldTo(const UObject* Taker)
 		++R.TakerNested;
 		return;
 	}
+	// (The legs: the seat's trim stays on the seat until Taker takes the seat
+	// too, YieldSeatTo, or levelling goes on from it.)
 	R.Taker = Taker;
 	R.TakerNested = 0;
 	R.bTakerSeenActive = false;
 	R.TakerTicks = 0;
+	R.HandBackLeftDeg.Reset();
 	// As things stand now, for a take-over refused before it begins.
 	R.PreYieldLaw = R.Law;
 	R.PreYieldLast = R.Last;
 	R.bFoldedMotors = R.bClaimed;
+	R.bSeatYielded = false;
 	if (R.bClaimed)
 	{
 		R.Plant->Fold();
@@ -660,6 +760,20 @@ void URammsLevelAssistComponent::YieldTo(const UObject* Taker)
 	// The law is told in the same call (no time passes): by the time Taker
 	// reads a command, the correction is in the baselines and the law's is 0.
 	StepLaw(0.0, true, false);
+}
+
+void URammsLevelAssistComponent::YieldSeatTo(const UObject* Taker)
+{
+	RammsLevel::FAssistRuntime& R = *Runtime;
+	// Only while standing by with the offsets held: a trim the law is still
+	// working would be put straight back on top of what was folded.
+	if (!Taker || !R.Plant || !R.bClaimed || R.Law.Arbiter.HasOffsets())
+	{
+		return;
+	}
+	R.Plant->FoldSeatTrim();
+	R.SeatTrimOnDeg = R.Plant->SeatTrimOnDeg();
+	R.bSeatYielded = true;
 }
 
 bool URammsLevelAssistComponent::AdoptPose(const FRammsDriveStance* NextStance, RammsLevel::FAdoption& OutAdoption)
@@ -739,8 +853,10 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 	R.Taker.Reset();
 	R.TakerNested = 0;
 	// The exact undo only with the layer still held, as it was at the fold:
-	// without it no baseline can be put back.
-	if (!NextStance && R.PreYieldLaw.IsSet() && (!R.bFoldedMotors || (R.bClaimed && R.Plant->Unfold())))
+	// without it no baseline can be put back. (And only while the taker had
+	// the legs alone: with the seat's trim folded for it too, the law as it
+	// stood no longer says what the seat carries.)
+	if (!NextStance && !R.bSeatYielded && R.PreYieldLaw.IsSet() && (!R.bFoldedMotors || (R.bClaimed && R.Plant->Unfold())))
 	{
 		// Refused before anything was written: the baselines, the offsets and
 		// the law exactly as they were, as if nothing had been asked.
@@ -748,6 +864,10 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 		R.Last = R.PreYieldLast.Get(R.Last);
 		R.PreYieldLaw.Reset();
 		R.PreYieldLast.Reset();
+		// (The drive was let go as the legs were yielded: it is asked again
+		// for the scale it had, in the same call. A step in which no time
+		// passes advances nothing else.)
+		StepLaw(0.0, false, false);
 		return;
 	}
 	R.PreYieldLaw.Reset();
@@ -756,10 +876,34 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 	// the commands (while the fold's own commands are still remembered: with
 	// no stance to go to, they are what the pose is measured against), and the
 	// law told in the same call, before anyone reads a command again.
+	// The seat first: its trim is on it still unless the taker took the seat
+	// too (YieldSeatTo), and one folded for a taker that then never wrote the
+	// seat's tilt after all is taken back out. The law's step below reads what
+	// the seat carries and goes on from it.
+	TakeBackSeatTrim();
 	RammsLevel::FAdoption Adoption;
 	const bool			  bAdopted = AdoptPose(NextStance, Adoption);
 	R.Plant->ForgetFold();
+	// What of the pose's plane could not be taken out stays in the commands,
+	// for the stance ramp to turn the base by: whoever times that ramp is owed
+	// how much (GetHandBackTurnDeg).
+	R.HandBackLeftDeg.Reset();
+	if (bAdopted && NextStance)
+	{
+		R.HandBackLeftDeg = Adoption.FittedDeg - Adoption.PlaneDeg;
+	}
 	StepLaw(0.0, false, true, bAdopted ? &Adoption : nullptr);
+}
+
+bool URammsLevelAssistComponent::GetHandBackTurnDeg(FVector2D& OutLeftDeg) const
+{
+	const RammsLevel::FAssistRuntime& R = *Runtime;
+	if (!R.HandBackLeftDeg.IsSet() || !R.Law.Arbiter.HasOffsets())
+	{
+		return false;
+	}
+	OutLeftDeg = *R.HandBackLeftDeg;
+	return true;
 }
 
 bool URammsLevelAssistComponent::IsLevelling() const
@@ -918,14 +1062,14 @@ bool URammsLevelAssistComponent::ReadControl(FName Id, float& OutValue) const
 	}
 	if (Id == RammsLevel::SeatTrimControlId())
 	{
-		OutValue = static_cast<float>(R.Last.SeatTrimDeg);
+		OutValue = static_cast<float>(SeatTrimShownDeg());
 		return true;
 	}
 	if (Id == RammsLevel::RiderTiltControlId())
 	{
 		// The base's attitude with what the seat pitches the rider by on it:
 		// its own setting and the trim.
-		OutValue = static_cast<float>(RammsLevel::Inclination(R.Last.AttitudeDeg + FVector2D(R.SeatOwnDeg + R.Last.SeatTrimDeg, 0.0)));
+		OutValue = static_cast<float>(RammsLevel::Inclination(R.Last.AttitudeDeg + FVector2D(R.SeatOwnDeg + SeatTrimShownDeg(), 0.0)));
 		return true;
 	}
 	if (Id == RammsLevel::PreferencePitchControlId())

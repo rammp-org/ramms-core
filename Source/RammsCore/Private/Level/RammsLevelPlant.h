@@ -68,11 +68,31 @@ namespace RammsLevel
 		 *  seat's tilt motor, as an offset over the seat's own command. */
 		virtual void ApplySeatTrim(double TrimDeg) = 0;
 
-		/** The seat trim (deg) that folds have put into the seat tilt's own
-		 *  command and that is in it still: 0 once anything has commanded the
-		 *  tilt since, or the fold was undone. What a taker must take off the
-		 *  pitch it reads back to have the rider's own setting. */
+		/** The seat trim (deg) that FoldSeatTrim has put into the seat tilt's
+		 *  own command and that is in it still: 0 once the tilt's command is no
+		 *  longer the one the fold left, or it was taken back out (UnfoldSeatTrim). What a
+		 *  taker must take off the pitch it reads back to have the rider's own
+		 *  setting. */
 		virtual double FoldedSeatTrimDeg() const = 0;
+
+		/** The trim (deg, nose up) the seat's tilt motor carries now as an
+		 *  offset over its own command, as the base has it: what ApplySeatTrim
+		 *  last put there, or what a hand-back took back out of the command
+		 *  (UnfoldSeatTrim). 0 with no seat. */
+		virtual double SeatTrimOnDeg() const = 0;
+
+		/**
+		 * A taker that had the seat's trim folded for it (FoldSeatTrim) hands
+		 * back without having commanded the seat's tilt after all: the trim is
+		 * in the tilt's own command still (FoldedSeatTrimDeg), where nothing
+		 * will take it out again -- the rider's own setting would read that
+		 * much off, and levelling would add the trim a second time. Taken back out here: the
+		 * tilt's command is the rider's own again and the trim is its offset,
+		 * the motor told nothing. False, nothing changed, when no trim is in
+		 * the command any more (something has commanded the tilt since), there
+		 * is no seat, or the offset layer is not held.
+		 */
+		virtual bool UnfoldSeatTrim() = 0;
 
 		/**
 		 * The legs now, in a fixed order: each one's place, its height at its
@@ -105,10 +125,22 @@ namespace RammsLevel
 		/** Every offset exactly zero. */
 		virtual void ZeroOffsets() = 0;
 
-		/** Fold: every motor's offset goes into its baseline (the motor told
-		 *  nothing), for a controller about to take the legs over, and the
-		 *  baselines from before are remembered. */
+		/** Every LEG motor's offset exactly zero; a trim on the seat stays
+		 *  (the rider's attitude is not dropped in one write where the legs'
+		 *  correction is given up: the level assist walks it off). */
+		virtual void ZeroLegOffsets() = 0;
+
+		/** Fold: every LEG motor's offset goes into its baseline (the motor
+		 *  told nothing), for a controller about to take the legs over, and
+		 *  the baselines from before are remembered. The seat's trim stays on
+		 *  the seat: taking the legs is not taking the seat (FoldSeatTrim). */
 		virtual void Fold() = 0;
+
+		/** The seat's trim goes into the seat tilt's own command, the motor
+		 *  told nothing, for a controller about to command the seat's tilt
+		 *  with an absolute command of its own; FoldedSeatTrimDeg then says
+		 *  how much is in the command. Nothing with no trim on, or no seat. */
+		virtual void FoldSeatTrim() = 0;
 
 		/** Undo the last Fold exactly, when nothing has written a levelled
 		 *  motor since: the remembered baselines back, the offsets as they
@@ -156,10 +188,17 @@ namespace RammsLevel
 		virtual bool RebaseLegs(TConstArrayView<double> BaseZ, FLegValues& OutDz) = 0;
 
 		/**
-		 * The backstop for a take-over nobody announced: each motor whose
+		 * The backstop for a take-over nobody announced: each LEG motor whose
 		 * baseline is as the last MeasureLegs but one found it has its offset
 		 * folded into it; each whose baseline was rewritten since has its
 		 * offset set to zero (its new command is then what it is told).
+		 * The seat's tilt is neither: its trim stays on it as an offset. The
+		 * mode that took the legs has not thereby taken the seat, and whoever
+		 * goes on writing the seat's own command (the seat's controller
+		 * rewrites it every tick while it holds the seat) would either read as
+		 * a taker, the trim dropped in one write, or write straight over a
+		 * trim folded into its command. The level assist leaves it on the seat
+		 * while it stands by and goes on from it at the hand-back.
 		 */
 		virtual void FoldOrZero(int32& OutFolded, int32& OutZeroed) = 0;
 

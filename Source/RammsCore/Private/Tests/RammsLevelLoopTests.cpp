@@ -1886,4 +1886,59 @@ bool FRammsLevelLoopTrimBand::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a ground estimate that cannot follow the ground under a robot turning on the spot on a slope (the slope
+// swings from pitch into roll in the chassis' own frame with nothing travelled, so an allowance by the distance alone
+// leaves the reading a slope behind in a quarter turn), and one that lets a turn on LEVEL ground, or a knock while
+// turning, through as ground.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelGroundGateTurnOnASlope,
+	"Ramms.Level.Ground.FollowsASlopeSwungByATurnOnTheSpot",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelGroundGateTurnOnASlope::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevel;
+	const double Dt = 1.0 / 30.0;
+	const double SlopeDeg = 6.0;
+	const double YawRate = 60.0;
+	const auto	 Ground = [SlopeDeg](double YawDeg) {
+		  const double Yaw = FMath::DegreesToRadians(YawDeg);
+		  return FVector2D(SlopeDeg * FMath::Cos(Yaw), -SlopeDeg * FMath::Sin(Yaw));
+	};
+	for (const bool bToldTheTurn : { true, false })
+	{
+		FGroundGate Gate;
+		Gate.Seed(Ground(0.0));
+		double Behind = 0.0;
+		// A quarter turn and a half, standing on the spot (no speed at all).
+		for (int32 Index = 1; Index <= 68; ++Index)
+		{
+			const FVector2D Raw = Ground(YawRate * Dt * Index);
+			Behind = FMath::Max(Behind, (Gate.Tick(Raw, 0.0, 0.1, 0.0, Dt, bToldTheTurn ? YawRate : 0.0) - Raw).Size());
+		}
+		AddInfo(FString::Printf(TEXT("turning at %.0f deg/s on %.0f deg, the turn %s: the gate's reading is %.2f deg behind the ground at most"), YawRate, SlopeDeg, bToldTheTurn ? TEXT("told") : TEXT("not told"), Behind));
+		if (bToldTheTurn)
+		{
+			TestTrue(TEXT("told the turn: the reading keeps up with the ground"), Behind <= 0.05);
+		}
+		else
+		{
+			TestTrue(TEXT("(not told, it falls degrees behind: the settling allowance is all it has)"), Behind >= 3.0);
+		}
+	}
+	{
+		// Level ground: a turn swings nothing, so it buys no allowance, and a knock while turning is still left out.
+		FGroundGate Gate;
+		Gate.Seed(FVector2D::ZeroVector);
+		const FVector2D After = Gate.Tick(FVector2D(2.0, 0.0), 0.0, 0.1, 0.0, Dt, YawRate);
+		TestEqual(TEXT("level ground, a 2 deg knock while turning: followed only as fast as a robot settling"), After.Size(), Gate.Tuning.SettleDegPerSec * Dt, 1.0e-9);
+		// The allowance is by the slope believed, which is small: a knock on a gentle slope is mostly left out too.
+		FGroundGate Gentle;
+		Gentle.Seed(FVector2D(1.0, 0.0));
+		const FVector2D Knocked = Gentle.Tick(FVector2D(4.0, 0.0), 0.0, 0.1, 0.0, Dt, YawRate);
+		TestEqual(TEXT("a 1 deg slope, a 3 deg knock while turning: the settling allowance and the slope's swing, no more"), Knocked.X - 1.0,
+			(Gentle.Tuning.SettleDegPerSec + 1.0 * FMath::DegreesToRadians(YawRate)) * Dt, 1.0e-9);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

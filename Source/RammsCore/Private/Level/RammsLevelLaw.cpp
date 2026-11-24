@@ -56,6 +56,17 @@ namespace RammsLevel
 			State.SeatShare.Reset(FVector2D::ZeroVector);
 		}
 
+		/** The seat's trim is what the seat carries as an offset now
+		 *  (FInputs::SeatTrimOnDeg; none where that is not a number): what the
+		 *  law goes on from when it starts with no trim of its own. The share
+		 *  is set from it by whoever starts the wanted attitudes next
+		 *  (StartWantedFrom). */
+		void TakeUpSeat(FState& State, const FInputs& In)
+		{
+			State.SeatTrim.Set(FMath::IsFinite(In.SeatTrimOnDeg) ? In.SeatTrimOnDeg : 0.0);
+			State.SeatShare.Reset(FVector2D::ZeroVector);
+		}
+
 		/**
 		 * The wanted attitudes start again from where things stand: the BASE's
 		 * at Deg, at rest, and the rider's at that with the trim the seat
@@ -441,12 +452,14 @@ namespace RammsLevel
 			const FVector2D Filtered = State.Attitude.Tick(In.AttitudeDeg, Dt, Tuning.AttitudeFilterSeconds);
 			// The ground as far as it can have turned: by the distance
 			// travelled over the standing legs' span, and by what the legs'
-			// own baselines turned the stance. What the attitude did beyond
-			// that (a knock, braking, a rock onto a leg set down) is the
-			// body's, and neither the terrain estimate nor the loop sees it.
+			// own baselines turned the stance; and, turning on the spot on a
+			// slope, by the slope swinging from pitch into roll in the
+			// chassis' own frame. What the attitude did beyond that (a knock,
+			// braking, a rock onto a leg set down) is the body's, and neither
+			// the terrain estimate nor the loop sees it.
 			const double	TurnDegPerCm = State.Ground.Tuning.BreakDeg / StandingSpanCm(Sensed);
 			const double	ExplainedDeg = BaselineTurnDeg(Sensed, State.PrevBaseZ);
-			const FVector2D SeenDeg = State.Ground.Tick(Filtered + AchievedDeg, In.SpeedCmS, TurnDegPerCm, ExplainedDeg, Dt);
+			const FVector2D SeenDeg = State.Ground.Tick(Filtered + AchievedDeg, In.SpeedCmS, TurnDegPerCm, ExplainedDeg, Dt, In.YawRateDegPerSec);
 			State.Terrain.Tick(SeenDeg - AchievedDeg, AchievedDeg, Dt, Tuning.TerrainFilterSeconds);
 			State.SeatGround.Tick(SeenDeg, Dt, Tuning.SeatFilterSeconds);
 			State.LossSeconds = 0.0;
@@ -492,6 +505,11 @@ namespace RammsLevel
 		{
 			case EAction::StartFromAttitude:
 				LawImpl::ZeroCorrection(State, NumLegs);
+				// What the seat carries as an offset already (a trim taken back
+				// out of its command at a hand-back, one a take-over nobody
+				// announced left on it) is gone on from: zeroed here it would be
+				// stepped off the seat, and ignored it would be added to.
+				LawImpl::TakeUpSeat(State, In);
 				LawImpl::ColdResume(State, In, AchievedDeg, bValid, Tuning);
 				bWantedSet = true;
 				break;
@@ -505,7 +523,11 @@ namespace RammsLevel
 				State.CorrectionDeg = In.ResumePlaneDeg;
 				State.RideCm = 0.0;
 				State.HeightRateCmS = 0.0;
-				LawImpl::ZeroSeat(State);
+				// (The seat: none where the fold's trim stayed in the seat's own
+				// command for a taker that commanded the seat; the trim itself
+				// where the shell has taken it back out of a command nobody
+				// wrote.)
+				LawImpl::TakeUpSeat(State, In);
 				LawImpl::ColdResume(State, In, AchievedDeg, bValid, Tuning);
 				bWantedSet = true;
 				bAdopted = true;
@@ -513,6 +535,11 @@ namespace RammsLevel
 			case EAction::Fold:
 				LawImpl::ZeroCorrection(State, NumLegs);
 				LawImpl::ZeroSeat(State);
+				// Whoever has taken the legs runs its own pace, and the drive is
+				// let go at once: the scale goes on from full, as the drive
+				// does, not from where it was (a hand-back a moment later would
+				// otherwise ask a drive at full speed for a part of it in one go).
+				State.SpeedScale.Reset();
 				break;
 			case EAction::Clear:
 				LawImpl::ZeroCorrection(State, NumLegs);

@@ -4000,4 +4000,105 @@ bool FRammsLevelDryRunSeatCover::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: the law's seat trim not gone on from when a taker hands the legs back without ever having had the seat
+// (FInputs::SeatTrimOnDeg): begun again from nothing, the seat is stepped by the whole trim at the hand-back and
+// walked back; begun again on top of what is there, the rider gets it twice. (The taker here is the harness's own,
+// as in every dry run: this is the law's bookkeeping. What the curb controller, the mode selector's stance ramp and
+// the seat's controller do with the seat is tried on the component: Ramms.Level.Assist.SeatTrimKept... and
+// ...CrossingTakesTheSeatWithItsTrim.)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunSeatLeftAlone,
+	"Ramms.Level.DryRun.SeatTrimGoneOnFromWhereTheTakerNeverTookTheSeat",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunSeatLeftAlone::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	// Parked 10 deg nose up, past the legs' reach: the seat holds what the legs leave. With a preference on top.
+	const FKit Kit = QuickOnFour();
+	for (const int32 Rate : { 0, 2 })
+	{
+		for (const bool bCold : { false, true })
+		{
+			const auto Say = [&](const TCHAR* What) { return FString::Printf(TEXT("%s, %s, %s: %s"), Kit.Name, FrameNames[Rate], bCold ? TEXT("a cold hand-back") : TEXT("a hand-back with its plane"), What); };
+			FOptions   Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.bEnabledAtStart = false;
+			Options.MaxSeconds = 26.0;
+			Options.bKeepTrace = true;
+			Options.PreferenceDeg = FVector2D(-2.0, 0.0);
+			Options.Events.Add(MakeEvent(1.0, EEvent::Enable));
+			FDryEvent TakeOver = MakeEvent(14.0, EEvent::FoldAdopt, 3.0);
+			TakeOver.bLeaveSeat = true;
+			TakeOver.bCold = bCold;
+			Options.Events.Add(TakeOver);
+			const FResult  Result = DryRun::Run(Kit.Robot, Plane(10.0, 0.0), Options);
+			const FSample* Held = SampleAt(Result, 13.9);
+			const FSample* Taken = SampleAt(Result, 16.0);
+			if (!TestTrue(Say(TEXT("a trace")), Held != nullptr && Taken != nullptr && Result.Trace.Num() > 0))
+			{
+				continue;
+			}
+			const FSample& End = Result.Trace.Last();
+			// (A cold hand-back gives the legs' plane up: the base is let go to the ground's attitude and levelled
+			// again, and the seat's share follows the base through that within the policy. The seat itself must not
+			// be stepped either way: the window is the hand-back's own few frames.)
+			const FRiderSwing AtHandBack = RiderBetween(Result, 16.9, 17.0 + 4.0 * Options.FrameSeconds, Options.FrameSeconds);
+			const FRiderSwing Through = RiderBetween(Result, 13.9, 26.0, Options.FrameSeconds);
+			AddInfo(Say(*FString::Printf(TEXT("before the take-over the seat held %.2f deg, the rider %.2f; taken, the seat %.2f; over the hand-back's frames the seat moved %.3f deg; through it all the rider turned at %.2f deg/s at most; at the end the seat %.2f, the rider %.2f"),
+				Held->SeatDeg, Held->RiderDeg.X, Taken->SeatDeg, AtHandBack.SeatRangeDeg, Through.RateDegPerSec, End.SeatDeg, End.RiderDeg.X)));
+			TestTrue(Say(TEXT("(the seat carries a trim: the preference and what the legs leave)")), FMath::Abs(Held->SeatDeg) >= 0.2 && FMath::IsNearlyEqual(Held->RiderDeg.X, -2.0, 0.3));
+			TestEqual(Say(TEXT("while the taker has the legs and not the seat: the seat stays as it was")), Taken->SeatDeg, Held->SeatDeg, 0.02);
+			TestTrue(Say(TEXT("the hand-back does not step the seat")), AtHandBack.SeatRangeDeg <= 0.25);
+			TestEqual(Say(TEXT("a take-over was folded for, and handed back")), static_cast<int32>(Result.FinalState), static_cast<int32>(EState::Active));
+			TestEqual(Say(TEXT("at the end the rider has their preference, once")), End.RiderDeg.X, -2.0, 0.3);
+			if (!bCold)
+			{
+				TestTrue(Say(TEXT("the rider is not turned by the take-over or its hand-back")), Through.RateDegPerSec <= 1.0);
+			}
+		}
+	}
+	return true;
+}
+
+// Catches: a fore/aft preference the seat has no room for dropped, where the legs could have held it (the seat's own
+// room about where its rider has it; the trim's limit).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunPreferencePastTheSeat,
+	"Ramms.Level.DryRun.PreferenceTheSeatHasNoRoomForIsTheLegs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunPreferencePastTheSeat::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	const FKit Kit = QuickOnFour();
+	for (const int32 Limit : { 0, 1 })
+	{
+		const TCHAR* const Name = Limit == 0 ? TEXT("a seat with 2 deg of room") : TEXT("a trim limit of 3 deg");
+		FOptions		   Options = MakeOptions(Kit, 0);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 14.0;
+		Options.bKeepTrace = true;
+		Options.PreferenceDeg = FVector2D(5.0, 0.0);
+		if (Limit == 0)
+		{
+			Options.SeatRoomDeg = 2.0;
+		}
+		else
+		{
+			Options.Tuning.SeatTrimMaxDeg = 3.0;
+		}
+		const double  Room = Limit == 0 ? 2.0 : 3.0;
+		const FResult Result = DryRun::Run(Kit.Robot, Plane(0.0, 0.0), Options);
+		if (!TestTrue(FString::Printf(TEXT("%s: a trace"), Name), Result.Trace.Num() > 0))
+		{
+			continue;
+		}
+		const FSample& End = Result.Trace.Last();
+		AddInfo(FString::Printf(TEXT("%s | parked on the flat, 5 deg nose up preferred | the seat holds %.2f deg, the base %.2f; the rider %.2f"), Name, End.SeatDeg, End.TrueAttitudeDeg.X, End.RiderDeg.X));
+		TestEqual(FString::Printf(TEXT("%s: the seat holds what it has room for"), Name), End.SeatDeg, Room, 0.2);
+		TestEqual(FString::Printf(TEXT("%s: the base holds the rest"), Name), End.TrueAttitudeDeg.X, 5.0 - Room, 0.3);
+		TestEqual(FString::Printf(TEXT("%s: the rider has the whole preference"), Name), End.RiderDeg.X, 5.0, 0.3);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

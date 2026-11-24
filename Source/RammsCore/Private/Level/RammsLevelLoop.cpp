@@ -84,7 +84,7 @@ namespace RammsLevel
 		return Filter.Tick(AttitudeDeg + MeasuredCorrectionDeg, Dt, Seconds);
 	}
 
-	FVector2D FGroundGate::Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt)
+	FVector2D FGroundGate::Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt, double YawRateDegPerSec)
 	{
 		if (!bSeeded)
 		{
@@ -115,7 +115,10 @@ namespace RammsLevel
 		// (While the base is being braked or driven off hard its attitude says
 		// nothing of the ground, slowly or otherwise: the settling allowance
 		// is given up with the travel's. What the baselines did is known.)
-		Allowance = Trust * (FMath::Max(0.0, Tuning.SettleDegPerSec) + FMath::Max(0.0, TurnDegPerCm) * Speed) + FMath::Max(0.0, ExplainedDeg) / Dt;
+		// (Turning on a slope: the slope as it is believed, swung by the angle
+		// turned. A turn on level ground swings nothing.)
+		const double YawRadPerSec = FMath::IsFinite(YawRateDegPerSec) ? FMath::DegreesToRadians(FMath::Abs(YawRateDegPerSec)) : 0.0;
+		Allowance = Trust * (FMath::Max(0.0, Tuning.SettleDegPerSec) + FMath::Max(0.0, TurnDegPerCm) * Speed + Value.Size() * YawRadPerSec) + FMath::Max(0.0, ExplainedDeg) / Dt;
 		FVector2D	 Step = RawGroundDeg - Value;
 		const double Size = Step.Size();
 		const double Most = Allowance * Dt;

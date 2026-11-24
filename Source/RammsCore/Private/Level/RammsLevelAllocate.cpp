@@ -837,6 +837,7 @@ namespace RammsLevel
 		{
 			return false;
 		}
+		Out.FittedDeg = PlaneDeg;
 		PlaneDeg = ClampAxes(PlaneDeg, Tuning.MaxCorrectionDeg);
 
 		// The offsets are the law's own for that plane, on the baselines they

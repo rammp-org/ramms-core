@@ -38,6 +38,7 @@ namespace RammsLevel
 		}
 		Out.Deg = Deg;
 		Out.Position = Position;
+		Out.Heading = FVector2D(Measured.Forward.X, Measured.Forward.Y).GetSafeNormal();
 		return true;
 	}
 } // namespace RammsLevel

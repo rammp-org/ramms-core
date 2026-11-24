@@ -39,9 +39,13 @@
  * trim is exactly no offset. (The link is taken as commanded for both: what
  * the seat's loaded linkage sags by is the seat controller's to make up, as
  * it does, and not something to step the seat by when the switch is thrown.)
- * A fold puts the trim into the tilt's own command with the legs' offsets, and
- * how much of it is in that command still is kept for the taker
- * (FoldedSeatTrimDeg).
+ * A fold of the legs leaves the trim on the seat: whoever takes the legs has
+ * not thereby taken the seat. The trim goes into the tilt's own command when
+ * something takes the seat itself (FoldSeatTrim: a crossing about to hold the
+ * rider's pitch with commands of its own), and how much of it is in that
+ * command still is kept for that taker (FoldedSeatTrimDeg). One that then
+ * never wrote the tilt after all leaves it there, and a hand-back takes it
+ * back out (UnfoldSeatTrim).
  */
 namespace RammsLevel
 {
@@ -136,12 +140,16 @@ namespace RammsLevel
 			virtual bool   SeatTrimRange(double& OutOwnDeg, double& OutLowDeg, double& OutHighDeg) override;
 			virtual void   ApplySeatTrim(double TrimDeg) override;
 			virtual double FoldedSeatTrimDeg() const override;
+			virtual double SeatTrimOnDeg() const override;
+			virtual bool   UnfoldSeatTrim() override;
 			virtual bool MeasureLegs(FPlantLegs& OutLegs) override;
 			virtual void ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const override;
 			virtual void ApplyOffsets(TConstArrayView<double> Dz) override;
 			virtual bool OffsetsLost() override;
 			virtual void ZeroOffsets() override;
+			virtual void   ZeroLegOffsets() override;
 			virtual void Fold() override;
+			virtual void   FoldSeatTrim() override;
 			virtual bool Unfold() override;
 			virtual void ForgetFold() override;
 			virtual bool StanceHeights(const FRammsDriveStance& Stance, FLegValues& OutZ) const override;
@@ -152,6 +160,7 @@ namespace RammsLevel
 
 		private:
 			int32 AddMotor(FName Id, FString& OutWhy);
+			void  ZeroMotorOffsets(bool bSeatToo);
 			bool  WithinRange(const FPlantMotor& Motor, double Angle) const;
 			/** A 5-bar's hips for an endpoint (its own frame), within their
 			 *  motors' ranges. */
@@ -189,10 +198,6 @@ namespace RammsLevel
 			double SeatFoldedRad = 0.0;
 			float  SeatFoldedCommand = 0.0f;
 			bool   bSeatFolded = false;
-			/** What was in the command already when the last Fold began (rad):
-			 *  what is in it again once that fold is undone. */
-			double SeatUnfoldRad = 0.0;
-
 			/** The tilt motor's sense as a platform pitch: +1 or -1. */
 			double SeatSign() const;
 			/** The trim that is in the seat tilt's command now (rad): what folds
@@ -438,6 +443,44 @@ namespace RammsLevel
 		double FLegPlant::FoldedSeatTrimDeg() const
 		{
 			return FMath::RadiansToDegrees(SeatFoldedNowRad());
+		}
+
+		double FLegPlant::SeatTrimOnDeg() const
+		{
+			const URammsRobotBaseComponent* BasePtr = Base.Get();
+			if (!BasePtr || !Motors.IsValidIndex(SeatMotor))
+			{
+				return 0.0;
+			}
+			// (The tilt motor's angle is the platform's pitch, one sense or the
+			// other: an offset on it is that much trim, as a fold takes it.)
+			return FMath::RadiansToDegrees(static_cast<double>(BasePtr->GetMotorCommandOffset(Motors[SeatMotor].Id)) * SeatSign());
+		}
+
+		bool FLegPlant::UnfoldSeatTrim()
+		{
+			URammsRobotBaseComponent* BasePtr = Base.Get();
+			const UObject*			  LayerPtr = Layer.Get();
+			const double			  InCommandRad = SeatFoldedNowRad();
+			float					  Command = 0.0f;
+			if (!BasePtr || !LayerPtr || InCommandRad == 0.0 || !Motors.IsValidIndex(SeatMotor) || !BasePtr->GetMotorCommand(Motors[SeatMotor].Id, Command))
+			{
+				return false;
+			}
+			// The command without the trim; what the motor is told stays, so the
+			// trim is its offset again. (The base refuses when the layer is no
+			// longer held: then the trim stays where it is.)
+			if (!BasePtr->RebaseMotorCommand(Motors[SeatMotor].Id, static_cast<float>(static_cast<double>(Command) - InCommandRad * SeatSign()), LayerPtr))
+			{
+				return false;
+			}
+			SeatFoldedRad = 0.0;
+			bSeatFolded = false;
+			Motors[SeatMotor].bFolded = false;
+			// The baseline the next tick compares with is this one.
+			Motors[SeatMotor].bNow = BasePtr->GetMotorCommand(Motors[SeatMotor].Id, Motors[SeatMotor].NowBaseline);
+			RememberOffsets();
+			return true;
 		}
 
 		bool FLegPlant::WithinRange(const FPlantMotor& Motor, double Angle) const
@@ -785,19 +828,29 @@ namespace RammsLevel
 
 		void FLegPlant::ZeroOffsets()
 		{
+			ZeroMotorOffsets(/*bSeatToo=*/true);
+		}
+
+		void FLegPlant::ZeroLegOffsets()
+		{
+			ZeroMotorOffsets(/*bSeatToo=*/false);
+		}
+
+		void FLegPlant::ZeroMotorOffsets(bool bSeatToo)
+		{
 			URammsRobotBaseComponent* BasePtr = Base.Get();
 			const UObject*			  LayerPtr = Layer.Get();
 			if (!BasePtr || !LayerPtr)
 			{
 				return;
 			}
-			for (const FPlantMotor& Motor : Motors)
+			for (int32 Index = 0; Index < Motors.Num(); ++Index)
 			{
 				// Only where one is on: a write is a push at the base's next
 				// tick, and a motor already on its baseline needs none.
-				if (BasePtr->GetMotorCommandOffset(Motor.Id) != 0.0f)
+				if ((bSeatToo || Index != SeatMotor) && BasePtr->GetMotorCommandOffset(Motors[Index].Id) != 0.0f)
 				{
-					BasePtr->SetMotorCommandOffset(Motor.Id, 0.0f, LayerPtr);
+					BasePtr->SetMotorCommandOffset(Motors[Index].Id, 0.0f, LayerPtr);
 				}
 			}
 			RememberOffsets();
@@ -811,13 +864,17 @@ namespace RammsLevel
 			{
 				return;
 			}
-			// (What the seat's tilt carries before it is folded, and what an
-			// earlier fold left in its command, for FoldedSeatTrimDeg.)
-			SeatUnfoldRad = SeatFoldedNowRad();
-			const float SeatOffsetBefore = Motors.IsValidIndex(SeatMotor) ? BasePtr->GetMotorCommandOffset(Motors[SeatMotor].Id) : 0.0f;
-			for (FPlantMotor& Motor : Motors)
+			for (int32 Index = 0; Index < Motors.Num(); ++Index)
 			{
+				FPlantMotor& Motor = Motors[Index];
 				Motor.bFolded = false;
+				// The legs' motors: whoever takes the legs has not thereby taken
+				// the seat, whose trim stays on it until something takes the
+				// seat too (FoldSeatTrim) or levelling goes on from it.
+				if (Index == SeatMotor)
+				{
+					continue;
+				}
 				float Baseline = 0.0f, Effective = 0.0f;
 				// A motor nothing commands has no baseline to fold into (the
 				// base refuses the rebase): its offset is dropped instead.
@@ -833,12 +890,39 @@ namespace RammsLevel
 				}
 			}
 			bFoldRemembered = true;
-			if (Motors.IsValidIndex(SeatMotor) && Motors[SeatMotor].bFolded)
-			{
-				NoteSeatFold(SeatUnfoldRad, SeatOffsetBefore);
-			}
 			RememberOffsets();
 			SyncBaselineHolders();
+		}
+
+		void FLegPlant::FoldSeatTrim()
+		{
+			URammsRobotBaseComponent* BasePtr = Base.Get();
+			const UObject*			  LayerPtr = Layer.Get();
+			if (!BasePtr || !LayerPtr || !Motors.IsValidIndex(SeatMotor))
+			{
+				return;
+			}
+			const FName Id = Motors[SeatMotor].Id;
+			const float Offset = BasePtr->GetMotorCommandOffset(Id);
+			if (Offset == 0.0f)
+			{
+				return;
+			}
+			// (What an earlier fold left in the command is in it still: this
+			// one adds to it.)
+			const double InCommandRad = SeatFoldedNowRad();
+			float		 Effective = 0.0f;
+			if (BasePtr->GetMotorEffectiveCommand(Id, Effective) && BasePtr->RebaseMotorCommand(Id, Effective, LayerPtr))
+			{
+				NoteSeatFold(InCommandRad, Offset);
+				Motors[SeatMotor].bNow = BasePtr->GetMotorCommand(Id, Motors[SeatMotor].NowBaseline);
+			}
+			else
+			{
+				// Nothing commands the tilt: there is no command to fold into.
+				BasePtr->SetMotorCommandOffset(Id, 0.0f, LayerPtr);
+			}
+			RememberOffsets();
 		}
 
 		bool FLegPlant::Unfold()
@@ -851,11 +935,13 @@ namespace RammsLevel
 			}
 			// Only when every motor is exactly as the fold left it: a taker
 			// that has written even one has started, and what it wrote stands.
-			for (const FPlantMotor& Motor : Motors)
+			// (The legs' motors: the seat's tilt was not folded with them.)
+			for (int32 Index = 0; Index < Motors.Num(); ++Index)
 			{
-				float	   Baseline = 0.0f;
-				const bool bHas = BasePtr->GetMotorCommand(Motor.Id, Baseline);
-				if (bHas != Motor.bFolded || (bHas && !SameBits(Baseline, Motor.FoldedBaseline)) || BasePtr->GetMotorCommandOffset(Motor.Id) != 0.0f)
+				const FPlantMotor& Motor = Motors[Index];
+				float			   Baseline = 0.0f;
+				const bool		   bHas = BasePtr->GetMotorCommand(Motor.Id, Baseline);
+				if (Index != SeatMotor && (bHas != Motor.bFolded || (bHas && !SameBits(Baseline, Motor.FoldedBaseline)) || BasePtr->GetMotorCommandOffset(Motor.Id) != 0.0f))
 				{
 					return false;
 				}
@@ -884,11 +970,6 @@ namespace RammsLevel
 				Motor.bFolded = false;
 			}
 			bFoldRemembered = false;
-			// (The seat's trim of that fold is an offset again; what an earlier
-			// fold had put into the command is in it still.)
-			SeatFoldedRad = SeatUnfoldRad;
-			bSeatFolded = SeatUnfoldRad != 0.0 && Motors.IsValidIndex(SeatMotor) && BasePtr->GetMotorCommand(Motors[SeatMotor].Id, SeatFoldedCommand);
-			SeatUnfoldRad = 0.0;
 			RememberOffsets();
 			SyncBaselineHolders();
 			return true;
@@ -1108,10 +1189,17 @@ namespace RammsLevel
 			{
 				return;
 			}
-			const double SeatInCommandRad = SeatFoldedNowRad();
-			for (FPlantMotor& Motor : Motors)
+			for (int32 Index = 0; Index < Motors.Num(); ++Index)
 			{
-				if (BasePtr->GetMotorCommandOffset(Motor.Id) == 0.0f)
+				FPlantMotor& Motor = Motors[Index];
+				// The legs' motors only. The seat's trim stays an offset on its
+				// tilt: whoever took the legs has not taken the seat, and what
+				// goes on writing the seat's own command (its controller, every
+				// tick while it holds) is no taker. Folded, that writer's next
+				// command would wipe the trim out in one write; zeroed, this
+				// would. It stays on the seat, and levelling goes on from it at
+				// the hand-back.
+				if (Index == SeatMotor || BasePtr->GetMotorCommandOffset(Motor.Id) == 0.0f)
 				{
 					continue;
 				}
@@ -1119,18 +1207,11 @@ namespace RammsLevel
 				// read this command as where the motor is, so the offset goes
 				// into it. Rewritten: the new command is an absolute one, and
 				// the offset on top of it would be an error.
-				const bool	bUntouched = Motor.bNow && Motor.bPrev && SameBits(Motor.NowBaseline, Motor.PrevBaseline);
-				const float Offset = BasePtr->GetMotorCommandOffset(Motor.Id);
-				float		Effective = 0.0f;
+				const bool bUntouched = Motor.bNow && Motor.bPrev && SameBits(Motor.NowBaseline, Motor.PrevBaseline);
+				float	   Effective = 0.0f;
 				if (bUntouched && BasePtr->GetMotorEffectiveCommand(Motor.Id, Effective) && BasePtr->RebaseMotorCommand(Motor.Id, Effective, LayerPtr))
 				{
 					++OutFolded;
-					if (Motors.IsValidIndex(SeatMotor) && &Motor == &Motors[SeatMotor])
-					{
-						// The seat's trim went into its command: whoever took
-						// the seat is owed how much.
-						NoteSeatFold(SeatInCommandRad, Offset);
-					}
 				}
 				else
 				{
