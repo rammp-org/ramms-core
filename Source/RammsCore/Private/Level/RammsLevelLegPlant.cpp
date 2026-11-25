@@ -168,6 +168,7 @@ namespace RammsLevel
 			virtual bool   UnfoldSeatTrim() override;
 			virtual bool   MeasureLegs(FPlantLegs& OutLegs) override;
 			virtual void   RestLegsAt(TConstArrayView<double> Z, TArrayView<FLegReach> InOutLegs) const override;
+			virtual bool   StanceCentre(FVector2D& OutXY) const override;
 			virtual void   ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const override;
 			virtual void   ApplyOffsets(TConstArrayView<double> Dz) override;
 			virtual bool   OffsetsLost() override;
@@ -825,6 +826,13 @@ namespace RammsLevel
 			{
 				InOutLegs[Index].StanceGroundZ = At[Index].StanceGroundZ;
 			}
+		}
+
+		bool FLegPlant::StanceCentre(FVector2D& OutXY) const
+		{
+			// (Where MeasureLegs last worked the legs' StanceGroundZ out from.)
+			OutXY = CentreOfMassXY;
+			return true;
 		}
 
 		void FLegPlant::ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const

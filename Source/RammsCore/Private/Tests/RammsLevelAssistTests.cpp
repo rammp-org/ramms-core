@@ -4417,4 +4417,209 @@ bool FRammsLevelLegPlantStandsByWeightAsItStands::RunTest(const FString& Paramet
 	return true;
 }
 
+// Catches: a level assist that lets its carried wheels down onto the ground when the linkage it stands on is jogged.
+// A robot of this kind levelled on the flat, standing on its centre and rear wheels with its front pair carried 8 cm
+// clear, its centre linkage jogged up 6 cm at a jog's rate: the stance then leans nose down by 7 deg, the plane that
+// takes the lean back out lets a leg at the front down by twice what the centre was raised, and from 4.3 cm of the
+// jog on the front wheels are on the ground (the simulator, across a slope: every leg then counted as standing, the
+// centre legs at the top of their travel cut the whole correction, and the chassis went off by most of the slope). The plant says
+// where the weight is, the law holds a carried leg clear by what the stance's ground has risen under it, and the
+// stance's lean is taken into the ground's estimate on the frame the linkage moves.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelAssistJoggedLinkageCarriedStayCarried,
+	"Ramms.Level.Assist.JoggedLinkageLeavesTheCarriedLegsCarried",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelAssistJoggedLinkageCarriedStayCarried::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	using RammsLevel::EState;
+	FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/false);
+	if (!TestTrue(TEXT("the made-up robot on the recording backend"), R.IsReady() && R.Curb != nullptr))
+	{
+		return false;
+	}
+	// Its weight between the centre and the rear wheels; then its level assist.
+	R.Curb->Tuning.CenterOfMass = FVector(-15.0, 0.0, 10.0);
+	R.Level = NewObject<URammsLevelAssistComponent>(R.Actor, TEXT("LevelAssist"));
+	R.BeginPlayOf(*R.Level);
+	if (!TestTrue(TEXT("its level assist"), R.Level->HasBegunPlay()))
+	{
+		return false;
+	}
+	// The front pair carried 8 cm clear of the ground.
+	float Raised = 0.0f;
+	for (const float Sign : { 1.0f, -1.0f })
+	{
+		for (float Crank = 0.0f; FMath::Abs(Crank) <= 0.9f && Raised == 0.0f; Crank += Sign * 0.02f)
+		{
+			bool bValid = false;
+			if (URamms4BarKinematics::ComputeWheelCenter(CornerLeg(CrankFL, 20.0), Crank, bValid).Y >= StanceZ + 8.0 && bValid)
+			{
+				Raised = Crank;
+			}
+		}
+	}
+	if (!TestTrue(TEXT("a crank angle that carries a front wheel 8 cm up"), Raised != 0.0f))
+	{
+		return false;
+	}
+	R.Base->SetMotorCommand(CrankFL, Raised);
+	R.Base->SetMotorCommand(CrankFR, Raised);
+	R.Tick();
+
+	// The chassis as it stands on its centre and rear wheels on the flat: nose down by what the centre wheels are
+	// told to be over the rear ones.
+	const float Dt = 1.0f / 30.0f;
+	const auto	Pitch = [&R]() {
+		 const double Centre = 0.5 * (R.LegZ(2, true) + R.LegZ(3, true));
+		 const double Rear = 0.5 * (R.LegZ(4, true) + R.LegZ(5, true));
+		 return -FMath::RadiansToDegrees(FMath::Atan((Centre - Rear) / (CentreX + CornerX)));
+	};
+	const auto Frame = [&R, &Pitch, Dt]() {
+		R.Level->TickComponent(Dt, LEVELTICK_All, nullptr);
+		R.Tick(Dt);
+		R.PoseChassis(FVector2D(Pitch(), 0.0));
+	};
+	R.PoseChassis(FVector2D(Pitch(), 0.0));
+	IRammsControlContributor* Controls = R.Level;
+	TestTrue(TEXT("switched on"), Controls->ApplyControl(RammsLevel::AssistControlId(), 1.0f));
+	for (int32 Index = 0; Index < 60; ++Index)
+	{
+		Frame();
+	}
+	TestTrue(TEXT("levelling on the flat"), R.State() == EState::Active);
+	const double FrontBefore = FMath::Min(R.LegZ(0, true), R.LegZ(1, true));
+
+	// The centre linkage jogged up 6 cm at 6 cm/s, held a second.
+	double WorstDeg = 0.0, LetDownCm = 0.0;
+	bool   bAtReach = false;
+	for (int32 Index = 0; Index < 60; ++Index)
+	{
+		const double Jog = FMath::Min(6.0, 6.0 * Dt * (Index + 1));
+		R.Left->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+		R.Right->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+		Frame();
+		WorstDeg = FMath::Max(WorstDeg, FMath::Abs(Pitch()));
+		LetDownCm = FMath::Max(LetDownCm, FrontBefore - FMath::Min(R.LegZ(0, true), R.LegZ(1, true)));
+		bAtReach = bAtReach || R.Status().Contains(TEXT("reach"));
+	}
+	AddInfo(FString::Printf(TEXT("centre linkage jogged +6 cm: the base %.2f deg off at most, the carried pair let down %.2f cm at most, the rear legs retracted %.2f cm, status '%s'"), WorstDeg, LetDownCm, 0.5 * (R.LegDz(4) + R.LegDz(5)), *R.Status()));
+	TestTrue(TEXT("(the centre legs' baselines went up 6 cm)"), FMath::IsNearlyEqual(R.LegZ(2, false), StanceZ + 6.0, 0.05));
+	TestTrue(TEXT("still levelling"), R.State() == EState::Active);
+	TestTrue(*FString::Printf(TEXT("the plane takes the lean out on the legs it stands on: the rear legs retracted, the centre legs let down (%.2f and %.2f cm)"), 0.5 * (R.LegDz(4) + R.LegDz(5)), 0.5 * (R.LegDz(2) + R.LegDz(3))),
+		R.LegDz(4) > 2.0 && R.LegDz(5) > 2.0 && R.LegDz(2) < -2.0 && R.LegDz(3) < -2.0);
+	TestTrue(*FString::Printf(TEXT("the base stays level through the jog (%.2f deg)"), WorstDeg), WorstDeg <= 0.5);
+	TestTrue(*FString::Printf(TEXT("the carried pair is not let down with the plane (%.2f cm)"), LetDownCm), LetDownCm <= 0.5);
+	TestFalse(TEXT("... and nothing is at reach"), bAtReach);
+
+	// A carried leg lowered by its OWN command comes down: it is held clear of the ground that rose under it, not
+	// held where it was. (The front pair let down 3 cm.)
+	{
+		float Lower = Raised;
+		for (float Crank = Raised; FMath::Abs(Crank) >= 0.0f && Lower == Raised; Crank -= FMath::Sign(Raised) * 0.01f)
+		{
+			bool bValid = false;
+			if (URamms4BarKinematics::ComputeWheelCenter(CornerLeg(CrankFL, 20.0), Crank, bValid).Y <= StanceZ + 5.0 && bValid)
+			{
+				Lower = Crank;
+			}
+			if (FMath::Abs(Crank) < 0.01f)
+			{
+				break;
+			}
+		}
+		const double ToldBefore = R.LegZ(0, true);
+		const double BaseBefore = R.LegZ(0, false);
+		R.Base->SetMotorCommand(CrankFL, Lower);
+		R.Base->SetMotorCommand(CrankFR, Lower);
+		for (int32 Index = 0; Index < 30; ++Index)
+		{
+			Frame();
+			WorstDeg = FMath::Max(WorstDeg, FMath::Abs(Pitch()));
+		}
+		const double Lowered = BaseBefore - R.LegZ(0, false);
+		TestTrue(*FString::Printf(TEXT("(the front pair's own command let it down %.2f cm)"), Lowered), Lowered >= 2.5);
+		TestTrue(*FString::Printf(TEXT("the front wheels came down with their own command (told %.2f cm lower for %.2f)"), ToldBefore - R.LegZ(0, true), Lowered), ToldBefore - R.LegZ(0, true) >= Lowered - 0.5);
+		TestTrue(*FString::Printf(TEXT("... the base level meanwhile (%.2f deg)"), WorstDeg), WorstDeg <= 0.5);
+		R.Base->SetMotorCommand(CrankFL, Raised);
+		R.Base->SetMotorCommand(CrankFR, Raised);
+		for (int32 Index = 0; Index < 30; ++Index)
+		{
+			Frame();
+		}
+		TestTrue(*FString::Printf(TEXT("... and went back up with it (told %.2f cm from where they were)"), R.LegZ(0, true) - ToldBefore), FMath::Abs(R.LegZ(0, true) - ToldBefore) <= 0.5);
+	}
+
+	// Switched off with the linkage still jogged up 3 cm and the front pair held (given the plane it would stand
+	// 2.4 cm over the ground; it is held 5 cm over that): the base is given back to its stance, nose down on the
+	// jogged linkage, and no leg's command steps on the way or at the end.
+	{
+		for (int32 Index = 0; Index < 45; ++Index)
+		{
+			const double Jog = FMath::Max(3.0, 6.0 - 6.0 * Dt * (Index + 1));
+			R.Left->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+			R.Right->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+			Frame();
+			WorstDeg = FMath::Max(WorstDeg, FMath::Abs(Pitch()));
+		}
+		TestTrue(*FString::Printf(TEXT("level through the jog half way back (%.2f deg)"), WorstDeg), WorstDeg <= 0.5);
+		TestTrue(*FString::Printf(TEXT("the front pair still held: told %.2f cm over where the plane alone would have it"), R.LegDz(0) - (0.5 * (R.LegDz(2) + R.LegDz(3)) + (0.5 * (R.LegDz(2) + R.LegDz(3)) - 0.5 * (R.LegDz(4) + R.LegDz(5))) * (CornerX - CentreX) / (CentreX + CornerX))),
+			R.LegDz(0) - (0.5 * (R.LegDz(2) + R.LegDz(3)) + (0.5 * (R.LegDz(2) + R.LegDz(3)) - 0.5 * (R.LegDz(4) + R.LegDz(5))) * (CornerX - CentreX) / (CentreX + CornerX)) >= 3.0);
+		double Before[6];
+		for (int32 Leg = 0; Leg < 6; ++Leg)
+		{
+			Before[Leg] = R.LegZ(Leg, true);
+		}
+		TestTrue(TEXT("switched off"), Controls->ApplyControl(RammsLevel::AssistControlId(), 0.0f));
+		// (Held, the front pair stands over its own command by what the chassis has come down.)
+		const double FrontAtOffCm = FMath::Max(R.LegDz(0), R.LegDz(1));
+		double		 LargestStepCm = 0.0, HighestFrontCm = 0.0;
+		int32		 FramesToOff = 0;
+		for (int32 Index = 0; Index < 600 && R.State() != EState::Off; ++Index)
+		{
+			Frame();
+			++FramesToOff;
+			for (int32 Leg = 0; Leg < 6; ++Leg)
+			{
+				const double Now = R.LegZ(Leg, true);
+				LargestStepCm = FMath::Max(LargestStepCm, FMath::Abs(Now - Before[Leg]));
+				Before[Leg] = Now;
+			}
+			HighestFrontCm = FMath::Max(HighestFrontCm, FMath::Max(R.LegDz(0), R.LegDz(1)) - FrontAtOffCm);
+		}
+		AddInfo(FString::Printf(TEXT("switched off jogged: off after %.1f s, the largest step of a leg's command in a frame %.2f cm, the front pair at most %.2f cm over where it was held (%.2f cm over its own command)"), FramesToOff * Dt, LargestStepCm, HighestFrontCm, FrontAtOffCm));
+		TestTrue(TEXT("off in the end"), R.State() == EState::Off);
+		TestTrue(*FString::Printf(TEXT("no leg's command steps as the base is given back (%.2f cm in a frame at most)"), LargestStepCm), LargestStepCm <= 0.45);
+		TestTrue(*FString::Printf(TEXT("the front pair is not sent up from where it was held on the way (%.2f cm)"), HighestFrontCm), HighestFrontCm <= 0.1);
+		for (const FName& Id : FLevelRig::LegMotors())
+		{
+			TestTrue(*FString::Printf(TEXT("%s: no offset left"), *Id.ToString()), R.Base->GetMotorCommandOffset(Id) == 0.0f);
+		}
+		R.PoseChassis(FVector2D(Pitch(), 0.0));
+	}
+
+	// On again, and the linkage jogged back: nothing is left held, and the legs are as they were.
+	TestTrue(TEXT("switched on again"), Controls->ApplyControl(RammsLevel::AssistControlId(), 1.0f));
+	for (int32 Index = 0; Index < 240; ++Index)
+	{
+		Frame();
+	}
+	TestTrue(*FString::Printf(TEXT("levelled again on the jogged linkage (%.2f deg)"), FMath::Abs(Pitch())), R.State() == EState::Active && FMath::Abs(Pitch()) <= 0.1);
+	WorstDeg = 0.0;
+	for (int32 Index = 0; Index < 90; ++Index)
+	{
+		const double Jog = FMath::Max(0.0, 3.0 - 6.0 * Dt * (Index + 1));
+		R.Left->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+		R.Right->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+		Frame();
+		WorstDeg = FMath::Max(WorstDeg, FMath::Abs(Pitch()));
+	}
+	TestTrue(*FString::Printf(TEXT("level through the jog back (%.2f deg)"), WorstDeg), WorstDeg <= 0.5);
+	for (int32 Leg = 0; Leg < 6; ++Leg)
+	{
+		TestTrue(*FString::Printf(TEXT("leg %d: no offset left once the jog is taken back (%.3f cm)"), Leg, R.LegDz(Leg)), FMath::Abs(R.LegDz(Leg)) <= 0.15);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

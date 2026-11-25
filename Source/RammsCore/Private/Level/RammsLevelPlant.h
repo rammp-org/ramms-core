@@ -118,6 +118,16 @@ namespace RammsLevel
 		 */
 		virtual void RestLegsAt(TConstArrayView<double> Z, TArrayView<FLegReach> Legs) const {}
 
+		/**
+		 * Where the robot's weight is, as of the last MeasureLegs, for a plant
+		 * that worked the legs' StanceGroundZ out from it (StanceGround): the
+		 * centre of mass on the chassis (cm). The law then holds a carried leg
+		 * clear of a stance ground that rises under it and works that ground
+		 * out again with the leg where it is held (FInputs::bStanceCentre).
+		 * False for a plant that does not, or whose legs are pairs.
+		 */
+		virtual bool StanceCentre(FVector2D& OutXY) const { return false; }
+
 		/** The underside points the law keeps clear of the ground, each asking
 		 *  Tuning.MinBellyClearanceCm. */
 		virtual void ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const = 0;

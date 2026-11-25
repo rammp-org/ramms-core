@@ -25,6 +25,9 @@ namespace RammsLevel
 			State.RideCm = 0.0;
 			State.HeightRateCmS = 0.0;
 			State.LastDz.Init(0.0, NumLegs);
+			State.HeldCm.Init(0.0, NumLegs);
+			State.KeptCm.Reset();
+			State.HeldBaseZ.Reset();
 			State.Fraction = 1.0;
 			State.ReachLeft = 1.0;
 			State.MinMarginCm = NoTravelMarginCm;
@@ -137,6 +140,8 @@ namespace RammsLevel
 			State.PrevGroundDeg = State.Terrain.Get();
 			// What may be carried starts again from what is carried.
 			State.Carry.Reset();
+			// (The estimates were taken afresh: what the stance leaned by before is not gone on from.)
+			State.bStanceLean = false;
 		}
 
 		/** The legs with who stands, each lifted leg's clearance and how far
@@ -383,12 +388,147 @@ namespace RammsLevel
 			// (The first sight of the legs is not a move.)
 			return bMoved && !bFirst;
 		}
+
+		/**
+		 * The law's step 0a: carried legs held clear of a stance ground that
+		 * rises under them. Moves State.HeldCm on (and KeptCm, HeldBaseZ) and
+		 * gives the legs as held in OutLegs. False, OutLegs untouched, when no
+		 * leg is held: the legs are then as given.
+		 */
+		bool HoldCarried(const FInputs& Given, double Dt, const FTuning& Tuning, FState& State, FLegs& OutLegs)
+		{
+			const int32 Num = Given.Legs.Num();
+			if (State.HeldCm.Num() != Num)
+			{
+				State.HeldCm.Init(0.0, Num);
+				State.KeptCm.Reset();
+				State.HeldBaseZ.Reset();
+			}
+			const auto AsHeld = [&Given, &State, Num](FLegs& Legs) {
+				bool bAny = false;
+				for (int32 Index = 0; Index < Num; ++Index)
+				{
+					bAny = bAny || State.HeldCm[Index] != 0.0;
+				}
+				if (!bAny)
+				{
+					return false;
+				}
+				Legs.Reset();
+				Legs.Append(Given.Legs.GetData(), Num);
+				for (int32 Index = 0; Index < Num; ++Index)
+				{
+					Legs[Index].BaseZ += State.HeldCm[Index];
+				}
+				// The ground the stance rests on with the held legs where they are held.
+				StanceGround(Legs, Given.StancePairHalfTrackCm, Given.StanceCentreXY);
+				return true;
+			};
+			if (!Given.bStanceCentre || Given.bSupportGiven || Num == 0 || !State.Arbiter.HasOffsets())
+			{
+				State.HeldCm.Init(0.0, Num);
+				State.KeptCm.Reset();
+				State.HeldBaseZ.Reset();
+				return false;
+			}
+			const EState Was = State.Arbiter.GetState();
+			const bool	 bLevelling = Was == EState::Active && Given.bEnable && Given.Mode == EMode::Allowed && !Given.bYield && !Given.bResume;
+			// A leg held further or less far is told nothing by that alone: what
+			// it carries over its own baseline stays, and the offset it had over
+			// the baseline as held changes by as much the other way. (The legs'
+			// rate is then counted on what a leg is really asked to move.)
+			const auto HoldAt = [&State](int32 Index, double HeldCm) {
+				if (State.LastDz.IsValidIndex(Index))
+				{
+					State.LastDz[Index] += State.HeldCm[Index] - HeldCm;
+				}
+				State.HeldCm[Index] = HeldCm;
+			};
+			if (Dt > 0.0 && bLevelling && !Given.bStanceChanging)
+			{
+				// Who stands, the legs as held so far: as the last step left it.
+				FLegs Held;
+				if (!AsHeld(Held))
+				{
+					Held.Append(Given.Legs.GetData(), Num);
+				}
+				SupportMask(Held, State.Support, Tuning);
+				const auto Over = [](const FLegReach& Leg) { return Leg.BaseZ - Leg.RadiusCm - Leg.StanceGroundZ; };
+				double	   Lowest = Over(Held[0]);
+				for (const FLegReach& Leg : Held)
+				{
+					Lowest = FMath::Min(Lowest, Over(Leg));
+				}
+				const bool bAfresh = State.KeptCm.Num() != Num || State.HeldBaseZ.Num() != Num;
+				if (bAfresh)
+				{
+					State.KeptCm.Init(0.0, Num);
+					State.HeldBaseZ.Init(0.0, Num);
+				}
+				for (int32 Index = 0; Index < Num; ++Index)
+				{
+					const FLegReach& Leg = Given.Legs[Index];
+					// Its clearance as held, and as its baseline alone would have it.
+					const double ClearCm = Over(Held[Index]) - Lowest;
+					const double AloneCm = ClearCm - State.HeldCm[Index];
+					if (bAfresh || Held[Index].bSupport || !Leg.bHasBaseline)
+					{
+						State.KeptCm[Index] = ClearCm;
+					}
+					else
+					{
+						// (Its own baseline's moves are its own: lowered by its
+						// command, it comes down.)
+						State.KeptCm[Index] += Leg.BaseZ - State.HeldBaseZ[Index];
+						const double ShortCm = State.KeptCm[Index] - AloneCm;
+						// No further than its travel lets it be held, with the offset it last had.
+						const double LastCm = State.LastDz.IsValidIndex(Index) ? State.LastDz[Index] : 0.0;
+						HoldAt(Index, FMath::Min(ShortCm > HeldSlackCm ? ShortCm - HeldSlackCm : 0.0, FMath::Max(0.0, Leg.MaxZ - Leg.BaseZ - LastCm)));
+					}
+					State.HeldBaseZ[Index] = Leg.BaseZ;
+				}
+			}
+			else if (Dt > 0.0 && !bLevelling && Was != EState::Holding)
+			{
+				// Given back: no leg is held, and each goes from where it was
+				// held to where its baseline and the plane have it as any
+				// lifted leg is let down (LimitLegSteps: at its own rate).
+				for (int32 Index = 0; Index < Num; ++Index)
+				{
+					HoldAt(Index, 0.0);
+				}
+				State.KeptCm.Reset();
+				State.HeldBaseZ.Reset();
+			}
+			else if (Dt > 0.0)
+			{
+				// A stance being changed, no attitude: held as it is, the
+				// clearances taken afresh after.
+				State.KeptCm.Reset();
+				State.HeldBaseZ.Reset();
+			}
+			return AsHeld(OutLegs);
+		}
 	} // namespace LawImpl
 
-	FOutputs FLaw::Step(const FInputs& In, double InDt, const FTuning& Tuning, FState& State)
+	FOutputs FLaw::Step(const FInputs& Given, double InDt, const FTuning& Tuning, FState& State)
 	{
 		// ---- 0. Housekeeping ----
-		const double	Dt = FMath::IsFinite(InDt) ? FMath::Clamp(InDt, 0.0, MaxStepSeconds) : 0.0;
+		const double Dt = FMath::IsFinite(InDt) ? FMath::Clamp(InDt, 0.0, MaxStepSeconds) : 0.0;
+		// ---- 0a. Carried legs held clear: from here on the legs are the legs as held ----
+		FInputs		   In = Given;
+		LawImpl::FLegs HeldLegs;
+		{
+			bool bNumbers = true;
+			for (const FLegReach& Leg : Given.Legs)
+			{
+				bNumbers = bNumbers && LawImpl::IsFinite(Leg);
+			}
+			if (bNumbers && State.LegCount == Given.Legs.Num() && !Given.bColdReset && LawImpl::HoldCarried(Given, Dt, Tuning, State, HeldLegs))
+			{
+				In.Legs = HeldLegs;
+			}
+		}
 		const int32		NumLegs = In.Legs.Num();
 		const FVector2D Ref = Tuning.LevelReferenceDeg;
 
@@ -404,6 +544,14 @@ namespace RammsLevel
 			State.PrevBaseZ.Reset();
 			State.StillBaseZ.Reset();
 			State.SagCm.Reset();
+			State.HeldCm.Init(0.0, NumLegs);
+			State.KeptCm.Reset();
+			State.HeldBaseZ.Reset();
+		}
+		double HeldMostCm = 0.0;
+		for (const double HeldCm : State.HeldCm)
+		{
+			HeldMostCm = FMath::Max(HeldMostCm, FMath::Abs(HeldCm));
 		}
 
 		// Every number the legs and the points come with, not only the two
@@ -514,6 +662,53 @@ namespace RammsLevel
 			const double	TurnDegPerCm = State.Ground.Tuning.BreakDeg / StandingSpanCm(Sensed);
 			const double	ExplainedDeg = BaselineTurnDeg(Sensed, State.PrevBaseZ);
 			const FVector2D SeenDeg = State.Ground.Tick(Filtered + AchievedDeg, In.SpeedCmS, TurnDegPerCm, ExplainedDeg, Dt, In.YawRateDegPerSec);
+			// How the stance itself leans on the flat (the plane of the ground
+			// it rests on under the legs that stand, where the plant gives one)
+			// is KNOWN, and so is what a baseline that moved since the last step
+			// turned it by, to the last bit, on the step it moved: the stance's
+			// own attitude (the estimate's G) turned by exactly that, the other
+			// way. Left to the estimate's low-pass, a linkage jogged under a
+			// levelled robot is followed a filter's time behind for as long as
+			// the jog runs, the integral makes the lag up, and has it the wrong
+			// way round the moment the jog stops or turns back: the base then
+			// swings by twice the lag (a simulator's finding, at the turn of a
+			// jog at its real rate). So the estimates take that part whole.
+			// (While levelling, and not while a drive mode changes the stance:
+			// its ramp is waited out, not followed. Nothing on a robot whose
+			// stances stand level in its own frame: its lean is none.)
+			{
+				TArray<FVector2D, TInlineAllocator<8>> XY;
+				TArray<bool, TInlineAllocator<8>>	   Stands;
+				FLegValues							   GroundZ;
+				bool								   bMoved = false;
+				for (int32 Index = 0; Index < Sensed.Num(); ++Index)
+				{
+					XY.Add(Sensed[Index].XY);
+					Stands.Add(Sensed[Index].bSupport);
+					GroundZ.Add(Sensed[Index].StanceGroundZ);
+					bMoved = bMoved || (State.PrevBaseZ.IsValidIndex(Index) && Sensed[Index].BaseZ != State.PrevBaseZ[Index]);
+				}
+				FVector2D  LeanDeg = FVector2D::ZeroVector;
+				double	   HeightCm = 0.0;
+				const bool bLean = Stands.Contains(true) && FitPlane(XY, GroundZ, Stands, TConstArrayView<bool>(), LeanDeg, HeightCm);
+				if (Dt > 0.0 && bLean && State.bStanceLean && bMoved && !In.bStanceChanging && State.Arbiter.GetState() == EState::Active && State.Terrain.IsSeeded())
+				{
+					const FVector2D TurnedDeg = LeanDeg - State.StanceLeanDeg;
+					if (!TurnedDeg.IsZero())
+					{
+						State.Terrain.Seed(State.Terrain.Get() - TurnedDeg);
+						if (State.SeatGround.IsSeeded())
+						{
+							State.SeatGround.Seed(State.SeatGround.Get() - TurnedDeg);
+						}
+					}
+				}
+				if (Dt > 0.0)
+				{
+					State.StanceLeanDeg = LeanDeg;
+					State.bStanceLean = bLean;
+				}
+			}
 			State.Terrain.Tick(SeenDeg - AchievedDeg, AchievedDeg, Dt, Tuning.TerrainFilterSeconds);
 			State.SeatGround.Tick(SeenDeg, Dt, Tuning.SeatFilterSeconds);
 			State.LossSeconds = 0.0;
@@ -545,7 +740,7 @@ namespace RammsLevel
 		Ask.bResumeHasPlane = In.bResumeHasPlane && LawImpl::IsFinite(In.ResumePlaneDeg);
 		Ask.bColdReset = bColdReset;
 		Ask.bCorrectionZero = State.CorrectionDeg.Size() < ReleaseDoneDeg && FMath::Abs(State.RideCm) < ReleaseDoneCm
-			&& FMath::Abs(State.SeatTrim.Get()) < ReleaseDoneDeg && !State.bLegsBehind;
+			&& FMath::Abs(State.SeatTrim.Get()) < ReleaseDoneDeg && !State.bLegsBehind && HeldMostCm < ReleaseDoneCm;
 		Ask.bDiverged = State.Divergence.HasDiverged();
 		Ask.bStanceChanging = In.bStanceChanging;
 		const FArbiterStep Arbiter = State.Arbiter.Tick(Ask);
@@ -829,7 +1024,7 @@ namespace RammsLevel
 				// (Nor while the seat is still on its way.)
 				const bool bMayRest = State.Tilt.IsNear(RiderGoalDeg) && State.SeatShare.IsNear(ShareGoal) && !State.SeatTrim.IsBehind() && !bBaselinesMoving && !State.bLegsBehind;
 				bQuiet = State.Quiet.Tick(In.SpeedCmS, (AttitudeDeg - LawImpl::BaseWanted(State)).Size(), In.bStick, bMayRest, Dt, Tuning);
-				bAboutToRest = bMayRest && !In.bStick && In.SpeedCmS < QuietSpeedCmS;
+				bAboutToRest = bMayRest && !In.bStick && FMath::Abs(In.SpeedCmS) < QuietSpeedCmS;
 			}
 			// At rest nothing is written, so the servos simply hold; and a step
 			// in which no time passes advances nothing.
@@ -878,7 +1073,21 @@ namespace RammsLevel
 				const FVector2D WithinDeg = ClampAxes(RawDeg, Full.MaxCorrectionDeg);
 				State.bAxisLimited = FMath::Abs(RawDeg.X - WithinDeg.X) > AxisLimitSlackDeg || FMath::Abs(RawDeg.Y - WithinDeg.Y) > AxisLimitSlackDeg;
 
-				const FVector2D SlewedDeg = SlewCorrection(Legs, State.CorrectionDeg, AskedDeg, Dt, Tuning.MaxCorrectionRateDegPerSec, Tuning, RateUse, State.bRateLimited);
+				// (A carried leg held clear stands above where the plane has
+				// it: the plane coming up to it does not move it, and is not
+				// slowed to its rate.)
+				FLegValues AboveCm;
+				if (HeldMostCm > 0.0)
+				{
+					FLegValues Rigid;
+					RigidOffsets(Legs, State.CorrectionDeg, Rigid);
+					for (int32 Index = 0; Index < Legs.Num() && Index < Rigid.Num(); ++Index)
+					{
+						const bool bHeld = State.HeldCm.IsValidIndex(Index) && State.HeldCm[Index] > 0.0 && State.LastDz.IsValidIndex(Index);
+						AboveCm.Add(bHeld ? FMath::Max(0.0, State.LastDz[Index] - (Rigid[Index] - State.RideCm)) : 0.0);
+					}
+				}
+				const FVector2D SlewedDeg = SlewCorrection(Legs, State.CorrectionDeg, AskedDeg, Dt, Tuning.MaxCorrectionRateDegPerSec, Tuning, RateUse, State.bRateLimited, AboveCm);
 
 				FAllocation Alloc = Allocate(Legs, Points, SlewedDeg, Full, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
 				State.RideCm = Alloc.HeightCm;
@@ -1112,7 +1321,8 @@ namespace RammsLevel
 		FOutputs Out;
 		if (bHasOffsets)
 		{
-			Out.Dz = State.LastDz;
+			// (Over the legs' own baselines: with what each is held clear by.)
+			Out.Dz = State.TrueOffsets();
 		}
 		else
 		{

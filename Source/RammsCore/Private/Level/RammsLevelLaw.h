@@ -49,13 +49,62 @@
  *    allocated: an open-loop ramp holds its offsets, an adopt keeps none,
  *    until the legs read again.)
  *
+ * 0a. CARRIED LEGS HELD CLEAR, where In.bStanceCentre (a plant that judges
+ *    who stands by where the weight is) and not bSupportGiven. The
+ *    correction is a plane, and every leg is given it: a carried leg then
+ *    keeps, over the ground the standing legs make, the clearance its
+ *    baseline has over the flat ground the STANCE rests on (StanceGroundZ).
+ *    That is right for a slope, and wrong when the stance itself is made to
+ *    lean under a levelled robot: the legs it stands on jogged up or down.
+ *    The plane that takes that lean back out lets a carried leg down by the
+ *    lean times its distance, the wheels are set on the ground with the
+ *    robot's weight nowhere near them, every leg counts as standing while
+ *    the stance changes hands, and the legs on their way out (jogged to the
+ *    end of their travel) cut the whole correction to what they can follow.
+ *    So each leg has HeldCm (0 or more): how far it is held above where its
+ *    baseline and the plane would have it, and everything below works on the
+ *    legs AS HELD (each BaseZ with its HeldCm added; StanceGroundZ worked
+ *    out again from In.StanceCentreXY when any is held); LastDz and the
+ *    allocation are over those, and FOutputs::Dz is LastDz + HeldCm. On a
+ *    step that takes time, with the last step Active, the switch on, the
+ *    mode allowed, no yield, no resume and the stance not being changed
+ *    (a drive mode's ramp sets its own legs down, and is not held off):
+ *    SupportMask as the last step left it says who stands as held; each
+ *    leg's KeptCm goes with its own baseline (a leg lowered by its own
+ *    command comes down); a leg that stands, or has no baseline, keeps its
+ *    HeldCm and its KeptCm is its clearance as held; a carried leg's HeldCm
+ *    is what its clearance by its baseline alone is short of KeptCm, less
+ *    HeldSlackCm, 0 when it is not short, and no more than its travel lets
+ *    it be held with the offset it last had. So a carried leg loses no
+ *    clearance to a stance ground that rises under it and gets none back it
+ *    did not have, and a jog taken back leaves nothing held. While the
+ *    stance is being changed HeldCm stands and KeptCm is taken afresh
+ *    after. Whenever a leg's HeldCm changes its LastDz changes by as much
+ *    the other way: what the leg carries over its own baseline stays, and
+ *    the legs' rate (step g2) is counted on what it is really asked to move.
+ *    Once the robot is no longer levelling (the switch off, a mode to
+ *    release for, Releasing, Faulted) every HeldCm is 0 from that step, and
+ *    the legs go from where they were held to where the plane has them as
+ *    any lifted leg is let down, which a release waits for; in Holding
+ *    HeldCm stands; with no offsets (and wherever the correction is zeroed:
+ *    StartFromAttitude, Fold, Clear) it is 0.
+ *
  * 1. SENSING, when valid: A = Attitude.Tick(In.AttitudeDeg, Dt,
  *    AttitudeFilterSeconds); c = MeasuredCorrection(Legs);
  *    S = Ground.Tick(A + c, In.SpeedCmS, Ground.Tuning.BreakDeg /
  *    StandingSpanCm(Legs), BaselineTurnDeg(Legs, the baselines of the last
  *    step that took time), Dt, In.YawRateDegPerSec): the ground as far as it can have turned
  *    (FGroundGate); G = Terrain.Tick(S - c, c, Dt, TerrainFilterSeconds),
- *    the low-pass of S; LossSeconds = 0. When not: all hold and
+ *    the low-pass of S -- but for what a baseline that moved turned the
+ *    stance's own lean by, which is known exactly. The lean is the plane of
+ *    StanceGroundZ under the legs that stand (FitPlane; none on a robot
+ *    whose stances stand level in its own frame). On a step that takes
+ *    time, with the last step Active, the stance not being changed, the
+ *    lean known at the last such step too (and the estimates not seeded
+ *    afresh since: ColdResume) and a leg's BaseZ other than at the last
+ *    step that took time, G and the seat's low-pass are first moved by the
+ *    lean's change whole, the other way: a jogged leg is then answered on
+ *    the step it moves, not a filter's time behind. LossSeconds = 0. When not: all hold and
  *    LossSeconds += Dt. When valid the seat hears the same reading through
  *    its own low-pass: SeatGround.Tick(S, Dt, SeatFilterSeconds). The LOOP's
  *    attitude, "A'" below, is S - c: the
@@ -204,7 +253,9 @@
  *       bAxisLimited = an axis of C_raw is more than AxisLimitSlackDeg past
  *       its limit.
  *    f. Slewed = SlewCorrection(Legs, C, Asked, Dt,
- *       MaxCorrectionRateDegPerSec, Tuning, RateUse, bRateLimited).
+ *       MaxCorrectionRateDegPerSec, Tuning, RateUse, bRateLimited, Above),
+ *       Above being, for a leg held clear (0a), how far its LastDz stands
+ *       over where C and Ride have it, and 0 for every other leg.
  *    g. Alloc = Allocate(Legs, Points, Slewed, Tuning, Ride,
  *       RideHeightRateCmPerSec Dt); Ride = Alloc.HeightCm; C := Slewed;
  *       bSaturated = Alloc.Fraction < 1, and then C := Alloc.AppliedDeg and
@@ -407,6 +458,16 @@ namespace RammsLevel
 		/** Take the legs' bSupport and BaselineClearanceCm as given instead of
 		 *  working them out (a plant that knows better; a test's wrong set). */
 		bool bSupportGiven = false;
+		/** The legs' StanceGroundZ was worked out from where the robot's
+		 *  weight is (StanceGround), and this is where: the centre of mass on
+		 *  the chassis (cm), and each leg's half track where it is a pair
+		 *  (empty: none is). The law then holds a carried leg clear of a
+		 *  stance ground that rises under it (FState::HeldCm) and works that
+		 *  ground out again with the leg where it is held. False: no leg is
+		 *  held, and StanceGroundZ is taken as given. */
+		bool					bStanceCentre = false;
+		FVector2D				StanceCentreXY = FVector2D::ZeroVector;
+		TConstArrayView<double> StancePairHalfTrackCm;
 
 		/** The switch, as a level: true while level.assist is On. */
 		bool bEnable = false;
@@ -565,8 +626,23 @@ namespace RammsLevel
 		/** How fast the offsets' common height is catching the allocation's
 		 *  up (cm/s; step g2), 0 when it has. */
 		double HeightRateCmS = 0.0;
-		/** The last offsets given, for the steps that hold them. */
+		/** The last offsets given, for the steps that hold them: over the
+		 *  baselines AS HELD (each leg's baseline with its HeldCm). What the
+		 *  motors carry over their own baselines is these with HeldCm added
+		 *  (FOutputs::Dz; TrueOffsets). */
 		FLegValues LastDz;
+		/** CARRIED LEGS HELD CLEAR. How far each leg is held above where its
+		 *  baseline and the plane would have it (cm, 0 or more), the clearance
+		 *  each is kept at (cm; empty: to be taken afresh), and each baseline
+		 *  as it last read (cm). See the law's step 0a. */
+		FLegValues HeldCm;
+		FLegValues KeptCm;
+		FLegValues HeldBaseZ;
+		/** How the stance leaned on the flat at the last step that took time
+		 *  (deg: the plane of StanceGroundZ under the legs that stood), and
+		 *  whether that is known (step 1). */
+		FVector2D StanceLeanDeg = FVector2D::ZeroVector;
+		bool	  bStanceLean = false;
 		/** Who stood last step, for SupportMask's hysteresis; empty: no memory. */
 		TArray<bool, TInlineAllocator<8>> Support;
 		/** The last allocation, for the steps that reuse its figures. */
@@ -610,6 +686,18 @@ namespace RammsLevel
 		int32 LegCount = INDEX_NONE;
 
 		void Reset() { *this = FState(); }
+
+		/** The offsets the motors carry over their own baselines (cm): LastDz
+		 *  with what each leg is held clear by. */
+		FLegValues TrueOffsets() const
+		{
+			FLegValues Out = LastDz;
+			for (int32 Index = 0; Index < Out.Num() && Index < HeldCm.Num(); ++Index)
+			{
+				Out[Index] += HeldCm[Index];
+			}
+			return Out;
+		}
 	};
 
 	/** Where the rider's preferred tilt is held. */

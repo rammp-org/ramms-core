@@ -961,6 +961,10 @@ namespace RammsLevel::DryRun
 				In.ResumePlaneDeg = Adoption.PlaneDeg;
 				In.ResumeDz = Adoption.Dz;
 				In.bStanceChanging = Time < ChangingUntil - TimeHair;
+				// (As a plant that judges who stands by where the weight is.)
+				In.bStanceCentre = Robot.bStanceRests;
+				In.StanceCentreXY = FVector2D(Robot.CentreOfMass);
+				In.StancePairHalfTrackCm = PairHalfTracks;
 				const FOutputs Out = FLaw::Step(In, LawDt, Tuning, Law);
 
 				// The shell's part: fold, write, push.

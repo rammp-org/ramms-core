@@ -4888,6 +4888,84 @@ bool FRammsLevelDryRunJoggedLegs::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: carried wheels brought down onto the ground by a jog of the legs the robot stands on. A robot levelled
+// across a 6 deg fall (and on a 6 deg grade), standing on its centre and rear legs with its front pair carried 12 cm
+// clear, its centre legs' height jogged up 9 cm at a jog's real rate (6 cm/s) and back. The correction that holds the
+// base level against the lean of the jogged stance is a plane, and a carried leg given that plane with the rest is
+// let down by twice what the centre legs were raised: from 6 cm of the jog on the front wheels are on the ground, the
+// robot stands on its front and rear pairs, every leg counts as standing through the change, the centre legs (jogged
+// to the top of their travel) cannot follow the plane, the allocation cuts the WHOLE correction to what they can, and
+// the base goes off by degrees of the cross fall it was holding (a simulator's finding, at a jog's real rate; at a
+// slower jog, 3 cm, nothing). A carried leg is held clear by what the ground of the stance has risen under it: it
+// stays carried, and the robot on the legs it stood on. And the jog itself is followed on the frame it moves: what a
+// baseline turned the stance's own lean by is known, and left to the ground estimate's low-pass the base swung at
+// the turn of the jog by twice the filter's lag (0.7 to 1.1 deg here).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunJoggedFarCarriedStayCarried,
+	"Ramms.Level.DryRun.JoggedFarCarriedLegsStayCarried",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunJoggedFarCarriedStayCarried::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	struct FCase
+	{
+		const TCHAR* Name;
+		FVector2D	 GroundDeg;
+		double		 JogCm;
+	};
+	// (Nose up on the grade the carried pair, at the top of its travel, has 5 cm over the ground to begin with and
+	// the chassis comes down by half the jog: the jog there is one that leaves it clear.)
+	const FCase Cases[3] = { { TEXT("across a 6 deg fall"), FVector2D(0.0, 6.0), 9.0 }, { TEXT("nose down on a 6 deg grade"), FVector2D(-6.0, 0.0), 9.0 }, { TEXT("nose up on a 6 deg grade"), FVector2D(6.0, 0.0), 5.0 } };
+	for (const FCase& Case : Cases)
+	{
+		for (int32 Rate = 0; Rate < 3; ++Rate)
+		{
+			FKit Kit = QuickOnFour();
+			Kit.Robot.bStanceRests = true;
+			FOptions Options = MakeOptions(Kit, Rate);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 16.0;
+			Options.bKeepTrace = true;
+			for (const int32 Leg : { 2, 3 })
+			{
+				Options.Events.Add(MakeEvent(6.0, EEvent::StanceRamp, Case.JogCm / 6.0, Case.JogCm, Leg));
+				Options.Events.Add(MakeEvent(7.5, EEvent::StanceRamp, Case.JogCm / 6.0, -Case.JogCm, Leg));
+			}
+			const FResult Result = DryRun::Run(Kit.Robot, Plane(Case.GroundDeg.X, Case.GroundDeg.Y), Options);
+			double		  Base = 0.0, Rider = 0.0, LeastShare = 1.0, LetDownCm = 0.0;
+			double		  FrontBefore[2] = { 0.0, 0.0 };
+			int32		  FrontDown = 0;
+			for (const FSample& Sample : Result.Trace)
+			{
+				if (Sample.Seconds < 5.9)
+				{
+					FrontBefore[0] = Sample.CommandZ[0];
+					FrontBefore[1] = Sample.CommandZ[1];
+				}
+				if (Sample.Seconds >= 5.9 && Sample.Seconds <= 11.0)
+				{
+					Base = FMath::Max(Base, Inclination(Sample.TrueAttitudeDeg));
+					Rider = FMath::Max(Rider, Inclination(Sample.RiderDeg - Sample.RiderReferenceDeg));
+					LeastShare = FMath::Min(LeastShare, Sample.Out.Fraction);
+					// How far under where it was carried either front wheel is told to be.
+					LetDownCm = FMath::Max3(LetDownCm, FrontBefore[0] - Sample.CommandZ[0], FrontBefore[1] - Sample.CommandZ[1]);
+					FrontDown += Sample.Touching > 4 ? 1 : 0;
+				}
+			}
+			const FString Say = FString::Printf(TEXT("%s, %s, centre legs jogged +%.0f cm at 6 cm/s and back"), Case.Name, FrameNames[Rate], Case.JogCm);
+			AddInfo(FString::Printf(TEXT("%s | the base %.2f deg off, the rider %.2f; the least share of the correction given %.2f; the carried pair let down %.2f cm at most; frames with more than four wheels down %d; residual %.2f deg"), *Say, Base, Rider, LeastShare, LetDownCm, FrontDown, Result.FinalRiderTiltDeg));
+			TestTrue(*FString::Printf(TEXT("%s: the run is sound"), *Say), Result.bCompleted && Result.UnstableFrames == 0);
+			TestTrue(*FString::Printf(TEXT("%s: the base stays level (%.2f deg)"), *Say, Base), Base <= 0.6);
+			TestTrue(*FString::Printf(TEXT("%s: the rider with it (%.2f deg)"), *Say, Rider), Rider <= 0.7);
+			TestTrue(*FString::Printf(TEXT("%s: the carried pair is not let down with the plane (%.2f cm)"), *Say, LetDownCm), LetDownCm <= 1.0);
+			TestTrue(*FString::Printf(TEXT("%s: the carried pair is never set down (%d frames)"), *Say, FrontDown), FrontDown == 0);
+			TestTrue(*FString::Printf(TEXT("%s: the correction is never cut (%.2f of it at least)"), *Say, LeastShare), LeastShare >= 1.0);
+			TestTrue(*FString::Printf(TEXT("%s: level again after (%.2f deg)"), *Say, Result.FinalRiderTiltDeg), Result.FinalRiderTiltDeg <= 0.3);
+		}
+	}
+	return true;
+}
+
 // Catches: a roll the robot has DECIDED not to carry held against the tilt policy's bound. Across a 5 deg fall with a
 // roll preferred the other way, 7.5 deg of roll correction would hold the reference and the roll limit is 6: standing,
 // the robot is at reach, 1.5 deg short. Driven off at a speed at which a three-point robot carries no roll, all 7.5

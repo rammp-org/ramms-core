@@ -349,7 +349,7 @@ namespace RammsLevel
 	}
 
 	FVector2D SlewCorrection(TConstArrayView<FLegReach> Legs, const FVector2D& FromDeg, const FVector2D& ToDeg, double Dt,
-		double MaxRateDegPerSec, const FTuning& Tuning, double& OutRateUse, bool& bOutLimited)
+		double MaxRateDegPerSec, const FTuning& Tuning, double& OutRateUse, bool& bOutLimited, TConstArrayView<double> AboveCm)
 	{
 		OutRateUse = 0.0;
 		bOutLimited = false;
@@ -395,7 +395,10 @@ namespace RammsLevel
 		{
 			if (Legs[i].MaxRateCmS > 0.0)
 			{
-				OutRateUse = FMath::Max(OutRateUse, LoopCountedMove(Legs[i], Before[i], After[i]) / (Dt * Legs[i].MaxRateCmS));
+				// (A lifted leg that stands above where the plane has it is
+				// brought up only from where it stands.)
+				const double Above = !Legs[i].bSupport && AboveCm.IsValidIndex(i) ? FMath::Max(0.0, AboveCm[i]) : 0.0;
+				OutRateUse = FMath::Max(OutRateUse, LoopCountedMove(Legs[i], Before[i] + Above, After[i]) / (Dt * Legs[i].MaxRateCmS));
 			}
 		}
 		// (A fraction of 0 or less would stop the plane for good; it is read
@@ -864,9 +867,34 @@ namespace RammsLevel
 		// speed at which part of the roll was out gets none of it back until
 		// it stands. Roll that came back as the speed fell through the band
 		// came back in the middle of the braking it was taken out for.)
-		if (bThreePoint && FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0 && V > In.AskedSpeedCmS + QuietSpeedCmS)
+		// Coming down is not the same as being over the ask. A robot that has
+		// been AT the speed asked and is then a little over it (the ground
+		// tipping away under it, a drive that wanders) is not being slowed:
+		// it stays "there" until its stick asks less than it did when the
+		// robot was last there, or it is faster than a start's overshoot of
+		// what is asked (the speed the rule itself goes by, above). Taken for
+		// coming down, a robot a few cm/s over its ask on the ticks a cross
+		// fall came on under it was given no roll limit at all for as long as
+		// it was over, the fall left in the base meanwhile.
+		if (bThreePoint && FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0)
 		{
-			Target.Y = FMath::Min(Target.Y, FMath::Max(0.0, Limit.Get().Y));
+			if (V <= In.AskedSpeedCmS + QuietSpeedCmS)
+			{
+				bAtAsked = true;
+				AtAskedCmS = In.AskedSpeedCmS;
+			}
+			else if (In.AskedSpeedCmS < AtAskedCmS - QuietSpeedCmS || V > In.AskedSpeedCmS * (1.0 + FMath::Max(0.0, Tuning.ThreePointOvershoot)) + QuietSpeedCmS)
+			{
+				bAtAsked = false;
+			}
+			if (!bAtAsked)
+			{
+				Target.Y = FMath::Min(Target.Y, FMath::Max(0.0, Limit.Get().Y));
+			}
+		}
+		else
+		{
+			bAtAsked = false;
 		}
 		// A roll that has just come to be worth correcting (out of the dead
 		// band) is corrected from here on with all the roll limit there is: at

@@ -563,6 +563,9 @@ void URammsLevelAssistComponent::StepLaw(double ClockDt, bool bYield, bool bResu
 	R.Plant->ClearancePoints(R.LawTuning, R.Points);
 	In.Legs = R.Legs;
 	In.Points = R.Points;
+	// (Where the weight is, for a plant that judges who stands by it: the law
+	// then holds a carried leg clear of a stance ground that rises under it.)
+	In.bStanceCentre = bLegs && R.Plant->StanceCentre(In.StanceCentreXY);
 
 	// --- the rider's stick: off centre wakes a robot at rest ---
 	if (const URammsRobotControlSurfaceComponent* Surface = URammsRobotControlSurfaceComponent::FindGoverningSurface(this))
@@ -995,7 +998,7 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 		{
 			RammsLevel::FAdoption Kept;
 			Kept.PlaneDeg = Kept.FittedDeg = Was.CorrectionDeg;
-			Kept.Dz = Was.LastDz;
+			Kept.Dz = Was.TrueOffsets();
 			R.PreYieldLaw.Reset();
 			R.PreYieldLast.Reset();
 			R.HandBackLeftDeg.Reset();

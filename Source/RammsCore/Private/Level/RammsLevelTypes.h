@@ -120,6 +120,10 @@ namespace RammsLevel
 	 *  last found still: a stance being ramped, a height being jogged. Under
 	 *  it is the last digits of a joint read back. */
 	constexpr double BaselineStillCm = 0.02;
+	/** A carried leg is held clear (FState::HeldCm) by what the ground of the
+	 *  stance has come nearer it than the clearance it had, less this (cm):
+	 *  the last digits of a baseline read back are not the ground rising. */
+	constexpr double HeldSlackCm = 0.1;
 	/** The standing legs span at least this (cm) for the ground's turning
 	 *  rate (FGroundGate): a robot standing on a line of legs has no span,
 	 *  and none would mean the ground could turn at any rate. */

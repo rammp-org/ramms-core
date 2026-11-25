@@ -395,7 +395,11 @@ namespace RammsLevel
 	 *     legs that stand, it would be the busiest leg by far, and the
 	 *     correction would unwind at a fraction of what those legs can do. (A
 	 *     lifted leg let down faster than it can go is told so all the same,
-	 *     at its own rate: FLaw::Step's g2.)
+	 *     at its own rate: FLaw::Step's g2.) And a lifted leg that stands
+	 *     AboveCm[i] over where From has it (0 or more; empty: none does) is
+	 *     brought up only by what takes it past where it stands: a carried
+	 *     leg the law holds clear (FState::HeldCm) is not moved by the plane
+	 *     coming up to it.
 	 *  3. Soft zone: for each support leg moving towards a limit of the
 	 *     constraint set (Lo_i or Hi_i of RammsLevelAllocate.h, ExtraMarginCm
 	 *     0) with less than Tuning.SoftZoneCm to go from where From puts it
@@ -415,7 +419,7 @@ namespace RammsLevel
 	 * Legs must have been through SupportMask.
 	 */
 	FVector2D SlewCorrection(TConstArrayView<FLegReach> Legs, const FVector2D& FromDeg, const FVector2D& ToDeg, double Dt,
-		double MaxRateDegPerSec, const FTuning& Tuning, double& OutRateUse, bool& bOutLimited);
+		double MaxRateDegPerSec, const FTuning& Tuning, double& OutRateUse, bool& bOutLimited, TConstArrayView<double> AboveCm = TConstArrayView<double>());
 
 	/**
 	 * How fast (deg/s) the legs the robot stands on can turn the correction
@@ -786,7 +790,12 @@ namespace RammsLevel
 	 *             that reading: FCarryTuning::RollSpotCm)
 	 *   rising  : without bMayRise an axis' target is no more than the limit
 	 *             it has; nor is a three-point robot's roll target while it
-	 *             is faster than its stick asks (it is being slowed)
+	 *             is coming down to what its stick asks (it is being slowed):
+	 *             faster than AskedSpeedCmS by more than QuietSpeedCmS, and
+	 *             not "there" -- it is there once it is within QuietSpeedCmS
+	 *             of the ask, and stays so until the ask is QuietSpeedCmS
+	 *             under what it was when the robot was last there, or the
+	 *             robot is more than ThreePointOvershoot over the ask
 	 *
 	 * (a three-point robot's roll limit goes to its target at once on the
 	 * tick roll becomes engaged, where it may rise), and otherwise
@@ -838,13 +847,18 @@ namespace RammsLevel
 		bool bRollOut = false;
 		/** Roll was engaged at the last tick. */
 		bool bWasRollEngaged = false;
+		/** The robot has been at the speed its stick asks and is not coming
+		 *  down to it since (the "rising" rule), and what was asked when it
+		 *  was last there (cm/s). */
+		bool   bAtAsked = false;
+		double AtAskedCmS = 0.0;
 		/** The ground's roll as last read with no roll carried (deg), and how
 		 *  far the robot has moved since (cm). */
-		double		FreeGroundRoll = 0.0;
-		bool		bHasFreeGround = false;
-		double		MovedCm = 0.0;
-		double		Speed = 0.0;
-		bool		bHasSpeed = false;
+		double FreeGroundRoll = 0.0;
+		bool   bHasFreeGround = false;
+		double MovedCm = 0.0;
+		double Speed = 0.0;
+		bool   bHasSpeed = false;
 	};
 
 	/**

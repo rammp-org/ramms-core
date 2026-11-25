@@ -2474,4 +2474,110 @@ bool FRammsLevelLoopCarryRollEngagedAtOnce::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a robot that is a little over the speed its stick asks taken for one being slowed. The roll limit does not
+// rise while a three-point robot is coming down to what its stick asks; "coming down" was any speed over the ask by
+// more than a crawl. A robot at half stick (57 cm/s asked and made) whose path folds onto a cross fall gains a few
+// cm/s as the ground tips under it: 62 cm/s on the very ticks the fall comes out of the dead band. The roll target
+// was pinned to the limit's nothing, the one tick on which the limit is given whole was spent, and the fall stood in
+// the base for two seconds, the speed cap slowing the robot for it meanwhile (a simulator's finding: the rider 3.3 deg
+// off where 0.7 was left before the rule). A robot that has been at the speed asked is not coming down to it until its
+// stick asks less, or it is faster than a start's overshoot of what is asked. In either direction of travel.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopCarryRollEngagedJustOverTheAsk,
+	"Ramms.Level.Loop.CarryLimit.RollLimitWholeForARobotJustOverItsAsk",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopCarryRollEngagedJustOverTheAsk::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	// The speeds a fold onto a cross fall gave (cm/s), one a tick, and the fall as it came on (deg).
+	const double Asked = 56.84;
+	const double Speeds[] = { 56.82, 57.5, 58.49, 60.2, 61.72, 62.1, 62.35, 61.5, 60.27, 59.0, 57.79, 56.2, 54.61 };
+	const double Falls[] = { 0.04, 0.2, 0.37, 0.7, 0.99, 1.4, 1.76, 2.15, 2.52, 2.7, 2.89, 2.95, 3.02 };
+	for (const double Way : { 1.0, -1.0 })
+	{
+		const FString Case = Way > 0.0 ? TEXT("forwards") : TEXT("backwards");
+		FCarryLimit	  Carry;
+		Carry.Tuning.bCrest = false;
+		// Steady on the flat at half stick.
+		for (int32 i = 0; i < 80; ++i)
+		{
+			Carry.Tick(ThreePointIn(0.0, 0.0, 0.0, Way * 56.8, Asked), Dt, Tuning);
+		}
+		Near(*this, *(Case + TEXT(": on the flat the roll limit rests at nothing")), Carry.Get().Y, 0.0, 1.0e-9);
+		double WorstShort = 0.0;
+		bool   bEngaged = false;
+		for (int32 i = 0; i < UE_ARRAY_COUNT(Speeds); ++i)
+		{
+			const double Limit = Carry.Tick(ThreePointIn(Way * Falls[i], Way * Falls[i], 0.0, Way * Speeds[i], Asked), Dt, Tuning).Y;
+			bEngaged = bEngaged || Carry.IsRollEngaged();
+			if (bEngaged)
+			{
+				WorstShort = FMath::Max(WorstShort, Falls[i] - Limit);
+			}
+		}
+		TestTrue(*(Case + TEXT(": the fall is taken up")), bEngaged);
+		TestTrue(*FString::Printf(TEXT("%s: a few cm/s over the ask as the fall comes on, the limit is never short of the fall (%.2f deg short at worst)"), *Case, WorstShort), WorstShort <= 1.0e-6);
+		TestFalse(*(Case + TEXT(": ... and the roll is not out for the speed")), Carry.IsRollOut());
+
+		// The same fall met with the stick eased to 40 cm/s on the way: the robot IS coming down, and gets no roll
+		// limit until it is at the speed asked.
+		FCarryLimit Eased;
+		Eased.Tuning.bCrest = false;
+		for (int32 i = 0; i < 80; ++i)
+		{
+			Eased.Tick(ThreePointIn(0.0, 0.0, 0.0, Way * 56.8, Asked), Dt, Tuning);
+		}
+		double Most = 0.0;
+		for (double Speed = 56.8; Speed > 44.0; Speed -= 30.0 * Dt)
+		{
+			Most = FMath::Max(Most, Eased.Tick(ThreePointIn(Way * 3.0, Way * 3.0, 0.0, Way * Speed, 40.0), Dt, Tuning).Y);
+		}
+		TestTrue(*FString::Printf(TEXT("%s: the stick eased to 40 cm/s: no roll limit while the robot comes down to it (%.3f deg)"), *Case, Most), Eased.IsRollEngaged() && Most <= 1.0e-6);
+		double Limit = 0.0;
+		for (int32 i = 0; i < 160; ++i)
+		{
+			Limit = Eased.Tick(ThreePointIn(Way * 3.0, Way * 3.0, 0.0, Way * 40.0, 40.0), Dt, Tuning).Y;
+		}
+		Near(*this, *(Case + TEXT(": ... and all of it once it is there")), Limit, 6.0, 1.0e-3);
+
+		// A stick eased slowly, a little a tick, under a robot that lags it, the fall met part of the way down: coming
+		// down all the same.
+		FCarryLimit Slowly;
+		Slowly.Tuning.bCrest = false;
+		for (int32 i = 0; i < 80; ++i)
+		{
+			Slowly.Tick(ThreePointIn(0.0, 0.0, 0.0, Way * 56.8, Asked), Dt, Tuning);
+		}
+		Most = 0.0;
+		for (double Less = Asked; Less > 30.0; Less -= 0.5)
+		{
+			const double Fall = Less < 50.0 ? Way * 3.0 : 0.0;
+			Most = FMath::Max(Most, Slowly.Tick(ThreePointIn(Fall, Fall, 0.0, Way * (Less + 6.0), Less), Dt, Tuning).Y);
+		}
+		TestTrue(*FString::Printf(TEXT("%s: a stick eased slowly under a robot 6 cm/s behind it: no roll limit on the way down (%.3f deg)"), *Case, Most), Most <= 1.0e-6);
+
+		// A robot that was at its ask and has run away to twice it (down a slope, its stick as it was): it is coming
+		// down again, and gets no roll limit until it is back at the speed asked.
+		FCarryLimit Ran;
+		Ran.Tuning.bCrest = false;
+		for (int32 i = 0; i < 80; ++i)
+		{
+			Ran.Tick(ThreePointIn(0.0, 0.0, 0.0, Way * 20.0, 20.0), Dt, Tuning);
+		}
+		for (int32 i = 0; i < 16; ++i)
+		{
+			Ran.Tick(ThreePointIn(0.0, 0.0, 0.0, Way * 40.0, 20.0), Dt, Tuning);
+		}
+		Most = 0.0;
+		for (double Speed = 40.0; Speed > 24.0; Speed -= 10.0 * Dt)
+		{
+			Most = FMath::Max(Most, Ran.Tick(ThreePointIn(Way * 3.0, Way * 3.0, 0.0, Way * Speed, 20.0), Dt, Tuning).Y);
+		}
+		TestTrue(*FString::Printf(TEXT("%s: run away to twice the 20 cm/s asked: no roll limit while it comes back down (%.3f deg)"), *Case, Most), Ran.IsRollEngaged() && !Ran.IsRollOut() && Most <= 1.0e-6);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
