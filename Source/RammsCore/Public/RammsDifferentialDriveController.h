@@ -17,6 +17,7 @@ class URammsRobotBaseComponent;
 namespace RammsDrive
 {
 	struct FCarry;
+	struct FSpeedScaleRequests;
 	struct FTorqueHold;
 	struct FWheelAngle;
 } // namespace RammsDrive
@@ -523,6 +524,22 @@ public:
 	 *  RobotMassKg if given, else VehicleMass), and eases its braking to rest
 	 *  rather than stopping short (no roll-back from the loop after the stop). */
 	virtual void SeedGroundSlope(float ForwardGradeDeg, float RobotMassKg) override;
+	/** In velocity control, both wheels' speeds are given at the least of the
+	 *  live requests' scales, after the stick's own mix and top speed: the
+	 *  curve the operator steers is kept, at a slower pace. Never under a
+	 *  tenth, and an operator holding the stick is always driven (the scale
+	 *  comes after the dead zone, and plays no part in whether the mode
+	 *  brakes or holds). Not applied in torque control: there the stick asks
+	 *  a push, not a speed, and a push scaled down might no longer hold the
+	 *  slope the robot is on. Not active, it takes no request; standing down
+	 *  or taking over drops them all. */
+	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) override;
+	/** The scale the live requests leave this mode at now (1: none). */
+	float GetDriveSpeedScale() const;
+	/** The forward speed the stick asks (velocity control: the mean of the
+	 *  two sides' speeds as the stick mixes them, before any request to go
+	 *  slower); negative in torque control, where it asks no speed. */
+	virtual float GetAskedSpeedCmS() const override;
 
 private:
 	/** Inactive modes contribute nothing: no controls, no claims, no commands. */
@@ -570,6 +587,9 @@ private:
 	 *  nearer rest, and never more than half a rad/s further from rest than those rates. The
 	 *  target rate (rad/s) of each wheel out. */
 	void StepBrakeRamp(double DeltaSeconds, double& OutLeft, double& OutRight);
+
+	/** The requests to go slower this mode holds (SetDriveSpeedScale). */
+	TPimplPtr<RammsDrive::FSpeedScaleRequests> SpeedRequests;
 
 	/** A motion handed over by the selector, pulled towards (SeedMotion). */
 	TPimplPtr<RammsDrive::FCarry> Carry;

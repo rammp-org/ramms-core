@@ -320,6 +320,22 @@ namespace RammsDrive
 		return FMath::Lerp(Channel.From, Channel.To, SmoothStep(Elapsed / Duration));
 	}
 
+	double StanceStartUnderOffset(double Baseline, double Effective, double Joint, double Tolerance)
+	{
+		return FMath::Abs(Effective - Joint) <= Tolerance ? Baseline : Joint - (Effective - Baseline);
+	}
+
+	double StanceMotorStart(const URammsRobotBaseComponent& Base, FName MotorId, const float* StanceCommanded, float Tolerance)
+	{
+		const float At = Base.GetMotorValue(MotorId);
+		float		Baseline = 0.0f, Effective = 0.0f;
+		if (Base.GetMotorCommandOffset(MotorId) != 0.0f && Base.GetMotorCommand(MotorId, Baseline) && Base.GetMotorEffectiveCommand(MotorId, Effective))
+		{
+			return StanceStartUnderOffset(Baseline, Effective, At, Tolerance);
+		}
+		return (StanceCommanded && FMath::Abs(*StanceCommanded - At) <= Tolerance) ? *StanceCommanded : At;
+	}
+
 	// --- carrying a motion -------------------------------------------------------
 
 	FRammsDriveMotion RampMotion(const FRammsDriveMotion& From, const FRammsDriveMotion& To, double LinearAccel, double YawAccel,
@@ -381,6 +397,63 @@ namespace RammsDrive
 		const auto Scale = [](double Value, double Full) { return Full > 0.0 ? FMath::Clamp(Value / Full, -1.0, 1.0) : 0.0; };
 		return FVector(Scale(Motion.ForwardCmPerSecond, MaxLinearCmS), Scale(Motion.RightCmPerSecond, MaxLinearCmS),
 			Scale(Motion.YawRateDegPerSecond, MaxYawDegS));
+	}
+
+	void FSpeedScaleRequests::Set(FName Requester, double Scale01, double HoldSeconds, double Now)
+	{
+		const int32 Found = Requests.IndexOfByPredicate([Requester](const FRequest& Request) { return Request.Requester == Requester; });
+		// Nothing to ask (full speed, no time, not a number): its last request goes.
+		if (!FMath::IsFinite(Scale01) || !FMath::IsFinite(HoldSeconds) || !FMath::IsFinite(Now) || Scale01 >= 1.0 || HoldSeconds <= 0.0)
+		{
+			if (Found != INDEX_NONE)
+			{
+				Requests.RemoveAtSwap(Found);
+			}
+			return;
+		}
+		FRequest& Request = Found != INDEX_NONE ? Requests[Found] : Requests.AddDefaulted_GetRef();
+		Request.Requester = Requester;
+		Request.Scale = FMath::Clamp(Scale01, MinDriveSpeedScale, 1.0);
+		Request.SetAt = Now;
+		Request.Until = Now + FMath::Min(HoldSeconds, MaxDriveSpeedScaleHoldSeconds);
+	}
+
+	double FSpeedScaleRequests::Get(double Now)
+	{
+		double Least = 1.0;
+		for (int32 Index = Requests.Num() - 1; Index >= 0; --Index)
+		{
+			const FRequest& Request = Requests[Index];
+			if (!(Now >= Request.SetAt && Now < Request.Until))
+			{
+				// Run out, or made before the clock was set back.
+				Requests.RemoveAtSwap(Index);
+				continue;
+			}
+			Least = FMath::Min(Least, Request.Scale);
+		}
+		return Least;
+	}
+
+	FRammsDriveMotion ScaledMotion(const FRammsDriveMotion& Motion, double Scale)
+	{
+		if (!(Scale < 1.0))
+		{
+			return Motion;
+		}
+		const float Share = static_cast<float>(FMath::Max(Scale, MinDriveSpeedScale));
+		return FRammsDriveMotion(Motion.ForwardCmPerSecond * Share, Motion.RightCmPerSecond * Share, Motion.YawRateDegPerSecond * Share);
+	}
+
+	void ScaleWheelSpeeds(float& InOutLeft, float& InOutRight, double Scale)
+	{
+		if (!(Scale < 1.0))
+		{
+			return;
+		}
+		const float Share = static_cast<float>(FMath::Max(Scale, MinDriveSpeedScale));
+		InOutLeft *= Share;
+		InOutRight *= Share;
 	}
 
 	FRammsDriveMotion HolonomicMotion(const FVector& Command, double MaxLinearCmS, double MaxYawDegS)

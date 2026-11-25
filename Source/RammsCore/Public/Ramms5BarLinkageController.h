@@ -89,6 +89,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|5-Bar")
 	FVector2D GetLastTarget() const { return LastTarget; }
 
+	/**
+	 * Take the endpoint target from the commands the hips hold now
+	 * (URammsRobotBaseComponent::GetMotorCommand, their baselines), commanding
+	 * nothing: for whoever moved those commands without going through this
+	 * controller (URammsRobotBaseComponent::RebaseMotorCommand), since the
+	 * target this holds is what a height or fore/aft command, a jog and the
+	 * control surface's read of the target all start from. Commands that do
+	 * not close the linkage leave no target; with a hip nothing commands,
+	 * nothing changes. Plain C++.
+	 */
+	void SyncTargetToCommands();
+
+	/** The linkage this controller solves with: the kinematic table's row where
+	 *  one resolved at BeginPlay, else the inline Linkage (before BeginPlay, a
+	 *  default spec). In the linkage's own frame, not the robot's: its x is the
+	 *  robot's times TranslationSign's sign. For whoever must work out where
+	 *  the hips' commands put the endpoint without moving this controller's
+	 *  target (the level assist). Plain C++. */
+	const FRamms5BarLinkageSpec& GetResolvedLinkage() const { return Resolved; }
+
 	/** IK preview without commanding: joint angles for TargetXZ. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|5-Bar")
 	FVector2D SolveTarget(FVector2D TargetXZ, bool& bReachable) const;
@@ -308,6 +328,16 @@ private:
 
 	/** The X SetEndpointHeight keeps: the last target's, else the live endpoint's. */
 	float HeldX() const;
+
+	/** The endpoint HeldX and HeldZ fall back on with no target held: the
+	 *  live one, or where the hips' commands put it while a hip carries a
+	 *  command offset. */
+	FVector2D UnheldEndpoint() const;
+
+	/** Where the hips' commands (their baselines) put the endpoint, while a
+	 *  hip carries a command offset and both are commanded to angles that
+	 *  close the linkage; false otherwise, OutEndpoint untouched. */
+	bool BaselineEndpointUnderOffset(FVector2D& OutEndpoint) const;
 
 	/** The height SetEndpointTranslation keeps, by the same rule. */
 	float HeldZ() const;

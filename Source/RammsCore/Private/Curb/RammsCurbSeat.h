@@ -48,6 +48,14 @@ namespace RammsCurb
 	 *  the chassis with the link at LinkAngle (the inverse of SeatPlatformPitch). */
 	double SeatTiltFor(const FRammsCurbSeat& Seat, double LinkAngle, double LinkAngle0, double PitchRad);
 
+	/** The tilt motor's command with TrimRad taken back off it: a platform
+	 *  pitch (rad, nose up) that was added to the command on top of the
+	 *  rider's own setting (a level assist's seat trim, folded into the
+	 *  command as a crossing took the seat). The platform's pitch at what this
+	 *  returns is its pitch at TiltCommand less TrimRad, whatever the link's
+	 *  angle. */
+	double SeatTiltLessTrim(const FRammsCurbSeat& Seat, double TiltCommand, double TrimRad);
+
 	/** The pitch in the world the platform is held at (rad), a step on from
 	 *  RefRad toward the rider's own OwnRad: by MaxStepRad at most, and never
 	 *  past it. A crossing that begins on a slope takes the seat over at the

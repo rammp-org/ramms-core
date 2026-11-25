@@ -236,6 +236,35 @@ void URammpGen1ControllerComponent::TickComponent(float DeltaTime, ELevelTick Ti
 	DrawDebugVisualization();
 }
 
+void URammpGen1ControllerComponent::SyncTargetsToCommands()
+{
+	if (!IsUsingRobotBase())
+	{
+		return;
+	}
+	// The same state a motor another mode drives is left in (UpdateAngularMotors), from the command alone: a motor
+	// nothing commands keeps what it has, since there is no command to have fallen behind.
+	for (FAngularMotorConfig& Motor : AngularMotors)
+	{
+		float Radians = 0.0f;
+		if (!Motor.ResolvedMotorId.IsNone() && RobotBase->GetMotorCommand(Motor.ResolvedMotorId, Radians))
+		{
+			const float Degrees = FMath::RadiansToDegrees(Radians);
+			Motor.CurrentAngle = Motor.TargetAngle = Motor.bInvertDirection ? -Degrees : Degrees;
+			Motor.bPendingApply = false;
+		}
+	}
+	for (FLinearMotorConfig& Motor : LinearMotors)
+	{
+		float Position = 0.0f;
+		if (!Motor.ResolvedMotorId.IsNone() && RobotBase->GetMotorCommand(Motor.ResolvedMotorId, Position))
+		{
+			Motor.CurrentPosition = Motor.TargetPosition = Position;
+			Motor.bPendingApply = false;
+		}
+	}
+}
+
 void URammpGen1ControllerComponent::SetAngularMotorTarget(FName MotorName, float TargetAngle)
 {
 	RefreshConstraintCache(); // applies immediately — revalidate at point of use, not just in tick

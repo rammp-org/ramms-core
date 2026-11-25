@@ -16,6 +16,7 @@
 #include "RammsControlInputResolve.h"
 #include "RammsDriveHandOver.h"
 #include "RammsDriveModeSelector.h"
+#include "RammsLevelAssistComponent.h"
 #include "RammsMotorSpec.h"
 #include "RammsRobotBaseComponent.h"
 #include "RammsRobotControlSurfaceComponent.h"
@@ -101,6 +102,14 @@ namespace
 	FString RammpGen1CurbPhaseName(ERammsRammpGen1CurbPhase P)
 	{
 		return RammpGen1CurbPhaseLabel(P);
+	}
+
+	/** The level assist on Component's robot, where it has one: a crossing takes the lifts from it before it reads a
+	 *  command (URammsLevelAssistComponent::YieldTo) and hands them back before the robot goes to another mode. */
+	URammsLevelAssistComponent* RammpGen1LevelAssistOf(const UActorComponent& Component)
+	{
+		const AActor* Owner = Component.GetOwner();
+		return Owner ? Owner->FindComponentByClass<URammsLevelAssistComponent>() : nullptr;
 	}
 } // namespace
 
@@ -592,9 +601,41 @@ void URammsRammpGen1CurbController::SetDriveModeActive(bool bActive)
 		}
 		bStartPending = false;
 		bHoldUntilDown = false;
+		// (Switched away from by hand with the lifts still this mode's: there is no hand-back, and the level assist
+		// starts again from the pose as it stands once it sees this mode gone.)
+		bLevelYielded = false;
 		bCentreOnHandBack = false; // this mode's own hand-back has taken it already; any other switch is the operator's
 		StickInput = FVector::ZeroVector;
 		ReleaseWheels();
+	}
+}
+
+void URammsRammpGen1CurbController::YieldLiftsToCrossing()
+{
+	// Once for as long as this mode holds the lifts: told again while it still holds them (a crossing started again
+	// where one stopped), the level assist would count a take-over inside a take-over, and the one hand-back would
+	// only end the inner one.
+	URammsLevelAssistComponent* const LevelAssist = RammpGen1LevelAssistOf(*this);
+	if (LevelAssist && !bLevelYielded)
+	{
+		// Its whole plane, pitch and roll, goes into the lifts' commands, no motor told anything: the commands the
+		// crossing reads as it begins are then the pose the robot is in, each elevator's own, and what it puts back
+		// at its end.
+		LevelAssist->YieldTo(this);
+		bLevelYielded = true;
+	}
+}
+
+void URammsRammpGen1CurbController::HandLiftsBackFromCrossing()
+{
+	if (!bLevelYielded)
+	{
+		return;
+	}
+	bLevelYielded = false;
+	if (URammsLevelAssistComponent* const LevelAssist = RammpGen1LevelAssistOf(*this))
+	{
+		LevelAssist->ResumeFrom(this, nullptr);
 	}
 }
 
@@ -799,10 +840,17 @@ bool URammsRammpGen1CurbController::Commit(const FPlan& Plan, FString& OutReason
 	UE_LOG(LogRammsRammpGen1Curb, Log, TEXT("%s: curb crossing: %s%s"), *GetNameSafe(GetOwner()), *Status,
 		bPowered ? TEXT(", the front omni wheels powered") : TEXT(""));
 
+	// The lifts from the robot's level assist, where it has one, HERE: before this mode is selected, not when the
+	// crossing begins on the next tick. From the moment it is selected this mode claims the lifts, and the level
+	// assist's own tick, which comes before that next one, would take it for a take-over nobody announced: it folds
+	// its plane into the commands too, but no longer knows what they were, and the hand-back could not take the plane
+	// back out. (The crossing reads the lifts' commands when it begins; by then they are the pose the robot is in.)
+	YieldLiftsToCrossing();
 	bStartPending = true;
 	if (!bModeActive && !SelectMode(GetDriveModeId()))
 	{
 		bStartPending = false;
+		HandLiftsBackFromCrossing(); // nothing was begun: the lifts as they were
 		OutReason = TEXT("could not select the curb drive mode");
 		return false;
 	}
@@ -961,6 +1009,10 @@ void URammsRammpGen1CurbController::TickComponent(float DeltaTime, ELevelTick Ti
 	{
 		StickInput.X = 0.0;
 	}
+	// The lifts back to the robot's level assist first, where a crossing took them from it: the plane it was levelling
+	// by comes back out of the lifts' commands (which the crossing has put back where it found them, the plane in
+	// them), so the mode handed back to finds each lift at its own stance, and levelling goes on from where it stood.
+	HandLiftsBackFromCrossing();
 	if (!SelectMode(ReturnModeId))
 	{
 		bCentreOnHandBack = bCentre; // still this mode's robot: asked again when the hand-back is made
@@ -2816,7 +2868,9 @@ bool URammsRammpGen1CurbController::LiftHeightCm(ESupport S, bool bCommanded, fl
 		{
 			A = Base->GetMotorValue(Lifts[Index].Motor);
 		}
-		else if (!Base->GetMotorCommand(Lifts[Index].Motor, A))
+		// What the motor is told: its command with whatever the robot's level assist has on top of it (nothing in a
+		// crossing, which takes the lifts with that folded in; outside one, the levelling the view should show).
+		else if (!Base->GetMotorEffectiveCommand(Lifts[Index].Motor, A))
 		{
 			return false;
 		}

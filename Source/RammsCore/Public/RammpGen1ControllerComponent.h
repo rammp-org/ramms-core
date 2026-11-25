@@ -253,6 +253,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "RAMMP Gen1 Controller")
 	float GetLinearMotorCurrentPosition(FName MotorName) const;
 
+	// Take every base-routed motor's ramp (where it is and where it is going) from the command the base holds for it
+	// (URammsRobotBaseComponent::GetMotorCommand), commanding nothing: for whoever moved those commands without going
+	// through this controller (URammsRobotBaseComponent::RebaseMotorCommand), or the next lift command would ramp from
+	// where this last left the motor. A motor nothing commands keeps what it has. Plain C++.
+	void SyncTargetsToCommands();
+
 	// Reinitialize all motor constraints (useful if constraints are added at runtime)
 	UFUNCTION(BlueprintCallable, Category = "RAMMP Gen1 Controller")
 	void ReinitializeMotors();

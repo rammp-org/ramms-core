@@ -191,4 +191,41 @@ public:
 	{
 		return 0.0f;
 	}
+
+	// --- Being asked to go slower -------------------------------------------------
+
+	/**
+	 * A layer that is not driving asks this mode to go slower for a while: the
+	 * level assist, while the ground turns under the robot faster than its
+	 * legs can follow. Scale01 (0..1) is the share of the speed its operator
+	 * asks for that the mode should give, forward and turn alike, so the path
+	 * the operator steers is kept and only the pace along it changes. It is a
+	 * request, not a command: it stands for HoldSeconds of simulated time and
+	 * then lapses, so whoever makes it renews it every tick for as long as it
+	 * holds, and a requester that stops (switched off, torn down, yielding to
+	 * a crossing) leaves nothing behind. A mode with several requesters gives
+	 * the least of the live requests; a new request from the same Requester
+	 * replaces its last, and one with a scale of 1 or no HoldSeconds withdraws
+	 * it.
+	 *
+	 * A request never stops the robot: a mode keeps a floor under the scale,
+	 * and an operator holding the stick always moves. It is not a brake, and
+	 * nothing to hold a robot still with. A mode that is not active takes no
+	 * request, and a mode drops every request when it stands down or takes
+	 * over. The default ignores it: a mode that runs its own speed (a curb
+	 * crossing) is not slowed by anyone.
+	 */
+	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) {}
+
+	/**
+	 * The speed over the ground this mode's operator is asking for now (cm/s,
+	 * 0 or more), before any request to go slower (SetDriveSpeedScale): what
+	 * the stick says, not what the robot is doing. For whoever asks the mode
+	 * to go slower: a robot can be going faster than its stick asks (gravity,
+	 * down the far side of a crest) or slower (a drive at its limit on a
+	 * ramp), and a request sized by the speed there is, taken for the speed
+	 * asked, chases the difference. Negative: this mode cannot say (the
+	 * default; a mode whose stick asks a torque, not a speed).
+	 */
+	virtual float GetAskedSpeedCmS() const { return -1.0f; }
 };

@@ -101,6 +101,13 @@ namespace RammsCurb
 		return (PitchRad - FMath::FindDeltaAngleRadians(LinkAngle0, LinkAngle)) / Sign;
 	}
 
+	double SeatTiltLessTrim(const FRammsCurbSeat& Seat, double TiltCommand, double TrimRad)
+	{
+		// As SeatTiltFor turns a pitch into the motor's angle.
+		const double Sign = Seat.TiltAngleSign >= 0.0f ? 1.0 : -1.0;
+		return TiltCommand - TrimRad / Sign;
+	}
+
 	double SeatPitchRefStep(double RefRad, double OwnRad, double MaxStepRad)
 	{
 		const double Step = FMath::Max(0.0, MaxStepRad);

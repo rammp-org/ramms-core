@@ -159,6 +159,85 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot|Motors")
 	bool GetMotorCommand(FName MotorId, float& OutValue) const;
 
+	// --- Command offset layer (plain C++) -------------------------------------
+	//
+	// A position motor's command can carry an OFFSET on top of what
+	// SetMotorCommand gives it, its BASELINE: the motor is told
+	// clamp(baseline + offset, ControlRange). Every writer there is keeps
+	// writing baselines through SetMotorCommand and reading them back through
+	// GetMotorCommand, unaware; one object per robot, the layer, writes the
+	// offsets. On the base because it is the one place every motor writer
+	// already passes through.
+	//
+	// A claimed motor is told its command once a frame, in this component's
+	// tick: SetMotorCommand and SetMotorCommandOffset only store. Two writers
+	// in a frame would otherwise tell it a bare baseline and then the sum, and
+	// a servo eased at the physics rate would chase the first for a step. A
+	// motor nobody has claimed is told at once, as ever.
+	//
+	// A baseline written LATER IN THE FRAME than this component ticks -- by a
+	// controller whose tick is in a later tick group, which cannot be ordered
+	// before this one -- is told at once, as baseline + offset: it is the
+	// frame's last word on that motor, as it is with nothing claimed. Held
+	// back for the next tick it would be told a frame late, and never at all
+	// while another controller writes the same motor earlier in every frame
+	// (a seat held where its rider has it, under a drive mode's stance ramp:
+	// the ramp's value was what the tick found each frame, and the tilt went
+	// with it while the seat's other motors stayed). Such a motor is then left
+	// to that late write: the tick after one tells it nothing (what is waiting
+	// goes out with the next late write, or at the following tick if none
+	// comes), so it is still told once a frame.
+
+	/**
+	 * Make Layer the one writer of offsets on MotorIds. False, and nothing
+	 * claimed, when another object holds the layer, or any of MotorIds is not
+	 * a Position motor of the registry. The holder may call again to add
+	 * motors. A claimed motor starts with no offset.
+	 */
+	bool ClaimCommandOffsetLayer(const UObject* Layer, TConstArrayView<FName> MotorIds);
+
+	/**
+	 * Give the layer up: every claimed motor is told its baseline now, if it
+	 * was last told anything else or has a write waiting, and is commanded at
+	 * once from then on. The layer is expected to have brought its offsets to
+	 * zero first; one still on is dropped, a step, and reported.
+	 */
+	void ReleaseCommandOffsetLayer(const UObject* Layer);
+
+	/**
+	 * Set a claimed motor's offset (the robot's sense, the motor's units),
+	 * told with its baseline at this component's next tick. False when Layer
+	 * does not hold the layer, the motor is not claimed, or Offset is not a
+	 * number. An offset on a motor nothing has commanded waits for its first
+	 * baseline.
+	 */
+	bool SetMotorCommandOffset(FName MotorId, float Offset, const UObject* Layer);
+
+	/**
+	 * Move a claimed motor's baseline to NewBaseline (clamped to its
+	 * ControlRange) and its offset to what keeps the motor told exactly what
+	 * it was: nothing is commanded and nothing moves. How the layer folds its
+	 * offset into the baseline for a controller about to take the motor over
+	 * (NewBaseline = GetMotorEffectiveCommand), and takes it back out after.
+	 * Both change here, together, so no reader sees one without the other.
+	 * False when Layer does not hold the layer, the motor is not claimed, or
+	 * nothing has commanded it.
+	 */
+	bool RebaseMotorCommand(FName MotorId, float NewBaseline, const UObject* Layer);
+
+	/** What the motor is told: its baseline plus its offset, clamped to its
+	 *  ControlRange (for a claimed motor, from its next tick on); the same as
+	 *  GetMotorCommand for a motor with no offset layer. False when
+	 *  GetMotorCommand is. */
+	bool GetMotorEffectiveCommand(FName MotorId, float& OutValue) const;
+
+	/** The offset last set on this motor; 0 for a motor not claimed. As set:
+	 *  where the sum runs into the ControlRange, more than what the motor is
+	 *  told past its baseline. Reflected so that a recorder can log what a
+	 *  motor was told (GetMotorCommand keeps meaning the baseline). */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Robot")
+	float GetMotorCommandOffset(FName MotorId) const;
+
 	/** Retune the velocity loop and reset its integrators. Gains are the one
 	 *  thing here that has to be found against a running robot, and poking the
 	 *  property on a live component is not a supported thing to do. */
@@ -292,6 +371,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Robot")
 	double GetSimulationTime() const;
 
+	/** The simulated time of the poses GetMotorTransform gives, on
+	 *  GetSimulationTime's clock, which may be earlier than the time that
+	 *  gives now; negative with no such clock. See
+	 *  IRammsActuationBackend::GetTransformTime. (Plain C++.) */
+	double GetTransformTime() const;
+
 private:
 	/** Load MotorTable into Motors once (idempotent; safe from any accessor, so
 	 *  callers that arrive before BeginPlay still see the configured specs). */
@@ -358,6 +443,48 @@ private:
 	/** The value each motor was last given through SetMotorCommand (robot
 	 *  sense, clamped), by Id; see GetMotorCommand. */
 	TMap<FName, float> LastCommands;
+
+	/** Tell the backend a value SetMotorCommand has clamped (the robot's
+	 *  sense): through the motor's profile where its row has one. Spec is the
+	 *  motor's registry row, null for a motor with none. */
+	void PushCommand(FName MotorId, const FRammsMotorSpec* Spec, float Value);
+
+	/** A motor claimed for the command offset layer. */
+	struct FCommandOffset
+	{
+		float Offset = 0.0f;
+		/** clamp(baseline + Offset), kept rather than summed again on every
+		 *  read so that a rebase leaves it bit for bit as it was. Meaningful
+		 *  while the motor has a baseline. */
+		float Effective = 0.0f;
+		/** Written since it was last told. */
+		bool bDirty = false;
+		/** Its baseline was written, and told at once, after this component
+		 *  ticked (since its last tick). */
+		bool bToldLate = false;
+	};
+
+	/** The claimed motors, by Id, in the order claimed (nothing is removed
+	 *  but all at once). */
+	TMap<FName, FCommandOffset> CommandOffsets;
+
+	/** Who writes the offsets. Weak: a layer collected without releasing must
+	 *  not leave its offsets on for good. */
+	TWeakObjectPtr<const UObject> CommandOffsetLayer;
+
+	/** Value within a motor's ControlRange, where its row sets one. */
+	static float ClampToControlRange(const FRammsMotorSpec* Spec, float Value);
+
+	/** Tell every claimed motor written since the last tick its command. */
+	void FlushCommandOffsets();
+
+	/** The world is ticking a group after the one this component ticks in:
+	 *  whoever writes a motor now is this frame's last writer of it. */
+	bool IsPastOwnTick() const;
+
+	/** Forget the layer: each claimed motor told its baseline, where that is
+	 *  not what it was last told. */
+	void DropCommandOffsetLayer();
 
 	/** Ease every profiled setpoint toward its target and command it. */
 	void StepPositionProfiles(float DeltaTime);

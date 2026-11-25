@@ -16,6 +16,9 @@
 class URammsRobotBaseComponent;
 class URamms5BarLinkageController;
 class UCanvas;
+/** The automation tests' way to the controller's private steps (the end of a crossing, the seat's take-over), which no
+ *  public call reaches without a whole crossing run in a simulator. Defined only in the plugin's own tests. */
+struct FRammsCurbControllerTestAccess;
 class APlayerController;
 namespace RammsCurb
 {
@@ -277,7 +280,11 @@ namespace RammsCurb
  * legs from where the crossing left them to that mode's stance, no faster
  * than the base may turn to the attitude that stance takes on the ground
  * (GetStanceChangeMinSeconds: within Tuning.TiltRateDegPerSec and
- * TiltAccelDegPerSec2). On ground sloping more than a degree it hands back
+ * TiltAccelDegPerSec2). On a robot whose level assist is on
+ * (URammsLevelAssistComponent) the legs are handed back to it first: it goes
+ * on holding the base level from the pose the crossing left, and the stance
+ * ramp turns the base only by what of that pose the level assist may not
+ * carry (nothing, inside its reach: the ramp is timed for that turn). On ground sloping more than a degree it hands back
  * only to a mode that holds the robot still with no command
  * (IRammsDriveMode::HoldsRobotStill) -- another such mode if the one it came
  * from does not, else it keeps the robot here, its wheels held. One
@@ -656,6 +663,8 @@ public:
 	virtual void GetHUDPanels(TArray<FRammsHUDPanelDesc>& OutPanels) const override;
 
 private:
+	friend struct ::FRammsCurbControllerTestAccess;
+
 	/** What a leg is asked to do during a step. */
 	enum class ELegGoal : uint8
 	{
@@ -1289,6 +1298,14 @@ private:
 	void  EndStopping(const FString& Why, EStopEnd How = EStopEnd::Abnormal);
 	void  SetActiveModeThroughSelector(FName ModeId);
 	float AxleProgress(ERammsCurbAxle Axle) const;
+	/** Hand the robot back to the drive mode NextModeId: the legs to the robot's level assist first (HandLegsBackFor),
+	 *  then the mode selected. Every hand-back goes through this. */
+	void HandBackTo(FName NextModeId);
+	/** Tell the robot's level assist, where it has one, that the legs are about to be ramped to NextModeId's stance
+	 *  (URammsLevelAssistComponent::ResumeFrom): it goes on levelling from the pose the crossing left. Before the mode
+	 *  is selected, and before GetStanceChangeMinSeconds is read for the switch. Once per hand-back: a second call
+	 *  changes nothing. */
+	void HandLegsBackFor(FName NextModeId);
 
 	// --- telemetry ---
 	/** The chassis' horizontal centre and heading (world) from its corner

@@ -23,6 +23,8 @@ URammsHolonomicDriveController::URammsHolonomicDriveController()
 	// FRammsDriveStance -- but those motor Ids belong to the robot.
 	LiftedStance.bHasLinkageHeight = true;
 	LiftedStance.LinkageHeightCm = 13.0f;
+
+	SpeedRequests = MakePimpl<RammsDrive::FSpeedScaleRequests>();
 }
 
 void URammsHolonomicDriveController::BeginPlay()
@@ -98,6 +100,9 @@ void URammsHolonomicDriveController::SetDriveModeActive(bool bActive)
 	}
 	bDriveModeActive = bActive;
 	bHoldInactive = false;
+	// Nobody's request to go slower outlives a change of mode: whoever asked
+	// was asking of the drive as it was.
+	SpeedRequests->Reset();
 	// Either way this mode starts and ends at rest -- unless the selector
 	// hands it the robot's motion (SeedMotion) right after taking over.
 	// Taking over matters as much as standing down: a SetDriveCommand that
@@ -218,7 +223,10 @@ void URammsHolonomicDriveController::TickComponent(float DeltaTime, ELevelTick T
 	// while a hand-over bound holds -- reached at the hand-over rates during a
 	// switch (from the motion the robot had, after one on the move), at once
 	// otherwise.
-	const FRammsDriveMotion Commanded = RammsDrive::HolonomicMotion(Command, Resolved.MaxLinearSpeedCmPerSecond, Resolved.MaxYawRateDegPerSecond);
+	// (Asked to go slower, SetDriveSpeedScale: the operator's command at that
+	// share of its pace, every part alike, ahead of this mode's own bounds.)
+	const FRammsDriveMotion Commanded = RammsDrive::ScaledMotion(
+		RammsDrive::HolonomicMotion(Command, Resolved.MaxLinearSpeedCmPerSecond, Resolved.MaxYawRateDegPerSecond), SpeedRequests->Get(T));
 	FRammsDriveMotion		Target = Commanded;
 	const IRammsDriveMode*	Bound = Cast<IRammsDriveMode>(HandOverTarget.Get());
 	if (bHeldForStance)
@@ -409,6 +417,29 @@ double URammsHolonomicDriveController::Now() const
 	}
 	const UWorld* World = GetWorld();
 	return World ? World->GetTimeSeconds() : 0.0;
+}
+
+void URammsHolonomicDriveController::SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds)
+{
+	if (bDriveModeActive)
+	{
+		SpeedRequests->Set(Requester, Scale01, HoldSeconds, Now());
+	}
+}
+
+float URammsHolonomicDriveController::GetDriveSpeedScale() const
+{
+	return static_cast<float>(SpeedRequests->Get(Now()));
+}
+
+float URammsHolonomicDriveController::GetAskedSpeedCmS() const
+{
+	if (!bDriveModeActive)
+	{
+		return -1.0f;
+	}
+	const FRammsDriveMotion Asked = RammsDrive::HolonomicMotion(Command, Resolved.MaxLinearSpeedCmPerSecond, Resolved.MaxYawRateDegPerSecond);
+	return static_cast<float>(FMath::Sqrt(FMath::Square(static_cast<double>(Asked.ForwardCmPerSecond)) + FMath::Square(static_cast<double>(Asked.RightCmPerSecond))));
 }
 
 void URammsHolonomicDriveController::ResetSwitching()

@@ -101,6 +101,19 @@ public:
 	virtual double GetSimulationTime() const { return -1.0; }
 
 	/**
+	 * The simulated time (GetSimulationTime's clock) of the state that
+	 * GetMotorTransform reports: when the poses it gives were taken. Not
+	 * always the time GetSimulationTime gives at the same moment: a simulator
+	 * stepping on its own thread publishes the bodies' poses for a frame when
+	 * the frame asks, and goes on stepping, so that the poses a tick reads may
+	 * be most of a frame older than the clock it reads, by a different amount
+	 * each tick. Whoever takes a rate from poses (a speed, a turning rate)
+	 * must divide by the time between the POSES. Negative: no such clock.
+	 * Default: GetSimulationTime (the poses are of now).
+	 */
+	virtual double GetTransformTime() const { return GetSimulationTime(); }
+
+	/**
 	 * Hold a torque motor's joint at TargetRate (the joint's own sense: rad/s,
 	 * or cm/s for a slide joint) with a PI loop the backend runs at the physics
 	 * rate, its output clamped to [TorqueMin, TorqueMax] (no clamp when

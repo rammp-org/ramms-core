@@ -6,7 +6,8 @@
 // command for a motion, and a carried motion's hold -- each on made-up numbers --
 // and the switch itself (FModeSwitcher) on a made-up robot with treads on a
 // linkage and corner wheels on a crank: on the move, at rest, refused, waiting
-// in its first stage, cancelled part way, and from modes with no stance.
+// in its first stage, cancelled part way, and from modes with no stance; and
+// where a stance ramp starts a motor that carries a command offset.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -475,6 +476,7 @@ namespace
 		static constexpr double CornersUpK = 0.0;
 		static constexpr double CornersDownK = 1.0;
 		static constexpr double CornerTouchK = 0.5;
+		static constexpr double CrankTolerance = 0.05;
 
 		double L = TreadsUpL;
 		double K = CornersDownK;
@@ -499,6 +501,14 @@ namespace
 		int32			  StanceCommands = 0;
 		/** Linkage heights a ramp commanded (not ApplyStance's). */
 		TArray<double> RampedL;
+		/** A command offset on the crank (URammsRobotBaseComponent::
+		 *  SetMotorCommandOffset): K is then its baseline, which a ramp
+		 *  commands, and its joint stands at K + CrankOffset. With CrankLag
+		 *  the joint is short of that by it. */
+		double CrankOffset = 0.0;
+		double CrankLag = 0.0;
+		/** Crank baselines a ramp commanded. */
+		TArray<double> RampedK;
 		/** The forward speed handed over at the last activation, if any. */
 		double SeededForward = -1.0;
 		double T = 0.0;
@@ -624,7 +634,12 @@ namespace
 			{
 				OutChannels.Add({ FName("linkage.main.height"), false, L, Mode == Diff ? TreadsDownL : TreadsUpL, true });
 			}
-			OutChannels.Add({ FName("crank"), true, K, Mode == Diff ? CornersUpK : CornersDownK, false });
+			// The crank from where it is: under an offset, in its baseline's
+			// terms, as the selector takes it (CrankTolerance its 0.05 rad).
+			const double CrankFrom = CrankOffset != 0.0
+				? RammsDrive::StanceStartUnderOffset(K, K + CrankOffset, K + CrankOffset - CrankLag, CrankTolerance)
+				: K;
+			OutChannels.Add({ FName("crank"), true, CrankFrom, Mode == Diff ? CornersUpK : CornersDownK, false });
 			if (bSeat)
 			{
 				OutChannels.Add({ FName("seat"), true, SeatX, SeatHomeX, false, bSeatLead });
@@ -645,6 +660,7 @@ namespace
 				{
 					bCornerMovedSeatAway |= bSeat && FMath::Abs(V - K) > 1e-9 && FMath::Abs(SeatX - SeatHomeX) > 1e-6;
 					K = V;
+					RampedK.Add(V);
 				}
 				else
 				{
@@ -1131,6 +1147,70 @@ bool FRammsDriveHandOverSwitchSeatFirst::RunTest(const FString& Parameters)
 		TestEqual(bLead ? TEXT("leads: no corner moved before the seat was home") : TEXT("no leads: the corners moved with the seat away"),
 			R.bCornerMovedSeatAway, !bLead);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsDriveHandOverStanceStartUnderOffset,
+	"Ramms.Drive.HandOver.StanceStartUnderOffset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsDriveHandOverStanceStartUnderOffset::RunTest(const FString& Parameters)
+{
+	// The rule itself. A crank whose baseline is 0.2 carries an offset of 0.3,
+	// so it is told 0.5 and stands there: a ramp of baselines starts from the
+	// baseline. Started from the joint it would command 0.5 as a baseline, and
+	// the crank would be told 0.8.
+	TestEqual(TEXT("the joint where it was told: from the baseline"), RammsDrive::StanceStartUnderOffset(0.2, 0.5, 0.5, 0.05), 0.2, 1e-12);
+	TestEqual(TEXT("...sagging a little under load: the baseline still"), RammsDrive::StanceStartUnderOffset(0.2, 0.5, 0.47, 0.05), 0.2, 1e-12);
+	// Somewhere else (moved by hand, still on its way): from the joint, less
+	// what the offset adds, so that the first command leaves it where it is.
+	TestEqual(TEXT("the joint elsewhere: from it, less the offset"), RammsDrive::StanceStartUnderOffset(0.2, 0.5, 0.9, 0.05), 0.6, 1e-12);
+	TestEqual(TEXT("...the other side"), RammsDrive::StanceStartUnderOffset(0.2, 0.5, 0.1, 0.05), -0.2, 1e-12);
+	// The sum against the motor's range (told 0.4 of the 0.5 asked): what the
+	// offset adds is what the motor was told past its baseline.
+	TestEqual(TEXT("clamped: less what the offset added, not what was asked"), RammsDrive::StanceStartUnderOffset(0.2, 0.4, 0.9, 0.05), 0.7, 1e-12);
+
+	// A switch on the made-up robot. Holonomic, corners down (the crank's
+	// baseline at 1.0), to differential (to 0.0), at rest.
+	const FSwitchConfig Config = ToyConfig();
+	const auto			Run = [&](double Offset, double Lag, TArray<double>& OutRampedK) {
+		 FToyRobot R;
+		 R.CrankOffset = Offset;
+		 R.CrankLag = Lag;
+		 FModeSwitcher S;
+		 S.Reset(FToyRobot::Holo);
+		 S.Request(R, FToyRobot::Diff, R.Sample(), Config);
+		 for (int32 i = 0; i < 2000 && S.GetPhase() != ESwitchPhase::Idle; ++i)
+		 {
+			 R.Tick(S, Config);
+		 }
+		 OutRampedK = R.RampedK;
+		 return R.K;
+	};
+	TArray<double> Plain, Offset, Sagging, Away;
+	TestEqual(TEXT("no offset: the crank ends at its stance"), Run(0.0, 0.0, Plain), FToyRobot::CornersUpK, 1e-9);
+	TestEqual(TEXT("an offset on: its baseline ends at the stance all the same"), Run(0.3, 0.0, Offset), FToyRobot::CornersUpK, 1e-9);
+	Run(0.3, 0.03, Sagging);
+	Run(0.3, 0.4, Away);
+	if (!TestTrue(TEXT("each ramp commanded the crank"), Plain.Num() > 2 && Offset.Num() == Plain.Num() && Sagging.Num() == Plain.Num() && Away.Num() == Plain.Num()))
+	{
+		return false;
+	}
+	// With the offset on, the baselines the ramp commands are the very ones it
+	// commands without: the offset is not taken into them, at the first
+	// command (where a start from the joint would step by the offset) or after.
+	double Worst = 0.0, WorstSagging = 0.0;
+	for (int32 i = 0; i < Plain.Num(); ++i)
+	{
+		Worst = FMath::Max(Worst, FMath::Abs(Offset[i] - Plain[i]));
+		WorstSagging = FMath::Max(WorstSagging, FMath::Abs(Sagging[i] - Plain[i]));
+	}
+	TestEqual(TEXT("an offset on: the ramp starts from the baseline"), Offset[0], Plain[0], 1e-12);
+	TestEqual(TEXT("...and commands the baselines it would without it"), Worst, 0.0, 1e-12);
+	TestEqual(TEXT("the joint sagging within the tolerance: the same"), WorstSagging, 0.0, 1e-12);
+	// The joint 0.4 short of where it was told: the ramp starts there in the
+	// baseline's terms (1.0 - 0.4), not at the baseline and not at the joint.
+	TestTrue(TEXT("the joint away: the ramp starts from it, less the offset"), FMath::Abs(Away[0] - 0.6) < 0.01);
 	return true;
 }
 

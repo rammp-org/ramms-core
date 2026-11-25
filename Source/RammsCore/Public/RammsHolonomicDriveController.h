@@ -8,10 +8,16 @@
 #include "RammsDriveMode.h"
 #include "RammsControlIds.h"
 #include "RammsHolonomicDriveTypes.h"
+#include "Templates/PimplPtr.h"
 
 #include "RammsHolonomicDriveController.generated.h"
 
 class URammsRobotBaseComponent;
+
+namespace RammsDrive
+{
+	struct FSpeedScaleRequests;
+} // namespace RammsDrive
 
 /**
  * Drives a base whose omni wheels can push in more than one direction, so it
@@ -155,6 +161,18 @@ public:
 	/** Stood down at rest with bHoldWhenIdle, its wheels held where they are
 	 *  until released (their speed loops on, asked back to that angle). */
 	virtual void HoldWheelsWhileInactive(bool bHold) override;
+	/** The motion its operator's command asks -- forward, sideways and turning
+	 *  alike -- is taken at the least of the live requests' scales, before any
+	 *  hand-over bound and ramp: the path steered is kept, at a slower pace.
+	 *  Never under a tenth; a command still drives, and none still holds. Not
+	 *  active, it takes no request; standing down or taking over drops them
+	 *  all. */
+	virtual void SetDriveSpeedScale(FName Requester, float Scale01, float HoldSeconds) override;
+	/** The scale the live requests leave this mode at now (1: none). */
+	float GetDriveSpeedScale() const;
+	/** The speed over the ground the command asks (forward and strafe
+	 *  together), before any request to go slower. */
+	virtual float GetAskedSpeedCmS() const override;
 
 	// --- IRammsControlContributor --------------------------------------------
 	virtual void  DescribeControls(FRammsControlSurface& OutSurface) const override;
@@ -180,6 +198,9 @@ private:
 
 	/** Inactive modes contribute nothing: no controls, no claims, no commands. */
 	bool bDriveModeActive = true;
+
+	/** The requests to go slower this mode holds (SetDriveSpeedScale). */
+	TPimplPtr<RammsDrive::FSpeedScaleRequests> SpeedRequests;
 
 	/** True once a non-zero command has been sent, so a released stick still
 	 *  writes one zero to the motors rather than leaving them spinning. */

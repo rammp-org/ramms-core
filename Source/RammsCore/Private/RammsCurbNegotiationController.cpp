@@ -8,6 +8,7 @@
 #include "Curb/RammsCurbExecutor.h"
 #include "Curb/RammsCurbLevel.h"
 #include "Curb/RammsCurbLoadShare.h"
+#include "Curb/RammsCurbMeasure.h"
 #include "Curb/RammsCurbPlanTask.h"
 #include "Curb/RammsCurbPlanner.h"
 #include "Curb/RammsCurbRobotModel.h"
@@ -31,6 +32,7 @@
 #include "RammsControlIds.h"
 #include "RammsDriveModeSelector.h"
 #include "RammsHolonomicDriveController.h"
+#include "RammsLevelAssistComponent.h"
 #include "RammsMotionProfile.h"
 #include "RammsActuationBackend.h"
 #include "RammsRobotBaseComponent.h"
@@ -279,6 +281,15 @@ namespace
 	FVector Horizontal(const FVector& V)
 	{
 		return FVector(V.X, V.Y, 0.0);
+	}
+
+	/** The robot's level assist, where it has one: it keeps the base level between crossings with offsets on top of the
+	 *  legs' commands, and a crossing about to start must have those folded into the commands before it reads one
+	 *  (URammsLevelAssistComponent::YieldTo). */
+	URammsLevelAssistComponent* LevelAssistOf(const UActorComponent& Component)
+	{
+		const AActor* Owner = Component.GetOwner();
+		return Owner ? Owner->FindComponentByClass<URammsLevelAssistComponent>() : nullptr;
 	}
 
 	/** The most one tick moves a ramp. Commands reach the physics once a tick,
@@ -978,6 +989,15 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 	{
 		SeatState.CmdAngles = FVector2D(Base->GetMotorValue(Seat.Linkage.ProximalMotorA), Base->GetMotorValue(Seat.Linkage.ProximalMotorB));
 		SeatState.bCmd = true;
+		// The crossing takes the seat now, with the legs it already has: a level assist that was levelling puts its seat
+		// trim into the tilt's own command first (the motor told nothing), so that the command read back below is where
+		// the seat stands. Until this, the trim was still on the seat as the level assist left it -- a crossing that
+		// never gets here (called off before it ran) has not touched the seat at all.
+		URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+		if (LevelAssist && !Seat.TiltMotor.IsNone())
+		{
+			LevelAssist->YieldSeatTo(this);
+		}
 		// The rider's attitude as the crossing found it -- level in the
 		// outdoor stance, or wherever the seat's own controls had tilted it --
 		// from the motors' commands where they have them (a loaded servo sits
@@ -995,10 +1015,19 @@ void URammsCurbNegotiationController::CommandSeat(double X)
 		// pitch read back is only where the rider is now.)
 		const bool	 bTilts = Start.bValid && !Seat.TiltMotor.IsNone();
 		const double Found = bTilts ? RammsCurb::SeatPlatformPitch(Seat, Start.LinkAngle, SeatState.LinkAngle0, Commanded(Seat.TiltMotor)) : 0.0;
+		// With the level assist's seat trim folded into it (above), the command
+		// holds the rider's own setting AND that trim (their preference, a slope
+		// past the legs' reach made up). The setting is the one without it; where
+		// the rider is now (the reference the level-in starts from, below) is the
+		// one with it, so nothing steps.
+		const double FoldedTrim = bTilts && LevelAssist ? FMath::DegreesToRadians(static_cast<double>(LevelAssist->GetFoldedSeatTrimDeg())) : 0.0;
 		float		 Now[3] = { 0.0f, 0.0f, 0.0f };
 		const bool	 bRead = Base->GetMotorCommand(Seat.Linkage.ProximalMotorA, Now[0]) && Base->GetMotorCommand(Seat.Linkage.ProximalMotorB, Now[1])
 			&& !Seat.TiltMotor.IsNone() && Base->GetMotorCommand(Seat.TiltMotor, Now[2]);
-		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && bSeatKept, SeatKeptPitchOwn, SeatKeptCommands, Now, Found);
+		// (Less the trim, the tilt may well be commanded as the last crossing
+		// left it: the kept setting is then the rider's.)
+		Now[2] = static_cast<float>(RammsCurb::SeatTiltLessTrim(Seat, Now[2], FoldedTrim));
+		SeatState.PitchOwn = RammsCurb::SeatOwnPitchAtTakeOver(bTilts && bRead && bSeatKept, SeatKeptPitchOwn, SeatKeptCommands, Now, Found - FoldedTrim);
 		SeatState.PitchRef = bTilts ? Found + SeatPitchRad : 0.0;
 	}
 	const FVector2D		 Target(FMath::Clamp(X, SeatState.XRange.X, SeatState.XRange.Y), SeatState.HeightCm);
@@ -1060,78 +1089,24 @@ bool URammsCurbNegotiationController::Measure(FString& OutReason)
 		return false;
 	}
 
-	// Chassis attitude from the crank pivots.
-	FVector	  FrontW = FVector::ZeroVector, RearW = FVector::ZeroVector;
-	FVector	  PlusW = FVector::ZeroVector, MinusW = FVector::ZeroVector, AllW = FVector::ZeroVector;
-	FVector2D FrontL = FVector2D::ZeroVector, RearL = FVector2D::ZeroVector, AllL = FVector2D::ZeroVector;
-	double	  AllZ = 0.0;
-	double	  AllY = 0.0;
-	int32	  NFront = 0, NRear = 0, NPlus = 0, NMinus = 0, NAll = 0;
-	for (const FRammsCurbLeg& Leg : Legs)
-	{
-		if (Leg.Kind != ERammsCurbLegKind::FourBar || Leg.Axle == ERammsCurbAxle::Center)
-		{
-			continue;
-		}
-		FTransform Pivot;
-		if (!Base->GetMotorTransform(Leg.FourBar.CrankMotor, Pivot))
-		{
-			OutReason = Unlocated;
-			return false;
-		}
-		const FVector P = Pivot.GetLocation();
-		if (Leg.Axle == ERammsCurbAxle::Front)
-		{
-			FrontW += P;
-			FrontL += Leg.FourBar.CrankPivot;
-			++NFront;
-		}
-		else
-		{
-			RearW += P;
-			RearL += Leg.FourBar.CrankPivot;
-			++NRear;
-		}
-		if (IsPlusY(Leg))
-		{
-			PlusW += P;
-			++NPlus;
-		}
-		else
-		{
-			MinusW += P;
-			++NMinus;
-		}
-		AllZ += P.Z;
-		AllW += P;
-		AllY += Leg.Wheel.Position.Y;
-		AllL += Leg.FourBar.CrankPivot;
-		++NAll;
-	}
-	if (NFront == 0 || NRear == 0)
+	// Chassis attitude from the crank pivots (RammsCurb::AttitudeFromPivots: the level assist reads the base by the
+	// same arithmetic).
+	TArray<RammsCurb::FPivotSample, TInlineAllocator<4>> Pivots;
+	RammsCurb::FPivotAttitude							 PivotAttitude;
+	if (!RammsCurb::GatherPivots(*Base, Legs, Pivots) || !RammsCurb::AttitudeFromPivots(Pivots, PivotAttitude))
 	{
 		OutReason = Unlocated;
 		return false;
 	}
-	FrontW /= NFront;
-	RearW /= NRear;
-	FrontL /= NFront;
-	RearL /= NRear;
-	AllL /= NAll;
-	AllZ /= NAll;
-
-	const FVector Along = FrontW - RearW;
-	const double  Pitch =
-		FMath::Atan2(Along.Z, Horizontal(Along).Size()) - FMath::Atan2(FrontL.Y - RearL.Y, FrontL.X - RearL.X);
-	const FVector Forward = Horizontal(Along).GetSafeNormal();
-	FVector		  Side = FVector::ZeroVector;
-	double		  Roll = 0.0;
-	if (NPlus > 0 && NMinus > 0)
-	{
-		const FVector Across = PlusW / NPlus - MinusW / NMinus;
-		Roll = FMath::Atan2(Across.Z, Horizontal(Across).Size());
-		Side = Horizontal(Across).GetSafeNormal();
-	}
+	const FVector	AllW = PivotAttitude.SumWorld;
+	const FVector2D AllL = PivotAttitude.MeanLocal;
+	const double	AllZ = PivotAttitude.MeanZ;
+	const double	AllY = PivotAttitude.SumWheelY;
+	const int32		NAll = PivotAttitude.Count;
+	const double	Pitch = PivotAttitude.PitchRad;
+	const double	Roll = PivotAttitude.RollRad;
+	const FVector	Forward = PivotAttitude.Forward;
+	const FVector	Side = PivotAttitude.Side;
 	MeasuredPitchDeg = static_cast<float>(FMath::RadiansToDegrees(Pitch));
 	MeasuredRollDeg = static_cast<float>(FMath::RadiansToDegrees(Roll));
 	// The whole chassis frame, for where its centre of mass is: the pivots'
@@ -3554,6 +3529,32 @@ bool URammsCurbNegotiationController::CheckFeasibility(FRammsCurbProfile Profile
 
 // --- running -------------------------------------------------------------------
 
+void URammsCurbNegotiationController::HandLegsBackFor(FName NextModeId)
+{
+	URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+	if (!LevelAssist)
+	{
+		return;
+	}
+	// Against the stance the selector is about to ramp the legs to. A mode with no stance of its own leaves them as
+	// they are: an empty stance says so (a null one would say "nothing was begun", which is a refusal's).
+	FRammsDriveStance	   Stance;
+	const IRammsDriveMode* Next = FindDriveMode(NextModeId);
+	if (!Next || !Next->GetRequiredStance(Stance))
+	{
+		Stance = FRammsDriveStance();
+	}
+	LevelAssist->ResumeFrom(this, &Stance);
+}
+
+void URammsCurbNegotiationController::HandBackTo(FName NextModeId)
+{
+	// (A hand-back already made for this switch -- Finish makes it early, to read the stance change's time after it
+	// -- is not made twice: the level assist takes the legs back from whoever has them, once.)
+	HandLegsBackFor(NextModeId);
+	SetActiveModeThroughSelector(NextModeId);
+}
+
 void URammsCurbNegotiationController::SetActiveModeThroughSelector(FName ModeId)
 {
 	AActor* Owner = GetOwner();
@@ -3743,10 +3744,21 @@ bool URammsCurbNegotiationController::BeginNegotiation(FRammsCurbProfile Profile
 		Status = OutReason;
 		return false;
 	}
+	// The level assist's offsets into the legs' commands before the plan reads one (the refusals above read none of
+	// them, and one of them is for a crossing already running, which must not hand its legs back).
+	URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+	if (LevelAssist)
+	{
+		LevelAssist->YieldTo(this);
+	}
 	if (!BuildPlan(Profile, OutReason))
 	{
 		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *OutReason);
 		Status = OutReason;
+		if (LevelAssist)
+		{
+			LevelAssist->ResumeFrom(this, nullptr); // nothing was begun: the legs back as they were
+		}
 		return false;
 	}
 	StartPerAxleCrossing(Profile);
@@ -4299,6 +4311,10 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 		}
 		if (!Next.IsNone())
 		{
+			// The legs back to the level assist first, where the robot has one that is levelling: it takes the pose's
+			// plane back out of the legs' commands, so how long the stance change must take, and where the selector
+			// starts each leg's ramp from, are read after it.
+			HandLegsBackFor(Next);
 			// The selector ramps the legs to that mode's stance no faster than the
 			// base may turn (GetStanceChangeMinSeconds).
 			const float	  Ramp = GetStanceChangeMinSeconds();
@@ -4321,7 +4337,7 @@ void URammsCurbNegotiationController::Finish(ERammsCurbPhase EndPhase, const FSt
 			}
 			{
 				TGuardValue<bool> Own(bOwnHandBack, true); // a refusal at rest hands back and may still be tried again
-				SetActiveModeThroughSelector(Next);
+				HandBackTo(Next);
 			}
 			// The fallback wheels kept from rolling free until that mode has the
 			// robot (ramms.Curb.HandOverOmniHold).
@@ -5858,19 +5874,45 @@ FVector2D URammsCurbNegotiationController::GroundAttitudeDeg(const FRammsCurbPla
 
 float URammsCurbNegotiationController::GetStanceChangeMinSeconds() const
 {
-	if (!bDriveModeActive || !bStanceAttitudeKnown || !ActiveTerrain.bValid)
+	if (!bDriveModeActive)
 	{
 		return 0.0f;
 	}
 	// From the attitude the base has now to the one a drive stance takes on the
 	// ground under it -- the ground's, plus the stance's own tilt over the
-	// ground it stood on as the crossing began -- no faster than the base may
-	// turn (pitch and roll together, as a planned tilt), on the selector's
-	// S-curve, with a little to spare for the legs' geometry and lag.
-	const bool		bFar = ActiveTerrain.DistancePastEdge(ChassisOriginXY) >= 0.0;
-	const FVector2D Stance = GroundAttitudeDeg(bFar ? ActiveTerrain.Far : ActiveTerrain.Near) + StanceAttitudeOverGround;
-	const double	Turn = (Stance - FVector2D(MeasuredPitchDeg, MeasuredRollDeg)).Size();
-	return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(Turn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
+	// ground it stood on as the crossing began -- where that is known: what
+	// the stance ramp turns the base by with nothing levelling it.
+	const bool	 bGroundKnown = bStanceAttitudeKnown && ActiveTerrain.bValid;
+	const bool	 bFar = bGroundKnown && ActiveTerrain.DistancePastEdge(ChassisOriginXY) >= 0.0;
+	const double GroundTurn = bGroundKnown
+		? ((GroundAttitudeDeg(bFar ? ActiveTerrain.Far : ActiveTerrain.Near) + StanceAttitudeOverGround) - FVector2D(MeasuredPitchDeg, MeasuredRollDeg)).Size()
+		: 0.0;
+	FVector2D LeftDeg = FVector2D::ZeroVector;
+	if (const URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this); LevelAssist && LevelAssist->GetHandBackTurnDeg(LeftDeg))
+	{
+		// The level assist has the legs back and carries the pose's plane on as its offsets: the stance ramp no longer
+		// turns the base to the ground's attitude. What it does still turn the base by is what of that plane the assist
+		// could NOT take out of the legs' commands (a slope past what it may correct in that stance: the crossing's own
+		// level reach is the larger). The ramp is timed for that turn, within the same tilt limits: nothing where the
+		// whole plane was taken out.
+		// (A level assist that took nothing back out at the hand-back, though it is on, falls through to the turn to the
+		// ground's attitude below: the whole pose is then in the commands the ramp takes to the stance.)
+		// And never for more than the turn to the ground's attitude, where that is known: levelled or not, the ramp
+		// cannot turn the base further than that. What is left of a pose's plane says so only for a pose that IS a drive
+		// stance with a plane on it. A crossing stopped part way (a fault, a simulation reset under it) hands back legs
+		// wherever it had them; the plane fitted through those is tens of degrees and no turn of the base at all, and a
+		// ramp timed for it took a quarter of a minute, with levelling (begun again from nothing) waiting for it.
+		const double Turn = bGroundKnown ? FMath::Min(LeftDeg.Size(), GroundTurn) : LeftDeg.Size();
+		return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(Turn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
+	}
+	if (!bGroundKnown)
+	{
+		return 0.0f;
+	}
+	// No faster than the base may turn (pitch and roll together, as a planned
+	// tilt), on the selector's S-curve, with a little to spare for the legs'
+	// geometry and lag.
+	return static_cast<float>(HandBackRampSpare * RammsDrive::StanceTurnSeconds(GroundTurn, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2));
 }
 
 bool URammsCurbNegotiationController::StepComplete() const
@@ -6089,10 +6131,21 @@ void URammsCurbNegotiationController::StepPlan(float DeltaTime)
 
 bool URammsCurbNegotiationController::BeginPerWheel(const FRammsCurbProfile& Profile, FString& OutReason)
 {
-	auto Refuse = [this, &OutReason](const FString& Why) {
+	// First of all, the level assist's offsets into the legs' commands: everything below that reads a command (and the
+	// crossing's "last commands", which its level-in starts from) must read the pose the robot is in. Nothing moves.
+	URammsLevelAssistComponent* const LevelAssist = LevelAssistOf(*this);
+	if (LevelAssist)
+	{
+		LevelAssist->YieldTo(this);
+	}
+	auto Refuse = [this, &OutReason, LevelAssist](const FString& Why) {
 		OutReason = Why;
 		UE_LOG(LogRammsCurb, Warning, TEXT("[Curb] '%s' will not attempt it: %s"), *GetNameSafe(GetOwner()), *Why);
 		Status = Why;
+		if (LevelAssist)
+		{
+			LevelAssist->ResumeFrom(this, nullptr); // nothing was begun: the legs back as they were
+		}
 		return false;
 	};
 	// Nothing of a crossing before this one runs on.
@@ -7303,7 +7356,7 @@ void URammsCurbNegotiationController::TickComponent(float DeltaTime, ELevelTick 
 			{
 				UE_LOG(LogRammsCurb, Log, TEXT("[Curb] '%s': selected with no crossing to run; back to '%s'"),
 					*GetNameSafe(GetOwner()), *Next.ToString());
-				SetActiveModeThroughSelector(Next);
+				HandBackTo(Next);
 			}
 		}
 	}

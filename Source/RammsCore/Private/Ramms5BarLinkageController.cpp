@@ -157,12 +157,43 @@ float URamms5BarLinkageController::HeldX() const
 	// coordinate to a height command would ask for a target that is infeasible
 	// in the axis the caller did not touch, and the move silently does nothing.
 	// Clamp into what is actually reachable instead.
-	const FVector2D Live = GetCurrentEndpoint();
+	const FVector2D Live = UnheldEndpoint();
 	bool			bValid = false;
 	const FVector2D Range = GetReachableTranslationRange(static_cast<float>(Live.Y), bValid);
 	return bValid ? FMath::Clamp(static_cast<float>(Live.X), static_cast<float>(Range.X),
 						static_cast<float>(Range.Y))
 				  : static_cast<float>(Live.X);
+}
+
+bool URamms5BarLinkageController::BaselineEndpointUnderOffset(FVector2D& OutEndpoint) const
+{
+	if (const URammsRobotBaseComponent* Base = EnsureBase())
+	{
+		float A = 0.0f, B = 0.0f;
+		if ((Base->GetMotorCommandOffset(Resolved.ProximalMotorA) != 0.0f || Base->GetMotorCommandOffset(Resolved.ProximalMotorB) != 0.0f)
+			&& Base->GetMotorCommand(Resolved.ProximalMotorA, A) && Base->GetMotorCommand(Resolved.ProximalMotorB, B))
+		{
+			bool			bValid = false;
+			const FVector2D Endpoint = URamms5BarKinematics::ComputeEndpoint(Resolved, FVector2D(A, B), bValid);
+			if (bValid)
+			{
+				OutEndpoint = ToRobot(Endpoint);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+FVector2D URamms5BarLinkageController::UnheldEndpoint() const
+{
+	// A hip carrying a command offset (URammsRobotBaseComponent::
+	// SetMotorCommandOffset) stands off its baseline by it, and the endpoint
+	// with it. A target taken from there would write the offset into the
+	// baselines, where it would be added a second time: the endpoint of the
+	// baselines instead.
+	FVector2D Endpoint;
+	return BaselineEndpointUnderOffset(Endpoint) ? Endpoint : GetCurrentEndpoint();
 }
 
 bool URamms5BarLinkageController::SetEndpointHeight(float Z)
@@ -179,7 +210,7 @@ float URamms5BarLinkageController::HeldZ() const
 	}
 	// See HeldX: the live height can be outside the reachable band, and a
 	// fore/aft command that inherited it would be refused or do nothing.
-	const FVector2D Live = GetCurrentEndpoint();
+	const FVector2D Live = UnheldEndpoint();
 	bool			bValid = false;
 	const FVector2D Range = GetReachableHeightRange(static_cast<float>(Live.X), bValid);
 	return bValid ? FMath::Clamp(static_cast<float>(Live.Y), static_cast<float>(Range.X),
@@ -556,6 +587,26 @@ void URamms5BarLinkageController::SetJointAngles(FVector2D AnglesAB)
 	}
 }
 
+void URamms5BarLinkageController::SyncTargetToCommands()
+{
+	const URammsRobotBaseComponent* Base = EnsureBase();
+	float							A = 0.0f, B = 0.0f;
+	if (!Base || !Base->GetMotorCommand(Resolved.ProximalMotorA, A) || !Base->GetMotorCommand(Resolved.ProximalMotorB, B))
+	{
+		// Nothing commands the hips (never commanded, or let go): there is
+		// nothing to hold, and what this had stands.
+		return;
+	}
+	// As SetJointAngles leaves it, without the commanding.
+	bool			bValid = false;
+	const FVector2D Endpoint = URamms5BarKinematics::ComputeEndpoint(Resolved, FVector2D(A, B), bValid);
+	bHasTarget = bValid;
+	if (bValid)
+	{
+		LastTarget = ToRobot(Endpoint);
+	}
+}
+
 FVector2D URamms5BarLinkageController::GetCurrentJointAngles() const
 {
 	URammsRobotBaseComponent* Base = EnsureBase();
@@ -917,18 +968,24 @@ bool URamms5BarLinkageController::ReadControl(FName Id, float& OutValue) const
 
 bool URamms5BarLinkageController::ReadTarget(FName Id, float& OutTarget) const
 {
-	if (!bHasTarget)
+	// With no target held, whoever asks falls back on where the endpoint reads
+	// and commands from there (a stance ramp, a held key). Under a hip's
+	// command offset that would write the offset into the baselines, as in
+	// UnheldEndpoint: the hips' baselines are then the target, whoever
+	// commanded them.
+	FVector2D Target = LastTarget;
+	if (!bHasTarget && !BaselineEndpointUnderOffset(Target))
 	{
 		return false;
 	}
 	if (Id == HeightControlId())
 	{
-		OutTarget = static_cast<float>(LastTarget.Y);
+		OutTarget = static_cast<float>(Target.Y);
 		return true;
 	}
 	if (Id == TranslationControlId())
 	{
-		OutTarget = static_cast<float>(LastTarget.X);
+		OutTarget = static_cast<float>(Target.X);
 		return true;
 	}
 	return false;

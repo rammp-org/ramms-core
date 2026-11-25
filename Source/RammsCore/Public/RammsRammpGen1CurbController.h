@@ -15,6 +15,9 @@ class URammsRobotBaseComponent;
 class USceneComponent;
 class UCanvas;
 class APlayerController;
+/** The automation tests' way to the controller's private steps (a crossing committed, begun and ended), which no
+ *  public call reaches without a whole crossing run in a simulator. Defined only in the plugin's own tests. */
+struct FRammsRammpGen1CurbTestAccess;
 namespace RammsCurb
 {
 	class FStickGate;
@@ -474,6 +477,8 @@ protected:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
+	friend struct ::FRammsRammpGen1CurbTestAccess;
+
 	enum class ESupport : uint8
 	{
 		Drive,
@@ -518,6 +523,10 @@ private:
 	bool CanStart(FString& OutReason) const;
 	bool PlanAhead(FPlan& OutPlan, FString& OutReason, float NoFurtherCm = TNumericLimits<float>::Max()) const;
 	bool Commit(const FPlan& Plan, FString& OutReason);
+	/** The lifts taken from the robot's level assist for a crossing, and handed back to it (nothing on a robot with
+	 *  none, or with it switched off). */
+	void YieldLiftsToCrossing();
+	void HandLiftsBackFromCrossing();
 
 	// The sequence.
 	void Begin();
@@ -717,6 +726,9 @@ private:
 
 	FLift Lifts[NumLifts];
 	float StartCmd[NumLifts] = {}; // where the crossing found each lift (its last command): a finished crossing returns there
+	// The robot's level assist was told this crossing takes the lifts (URammsLevelAssistComponent::YieldTo) and has
+	// not been handed them back: told once for as long as this mode holds them, and handed back once.
+	bool  bLevelYielded = false;
 	bool  bFrontUp = false;		   // the front omni wheels started off the ground: they stay up until they go down over the edge
 	float SettleLeft = 0.0f;
 	float PhaseSeconds = 0.0f;

@@ -1,0 +1,1010 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Level/RammsLevelAllocate.h"
+#include "Level/RammsLevelTypes.h"
+
+/**
+ * The level assist's control pieces, each a small class or function with its
+ * own state, fed made-up numbers by the tests and strung together by
+ * FLaw::Step (RammsLevelLaw.h), which alone decides when each runs. Plain
+ * C++. Units and signs as RammsLevelTypes.h: degrees, cm, s; X pitch (nose
+ * up), Y roll (+Y up).
+ *
+ * The variables, as the law names them:
+ *   A  the measured attitude, low-passed (FAttitudeFilter)
+ *   S  the ground as far as it can have turned (FGroundGate): A with the
+ *      joints' correction put back, less what only the body can have done
+ *   G  the terrain estimate: the attitude the base would have standing on
+ *      its baseline stance (FTerrainEstimate), from S
+ *   W  the wanted attitude: every deliberate change of the rider's attitude
+ *      goes through it, on the tilt policy's rate and acceleration
+ *      (WantedTiltGoal, FTiltTarget)
+ *   C  the correction plane the legs apply (FLevelLoop, SlewCorrection)
+ *   e  the error A - W
+ *
+ * Every Tick with Dt <= 0 changes nothing and returns what it last returned
+ * (a filter not yet seeded still takes its reading).
+ */
+namespace RammsLevel
+{
+	/** Error less the band either side of zero; 0 inside it. (RammsCurb::
+	 *  Deadband, in double.) */
+	inline double Deadband(double Error, double Band)
+	{
+		Band = FMath::Max(0.0, Band);
+		return Error > Band ? Error - Band : (Error < -Band ? Error + Band : 0.0);
+	}
+
+	/**
+	 * A first-order low-pass of an attitude, as the curb's: the first reading
+	 * is taken whole; after that the value moves towards each reading by the
+	 * share clamp(Dt / Seconds, 0, 1) of the gap (all of it for Seconds <= 0).
+	 */
+	class FAttitudeFilter
+	{
+	public:
+		/** Forget: the next reading is taken whole. */
+		void Reset() { *this = FAttitudeFilter(); }
+		/** Take Deg now, whole. */
+		void Seed(const FVector2D& Deg)
+		{
+			Value = Deg;
+			bSeeded = true;
+		}
+		/** One reading (deg); returns the filtered value. */
+		FVector2D Tick(const FVector2D& MeasuredDeg, double Dt, double Seconds);
+
+		FVector2D Get() const { return Value; }
+		bool	  IsSeeded() const { return bSeeded; }
+
+	private:
+		FVector2D Value = FVector2D::ZeroVector;
+		bool	  bSeeded = false;
+	};
+
+	/**
+	 * The terrain estimate G = low-pass(A + c_meas, TerrainFilterSeconds): A
+	 * the filtered attitude, c_meas the correction the joints of the legs it
+	 * stands on have achieved (MeasuredCorrection). The base reads A with
+	 * c_meas applied, so without it it would read A + c_meas -- whatever the
+	 * correction is, and however far the joints are behind their commands:
+	 * the same ground gives the same G.
+	 * The filter is FAttitudeFilter's.
+	 */
+	class FTerrainEstimate
+	{
+	public:
+		void Reset() { Filter.Reset(); }
+		void Seed(const FVector2D& GroundDeg) { Filter.Seed(GroundDeg); }
+		/** One tick; returns G (deg). */
+		FVector2D Tick(const FVector2D& AttitudeDeg, const FVector2D& MeasuredCorrectionDeg, double Dt, double Seconds);
+
+		FVector2D Get() const { return Filter.Get(); }
+		bool	  IsSeeded() const { return Filter.IsSeeded(); }
+
+	private:
+		FAttitudeFilter Filter;
+	};
+
+	/**
+	 * The ground as far as it can have turned.
+	 *
+	 * The attitude, with the correction the joints have made put back (A +
+	 * c_meas, the terrain estimate's reading), is the ground's -- while the
+	 * robot rests quietly on it. A base being braked, driven off, knocked, or
+	 * rocking onto a leg just set down reads something else for a few tenths
+	 * of a second, and legs sent after that reading arrive as the base comes
+	 * back by itself: the knock is answered by a swing the other way. The
+	 * ground cannot do that. Its attitude changes only as the robot moves
+	 * over it, by no more than a grade break turns it over the standing legs'
+	 * span; so the reading is followed only that fast:
+	 *
+	 *   allowance (deg/s) = Trust * (Tuning.SettleDegPerSec
+	 *                                + TurnDegPerCm * |SpeedCmS|
+	 *                                + |Value| * |YawRateDegPerSec| pi / 180)
+	 *                     + ExplainedDeg / Dt
+	 *   Value moves towards RawGroundDeg by at most allowance * Dt (Euclidean
+	 *   over pitch and roll)
+	 *
+	 * TurnDegPerCm is what the ground may turn per cm travelled (the law
+	 * gives Tuning.BreakDeg / StandingSpanCm). ExplainedDeg is how far the
+	 * legs' own baselines can have turned the stance this tick
+	 * (BaselineTurnDeg): a stance being ramped moves the reading with the ground
+	 * standing still, and by exactly that. YawRateDegPerSec is how fast the
+	 * chassis is turning about the vertical: a robot turning on the spot on a
+	 * slope of |Value| deg sees that slope swing from pitch into roll in its
+	 * own frame, by the slope times the angle turned, with no distance
+	 * travelled at all -- and legs that are not sent after it leave the base
+	 * to tilt by the whole slope in a quarter turn. Trust (0..1) is how far the
+	 * attitude is believed to be the ground's at all: with the base's speed
+	 * changing by a (cm/s^2, from one tick's SpeedCmS to the next) it is at
+	 * most 1 for |a| <= BodyAccelStartCmS2, 0 for |a| >= BodyAccelFullCmS2
+	 * and on a straight line between, taken at once when that is less than
+	 * it was; and it rises again by no more than Dt / BodySettleSeconds a
+	 * tick. A base being braked that hard pitches by its own inertia, and
+	 * goes on rocking for a moment after.
+	 *
+	 * When Trust falls, the share of it lost is taken back out of the LAST
+	 * tick's step too (but for what the baselines explained of it): SpeedCmS
+	 * is measured between two readings, so the braking a tick shows began
+	 * some way into the tick before, whose reading was already part body.
+	 *
+	 * What the gate leaves out is not lost: a reading that stays is caught up
+	 * at the allowance. With Tuning.BreakDeg <= 0 there is no gate: Value is
+	 * RawGroundDeg. The first reading (and Seed) is taken whole.
+	 */
+	class FGroundGate
+	{
+	public:
+		/** Its own tuning; a test or the dry run may change it. */
+		FGroundTuning Tuning;
+
+		/** Forget (the tuning stays): the next reading is taken whole. */
+		void Reset()
+		{
+			const FGroundTuning Kept = Tuning;
+			*this = FGroundGate();
+			Tuning = Kept;
+		}
+		/** Take GroundDeg now, whole; the travel is believed again from here. */
+		void Seed(const FVector2D& GroundDeg)
+		{
+			Value = GroundDeg;
+			bSeeded = true;
+			Trust = 1.0;
+			bHasSpeed = false;
+			LastStep = FVector2D::ZeroVector;
+		}
+		/** One tick; returns the ground as far as it can have turned (deg). */
+		FVector2D Tick(const FVector2D& RawGroundDeg, double SpeedCmS, double TurnDegPerCm, double ExplainedDeg, double Dt, double YawRateDegPerSec = 0.0);
+
+		FVector2D Get() const { return Value; }
+		bool	  IsSeeded() const { return bSeeded; }
+		/** How far the travel is believed (0..1), and the last tick's
+		 *  allowance (deg/s). */
+		double GetTrust() const { return Trust; }
+		double GetAllowanceDegPerSec() const { return Allowance; }
+
+	private:
+		FVector2D Value = FVector2D::ZeroVector;
+		bool	  bSeeded = false;
+		double	  Trust = 1.0;
+		double	  LastSpeedCmS = 0.0;
+		bool	  bHasSpeed = false;
+		double	  Allowance = 0.0;
+		/** What the last tick moved Value by on the attitude's word (deg; the
+		 *  part the baselines explain left out). */
+		FVector2D LastStep = FVector2D::ZeroVector;
+	};
+
+	/**
+	 * Where the wanted attitude should go while levelling (deg): level where
+	 * the legs can hold it, and beyond that the part of the ground's tilt they
+	 * cannot take out, along the ground's own direction, never more than
+	 * MaxTiltDeg.
+	 *
+	 *   T    = GroundDeg - Tuning.LevelReferenceDeg     (the correction that
+	 *          would hold the reference on this ground)
+	 *   s0   = AllocateFraction(Legs, Points, T, Tuning, Tuning.SoftZoneCm)
+	 *   Got  = s0 * ClampAxes(T, Tuning.MaxCorrectionDeg)
+	 *   goal = LevelReferenceDeg + ClampTotal(T - Got, Tuning.MaxTiltDeg)
+	 *
+	 * With no per-axis clamp binding this is the plan's (1 - s0) T. Taking
+	 * the per-axis clamp into Got is a choice made here: a robot whose roll
+	 * correction is capped then plans to keep the roll it cannot remove,
+	 * rather than wanting a level it cannot reach.
+	 *
+	 * It depends only on G and the legs' reach, never on W, C or A, so it
+	 * cannot chatter against the loop. The limits are pulled in by the soft
+	 * zone so that, resting on the goal, the correction sits short of the
+	 * margin and Allocate's share stays 1. Legs must have been through
+	 * SupportMask.
+	 */
+	FVector2D WantedTiltGoal(const FVector2D& GroundDeg, TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points,
+		const FTuning& Tuning);
+
+	/** WantedTiltGoal, with how much the legs must leave and what makes them. */
+	struct FTiltGoal
+	{
+		/** WantedTiltGoal's goal (deg). */
+		FVector2D GoalDeg = FVector2D::ZeroVector;
+		/** How much of the correction that would hold the reference the legs
+		 *  cannot give (deg, Euclidean): |T - Got|, before MaxTiltDeg caps the
+		 *  goal. 0 inside reach. */
+		double ShortDeg = 0.0;
+		/** What stops them: the allocation's limit where its share is under 1
+		 *  (AllocateReach, the limits pulled in by the soft zone), else
+		 *  AxisLimit where the per-axis clamp cut T, else None. */
+		EReachLimit Limit = EReachLimit::None;
+	};
+
+	FTiltGoal WantedTiltGoalWithLimit(const FVector2D& GroundDeg, TConstArrayView<FLegReach> Legs, TConstArrayView<FClearancePoint> Points,
+		const FTuning& Tuning);
+
+	/** WantedTiltGoal's rule with the reach share s0 given (0..1) rather than
+	 *  found from the legs: the tests check it at any share with this. */
+	FVector2D WantedTiltGoalForShare(const FVector2D& GroundDeg, double Share, const FTuning& Tuning);
+
+	/**
+	 * The wanted attitude W, moved to its goal within a rate (deg/s) and an
+	 * acceleration (deg/s^2), both as Euclidean lengths over pitch and roll
+	 * together, arriving at rest without passing a goal that stands still.
+	 *
+	 * One Tick, with D = Goal - W, d = |D|, a = MaxAccel, v = MaxRate:
+	 *  - the speed wanted along D is the most that can still stop on the goal
+	 *    in whole ticks: min(v, sqrt(a^2 Dt^2 + 2 a d) - a Dt); the velocity
+	 *    wanted is that along D (zero for d = 0);
+	 *  - the velocity moves towards the wanted one by at most a Dt (as a
+	 *    vector), then is shortened to length v if longer;
+	 *  - W += velocity Dt;
+	 *  - once d <= 1e-9 and the velocity is at most a Dt long, W is the goal
+	 *    exactly and the velocity zero.
+	 * With MaxAccel <= 0 the velocity is the wanted one at once (a pure rate
+	 * limit, min(v, d / Dt)); with MaxRate <= 0 too, W jumps to the goal.
+	 * MaxRate <= 0 with MaxAccel > 0 is an acceleration limit alone. The d of
+	 * the arrival test is the distance at the start of the tick.
+	 *
+	 * So the rate never exceeds MaxRate, the velocity never changes by more
+	 * than MaxAccel Dt in a tick, and from rest to a goal that stays put W
+	 * travels the straight line and stops on it. A goal that moves is chased
+	 * under the same limits.
+	 */
+	class FTiltTarget
+	{
+	public:
+		/** W := Deg, at rest. */
+		void Reset(const FVector2D& Deg)
+		{
+			Wanted = Deg;
+			Rate = FVector2D::ZeroVector;
+		}
+		/** One tick; returns W (deg). */
+		FVector2D Tick(const FVector2D& GoalDeg, double Dt, double MaxRateDegPerSec, double MaxAccelDegPerSec2);
+		/**
+		 * One tick of coming to rest where it can, whatever the goal: the
+		 * velocity is shortened by at most MaxAccel Dt (to zero at once for
+		 * MaxAccel <= 0) and W moves on by it. At rest it stays at rest. For
+		 * a walk that must wait (a stance being changed under the base): it
+		 * stops as gently as it would at its goal, not dead.
+		 */
+		FVector2D Brake(double Dt, double MaxAccelDegPerSec2);
+
+		FVector2D Get() const { return Wanted; }
+		/** W's velocity (deg/s). */
+		FVector2D GetRate() const { return Rate; }
+		/** Within TiltArrivedDeg of GoalDeg and not moving. */
+		bool HasArrived(const FVector2D& GoalDeg) const { return (GoalDeg - Wanted).Size() < TiltArrivedDeg && Rate.IsNearlyZero(1e-6); }
+		/**
+		 * As good as there: within TiltArrivedDeg of GoalDeg and slower than
+		 * TiltArrivedRateDegPerSec. For a goal that is a live estimate (the
+		 * ground's attitude, or a goal worked out from it): a real base's
+		 * attitude moves in its last digits for ever, W follows the goal with
+		 * it, and "not moving" never comes true.
+		 */
+		bool IsNear(const FVector2D& GoalDeg) const { return (GoalDeg - Wanted).Size() < TiltArrivedDeg && Rate.Size() < TiltArrivedRateDegPerSec; }
+
+	private:
+		FVector2D Wanted = FVector2D::ZeroVector;
+		FVector2D Rate = FVector2D::ZeroVector;
+	};
+
+	/**
+	 * The loop: the curb's structure, terrain feed-forward with a PI trim.
+	 *
+	 *   e     = (Deadband(A.X - W.X, DeadbandDeg), Deadband(A.Y - W.Y, ...))
+	 *   e_I   = e, or with a TrimDeadbandDeg of 0 or more the same error less
+	 *           that band (the lesser of it and DeadbandDeg) instead
+	 *   I    += IntegralGain e_I Dt, per axis, where allowed (below), then
+	 *           clamped to +-IntegralMaxDeg per axis
+	 *   C_raw = FeedForwardGain (G - W) + I + ProportionalGain e
+	 *
+	 * The deadband keeps the legs from hunting after the last tenth of a
+	 * degree while the ground moves under them. It also means that nothing
+	 * acts inside it: an integral wound up by a transient (the lag of a walk,
+	 * a knock) unwinds only until the error is back at the band's edge, and
+	 * the base is left resting there. So where the law knows the base is
+	 * standing still and about to rest it gives the integral a narrower band
+	 * (TrimDeadbandDeg), and the rest is on the wanted attitude. The
+	 * proportional term keeps the whole deadband either way.
+	 *
+	 * A nose-up error gives a positive pitch correction, which retracts the
+	 * front legs. C_raw is NOT clamped here: the law clamps per axis, slews
+	 * and allocates it.
+	 *
+	 * The integral moves on an axis only with bIntegrate and Dt > 0, and,
+	 * against a limit, only when its step is of the opposite sign to the last
+	 * C_raw on that axis: it never pushes further into a limit, and unwinds at
+	 * once. An axis is against a limit with bSaturated (the last allocation
+	 * could not give all of C: both axes), or when the last C_raw on that axis
+	 * was at or past Tuning.MaxCorrectionDeg (that axis alone: the other goes
+	 * on trimming). The clamp is applied on every tick with Dt > 0,
+	 * integrating or not.
+	 */
+	class FLevelLoop
+	{
+	public:
+		void Reset() { *this = FLevelLoop(); }
+
+		/** One tick; returns C_raw (deg). TrimDeadbandDeg under 0: the
+		 *  integral's band is the loop's. */
+		FVector2D Tick(const FVector2D& AttitudeDeg, const FVector2D& WantedDeg, const FVector2D& GroundDeg, double Dt, bool bIntegrate,
+			bool bSaturated, const FTuning& Tuning, double TrimDeadbandDeg = -1.0);
+
+		/**
+		 * A limit gave AchievedDeg where AskedDeg was asked (the allocation's
+		 * share of the slewed plane, at the legs' reach). The
+		 * integral gives up its own part of what was cut, per axis: it moves
+		 * by (AchievedDeg - AskedDeg) but only TOWARDS zero and never past
+		 * it. C_raw becomes the last Tick's other two terms plus the new
+		 * integral.
+		 *
+		 * (Back-calculation, of the integral's own contribution only. What
+		 * the feed-forward asks beyond a limit is not the integral's to
+		 * cancel: an integral driven negative to make up for it would, when
+		 * the limit lets go, hold the correction short by that much until it
+		 * had integrated back. The plan words this "I is back-calculated to
+		 * the achieved s * C"; taken literally that stores the feed-forward's
+		 * excess and the slew's lag in the integral.)
+		 */
+		void BackCalculate(const FVector2D& AskedDeg, const FVector2D& AchievedDeg, const FTuning& Tuning);
+
+		/**
+		 * Start from a correction that is already applied, with no error:
+		 * I := clamp(CorrectionDeg - FeedForwardGain (GroundDeg - WantedDeg),
+		 * +-IntegralMaxDeg), and C_raw := the feed-forward term plus that I. A
+		 * Tick straight after, with A = W, returns CorrectionDeg (to within
+		 * the clamp): how an adopted plane and a resume go on without a step.
+		 */
+		void StartFrom(const FVector2D& CorrectionDeg, const FVector2D& WantedDeg, const FVector2D& GroundDeg, const FTuning& Tuning);
+
+		FVector2D GetIntegral() const { return Integral; }
+		/** The last C_raw (deg). */
+		FVector2D GetCorrection() const { return Correction; }
+
+	private:
+		FVector2D Integral = FVector2D::ZeroVector;
+		FVector2D Correction = FVector2D::ZeroVector;
+		/** The last Tick's Kff (G - W) + Kp e, for BackCalculate. */
+		FVector2D Others = FVector2D::ZeroVector;
+	};
+
+	/**
+	 * One tick of the correction's slew: the plane moves from FromDeg towards
+	 * ToDeg (both after the per-axis clamps), as a whole, no faster than the
+	 * actuators allow. Returns the new plane. In order:
+	 *
+	 *  1. Step = ToDeg - FromDeg, shortened to MaxRateDegPerSec Dt (Euclidean;
+	 *     no limit for MaxRateDegPerSec <= 0).
+	 *  2. Each leg's move is RigidOffsets(From + Step) - RigidOffsets(From).
+	 *     OutRateUse = the largest |move| / (Dt MaxRateCmS) over every leg
+	 *     that counts and has MaxRateCmS > 0: the share of its rate the plane
+	 *     asks of the busiest leg, measured here, before the next cut, and so
+	 *     able to pass 1. Above Tuning.LegRateFraction the Step is scaled by
+	 *     LegRateFraction / OutRateUse.
+	 *     A leg the robot stands on counts for all of its move. A LIFTED leg
+	 *     (bSupport false) counts only for the part of its move that takes it
+	 *     UP, and that it can make: both ends of the move held inside its
+	 *     travel (Allocate's own clamp) first. Where a lifted leg is changes
+	 *     nothing about the base's attitude; it is carried with the plane to
+	 *     keep its clearance, and only a leg late in coming UP loses any. One
+	 *     that is being let down, or that rests on its stop and is not moving
+	 *     at all, must not hold the whole plane back: carried far ahead of the
+	 *     legs that stand, it would be the busiest leg by far, and the
+	 *     correction would unwind at a fraction of what those legs can do. (A
+	 *     lifted leg let down faster than it can go is told so all the same,
+	 *     at its own rate: FLaw::Step's g2.) And a lifted leg that stands
+	 *     AboveCm[i] over where From has it (0 or more; empty: none does) is
+	 *     brought up only by what takes it past where it stands: a carried
+	 *     leg the law holds clear (FState::HeldCm) is not moved by the plane
+	 *     coming up to it.
+	 *  3. Soft zone: for each support leg moving towards a limit of the
+	 *     constraint set (Lo_i or Hi_i of RammsLevelAllocate.h, ExtraMarginCm
+	 *     0) with less than Tuning.SoftZoneCm to go from where From puts it
+	 *     (d, 0 or more), f_i = SoftZoneFloor + (1 - SoftZoneFloor) d /
+	 *     SoftZoneCm. The Step is scaled by the least f_i.
+	 *
+	 * The plane stays rigid: every cut scales the whole Step. bOutLimited
+	 * says a RATE cut it (1 or 2): the legs are going as fast as they may,
+	 * and the law holds its integral meanwhile. The soft zone's taper is not
+	 * reported: it slows the last of every approach to a limit for many
+	 * ticks, and an integral held all that while could not trim a leg that
+	 * rests at the zone's edge (where the wanted tilt is planned to leave
+	 * it). With Dt <= 0: FromDeg, use 0, not limited.
+	 * Tuning.LegRateFraction <= 0 means no leg-rate cut (the formula would
+	 * stop the plane for good) and SoftZoneCm <= 0 no taper. A leg is moving
+	 * towards a limit when its move, after the leg-rate cut, is over 1e-9 cm.
+	 * Legs must have been through SupportMask.
+	 */
+	FVector2D SlewCorrection(TConstArrayView<FLegReach> Legs, const FVector2D& FromDeg, const FVector2D& ToDeg, double Dt,
+		double MaxRateDegPerSec, const FTuning& Tuning, double& OutRateUse, bool& bOutLimited, TConstArrayView<double> AboveCm = TConstArrayView<double>());
+
+	/**
+	 * How fast (deg/s) the legs the robot stands on can turn the correction
+	 * plane along DirDeg (a direction over pitch and roll; its length does not
+	 * matter): the plane's own rate, Tuning.MaxCorrectionRateDegPerSec, and no
+	 * faster than keeps the busiest of those legs within Tuning.LegRateFraction
+	 * of its MaxRateCmS (RigidOffsets of a degree along DirDeg gives each
+	 * leg's cm per degree). The legs that count are the support legs (every
+	 * leg when none stands): a lifted leg holds the plane back only while it
+	 * is being brought up (SlewCorrection), which is not what the ground can
+	 * be followed at in general. 0: nothing limits it (no plane rate, and no
+	 * counting leg with a rate, or no LegRateFraction), or DirDeg is zero.
+	 * Legs must have been through SupportMask. What the speed cap takes for
+	 * the rate the ground may turn at.
+	 */
+	double PlaneRateDegPerSec(TConstArrayView<FLegReach> Legs, const FVector2D& DirDeg, const FTuning& Tuning);
+
+	/**
+	 * The seat's trim (deg; positive pitches the seat nose up against the
+	 * chassis): what the level assist adds to the seat's own tilt, on a robot
+	 * whose seat tilts. It has two parts.
+	 *
+	 * The SHARE is the part of the rider's wanted pitch that is held in the
+	 * seat rather than in the base: the pitch the rider prefers, and the tilt
+	 * a slope past the legs' reach leaves the base with, taken back out. It
+	 * is a deliberate change of the rider's attitude, so the law moves it
+	 * within the tilt policy (FLaw::Step) and gives it here.
+	 *
+	 * The COVER is of the base's pitch error while the legs catch the ground
+	 * up: AnswerDeg, how far nose up of where it is wanted the base will be,
+	 * by the ground's doing, when the seat's command lands (the law works it
+	 * out: FLaw::Step, step 4). The seat takes it out, and the legs, bringing
+	 * the base to where it is wanted, take the cover away again by
+	 * themselves. Roll has no seat axis.
+	 *
+	 *   cover  = bCover ? -Deadband(AnswerDeg, SeatTrimDeadbandDeg) : 0
+	 *   target = clamp(ShareDeg + cover, max(LowDeg, -SeatTrimMaxDeg),
+	 *                                    min(HighDeg, SeatTrimMaxDeg))
+	 *   trim moves to target by at most SeatTrimRateDegPerSec Dt
+	 *
+	 * LowDeg (0 or less) and HighDeg (0 or more) are the seat's own room about
+	 * where the rider has it. A rate of 0 holds the trim where it is. Turning
+	 * the trim into a seat joint command is the plant's.
+	 */
+	class FSeatTrim
+	{
+	public:
+		/** The cover's own tuning (the law reads it; a test or the dry run
+		 *  may change it). */
+		FSeatCoverTuning Cover;
+
+		/** Forget (the tuning stays). */
+		void Reset()
+		{
+			const FSeatCoverTuning Kept = Cover;
+			*this = FSeatTrim();
+			Cover = Kept;
+		}
+		/** The trim has become part of the seat's own command (a fold): it is
+		 *  zero now, with no motion. */
+		void Zero()
+		{
+			Trim = 0.0;
+			bBehind = false;
+		}
+		/** The seat carries TrimDeg as an offset already (one taken back out
+		 *  of its own command, or left on it): gone on from, with no motion. */
+		void Set(double TrimDeg)
+		{
+			Trim = TrimDeg;
+			bBehind = false;
+		}
+		/** One tick; returns the trim (deg). */
+		double Tick(double ShareDeg, double AnswerDeg, bool bCover, double LowDeg, double HighDeg, double Dt, const FTuning& Tuning);
+		double Get() const { return Trim; }
+		/** The last tick's rate held the trim short of its target. */
+		bool IsBehind() const { return bBehind; }
+
+	private:
+		double Trim = 0.0;
+		bool   bBehind = false;
+	};
+
+	/** What the drive-speed cap is told each tick. */
+	struct FSpeedCapInputs
+	{
+		/** The size of A - W (deg, Euclidean, no deadband). */
+		double ErrorDeg = 0.0;
+		/** The slope the robot stands on (deg): the terrain estimate's
+		 *  inclination. What the legs will have to turn the correction by
+		 *  when that slope ends. */
+		double SlopeDeg = 0.0;
+		/** How fast the terrain estimate moved over this tick (deg/s, pitch
+		 *  and roll), and whether that is the ground's doing: not on a tick
+		 *  that reseeded the estimate, nor while the legs' own baselines move
+		 *  (a stance being changed turns it with the ground standing still). */
+		FVector2D GroundRateDegPerSec = FVector2D::ZeroVector;
+		bool	  bGroundRateKnown = false;
+		/** How far apart the legs the robot stands on are (cm; StandingSpanCm):
+		 *  a break in the ground has passed under the robot once it has moved
+		 *  that far. */
+		double SpanCm = 0.0;
+		/** How fast the legs can turn the correction (deg/s;
+		 *  PlaneRateDegPerSec); 0: nothing limits them. */
+		double LegsDegPerSec = 0.0;
+		/** The chassis' speed over the ground as measured (cm/s). */
+		double SpeedCmS = 0.0;
+		/** The speed the rider's stick asks of the drive, before any scale
+		 *  (cm/s, 0 or more); negative where the drive cannot say (it is then
+		 *  taken from the speed there is, over the scale the drive has had
+		 *  time to answer). */
+		double AskedSpeedCmS = -1.0;
+		/** How fast the chassis is turning about the vertical (deg/s): on a
+		 *  slope that swings the ground from pitch into roll in the chassis'
+		 *  own frame, which going slower does nothing for. */
+		double YawRateDegPerSec = 0.0;
+		/** The legs are stopped with the base beyond the tilt policy. */
+		bool bPastReach = false;
+		/** How fast the ground moved over this tick as the gate lets it be
+		 *  read (deg/s, pitch and roll: FGroundGate's value, before the
+		 *  terrain estimate's low-pass), and whether that is the ground's
+		 *  doing (as bGroundRateKnown). Where a break shows first. */
+		FVector2D SeenRateDegPerSec = FVector2D::ZeroVector;
+		bool	  bSeenRateKnown = false;
+		/** The most the ground can turn per cm travelled (deg/cm): the
+		 *  sharpest break it is followed through, over the standing legs'
+		 *  span. The first sign of a break is taken for no more. 0: no bound. */
+		double MaxTurnDegPerCm = 0.0;
+		/** A speed (cm/s) the drive is to be kept under, whatever the ground
+		 *  does: what the roll a three-point robot still carries allows
+		 *  (FCarryLimit::HoldSpeedCmS). 0 or less: none. */
+		double HoldSpeedCmS = 0.0;
+	};
+
+	/**
+	 * The drive-speed cap: a scale on the rider's stick, 1 down to
+	 * Tuning.MinSpeedScale and never 0.
+	 *
+	 * WHAT IT SLOWS FOR. The legs take a turn of the ground out by turning the
+	 * correction, at no more than their own rate; what the ground turns
+	 * faster than that, the rider gets. The ground turns under the robot only
+	 * as the robot moves over it -- by its speed times the ground's curvature
+	 * -- so the drive is slowed until the ground turns at a rate the legs can
+	 * follow:
+	 *
+	 *   Follow = min(Cap.FollowMaxDegPerSec, Cap.FollowShare * LegsDegPerSec)
+	 *            (the first alone with no leg rate known)
+	 *
+	 * The scale is the least of these terms, each from 1 down to the floor:
+	 *  - THE TURN NOW: with Turn the low-pass (Cap.TurnFilterSeconds) of
+	 *    GroundRateDegPerSec (towards zero on a tick it is not known):
+	 *    Driven * Follow / |Turn|. Driven is the scale as the drive has had
+	 *    time to answer it (a first-order lag, Cap.DriveLagSeconds): the
+	 *    ground turns in proportion to the speed, so that is the scale at
+	 *    which it would turn at Follow. (Over 1, and so nothing, while the
+	 *    ground turns slower than that at the speed there is.)
+	 *    Two things are kept out of Turn, because going slower does nothing
+	 *    for either. What the chassis' own turning about the vertical swings
+	 *    the slope by in its frame (SlopeDeg times the yaw rate in rad/s) is
+	 *    taken off the rate's size: a start across a slope that kicks the
+	 *    heading round is not a break in the ground. And the rate is taken up
+	 *    only while the speed asked of the drive, and the speed there is, are
+	 *    steady (Cap.SteadyAskCmS2, Cap.SteadySpeedCmS2 and what follows
+	 *    them): a drive changing speed pitches the body, and the cap must not
+	 *    answer the pitch of its own braking, or of a start.
+	 *  - THE SLOPE'S END, only with Cap.bSlopeEnd (off: a steady slope costs
+	 *    nothing): the robot is levelled on a slope of SlopeDeg, and
+	 *    where that slope ends the ground comes back to level within one
+	 *    span's travel: it will turn SlopeDeg / SpanCm for every cm. That is
+	 *    the one turn of the ground that can be known before it comes, so the
+	 *    speed it can be followed at, ExitSpeed = Follow * SpanCm / SlopeDeg,
+	 *    is kept to from the start: ExitSpeed / FreeSpeed. (The slope counts
+	 *    as steep as it has been until the robot has moved
+	 *    Cap.SlopeHeldSpans spans on from there: half way through its end the
+	 *    slope left is half, and so is the way left to lose it in, so the
+	 *    drive is not let go into the break.) FreeSpeed is the
+	 *    speed the rider's stick is asking for: the low-pass
+	 *    (Cap.FreeSpeedFilterSeconds) of |SpeedCmS| / Driven, taken only while
+	 *    the robot moves (Cap.MinSpeedCmS) -- the speed as measured, so a
+	 *    robot that is not getting the speed its stick asks (a drive at its
+	 *    torque limit on a steep ramp) is not slowed for a speed it does not
+	 *    have. No such term standing still, on level ground, or with no span.
+	 *  - THE FIRST SIGN OF A BREAK (Cap.EarlyHeldSpans over 0): the same
+	 *    turning read where it shows first -- SeenRateDegPerSec, less the
+	 *    chassis' own swing, low-passed over Cap.EarlyFilterSeconds, taken up
+	 *    only while the drive is asked steadily, as the turn above. From
+	 *    Cap.EarlyStartShare of Follow (with the drive asked steadily) it is
+	 *    kept as a turn per cm travelled -- the largest read within
+	 *    Cap.EarlyOpenSeconds of that first sign, read as it comes -- and the
+	 *    scale is Follow over (that turn times FreeSpeed), and no less than
+	 *    Cap.EarlyMinScale: the speed at which that break turns the ground at
+	 *    the legs' rate, as far down as a first sign is trusted. It stands until the
+	 *    robot has moved Cap.EarlyHeldSpans spans on from the first sign. The
+	 *    turn above arrives at the same figure a third of a second later (two
+	 *    low-passes on); at a robot's full speed that is half a span.
+	 *  - A SPEED TO KEEP UNDER (HoldSpeedCmS over 0): HoldSpeedCmS over
+	 *    FreeSpeed.
+	 *  - THE ERROR, as a backstop for what those two do not see: 1 at
+	 *    ErrorDeg <= SpeedCapErrorDeg, the floor at SpeedCapErrorFullDeg or
+	 *    more, a straight line between.
+	 *  - PAST REACH: the floor outright with bPastReach.
+	 * Standing at a limit is no reason to be slow, and nothing here looks at
+	 * how much reach is left: a steady slope at the very end of the legs'
+	 * travel is driven at its ExitSpeed like any other.
+	 *
+	 * FreeSpeed is the speed the rider's stick asks for: AskedSpeedCmS where
+	 * the drive says, else the estimate above (the slope's-end term's).
+	 *
+	 * The scale falls towards that at Cap.FallPerSec -- and no faster than
+	 * brakes the robot at Cap.BrakeCmS2 (Cap.BrakeCmS2 / FreeSpeed per s), nor
+	 * than closes the gap in Cap.FallSeconds -- and rises at
+	 * Tuning.SpeedScaleRisePerSec. It starts at 1. The floor is
+	 * clamp(MinSpeedScale, 0.01, 1): a tuning of 0 still leaves a crawl.
+	 *
+	 * IT SLOWS, IT NEVER STOPS. The drive it asks is a speed loop, and a loop
+	 * asked for much less than the speed the robot has brakes through what
+	 * was asked. So the scale is never under the one that asks for a share
+	 * of the speed there is, (SpeedCmS (1 - Cap.LeadShare) - Cap.LeadCmS) /
+	 * FreeSpeed (1 at most): the drive is led down, in proportion, and a robot
+	 * that has run away far past what its stick asks (down the far side of a
+	 * crest) is slowed from the speed it has, not from the speed it was
+	 * asked.
+	 *
+	 * And what is given out (Get) is that scale less Cap.OverspeedGain times
+	 * the share by which the robot is going FASTER than its stick asks, at
+	 * once and only while it is (never under the floor; only where the drive
+	 * says what is asked): a robot run away by gravity is braked towards what
+	 * was asked in proportion to how far past it is, which fades as it comes
+	 * back, so it is never braked through it. The excess counts from a band
+	 * past the ask (Cap.OverspeedBandShare, Cap.OverspeedBandCmS), and not
+	 * until Cap.OverspeedSettleSeconds after the stick's own ask last
+	 * changed: a start's overshoot is the drive's, and a speed that wanders
+	 * by a part in fifty is not a run-away.
+	 *
+	 * WHAT IT CANNOT DO. It reacts: a break the robot meets at speed from
+	 * level ground (nothing levelled yet, so nothing known to end) has turned
+	 * the ground for a tick or two before anything here moves, and the drive
+	 * takes as long again to slow. On a robot standing on two axles the first
+	 * sign of a break is the base's own pitch, when the leading axle is on it;
+	 * no leg meets it sooner. Slowing early for those takes looking ahead.
+	 */
+	class FSpeedScale
+	{
+	public:
+		/** Its own tuning; a test or the dry run may change it. */
+		FSpeedCapTuning Cap;
+
+		/** Forget (the tuning stays): full speed. */
+		void Reset()
+		{
+			const FSpeedCapTuning Kept = Cap;
+			*this = FSpeedScale();
+			Cap = Kept;
+		}
+		/** One tick; returns the scale. */
+		double Tick(const FSpeedCapInputs& In, double Dt, const FTuning& Tuning);
+		/** One tick with nothing to cap for: the scale rises towards 1. */
+		double Relax(double Dt, const FTuning& Tuning);
+		double Get() const { return Out; }
+		/** The speed the rider's stick is taken to ask for (cm/s), the
+		 *  ground's turning rate as filtered (deg/s), and the last tick's
+		 *  Follow (deg/s) and ExitSpeed (cm/s; 0: no such term). */
+		double	  GetFreeSpeedCmS() const { return FreeSpeed; }
+		FVector2D GetTurnDegPerSec() const { return Turn; }
+		double	  GetFollowDegPerSec() const { return Follow; }
+		/** How far the ground's turning is being taken up (0..1). */
+		double GetSteady() const { return Steady; }
+		double GetExitSpeedCmS() const { return ExitSpeed; }
+		/** The turn per cm kept of a break's first sign (deg/cm; 0: none). */
+		double GetHeldTurnDegPerCm() const { return HeldTurnPerCm; }
+
+	private:
+		/** The scale as its terms and rates leave it, and what is given out:
+		 *  that, less what a robot running past its stick's ask takes off. */
+		double	  Scale = 1.0;
+		double	  Out = 1.0;
+		double	  Driven = 1.0;
+		double	  FreeSpeed = 0.0;
+		FVector2D Turn = FVector2D::ZeroVector;
+		double	  Follow = 0.0;
+		double	  ExitSpeed = 0.0;
+		/** The speed asked of the drive at the last tick (cm/s), and how far
+		 *  the ground's turning is taken up (0..1: Cap.SteadyAskCmS2). */
+		double LastAskedCmS = 0.0;
+		double LastSpeedCmS = 0.0;
+		bool   bHasAsked = false;
+		double Steady = 1.0;
+		/** The steepest the slope has been of late (deg), and how far the
+		 *  robot has moved since it was (cm). */
+		double Steepest = 0.0;
+		double SinceSteepestCm = 0.0;
+		/** The ground's turning where it shows first, low-passed (deg/s); the
+		 *  largest turn per cm kept of it (deg/cm), and how far the robot has
+		 *  moved since a tick last read as much (cm). */
+		double Early = 0.0;
+		double HeldTurnPerCm = 0.0;
+		double SinceHeldCm = 0.0;
+		double SinceHeldSeconds = 0.0;
+		/** The stick's own ask at the last tick (cm/s), and how long it has
+		 *  stood (s: the over-speed term waits Cap.OverspeedSettleSeconds). */
+		double LastFreeSpeedCmS = 0.0;
+		bool   bHasFreeSpeed = false;
+		double SinceStickSeconds = 1.0e6;
+	};
+
+	/** What FCarryLimit is told each tick. */
+	struct FCarryInputs
+	{
+		/** The most correction per axis the robot may carry at all (deg, 0 or
+		 *  more): the tuning's limits as the law counts them. */
+		FVector2D FullDeg = FVector2D::ZeroVector;
+		/** The correction that would hold the reference on this ground (deg). */
+		FVector2D NeededDeg = FVector2D::ZeroVector;
+		/** The chassis' speed over the ground (cm/s). */
+		double SpeedCmS = 0.0;
+		/** The speed the rider's stick asks of the drive (cm/s; negative where
+		 *  the drive cannot say). The three-point rule goes by the larger of
+		 *  this and the speed there is: a robot held to a crawl while its
+		 *  roll is eased out would otherwise keep the roll its crawl allows,
+		 *  and the crawl that roll allows, for good. */
+		double AskedSpeedCmS = -1.0;
+		/** How far apart the standing legs are (cm; StandingSpanCm), and how
+		 *  fast they turn the correction about each axis (deg/s;
+		 *  PlaneRateDegPerSec along pitch and along roll; 0: not limited). */
+		double	  SpanCm = 0.0;
+		FVector2D LegsDegPerSec = FVector2D::ZeroVector;
+		/** A roll correction stands this robot on three points: roll reaches
+		 *  some of the legs it stands on and not others. */
+		bool bThreePoint = false;
+		/** The limits may rise: the base is moving steadily (it is not being
+		 *  braked or driven off hard, nor has it just been). */
+		bool bMayRise = true;
+		/** The correction the legs carry now (deg): the first tick's limits
+		 *  are no less than it (within FullDeg), so that a correction taken up
+		 *  on the move (a hand-back's plane) is walked down, not cut. */
+		FVector2D CarriedDeg = FVector2D::ZeroVector;
+		/** The ground's roll as the terrain estimate has it (deg; NeededDeg.Y
+		 *  is this less the reference's roll), where it is known; where not,
+		 *  the three-point rule's dead band goes by NeededDeg alone. */
+		double GroundRollDeg = 0.0;
+		bool   bGroundRollKnown = false;
+	};
+
+	/**
+	 * How much correction the robot may carry at the speed it has, per axis
+	 * (deg): FCarryTuning's two rules, as limits the law holds its correction
+	 * inside in place of the tuning's own. Each tick:
+	 *
+	 *   V       = the larger of |SpeedCmS| and its low-pass (SpeedFilterSeconds)
+	 *   target  = FullDeg, per axis; then
+	 *   crest   : target_axis = min(target_axis, LegsDegPerSec_axis CrestShare T),
+	 *             T the time the robot takes over what is left of SpanCm
+	 *             after V CrestLagSeconds, braked from V by CrestBrakeCmS2 and
+	 *             no slower than the speed scale's floor of V
+	 *             (bCrest; an axis with no leg rate, no span, or V under
+	 *             QuietSpeedCmS is not limited)
+	 *   3 point : with bThreePoint (the robot's and the rule's), target.Y = 0
+	 *             while the roll is OUT for the speed: out from
+	 *             ThreePointNoneCmS up, in again from ThreePointFullCmS down,
+	 *             between them as it was (the speed being AskedSpeedCmS where
+	 *             the drive can say, or V less a start's overshoot,
+	 *             ThreePointOvershoot, where that is more; V alone where it
+	 *             cannot); and 0 while
+	 *             roll is not engaged: engaged from |NeededDeg.Y| >=
+	 *             RollEngageDeg until it is under RollLetGoDeg (until the
+	 *             robot has moved RollSpotCm from where the ground's roll last
+	 *             read with no roll carried, the roll needed is counted from
+	 *             that reading: FCarryTuning::RollSpotCm)
+	 *   rising  : without bMayRise an axis' target is no more than the limit
+	 *             it has; nor is a three-point robot's roll target while it
+	 *             is coming down to what its stick asks (it is being slowed):
+	 *             faster than AskedSpeedCmS by more than QuietSpeedCmS, and
+	 *             not "there" -- it is there once it is within QuietSpeedCmS
+	 *             of the ask, and stays so until the ask is QuietSpeedCmS
+	 *             under what it was when the robot was last there, or the
+	 *             robot is more than ThreePointOvershoot over the ask
+	 *
+	 * (a three-point robot's roll limit goes to its target at once on the
+	 * tick roll becomes engaged, where it may rise), and otherwise
+	 * the limits move to the target within the tilt policy's rate and
+	 * acceleration (FTiltTarget, both axes together): what they take out of the
+	 * correction, or give back, turns the rider, and that is a deliberate
+	 * change of the rider's attitude like any other. The first tick takes the
+	 * target whole. Nothing here knows why the law is at a limit: a limit
+	 * under the tuning's is "eased", not "at reach".
+	 */
+	class FCarryLimit
+	{
+	public:
+		/** Its own tuning; a test, the dry run or the shell may change it. */
+		FCarryTuning Tuning;
+
+		/** Forget (the tuning stays): the next tick takes its target whole. */
+		void Reset()
+		{
+			const FCarryTuning Kept = Tuning;
+			*this = FCarryLimit();
+			Tuning = Kept;
+		}
+		/** One tick; returns the limits (deg, 0 or more per axis). */
+		FVector2D Tick(const FCarryInputs& In, double Dt, const FTuning& LawTuning);
+		FVector2D Get() const { return Limit.Get(); }
+		bool	  IsSeeded() const { return bSeeded; }
+		/** Roll is being corrected at all (the three-point rule's hysteresis). */
+		bool IsRollEngaged() const { return bRollEngaged; }
+		/** The three-point rule has the roll out for the speed (or on its way
+		 *  out: the limit is walked there). */
+		bool IsRollOut() const { return bThreePoint && bRollOut; }
+		/**
+		 * The speed (cm/s) a three-point robot may be driven at while its roll
+		 * is being eased out for the speed and it still carries
+		 * RollCorrectionDeg of it: ThreePointFullCmS, the most it may go at
+		 * with roll on. 0: no such limit (not that kind of robot as of the
+		 * last tick, the roll not out for the speed, the rule or bHoldSpeed
+		 * off, or the roll under RollClearDeg).
+		 */
+		double HoldSpeedCmS(double RollCorrectionDeg, double FullRollDeg) const;
+
+	private:
+		FTiltTarget Limit;
+		bool		bSeeded = false;
+		bool		bRollEngaged = false;
+		bool		bThreePoint = false;
+		/** The three-point rule has the roll out for the speed. */
+		bool bRollOut = false;
+		/** Roll was engaged at the last tick. */
+		bool bWasRollEngaged = false;
+		/** The robot has been at the speed its stick asks and is not coming
+		 *  down to it since (the "rising" rule), and what was asked when it
+		 *  was last there (cm/s). */
+		bool   bAtAsked = false;
+		double AtAskedCmS = 0.0;
+		/** The ground's roll as last read with no roll carried (deg), and how
+		 *  far the robot has moved since (cm). */
+		double FreeGroundRoll = 0.0;
+		bool   bHasFreeGround = false;
+		double MovedCm = 0.0;
+		double Speed = 0.0;
+		bool   bHasSpeed = false;
+	};
+
+	/**
+	 * At rest: once the chassis has been slower than QuietSpeedCmS with the
+	 * error under SettleErrorDeg, the stick still and bMayRest, for
+	 * SettleSeconds without a break, it is quiet -- the law then freezes the
+	 * integral and writes nothing, so the position servos simply hold. It
+	 * wakes (and the count starts again) when the error reaches WakeErrorDeg,
+	 * the stick moves, the chassis moves at QuietSpeedCmS or more, or bMayRest
+	 * falls. Between SettleErrorDeg and WakeErrorDeg a count under way is
+	 * broken but a quiet already reached is kept. (This timer and
+	 * FDivergence's count as run a hair, 1e-9 s, early: ten ticks of 0.1 s do
+	 * not quite add up to 1.)
+	 */
+	class FQuiet
+	{
+	public:
+		void Reset() { *this = FQuiet(); }
+		/**
+		 * One tick; returns whether it is quiet. ErrorDeg is the size of A - W
+		 * (deg, Euclidean, no deadband); bMayRest is the law's leave (the
+		 * wanted tilt has arrived at its goal, and no leg's baseline is being
+		 * moved under it).
+		 */
+		bool Tick(double SpeedCmS, double ErrorDeg, bool bStick, bool bMayRest, double Dt, const FTuning& Tuning);
+		bool IsQuiet() const { return bQuiet; }
+
+	private:
+		double SettledSeconds = 0.0;
+		bool   bQuiet = false;
+	};
+
+	/**
+	 * The mark of a sign or geometry error: the error is large, does not
+	 * come back, and the base has been moving WITH the legs' correction
+	 * where a correction should move it the other way.
+	 *
+	 * An EPISODE runs while bCounts and ErrorDeg > DivergenceErrorDeg. In it:
+	 *  - a timer runs, and the worst error since it started is kept. Both
+	 *    start again when the error has come back DivergenceReliefDeg from
+	 *    the worst (a kick being taken out; the count then starts again from
+	 *    that tick, its error the new worst);
+	 *  - the evidence is summed: each tick, how far the attitude moved along
+	 *    the direction the correction moved in (deg, signed; nothing on a
+	 *    tick the correction stood still). A base wired the right way moves
+	 *    AGAINST its correction, so the sum goes negative; one wired
+	 *    backwards moves with it, degree for degree. The correction meant
+	 *    is the one the joints have made (MeasuredCorrection): joints move
+	 *    after the ground that made the law move them, so a ground that
+	 *    steps does not coincide with its own answer.
+	 * The episode ends, and timer, worst and evidence are forgotten, when
+	 * bCounts is false or the error is at or under DivergenceErrorDeg.
+	 * Diverged, and it stays so until Reset, once the timer has reached
+	 * Tuning.FaultSeconds with the evidence at DivergenceWithLegsDeg or more.
+	 *
+	 * Why the evidence, and not the plan's "growing ... while unsaturated and
+	 * not rate-limited": with the terrain feed-forward a base wired backwards
+	 * runs away at the correction's full rate and is on a limit within a
+	 * second, so it is rate-limited all the way and then stands still. Read
+	 * as a steady state it is exactly a slope past a limit, which is
+	 * nobody's fault (a correction held at its per-axis limit on a steep
+	 * cross fall leaves a large steady error for good). Only how it got
+	 * there tells the two apart. The law counts the ticks whose allocation
+	 * gave the whole plane (Fraction 1), rate-limited or not.
+	 *
+	 * What it cannot tell apart from a fault: ground that turns faster than
+	 * the legs can follow for a degree or more while the error is already
+	 * over DivergenceErrorDeg, ending past the tilt policy on a limit that
+	 * is not the legs' reach. That takes a slope well past FaultTiltDeg.
+	 */
+	class FDivergence
+	{
+	public:
+		void Reset() { *this = FDivergence(); }
+		/** One tick; returns whether it has diverged. ErrorDeg is the size of
+		 *  A - W (deg, Euclidean, no deadband); AttitudeDeg is A and
+		 *  CorrectionDeg the correction the joints have made (deg). */
+		bool Tick(double ErrorDeg, const FVector2D& AttitudeDeg, const FVector2D& CorrectionDeg, bool bCounts, double Dt, const FTuning& Tuning);
+		bool HasDiverged() const { return bDiverged; }
+
+	private:
+		double	  Seconds = 0.0;
+		double	  Worst = 0.0;
+		double	  WithLegsDeg = 0.0;
+		FVector2D LastAttitudeDeg = FVector2D::ZeroVector;
+		FVector2D LastCorrectionDeg = FVector2D::ZeroVector;
+		bool	  bHasLast = false;
+		bool	  bDiverged = false;
+	};
+	/**
+	 * How fast the chassis moves over the ground and turns about the vertical,
+	 * from readings of where it is -- each with THE TIME IT WAS TAKEN AT.
+	 *
+	 * A speed is a distance over a time, and both must be the readings' own.
+	 * Where the physics runs on its own thread the pose a tick is given was
+	 * taken some time before the tick (up to a frame), a different while each
+	 * tick; and the clock the tick reads is not that pose's either. A distance
+	 * between two poses divided by the time between two TICKS then swings by
+	 * a quarter and more from one tick to the next at a steady pace, and what
+	 * is made of the swing (how hard the base is being braked: FGroundGate)
+	 * is noise. Divided by the time between the two POSES it is the speed.
+	 *
+	 * One Tick takes a reading (a point fixed on the chassis, cm, world; its
+	 * heading, a horizontal unit vector, zero where it is not known) and the
+	 * time it was taken at (s, on any clock that runs with the physics: only
+	 * differences are used). It returns the time since the last reading's:
+	 * what every rate and filter fed by the readings must be counted on.
+	 *  - The first reading: 0, and the speeds are 0.
+	 *  - A reading taken at the same moment as the last (the same pose given
+	 *    twice): 0, and nothing changes -- it says nothing new.
+	 *  - A reading taken BEFORE the last: 0, RanBackwards() is true until the
+	 *    next Tick, and it is taken as a first reading (a clock that was
+	 *    reset).
+	 *  - Otherwise the interval; the speed is the distance over it, the
+	 *    turning rate the angle between the two headings over it (0 with a
+	 *    heading unknown), and MovedCm() the distance (for "was it picked up
+	 *    and put elsewhere").
+	 * Position or time that is not a number is no reading: 0, nothing changes.
+	 */
+	class FMotionSense
+	{
+	public:
+		void   Reset() { *this = FMotionSense(); }
+		double Tick(const FVector& PositionCm, const FVector2D& Heading, double SampleSeconds);
+
+		/** The chassis' speed over the ground (cm/s, 0 or more) and its turning
+		 *  rate about the vertical (deg/s, 0 or more), between the last two
+		 *  readings that were apart in time. */
+		double GetSpeedCmS() const { return SpeedCmS; }
+		double GetYawRateDegPerSec() const { return YawRateDegPerSec; }
+		/** How far the last Tick's reading was from the one before (cm; 0 for a
+		 *  first reading), and whether its time was before the last one's. */
+		double MovedCm() const { return Moved; }
+		bool   RanBackwards() const { return bBackwards; }
+		bool   HasReading() const { return bHas; }
+		/** The time of the last reading taken. */
+		double GetSampleSeconds() const { return LastSeconds; }
+
+	private:
+		FVector	  LastPosition = FVector::ZeroVector;
+		FVector2D LastHeading = FVector2D::ZeroVector;
+		double	  LastSeconds = 0.0;
+		bool	  bHas = false;
+		double	  SpeedCmS = 0.0;
+		double	  YawRateDegPerSec = 0.0;
+		double	  Moved = 0.0;
+		bool	  bBackwards = false;
+	};
+} // namespace RammsLevel

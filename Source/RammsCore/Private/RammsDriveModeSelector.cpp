@@ -191,9 +191,8 @@ namespace RammsDrive
 				FStanceChannel C;
 				C.Id = Target.MotorId;
 				C.bMotor = true;
-				const float	 At = Base->GetMotorValue(Target.MotorId);
 				const float* Commanded = Selector.State ? Selector.State->MotorCommands.Find(Target.MotorId) : nullptr;
-				C.From = (Commanded && FMath::Abs(*Commanded - At) <= MotorAtCommandTolerance) ? *Commanded : At;
+				C.From = StanceMotorStart(*Base, Target.MotorId, Commanded, MotorAtCommandTolerance);
 				C.To = Target.Target;
 				C.bLead = Stance.LeadMotorIds.Contains(Target.MotorId);
 				C.MaxRate = C.bLead ? FMath::Max(0.0, static_cast<double>(Stance.LeadMaxMotorRate)) : 0.0;
