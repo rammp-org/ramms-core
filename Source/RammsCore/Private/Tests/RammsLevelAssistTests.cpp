@@ -4187,4 +4187,96 @@ bool FRammsLevelAssistAskedSpeed::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a leg plant that takes the lowest wheels in the chassis' frame for the ground. A robot of this kind
+// standing on its centre and rear wheels, its front pair carried, whose centre linkage is jogged up: the centre wheels
+// are then centimetres over the rear ones in the chassis' frame, and the robot still stands on them (it pitches onto
+// them: its weight is between them and the rear pair). Read as lifted, the plane the legs have made is taken from the
+// rear pair alone, the ground estimate jumps by degrees, and the legs and the seat are sent after a turn of the ground
+// that is not there (the rider put further off level than the chassis, for as long as the jog runs). The plant gives
+// the ground the stance rests on by the robot's centre of mass, and who stands is judged from that.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLegPlantJoggedLegsStillStand,
+	"Ramms.Level.LegPlant.JoggedCentreLegsStillStand",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLegPlantJoggedLegsStillStand::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/false);
+	if (!TestTrue(TEXT("the made-up robot on the recording backend"), R.IsReady()))
+	{
+		return false;
+	}
+	// Its weight between the centre and the rear wheels.
+	R.Curb->Tuning.CenterOfMass = FVector(-15.0, 0.0, 10.0);
+	TUniquePtr<RammsLevel::IPlant> Plant = RammsLevel::MakeLegPlant(*R.Base, *R.Curb, R.Layer());
+	FString						   Why;
+	if (!TestTrue(TEXT("the robot's description resolves"), Plant->Resolve(Why)))
+	{
+		AddError(Why);
+		return false;
+	}
+	// The front pair carried well clear of the ground.
+	float Raised = 0.0f;
+	for (const float Sign : { 1.0f, -1.0f })
+	{
+		for (float Crank = 0.0f; FMath::Abs(Crank) <= 0.6f && Raised == 0.0f; Crank += Sign * 0.02f)
+		{
+			bool bValid = false;
+			if (URamms4BarKinematics::ComputeWheelCenter(CornerLeg(CrankFL, 20.0), Crank, bValid).Y >= StanceZ + 5.0 && bValid)
+			{
+				Raised = Crank;
+			}
+		}
+	}
+	if (!TestTrue(TEXT("a crank angle that carries a front wheel 5 cm up"), Raised != 0.0f))
+	{
+		return false;
+	}
+	R.Base->SetMotorCommand(CrankFL, Raised);
+	R.Base->SetMotorCommand(CrankFR, Raised);
+	R.Tick();
+
+	const RammsLevel::FTuning Tuning;
+	const auto				  Judge = [&](RammsLevel::FPlantLegs& Legs) {
+		   if (!Plant->MeasureLegs(Legs) || Legs.Num() != 6)
+		   {
+			   return false;
+		   }
+		   RammsLevel::SupportMask(Legs, TConstArrayView<bool>(), Tuning);
+		   return true;
+	};
+	RammsLevel::FPlantLegs Legs;
+	if (!TestTrue(TEXT("the legs measure"), Judge(Legs)))
+	{
+		return false;
+	}
+	TestTrue(TEXT("in the stance: the centre and rear legs stand, the front pair does not"), !Legs[0].bSupport && !Legs[1].bSupport && Legs[2].bSupport && Legs[3].bSupport && Legs[4].bSupport && Legs[5].bSupport);
+	const FVector2D Before = RammsLevel::MeasuredCorrection(Legs);
+
+	// The centre linkage jogged up 2 cm, and down 2 cm: either way the robot stands on the centre and the rear (the
+	// front pair, 5 cm up and twice as far forward, stays over the ground the others rest on).
+	for (const double Jog : { 2.0, -2.0 })
+	{
+		R.Left->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+		R.Right->SetEndpointTarget(FVector2D(CentreX, StanceZ + Jog));
+		R.Tick();
+		if (!TestTrue(TEXT("the legs measure with the centre linkage jogged"), Judge(Legs)))
+		{
+			return false;
+		}
+		const FString Case = FString::Printf(TEXT("centre legs jogged %+.0f cm"), Jog);
+		TestEqual(*(Case + TEXT(": (their baselines moved)")), Legs[2].BaseZ, StanceZ + Jog, 0.05);
+		TestTrue(*(Case + TEXT(": the centre legs still stand")), Legs[2].bSupport && Legs[3].bSupport);
+		TestTrue(*(Case + TEXT(": ... and carry in full")), Legs[2].CarryShare >= 0.99 && Legs[3].CarryShare >= 0.99);
+		TestTrue(*(Case + TEXT(": the rear legs still stand and carry")), Legs[4].bSupport && Legs[5].bSupport && Legs[4].CarryShare >= 0.99 && Legs[5].CarryShare >= 0.99);
+		TestTrue(*(Case + TEXT(": the front pair is still carried")), !Legs[0].bSupport && !Legs[1].bSupport);
+		// No offsets are on: the plane the legs have made of them is none, as it was.
+		const FVector2D Now = RammsLevel::MeasuredCorrection(Legs);
+		TestTrue(*FString::Printf(TEXT("%s: the legs have made no correction (%.3f, %.3f deg)"), *Case, Now.X, Now.Y), (Now - Before).Size() <= 0.01);
+		// The ground it rests on leans with the jog: lower under the legs that were let down.
+		TestTrue(*(Case + TEXT(": the ground lies under the centre and rear wheels' bottoms")), FMath::IsNearlyEqual(Legs[2].StanceGroundZ, Legs[2].BaseZ - Legs[2].RadiusCm, 1.0e-6) && FMath::IsNearlyEqual(Legs[4].StanceGroundZ, Legs[4].BaseZ - Legs[4].RadiusCm, 1.0e-6));
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

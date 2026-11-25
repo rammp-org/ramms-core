@@ -4,6 +4,7 @@
 
 #include "Curb/RammsCurbSeat.h"
 #include "GameFramework/Actor.h"
+#include "Level/RammsLevelAllocate.h"
 #include "Ramms4BarKinematics.h"
 #include "Ramms5BarKinematics.h"
 #include "Ramms5BarLinkageController.h"
@@ -28,6 +29,17 @@
  * An offset of dz on a leg becomes, on its motors, the difference between the
  * angles that put the wheel at (baseline height + dz) and at the baseline
  * height, both solved the same way, so that dz = 0 is exactly no offset.
+ *
+ * WHO STANDS. The lowest wheels in the chassis' own frame are the ground only
+ * in a stance that stands level. A robot on its centre and rear wheels whose
+ * centre linkage is jogged up or down still stands on those four (its weight
+ * is between them): it pitches, and the wheels it stands on are then
+ * centimetres apart in the chassis' frame. So each tick the flat ground the
+ * baselines would rest on is worked out from the robot's centre of mass (the
+ * curb controller's Tuning.CenterOfMass, as it stands: the mass that moves
+ * with the legs is left out) and given with the legs
+ * (FLegReach::StanceGroundZ, RammsLevel::StanceGround); in a level stance that
+ * is the lowest wheel bottoms, as before.
  *
  * THE SEAT. Where the curb controller describes a seat with a tilt motor (a
  * position motor of the registry), that motor is levelled too: the law's seat
@@ -133,30 +145,31 @@ namespace RammsLevel
 			{
 			}
 
-			virtual bool Resolve(FString& OutWhy) override;
-			virtual void LevelledMotorIds(TArray<FName>& OutIds) const override;
-			virtual bool HasSeat() const override;
+			virtual bool   Resolve(FString& OutWhy) override;
+			virtual void   LevelledMotorIds(TArray<FName>& OutIds) const override;
+			virtual bool   HasSeat() const override;
 			virtual FName  SeatMotorId() const override;
 			virtual bool   SeatTrimRange(double& OutOwnDeg, double& OutLowDeg, double& OutHighDeg) override;
 			virtual void   ApplySeatTrim(double TrimDeg) override;
 			virtual double FoldedSeatTrimDeg() const override;
 			virtual double SeatTrimOnDeg() const override;
 			virtual bool   UnfoldSeatTrim() override;
-			virtual bool MeasureLegs(FPlantLegs& OutLegs) override;
-			virtual void ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const override;
-			virtual void ApplyOffsets(TConstArrayView<double> Dz) override;
-			virtual bool OffsetsLost() override;
-			virtual void ZeroOffsets() override;
+			virtual bool   MeasureLegs(FPlantLegs& OutLegs) override;
+			virtual void   RestLegsAt(TConstArrayView<double> Z, TArrayView<FLegReach> InOutLegs) const override;
+			virtual void   ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const override;
+			virtual void   ApplyOffsets(TConstArrayView<double> Dz) override;
+			virtual bool   OffsetsLost() override;
+			virtual void   ZeroOffsets() override;
 			virtual void   ZeroLegOffsets() override;
-			virtual void Fold() override;
+			virtual void   Fold() override;
 			virtual void   FoldSeatTrim() override;
-			virtual bool Unfold() override;
-			virtual void ForgetFold() override;
-			virtual bool StanceHeights(const FRammsDriveStance& Stance, FLegValues& OutZ) const override;
-			virtual bool FoldedHeights(FLegValues& OutZ) const override;
-			virtual bool RebaseLegs(TConstArrayView<double> BaseZ, FLegValues& OutDz) override;
-			virtual void FoldOrZero(int32& OutFolded, int32& OutZeroed) override;
-			virtual void SyncBaselineHolders() override;
+			virtual bool   Unfold() override;
+			virtual void   ForgetFold() override;
+			virtual bool   StanceHeights(const FRammsDriveStance& Stance, FLegValues& OutZ) const override;
+			virtual bool   FoldedHeights(FLegValues& OutZ) const override;
+			virtual bool   RebaseLegs(TConstArrayView<double> BaseZ, FLegValues& OutDz) override;
+			virtual void   FoldOrZero(int32& OutFolded, int32& OutZeroed) override;
+			virtual void   SyncBaselineHolders() override;
 
 		private:
 			int32 AddMotor(FName Id, FString& OutWhy);
@@ -179,7 +192,9 @@ namespace RammsLevel
 			TWeakObjectPtr<const UObject>						  Layer;
 			TArray<FPlantMotor>									  Motors;
 			TArray<FPlantLeg>									  Legs;
-			bool												  bFoldRemembered = false;
+			/** The robot's centre of mass on the chassis as the last MeasureLegs took it (cm). */
+			FVector2D CentreOfMassXY = FVector2D::ZeroVector;
+			bool	  bFoldRemembered = false;
 
 			// ---- the seat ----
 			/** The seat's tilt motor among Motors; INDEX_NONE: no seat. */
@@ -679,8 +694,33 @@ namespace RammsLevel
 			if (!bAll)
 			{
 				OutLegs.Reset();
+				return false;
 			}
-			return bAll;
+			// The flat ground the baselines rest on: who stands is judged from it
+			// (a stance one linkage has been jogged out of does not stand level
+			// in the chassis' frame, and the robot stands on those wheels still).
+			CentreOfMassXY = FVector2D(CurbPtr->Tuning.CenterOfMass.X, CurbPtr->Tuning.CenterOfMass.Y);
+			StanceGround(OutLegs, TConstArrayView<double>(), CentreOfMassXY);
+			return true;
+		}
+
+		void FLegPlant::RestLegsAt(TConstArrayView<double> Z, TArrayView<FLegReach> InOutLegs) const
+		{
+			if (Z.Num() != InOutLegs.Num())
+			{
+				return;
+			}
+			FPlantLegs At;
+			At.Append(InOutLegs.GetData(), InOutLegs.Num());
+			for (int32 Index = 0; Index < At.Num(); ++Index)
+			{
+				At[Index].BaseZ = Z[Index];
+			}
+			StanceGround(At, TConstArrayView<double>(), CentreOfMassXY);
+			for (int32 Index = 0; Index < At.Num(); ++Index)
+			{
+				InOutLegs[Index].StanceGroundZ = At[Index].StanceGroundZ;
+			}
 		}
 
 		void FLegPlant::ClearancePoints(const FTuning& Tuning, FPlantPoints& OutPoints) const

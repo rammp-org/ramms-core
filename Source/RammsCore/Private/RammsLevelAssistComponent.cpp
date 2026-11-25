@@ -896,6 +896,9 @@ bool URammsLevelAssistComponent::AdoptPose(const FRammsDriveStance* NextStance, 
 		{
 			Legs[Index].BaseZ += OutAdoption.Dz[Index];
 		}
+		// (Measured again, the legs come with the ground their baselines rest
+		// on as they now are: who stands in the stance is still judged there.)
+		R.Plant->RestLegsAt(StanceZ, Legs);
 	}
 	return bAdopted;
 }
