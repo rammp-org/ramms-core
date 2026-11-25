@@ -543,9 +543,13 @@ namespace RammsLevel
 		FDivergence Divergence;
 		/** How much correction the robot may carry at the speed it has. */
 		FCarryLimit Carry;
-		/** The limits it left, and whether they are under the tuning's. */
+		/** The limits it left, and whether they are under the tuning's; and
+		 *  the tilt that leaves in the base on top of what the legs' own reach
+		 *  does (deg: where the base is wanted, less where it would be with
+		 *  only the legs' limits). */
 		FVector2D CarryDeg = FVector2D::ZeroVector;
 		bool	  bEased = false;
+		FVector2D EasedDeg = FVector2D::ZeroVector;
 		/** What each leg's joint stands off its command by (cm, positive: the
 		 *  wheel higher than told), low-passed (SagFilterSeconds). Empty: none
 		 *  read yet. And the plane a release took those for when it began

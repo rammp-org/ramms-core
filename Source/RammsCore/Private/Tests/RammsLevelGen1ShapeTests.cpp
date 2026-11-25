@@ -365,9 +365,9 @@ bool FRammsLevelGen1ShapeStands::RunTest(const FString& Parameters)
 // Catches: a roll correction given to a pair that roll does not reach; a base left tilted, or hunting, on the three
 // points a roll correction puts it on (both drive wheels and one wheel of the rear pair, the other in the air); a
 // drive wheel off the ground there; and a cross slope past the roll allowed taken for a fault. And roll carried at
-// speed: on three points this kind of robot swings about its heavier drive wheel when it is braked, so roll is
-// levelled at a crawl only (FCarryTuning's three-point rule) and at a walk the robot is on all four wheels along the
-// fall, the fall left in the base.
+// speed: on three points this kind of robot swings about its heavier drive wheel when it is braked, the further the
+// faster it was going, so roll is levelled up to a walk (FCarryTuning's three-point rule) and driven faster than that
+// the robot is on all four wheels along the fall, the fall left in the base.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelGen1ShapeThreePoints,
 	"Ramms.Level.Gen1Shape.CrossSlopeOnThreePoints",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -382,9 +382,9 @@ bool FRammsLevelGen1ShapeThreePoints::RunTest(const FString& Parameters)
 		// Driven from the flat onto a cross fall that comes on over a metre and a half, along it, and off again.
 		for (const double CrossDeg : { 2.0, 5.0 })
 		{
-			for (const double Speed : { 12.0, 60.0 })
+			for (const double Speed : { 12.0, 60.0, 110.0 })
 			{
-				const bool bCrawl = Speed < 15.0;
+				const bool bCrawl = Speed <= FCarryTuning().ThreePointFullCmS;
 				FOptions   Options = MakeOptions(Rate);
 				Options.SpeedCmS = Speed;
 				Options.MaxSeconds = 120.0;
@@ -415,11 +415,12 @@ bool FRammsLevelGen1ShapeThreePoints::RunTest(const FString& Parameters)
 					// Three points: both drive wheels and the rear wheel on the high side.
 					TestEqual(Case + TEXT(": on three wheels along the fall"), Along.MostTouching, 3);
 					TestEqual(Case + TEXT(": never on fewer"), Along.LeastTouching, 3);
-					TestTrue(Case + FString::Printf(TEXT(": the rider turned gently coming on and off it (%.1f deg/s, %.2f deg)"), Whole.RateDegPerSec, Whole.PeakDeg), Whole.RateDegPerSec <= 4.0 && Whole.PeakDeg <= 1.5);
+					// (At a walk the fall comes on in two and a half seconds: a little further behind it than at a crawl.)
+					TestTrue(Case + FString::Printf(TEXT(": the rider turned gently coming on and off it (%.1f deg/s, %.2f deg)"), Whole.RateDegPerSec, Whole.PeakDeg), Whole.RateDegPerSec <= 4.0 && Whole.PeakDeg <= (Speed < 15.0 ? 1.5 : 1.8));
 				}
 				else
 				{
-					// At a walk no roll is carried: all four wheels down along the fall, which is left in the base.
+					// Faster than a walk no roll is carried: all four wheels down along the fall, which is left in the base.
 					TestEqual(Case + TEXT(": on all four wheels along the fall"), Along.LeastTouching, 4);
 					TestTrue(Case + FString::Printf(TEXT(": the fall left in the base (%.2f deg)"), Along.PeakDeg), Along.PeakDeg >= CrossDeg - 0.3 && Along.PeakDeg <= CrossDeg + 0.3);
 					TestTrue(Case + FString::Printf(TEXT(": the rider turned no faster than the ground turns (%.1f deg/s)"), Whole.RateDegPerSec), Whole.RateDegPerSec <= 4.0);

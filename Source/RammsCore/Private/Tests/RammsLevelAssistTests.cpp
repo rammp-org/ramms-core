@@ -4279,4 +4279,142 @@ bool FRammsLevelLegPlantJoggedLegsStillStand::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Catches: a leg plant that judges who stands by the centre of mass the robot has at its ZERO poses. On a robot of this
+// kind the rider's seat rides well aft of where its mechanism's zero pose has it, and the tuning's centre of mass (the
+// robot with every leg and the seat at zero) is ahead of the centre wheels where the robot's weight as it stands is
+// behind them. Judged by the zero-pose figure the robot "rests" on its carried front pair and its centre pair, the rear
+// pair "in the air": the plane, the ride height and the legs' shares of a correction are then all worked out for a
+// stance the robot is not in (in the simulator a robot of this kind then levelled a slope slowly and the long way
+// round, raising its chassis to do it, and on a grade break the levelling was stopped as making the tilt worse). The
+// mass that moves with the seat is carried to where the seat is commanded.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLegPlantStandsByWeightAsItStands,
+	"Ramms.Level.LegPlant.StandsByTheWeightWhereTheSeatIs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLegPlantStandsByWeightAsItStands::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelAssistTests;
+	FLevelRig R(/*bWithCurb=*/true, /*bWithLevel=*/false, /*bStartOn=*/false, /*bWithSeat=*/true);
+	if (!TestTrue(TEXT("the made-up robot on the recording backend"), R.IsReady()))
+	{
+		return false;
+	}
+	// Most of the robot's mass rides on the seat; at the zero poses its weight is ahead of the centre wheels.
+	const double MassKg = 200.0, MechanismKg = 30.0, PayloadKg = 150.0;
+	const double ZeroComX = CentreX + 3.0;
+	R.Curb->Tuning.RobotMassKg = MassKg;
+	R.Curb->Tuning.CenterOfMass = FVector(ZeroComX, 0.0, 10.0);
+	R.Curb->Seat.MechanismMassKg = MechanismKg;
+	R.Curb->Seat.PayloadMassKg = PayloadKg;
+	R.Curb->Seat.PayloadOffsetCm = FVector2D(0.0, 40.0);
+	const FRammsCurbSeat	   Seat = R.Curb->Seat;
+	const RammsCurb::FSeatPose Zero = RammsCurb::SeatForward(Seat, FVector2D::ZeroVector);
+	if (!TestTrue(TEXT("the made-up seat closes at its zero pose"), Zero.bValid))
+	{
+		return false;
+	}
+	// Where the seat rides: the furthest aft its mechanism holds the pivot near its zero height with the platform
+	// level (the tilt motor inside its range).
+	FVector2D Rides = FVector2D::ZeroVector;
+	float	  RidesTilt = 0.0f;
+	double	  RidesX = Zero.Pivot.X;
+	for (double A = -0.8; A <= 0.8; A += 0.05)
+	{
+		for (double B = -0.8; B <= 0.8; B += 0.05)
+		{
+			const RammsCurb::FSeatPose Pose = RammsCurb::SeatForward(Seat, FVector2D(A, B));
+			const double			   Tilt = Pose.bValid ? RammsCurb::SeatTiltFor(Seat, Pose.LinkAngle, Zero.LinkAngle, 0.0) : 0.0;
+			if (Pose.bValid && FMath::Abs(Pose.Pivot.Y - Zero.Pivot.Y) <= 6.0 && Tilt > -0.55 && Tilt < 0.85 && Pose.Pivot.X < RidesX)
+			{
+				RidesX = Pose.Pivot.X;
+				Rides = FVector2D(A, B);
+				RidesTilt = static_cast<float>(Tilt);
+			}
+		}
+	}
+	// (The robot's weight with the seat there, by hand: both of the seat's lumps move with the pivot.)
+	const double StandsComX = ZeroComX + (MechanismKg + PayloadKg) / MassKg * (RidesX - Zero.Pivot.X);
+	if (!TestTrue(*FString::Printf(TEXT("the seat rides far enough aft to take the weight behind the centre wheels (pivot %.1f cm from zero, weight at %+.1f cm)"), RidesX - Zero.Pivot.X, StandsComX),
+			StandsComX <= CentreX - 3.0))
+	{
+		return false;
+	}
+	TUniquePtr<RammsLevel::IPlant> Plant = RammsLevel::MakeLegPlant(*R.Base, *R.Curb, R.Layer());
+	FString						   Why;
+	if (!TestTrue(TEXT("the robot's description resolves"), Plant->Resolve(Why)))
+	{
+		AddError(Why);
+		return false;
+	}
+	// The front pair carried well clear of the ground, as this kind of robot drives.
+	float Raised = 0.0f;
+	for (const float Sign : { 1.0f, -1.0f })
+	{
+		for (float Crank = 0.0f; FMath::Abs(Crank) <= 0.6f && Raised == 0.0f; Crank += Sign * 0.02f)
+		{
+			bool bValid = false;
+			if (URamms4BarKinematics::ComputeWheelCenter(CornerLeg(CrankFL, 20.0), Crank, bValid).Y >= StanceZ + 5.0 && bValid)
+			{
+				Raised = Crank;
+			}
+		}
+	}
+	if (!TestTrue(TEXT("a crank angle that carries a front wheel 5 cm up"), Raised != 0.0f))
+	{
+		return false;
+	}
+	R.Base->SetMotorCommand(CrankFL, Raised);
+	R.Base->SetMotorCommand(CrankFR, Raised);
+	R.Tick();
+
+	const RammsLevel::FTuning Tuning;
+	RammsLevel::FPlantLegs	  Legs;
+	const auto				  Judge = [&]() {
+		   if (!Plant->MeasureLegs(Legs) || Legs.Num() != 6)
+		   {
+			   return false;
+		   }
+		   RammsLevel::SupportMask(Legs, TConstArrayView<bool>(), Tuning);
+		   return true;
+	};
+	// The seat where it rides: the robot stands on its centre and rear wheels, and the ground it rests on is the
+	// level plane under them (the lowest bottoms, as a robot standing level in its own frame has it).
+	R.StandSeat(static_cast<float>(Rides.X), static_cast<float>(Rides.Y), RidesTilt);
+	if (!TestTrue(TEXT("the legs measure with the seat where it rides"), Judge()))
+	{
+		return false;
+	}
+	TestTrue(TEXT("seat aft: the centre and rear legs stand"), Legs[2].bSupport && Legs[3].bSupport && Legs[4].bSupport && Legs[5].bSupport);
+	TestTrue(TEXT("seat aft: ... and carry in full"), Legs[2].CarryShare >= 0.99 && Legs[3].CarryShare >= 0.99 && Legs[4].CarryShare >= 0.99 && Legs[5].CarryShare >= 0.99);
+	TestTrue(TEXT("seat aft: the carried front pair does not stand"), !Legs[0].bSupport && !Legs[1].bSupport);
+	TestTrue(*FString::Printf(TEXT("seat aft: the front wheels are read 5 cm clear of the ground (%.2f cm)"), Legs[0].BaselineClearanceCm), FMath::IsNearlyEqual(Legs[0].BaselineClearanceCm, Legs[0].BaseZ - StanceZ, 0.05));
+	for (int32 Leg = 0; Leg < 6; ++Leg)
+	{
+		TestEqual(*FString::Printf(TEXT("seat aft: the ground under leg %d is the level plane under the standing wheels"), Leg), Legs[Leg].StanceGroundZ, StanceZ - Legs[2].RadiusCm, 1.0e-4);
+	}
+	// A trim on the seat's tilt is ours, not the seat's own command: it does not move the weight the plant reckons with.
+	const double GroundBefore = Legs[4].StanceGroundZ;
+	double		 Own = 0.0, Low = 0.0, High = 0.0;
+	if (TestTrue(TEXT("the seat can take a trim"), Plant->SeatTrimRange(Own, Low, High)))
+	{
+		Plant->ApplySeatTrim(FMath::Min(3.0, High));
+		R.Tick();
+		TestTrue(TEXT("the legs measure with a trim on the seat"), Judge());
+		TestEqual(TEXT("a seat trim: the ground the stance rests on is where it was"), Legs[4].StanceGroundZ, GroundBefore, 1.0e-9);
+		Plant->ApplySeatTrim(0.0);
+		R.Tick();
+	}
+	// The seat brought to its zero pose (as far forward as the tuning's centre of mass has it): the weight is ahead
+	// of the centre wheels, and this robot then does rest on its front and centre pairs, nose down, the rear pair in
+	// the air. (That the plant says so is what tells the centre of mass it uses moves with the seat.)
+	R.StandSeat(0.0f, 0.0f, 0.0f);
+	if (!TestTrue(TEXT("the legs measure with the seat at its zero pose"), Judge()))
+	{
+		return false;
+	}
+	TestTrue(TEXT("seat at zero: the front and centre legs stand"), Legs[0].bSupport && Legs[1].bSupport && Legs[2].bSupport && Legs[3].bSupport);
+	TestTrue(TEXT("seat at zero: the rear legs are over the ground"), !Legs[4].bSupport && !Legs[5].bSupport);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

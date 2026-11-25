@@ -785,16 +785,62 @@ namespace RammsLevel
 		bThreePoint = In.bThreePoint && Tuning.bThreePoint;
 		if (bThreePoint)
 		{
-			const double Needed = FMath::IsFinite(In.NeededDeg.Y) ? FMath::Abs(In.NeededDeg.Y) : 0.0;
+			double Needed = FMath::IsFinite(In.NeededDeg.Y) ? FMath::Abs(In.NeededDeg.Y) : 0.0;
+			// The ground's roll is read true only while no roll is carried: with
+			// some carried, the rigid pairs of a three-point robot still bear
+			// on both wheels for the first of it and hold the body back, the
+			// legs' plane reads as more roll than the body has made, and the
+			// rest is taken for ground (a roll "needed" that grows with the
+			// correction, and never comes back under the let-go). So the
+			// ground's roll as it last read with none carried is kept, and for
+			// as long as the robot has not moved off that spot the roll needed
+			// is counted from it. (Engaged or not: a roll let go by the one
+			// reckoning and taken up again by the other would do so every
+			// other tick.)
+			const double Ground = In.GroundRollDeg;
+			const bool	 bGround = In.bGroundRollKnown && FMath::IsFinite(Ground);
+			if (bGround && FMath::IsFinite(In.CarriedDeg.Y) && FMath::Abs(In.CarriedDeg.Y) <= Tuning.RollClearDeg)
+			{
+				FreeGroundRoll = Ground;
+				bHasFreeGround = true;
+				MovedCm = 0.0;
+			}
+			else
+			{
+				MovedCm += (Now >= QuietSpeedCmS ? Now : 0.0) * FMath::Max(0.0, Dt);
+			}
+			if (bHasFreeGround && MovedCm <= Tuning.RollSpotCm && bGround && FMath::IsFinite(In.NeededDeg.Y))
+			{
+				// (The reference's roll is the ground's as read now less what
+				// reads as needed now.)
+				Needed = FMath::Abs(FreeGroundRoll - (Ground - In.NeededDeg.Y));
+			}
 			bRollEngaged = bRollEngaged ? Needed >= FMath::Min(Tuning.RollLetGoDeg, Tuning.RollEngageDeg) : Needed >= Tuning.RollEngageDeg;
-			// (By the speed asked where that is more: the drive is being held
-			// to what the roll still carried allows.)
-			const double Going = FMath::IsFinite(In.AskedSpeedCmS) ? FMath::Max(V, In.AskedSpeedCmS) : V;
-			Target.Y = bRollEngaged ? FMath::Min(Target.Y, Full.Y * LoopRamp(Going, Tuning.ThreePointFullCmS, 1.0, Tuning.ThreePointNoneCmS, 0.0)) : 0.0;
+			// All of the roll or none of it, by the speed the robot is going
+			// at: none from NoneCmS, all again from FullCmS down, and between
+			// the two whichever it was. Never a part of it for good: a robot
+			// stopped with part of its roll out swings further than one with
+			// all of it carried, and turns again as the rest comes back.
+			// (The speed it is going at is the speed its stick asks, where the
+			// drive can say: held to a walk while its roll is eased out, it
+			// is still a robot going fast. The speed there is counts only
+			// past a start's overshoot of what was asked.)
+			const bool	 bAsked = FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0;
+			const double Going = bAsked ? FMath::Max(In.AskedSpeedCmS, V / (1.0 + FMath::Max(0.0, Tuning.ThreePointOvershoot))) : V;
+			if (Going >= FMath::Max(Tuning.ThreePointNoneCmS, Tuning.ThreePointFullCmS) && Going > Tuning.ThreePointFullCmS)
+			{
+				bRollOut = true;
+			}
+			else if (Going <= Tuning.ThreePointFullCmS)
+			{
+				bRollOut = false;
+			}
+			Target.Y = bRollEngaged && !bRollOut ? Target.Y : 0.0;
 		}
 		else
 		{
 			bRollEngaged = true;
+			bRollOut = false;
 		}
 		if (!bSeeded)
 		{
@@ -802,6 +848,7 @@ namespace RammsLevel
 			const FVector2D Carried(FMath::IsFinite(In.CarriedDeg.X) ? FMath::Min(Full.X, FMath::Abs(In.CarriedDeg.X)) : 0.0, FMath::IsFinite(In.CarriedDeg.Y) ? FMath::Min(Full.Y, FMath::Abs(In.CarriedDeg.Y)) : 0.0);
 			Limit.Reset(FVector2D(FMath::Max(Target.X, Carried.X), FMath::Max(Target.Y, Carried.Y)));
 			bSeeded = true;
+			bWasRollEngaged = bRollEngaged;
 			return Limit.Get();
 		}
 		// Not back up while the base is being braked: it is on all its wheels,
@@ -813,11 +860,28 @@ namespace RammsLevel
 		}
 		// Nor does the roll of a three-point robot come back while it is still
 		// coming DOWN to what its stick asks, however gently: only once it is
-		// at the speed asked, or at a crawl.
-		if (bThreePoint && FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0 && V > FMath::Max(In.AskedSpeedCmS, Tuning.ThreePointFullCmS) + QuietSpeedCmS)
+		// at the speed asked. (All the way down: a robot being stopped from a
+		// speed at which part of the roll was out gets none of it back until
+		// it stands. Roll that came back as the speed fell through the band
+		// came back in the middle of the braking it was taken out for.)
+		if (bThreePoint && FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0 && V > In.AskedSpeedCmS + QuietSpeedCmS)
 		{
 			Target.Y = FMath::Min(Target.Y, FMath::Max(0.0, Limit.Get().Y));
 		}
+		// A roll that has just come to be worth correcting (out of the dead
+		// band) is corrected from here on with all the roll limit there is: at
+		// once, not walked up from nothing. The limit only bounds the
+		// correction, and where it is walked up under a cross fall that comes
+		// on as the robot drives, it is the limit and not the legs that the
+		// correction then follows, a second or more behind the ground. (The
+		// rider is still turned within the tilt policy: where the base is
+		// wanted walks there from where the dead band left it.) Not where
+		// the limit is held just above: a robot being slowed, or braked.
+		if (bThreePoint && bRollEngaged && !bWasRollEngaged && Target.Y > Limit.Get().Y)
+		{
+			Limit.Reset(FVector2D(Limit.Get().X, Target.Y));
+		}
+		bWasRollEngaged = bRollEngaged;
 		Limit.Tick(Target, Dt, LawTuning.TiltRateDegPerSec, LawTuning.TiltAccelDegPerSec2);
 		return FVector2D(FMath::Clamp(Limit.Get().X, 0.0, Full.X), FMath::Clamp(Limit.Get().Y, 0.0, Full.Y));
 	}
@@ -825,11 +889,11 @@ namespace RammsLevel
 	double FCarryLimit::HoldSpeedCmS(double RollCorrectionDeg, double FullRollDeg) const
 	{
 		const double Roll = FMath::Abs(RollCorrectionDeg);
-		if (!bThreePoint || !Tuning.bHoldSpeed || !(FullRollDeg > 0.0) || !(Roll > Tuning.RollClearDeg) || !(Tuning.ThreePointNoneCmS > Tuning.ThreePointFullCmS))
+		if (!bThreePoint || !bRollOut || !Tuning.bHoldSpeed || !(FullRollDeg > 0.0) || !(Roll > Tuning.RollClearDeg) || !(Tuning.ThreePointFullCmS > 0.0))
 		{
 			return 0.0;
 		}
-		return LoopRamp(Roll / FullRollDeg, 0.0, Tuning.ThreePointNoneCmS, 1.0, Tuning.ThreePointFullCmS);
+		return Tuning.ThreePointFullCmS;
 	}
 
 	bool FQuiet::Tick(double SpeedCmS, double ErrorDeg, bool bStick, bool bMayRest, double Dt, const FTuning& Tuning)

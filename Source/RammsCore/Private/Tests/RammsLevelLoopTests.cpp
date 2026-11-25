@@ -2202,4 +2202,276 @@ bool FRammsLevelSpeedScaleSteady::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace RammsLevelLoopTests
+{
+	/** What a three-point robot's carry limit is told: the roll that reads as needed and the ground's roll as it reads
+	 *  (deg), the roll the legs carry (deg), the speed there is and the speed the stick asks (cm/s). */
+	FCarryInputs ThreePointIn(double NeededRoll, double GroundRoll, double CarriedRoll, double SpeedCmS, double AskedCmS)
+	{
+		FCarryInputs In;
+		In.FullDeg = FVector2D(10.0, 6.0);
+		In.NeededDeg = FVector2D(0.0, NeededRoll);
+		In.GroundRollDeg = GroundRoll;
+		In.bGroundRollKnown = true;
+		In.CarriedDeg = FVector2D(0.0, CarriedRoll);
+		In.SpeedCmS = SpeedCmS;
+		In.AskedSpeedCmS = AskedCmS;
+		In.bThreePoint = true;
+		In.bMayRise = true;
+		return In;
+	}
+} // namespace RammsLevelLoopTests
+
+// Catches: a roll dead band that goes by the ground's roll as it reads WITH roll carried. On a robot that a roll
+// correction stands on three points the rigid pairs still bear on both wheels over the first of a roll correction and
+// hold the body back: the legs' plane reads as more roll than the body has made, the rest is taken for ground, and the
+// roll "needed" then reads larger than the roll asked for by about as much again. A roll preference stepped down under
+// the let-go was held for good, one wheel of a rigid pair in the air (a simulator's finding: 0.44 deg held where the
+// band lets go under 0.5). Standing, the ground is what it read as before any roll was carried.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopCarryRollLetGo,
+	"Ramms.Level.Loop.CarryLimit.RollLetGoByTheGroundAsItReadWithNoneCarried",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopCarryRollLetGo::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	for (const bool bMoved : { false, true })
+	{
+		FCarryLimit Carry;
+		Carry.Tuning.bCrest = false;
+		// Standing on the flat with nothing asked: no roll needed, none carried.
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Carry.Tick(ThreePointIn(0.0, 0.0, 0.0, 0.0, 0.0), Dt, Tuning);
+		}
+		TestFalse(TEXT("nothing to correct: roll is not engaged"), Carry.IsRollEngaged());
+		// A roll of 0.9 deg preferred (needed: the ground's roll less the reference's): engaged. The legs then make
+		// 1.9 deg of plane for the 0.9 the body rolls, and the ground reads -1.0.
+		Carry.Tick(ThreePointIn(-0.9, 0.0, 0.0, 0.0, 0.0), Dt, Tuning);
+		TestTrue(TEXT("0.9 deg asked: roll is engaged"), Carry.IsRollEngaged());
+		for (int32 i = 0; i < 32; ++i)
+		{
+			Carry.Tick(ThreePointIn(-1.9, -1.0, 1.9, 0.0, 0.0), Dt, Tuning);
+		}
+		TestTrue(TEXT("... and stays engaged while it is held"), Carry.IsRollEngaged());
+		if (bMoved)
+		{
+			// Driven half a metre on at a crawl: the ground under it is no longer the ground it read.
+			for (int32 i = 0; i < 40; ++i)
+			{
+				Carry.Tick(ThreePointIn(-1.9, -1.0, 1.9, 20.0, 20.0), Dt, Tuning);
+			}
+			for (int32 i = 0; i < 16; ++i)
+			{
+				Carry.Tick(ThreePointIn(-1.9, -1.0, 1.9, 0.0, 0.0), Dt, Tuning);
+			}
+		}
+		// The preference stepped down to 0.4 deg: the body at 0.4 on 0.85 deg of plane, the ground reading -0.45.
+		for (int32 i = 0; i < 4; ++i)
+		{
+			Carry.Tick(ThreePointIn(-0.85, -0.45, 0.85, 0.0, 0.0), Dt, Tuning);
+		}
+		if (bMoved)
+		{
+			TestTrue(TEXT("moved on since the ground was read free: the reading as it is decides (0.85 deg: engaged)"), Carry.IsRollEngaged());
+		}
+		else
+		{
+			TestFalse(TEXT("standing where the ground read level: 0.4 deg asked is under the let-go, whatever the reading says"), Carry.IsRollEngaged());
+			double Limit = Carry.Get().Y;
+			for (int32 i = 0; i < 80; ++i)
+			{
+				Limit = Carry.Tick(ThreePointIn(-0.85, -0.45, 0.85, 0.0, 0.0), Dt, Tuning).Y;
+			}
+			Near(*this, TEXT("... and the roll limit walks to nothing: the split is wound out"), Limit, 0.0, 1.0e-6);
+		}
+	}
+	return true;
+}
+
+// Catches: roll that comes back while a three-point robot is being slowed. The roll is out at the speed the robot was
+// driven at; the stick is let go, or eased; as the speed falls to where roll may be carried again the rule gives it
+// back, in the middle of the braking it was taken out for (a simulator's finding: a stop that began with part of the
+// roll out swung the heading further than one with all of it carried). The roll limit does not rise while the robot is
+// faster than its stick asks, all the way down to a stand.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopCarryNoRollBackWhileStopped,
+	"Ramms.Level.Loop.CarryLimit.NoRollBackWhileBeingSlowed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopCarryNoRollBackWhileStopped::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	FCarryLimit	  Carry;
+	Carry.Tuning.bCrest = false;
+	Carry.Tuning.ThreePointFullCmS = 60.0;
+	Carry.Tuning.ThreePointNoneCmS = 70.0;
+	// Standing levelled across a 5 deg fall, then driven at 100 cm/s: the roll is taken out.
+	Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, 0.0, 0.0), Dt, Tuning);
+	Near(*this, TEXT("standing: all of the roll limit"), Carry.Get().Y, 6.0, 1.0e-9);
+	double Limit = 0.0;
+	for (int32 i = 0; i < 160; ++i)
+	{
+		Limit = Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, 100.0, 100.0), Dt, Tuning).Y;
+	}
+	Near(*this, TEXT("at 100 cm/s: no roll"), Limit, 0.0, 1.0e-3);
+	// The stick let go: braked at 50 cm/s^2 to a stand. The ground reads steadily all the while (bMayRise).
+	double Most = Limit;
+	for (double Speed = 100.0; Speed > 0.0; Speed -= 50.0 * Dt)
+	{
+		Most = FMath::Max(Most, Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, Speed, 0.0), Dt, Tuning).Y);
+	}
+	TestTrue(FString::Printf(TEXT("no roll comes back while the robot is being stopped (limit %.3f deg at most)"), Most), Most <= 1.0e-3);
+	// Standing: it comes back, all of it.
+	for (int32 i = 0; i < 160; ++i)
+	{
+		Limit = Carry.Tick(ThreePointIn(5.0, 5.0, 3.0, 0.0, 0.0), Dt, Tuning).Y;
+	}
+	Near(*this, TEXT("standing again: all of the roll limit"), Limit, 6.0, 1.0e-3);
+	// Out again at 100 cm/s; then slowed to a lower speed that the stick asks: back only once it is there.
+	for (int32 i = 0; i < 160; ++i)
+	{
+		Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, 100.0, 100.0), Dt, Tuning);
+	}
+	Near(*this, TEXT("at 100 cm/s again: no roll"), Carry.Get().Y, 0.0, 1.0e-3);
+	Most = 0.0;
+	for (double Speed = 100.0; Speed > 46.0; Speed -= 50.0 * Dt)
+	{
+		Most = FMath::Max(Most, Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, Speed, 40.0), Dt, Tuning).Y);
+	}
+	TestTrue(FString::Printf(TEXT("none back while it slows to the 40 cm/s asked (%.3f deg)"), Most), Most <= 1.0e-3);
+	for (int32 i = 0; i < 160; ++i)
+	{
+		Limit = Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, 40.0, 40.0), Dt, Tuning).Y;
+	}
+	Near(*this, TEXT("steady at 40 cm/s: all of it back"), Limit, 6.0, 1.0e-3);
+	return true;
+}
+
+// Catches: a three-point rule that leaves PART of the roll on for good. With the roll limit a line between two speeds,
+// a stick held between them carried part of the roll for as long as it was held: stopped there the robot swung further
+// than with all of the roll carried (the simulator: 7 to 9 deg from 70 to 88 cm/s with part of it out, 4 to 5.5 with
+// all of it on, under 1.5 with none), and turned again as the rest came back. It is all or none: out from the one
+// speed up, in from the other down, between them whichever it was; by the speed the stick asks, so that a start's
+// overshoot of a speed at which roll is carried does not take it out.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopCarryRollAllOrNone,
+	"Ramms.Level.Loop.CarryLimit.RollAllOrNoneAtAnySteadySpeed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopCarryRollAllOrNone::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	const auto	  Settle = [&](FCarryLimit& Carry, double Speed) {
+		   double Limit = 0.0;
+		   for (int32 i = 0; i < 160; ++i)
+		   {
+			   Limit = Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, Speed, Speed), Dt, Tuning).Y;
+		   }
+		   return Limit;
+	};
+	FCarryLimit Carry;
+	Carry.Tuning.bCrest = false;
+	Carry.Tuning.ThreePointFullCmS = 60.0;
+	Carry.Tuning.ThreePointNoneCmS = 70.0;
+	Carry.Tick(ThreePointIn(5.0, 5.0, 0.0, 0.0, 0.0), Dt, Tuning);
+	// Up through the speeds, steady at each: all of the roll under 70 cm/s, none from there.
+	for (double Speed = 0.0; Speed <= 120.0; Speed += 5.0)
+	{
+		const double Limit = Settle(Carry, Speed);
+		Near(*this, FString::Printf(TEXT("rising, steady at %.0f cm/s"), Speed), Limit, Speed < 70.0 ? 6.0 : 0.0, 1.0e-3);
+	}
+	// Down again: none until 60 cm/s, all from there.
+	for (double Speed = 120.0; Speed >= 0.0; Speed -= 5.0)
+	{
+		const double Limit = Settle(Carry, Speed);
+		Near(*this, FString::Printf(TEXT("falling, steady at %.0f cm/s"), Speed), Limit, Speed > 60.0 ? 0.0 : 6.0, 1.0e-3);
+	}
+	// A start to 60 cm/s that overshoots to 75 on its way: the roll stays on.
+	double Least = 6.0;
+	for (const double Speed : { 20.0, 45.0, 65.0, 75.0, 72.0, 66.0, 62.0, 60.0, 60.0, 60.0 })
+	{
+		for (int32 i = 0; i < 4; ++i)
+		{
+			Least = FMath::Min(Least, Carry.Tick(ThreePointIn(5.0, 5.0, 5.0, Speed, 60.0), Dt, Tuning).Y);
+		}
+	}
+	Near(*this, TEXT("a start to 60 cm/s that overshoots to 75: all of the roll throughout"), Least, 6.0, 1.0e-3);
+	TestEqual(TEXT("... and the drive is not held for it"), Carry.HoldSpeedCmS(5.0, 6.0), 0.0);
+	// A robot really going faster than its stick asks (run away down a slope: a third over and more): out.
+	Settle(Carry, 60.0);
+	double Limit = 6.0;
+	for (int32 i = 0; i < 160; ++i)
+	{
+		Limit = Carry.Tick(ThreePointIn(5.0, 5.0, 5.0, 100.0, 60.0), Dt, Tuning).Y;
+	}
+	Near(*this, TEXT("at 100 cm/s with 60 asked: the roll out"), Limit, 0.0, 1.0e-3);
+	// While the roll is being walked out for a stick that asks more, the drive is held to the speed it may be carried at.
+	FCarryLimit Held;
+	Held.Tuning = Carry.Tuning;
+	Held.Tick(ThreePointIn(5.0, 5.0, 5.0, 0.0, 0.0), Dt, Tuning);
+	Held.Tick(ThreePointIn(5.0, 5.0, 5.0, 10.0, 120.0), Dt, Tuning);
+	TestEqual(TEXT("full stick from a levelled stand: the drive held to the speed roll may be carried at while any is on"), Held.HoldSpeedCmS(5.0, 6.0), 60.0);
+	TestEqual(TEXT("... and let go once the roll is out"), Held.HoldSpeedCmS(0.0, 6.0), 0.0);
+	return true;
+}
+
+// Catches: a roll limit walked up from nothing when roll comes out of the dead band. On the flat no roll is engaged
+// and the limit rests at nothing; a cross fall then comes on under the robot as it drives. Walked up within the tilt
+// policy from the moment the fall is worth correcting, the limit is behind the fall for a second and more, and the
+// correction follows the limit, not the ground (the simulator: at a walk over courses whose cross fall comes and
+// goes, the rider 2 to 3 deg off where the legs alone left him under 1). On the tick roll is engaged the limit is all
+// there is.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLoopCarryRollEngagedAtOnce,
+	"Ramms.Level.Loop.CarryLimit.RollLimitWholeOnceRollIsEngaged",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLoopCarryRollEngagedAtOnce::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelLoopTests;
+	const FTuning Tuning;
+	const double  Dt = 1.0 / 16.0;
+	FCarryLimit	  Carry;
+	Carry.Tuning.bCrest = false;
+	// At a walk on the flat: nothing to correct, the roll limit at nothing.
+	for (int32 i = 0; i < 80; ++i)
+	{
+		Carry.Tick(ThreePointIn(0.0, 0.0, 0.0, 50.0, 50.0), Dt, Tuning);
+	}
+	Near(*this, TEXT("on the flat: roll not engaged, its limit at nothing"), Carry.Get().Y, 0.0, 1.0e-9);
+	// A cross fall comes on at 2.5 deg/s, to 5 deg.
+	double WorstShort = 0.0;
+	bool   bEngaged = false;
+	for (double Fall = 0.0; Fall <= 5.0; Fall += 2.5 * Dt)
+	{
+		const double Limit = Carry.Tick(ThreePointIn(Fall, Fall, 0.0, 50.0, 50.0), Dt, Tuning).Y;
+		bEngaged = bEngaged || Carry.IsRollEngaged();
+		if (bEngaged)
+		{
+			WorstShort = FMath::Max(WorstShort, Fall - Limit);
+		}
+	}
+	TestTrue(TEXT("the fall is taken up"), bEngaged);
+	TestTrue(FString::Printf(TEXT("from the tick roll is engaged the limit is never short of the fall (%.2f deg short at worst)"), WorstShort), WorstShort <= 1.0e-6);
+	Near(*this, TEXT("... it is the whole roll limit"), Carry.Get().Y, 6.0, 1.0e-6);
+	// Not for a robot being stopped: roll engaged on the way down stays where its limit was until the robot stands.
+	FCarryLimit Stopped;
+	Stopped.Tuning.bCrest = false;
+	for (int32 i = 0; i < 80; ++i)
+	{
+		Stopped.Tick(ThreePointIn(0.0, 0.0, 0.0, 50.0, 50.0), Dt, Tuning);
+	}
+	double Most = 0.0;
+	for (double Speed = 50.0; Speed > 4.0; Speed -= 50.0 * Dt)
+	{
+		Most = FMath::Max(Most, Stopped.Tick(ThreePointIn(3.0, 3.0, 0.0, Speed, 0.0), Dt, Tuning).Y);
+	}
+	TestTrue(FString::Printf(TEXT("a fall met while being stopped: no roll limit before the robot stands (%.3f deg)"), Most), Stopped.IsRollEngaged() && Most <= 1.0e-6);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

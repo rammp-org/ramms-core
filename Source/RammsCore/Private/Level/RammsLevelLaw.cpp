@@ -772,18 +772,37 @@ namespace RammsLevel
 				CarryIn.bThreePoint = bStandsWithoutRoll && bRollReaches;
 				CarryIn.bMayRise = State.Ground.GetTrust() >= 1.0;
 				CarryIn.CarriedDeg = State.CorrectionDeg;
+				CarryIn.GroundRollDeg = GroundDeg.Y;
+				CarryIn.bGroundRollKnown = State.Terrain.IsSeeded();
 				const FVector2D CarryDeg = State.Carry.Tick(CarryIn, Dt, Tuning);
 				Eff.MaxCorrectionDeg = FVector2D(FMath::Min(Full.MaxCorrectionDeg.X, CarryDeg.X), FMath::Min(Full.MaxCorrectionDeg.Y, CarryDeg.Y));
 				State.CarryDeg = Eff.MaxCorrectionDeg;
 				const bool bLower = Eff.MaxCorrectionDeg.X < Full.MaxCorrectionDeg.X - 1.0e-9 || Eff.MaxCorrectionDeg.Y < Full.MaxCorrectionDeg.Y - 1.0e-9;
 
-				const FTiltGoal Goal = WantedTiltGoalWithLimit(GroundDeg, Legs, Points, Eff);
-				GoalDeg = Goal.GoalDeg;
 				// (At reach is said of the legs' own limits, not of the speed's.)
-				const FTiltGoal Reach = bLower ? WantedTiltGoalWithLimit(GroundDeg, Legs, Points, Full) : Goal;
+				const FTiltGoal Reach = WantedTiltGoalWithLimit(GroundDeg, Legs, Points, Full);
+				GoalDeg = Reach.GoalDeg;
 				// Held back for the speed: the base is wanted somewhere else
-				// than the legs' own limits would have it.
-				State.bEased = bLower && (Goal.GoalDeg - Reach.GoalDeg).Size() > AxisLimitSlackDeg;
+				// than the legs' own limits would have it, by what the speed's
+				// limits leave over theirs. That is added whole to where the
+				// legs' reach has the base wanted. The tilt policy's bound on
+				// how far the base may be left off the reference is a bound on
+				// what the LEGS leave (past it the robot is past reach and
+				// crawls); a tilt the robot has decided not to carry at its
+				// speed is where the base will be, and a wanted attitude held
+				// short of it would be an error no leg may close, which the
+				// speed cap would slow for and a crawl would not cure.
+				FVector2D EasedDeg = FVector2D::ZeroVector;
+				if (bLower)
+				{
+					FTuning OpenEff = Eff;
+					FTuning OpenFull = Full;
+					OpenEff.MaxTiltDeg = OpenFull.MaxTiltDeg = UnboundedTiltDeg;
+					EasedDeg = WantedTiltGoalWithLimit(GroundDeg, Legs, Points, OpenEff).GoalDeg - WantedTiltGoalWithLimit(GroundDeg, Legs, Points, OpenFull).GoalDeg;
+				}
+				State.bEased = bLower && EasedDeg.Size() > AxisLimitSlackDeg;
+				State.EasedDeg = State.bEased ? EasedDeg : FVector2D::ZeroVector;
+				GoalDeg += State.EasedDeg;
 				State.bShort = Reach.ShortDeg > (State.bShort ? AtReachOffDeg : AtReachOnDeg);
 				State.GoalLimit = Reach.Limit;
 				ReachGoalDeg = Reach.GoalDeg;
@@ -956,6 +975,7 @@ namespace RammsLevel
 			State.bShort = false;
 			State.GoalLimit = EReachLimit::None;
 			State.bEased = false;
+			State.EasedDeg = FVector2D::ZeroVector;
 			State.CarryDeg = Full.MaxCorrectionDeg;
 		}
 		const bool bHasOffsets = State.Arbiter.HasOffsets();
@@ -1013,7 +1033,14 @@ namespace RammsLevel
 		// the wanted tilt is still walking to where a slope a little past the
 		// planned reach will leave it: switched on there, the base starts
 		// further off than the policy allows and is on its way in.
-		const bool bPastReach = bActive && (State.Fraction < 1.0 || State.bAxisLimited) && OffReferenceDeg > Tuning.MaxTiltDeg;
+		// (Off the reference by what the LEGS' reach leaves: a tilt the robot
+		// has decided not to carry at its speed is not past reach. Counted in,
+		// a cross fall of more than the policy's bound met at a speed at
+		// which no roll is carried read as past reach on every tick the
+		// allocation was cut for anything at all, and put the drive on the
+		// scale's floor.)
+		const double PastReachDeg = State.Attitude.IsSeeded() ? Inclination(AttitudeDeg - Ref - State.EasedDeg) : 0.0;
+		const bool	 bPastReach = bActive && (State.Fraction < 1.0 || State.bAxisLimited) && PastReachDeg > Tuning.MaxTiltDeg;
 		if (bActive || Now == EState::Releasing || bRamping)
 		{
 			// The cap goes by how fast the ground turns under the robot against
@@ -1022,6 +1049,20 @@ namespace RammsLevel
 			// slope is: standing at a limit, or on a slope, is not a turn.
 			FSpeedCapInputs Cap;
 			Cap.ErrorDeg = ErrorDeg;
+			// A roll the robot has decided not to carry at its speed is not
+			// followed: neither a ground that turns in roll under it nor what
+			// that leaves between the base and where it is wanted (the wanted
+			// attitude walks after the ground within the tilt policy, the base
+			// goes with the ground at once) is a reason to slow. The drive
+			// would be held back for a turn no leg is answering. (By the share
+			// of the roll limit that is left, while that roll is out or on its
+			// way out.)
+			const double RollShare = bActive && State.Carry.IsRollOut() && Full.MaxCorrectionDeg.Y > 0.0 ? FMath::Clamp(State.CarryDeg.Y / Full.MaxCorrectionDeg.Y, 0.0, 1.0) : 1.0;
+			if (RollShare < 1.0 && bHasOffsets && State.Attitude.IsSeeded())
+			{
+				const FVector2D Off = AttitudeDeg - WantedDeg;
+				Cap.ErrorDeg = FVector2D(Off.X, Off.Y * RollShare).Size();
+			}
 			Cap.bPastReach = bPastReach;
 			Cap.SpeedCmS = In.SpeedCmS;
 			Cap.AskedSpeedCmS = In.AskedSpeedCmS;
@@ -1047,6 +1088,9 @@ namespace RammsLevel
 				{
 					Cap.SeenRateDegPerSec = (State.Ground.Get() - PrevSeenDeg) / Dt;
 				}
+				// (The ground's turning in roll: as the error above.)
+				Cap.GroundRateDegPerSec.Y *= RollShare;
+				Cap.SeenRateDegPerSec.Y *= RollShare;
 				// What the legs can turn the correction at: the lesser of the
 				// way the slope would be taken out and the way the ground is
 				// turning now, where there is either.

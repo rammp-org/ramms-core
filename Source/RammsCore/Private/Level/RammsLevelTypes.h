@@ -149,6 +149,9 @@ namespace RammsLevel
 	 *  reading of it): one deliberate change of the rider's attitude at a
 	 *  time, and a grade break is one already. */
 	constexpr double ReleaseWaitTurnDegPerSec = 1.5;
+	/** A tilt policy bound (FTuning::MaxTiltDeg) that binds nothing (deg):
+	 *  for reckoning where the base would be wanted with no such bound. */
+	constexpr double UnboundedTiltDeg = 360.0;
 
 	/**
 	 * The level assist's tuning. A plain mirror of the reflected
@@ -447,19 +450,32 @@ namespace RammsLevel
 	 * rigid across the robot): any roll correction at all lifts one wheel of
 	 * each rigid pair, the robot stands on three points with its drive wheels
 	 * unequally loaded, and braked or driven hard in that stance it swings
-	 * about the heavier wheel. So roll is levelled standing and at a crawl and
-	 * eased out as the speed rises, to nothing at NoneCmS: whenever the robot
-	 * can be swung it is on all its wheels. The drive is held to the speed
-	 * the roll still carried allows (bHoldSpeed: it slows, it never stops),
-	 * the roll comes back only once the base moves steadily again (not while
-	 * it is being braked), and a roll under RollEngageDeg is not corrected at
+	 * about the heavier wheel, the further the faster it was going. So roll
+	 * is levelled standing and up to a walk, and taken out altogether for a
+	 * robot driven faster than that: all of it or none, never a part for good
+	 * (stopped with part of its roll out a robot swings further than with all
+	 * of it carried, and turns again as the rest comes back). While the roll
+	 * is walked out the drive is held to the walk (bHoldSpeed: it slows, it
+	 * never stops), the roll comes back only once the base moves steadily
+	 * again at a speed it may be carried at (not while the robot is being
+	 * slowed), and a roll under RollEngageDeg is not corrected at
 	 * all (and is let go again under RollLetGoDeg): a split of the lifts with
 	 * no roll to speak of to correct is wound out, where it would otherwise
 	 * stand for good, one wheel in the air on flat ground.
 	 */
 	struct FCarryTuning
 	{
-		bool bCrest = true;
+		/** OFF as built. The rule goes by how much correction is carried and
+		 *  how fast the robot is, and at a given speed a slope that ends in a
+		 *  crest of twice its grade cannot be told from a ramp that ends on a
+		 *  landing, nor from a steeper ramp: whatever it holds back for the
+		 *  one it holds back on the others, all the way up. On a robot with
+		 *  slow lifts at its full speed that left a 1:12 ramp all but
+		 *  unlevelled and a 1:7 ramp worse than half, and slowed both (the
+		 *  speed cap answering the error left), to take a third off the throw
+		 *  at one 12 deg crest (simulator, RAMMP Gen1). A crest is left to
+		 *  the speed cap; the rule is kept to be measured against. */
+		bool bCrest = false;
 		bool bThreePoint = true;
 		bool bHoldSpeed = true;
 		/** The crest rule's reckoning of how long a break takes to pass under
@@ -478,14 +494,38 @@ namespace RammsLevel
 		double CrestLagSeconds = 0.2;
 		double CrestBrakeCmS2 = 75.0;
 		double CrestShare = 0.8;
-		/** The three-point rule: all of the roll limit up to FullCmS (cm/s),
-		 *  none of it from NoneCmS, a straight line between. */
-		double ThreePointFullCmS = 15.0;
-		double ThreePointNoneCmS = 40.0;
+		/** The three-point rule: the roll is taken out once the robot goes
+		 *  NoneCmS (cm/s) or faster and carried again once it goes FullCmS or
+		 *  slower; between the two it stays as it was, so that a stick held
+		 *  near either does not walk the roll in and out. Where they are:
+		 *  measured on RAMMP Gen1 across a 6 deg fall, a hard stop with all of
+		 *  the roll carried swings the heading 0 to 3 deg from up to 57 cm/s
+		 *  (half its stick, which asks 60), 4 to 5.5 deg from 63 to 88 cm/s,
+		 *  10 from 100 and 15 from 120; with the roll out it swings under 1
+		 *  deg from any speed, and the robot then turns 4.3 to 4.7 deg where
+		 *  it stands as the roll comes back (the braked drive wheels roll
+		 *  with their lifts' arms as the lifts part). So: carried up to a
+		 *  walk, where the stop is the gentler either way and the rider rides
+		 *  level; out from just above. */
+		double ThreePointFullCmS = 60.0;
+		double ThreePointNoneCmS = 65.0;
+		/** The speed the rule goes by is what the stick asks; the speed there
+		 *  is counts once it is this share over that (a drive overshoots its
+		 *  ask as it arrives at it, and that is not a robot going faster). */
+		double ThreePointOvershoot = 0.3;
 		/** ... and the roll that would hold the reference (deg) from which
 		 *  roll is corrected at all, and under which it is let go again. */
 		double RollEngageDeg = 0.75;
 		double RollLetGoDeg = 0.5;
+		/** ... counted from the ground's roll as it last read with no roll
+		 *  carried, for as long as the robot has not moved further than this
+		 *  from there (cm). The ground's roll is read
+		 *  off the attitude less the plane the legs have made; a three-point
+		 *  robot's rigid pairs hold the body back over the first of a roll
+		 *  correction, the plane reads as more roll than the body made, and
+		 *  the difference would count as roll still needed. Standing, the
+		 *  ground under the robot is what it was. */
+		double RollSpotCm = 5.0;
 		/** A roll correction under this (deg) is none: the robot is on all its
 		 *  wheels, and the drive is not held for it. */
 		double RollClearDeg = 0.05;

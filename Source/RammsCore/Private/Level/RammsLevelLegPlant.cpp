@@ -2,6 +2,7 @@
 
 #include "Level/RammsLevelPlant.h"
 
+#include "Curb/RammsCurbRobotModel.h"
 #include "Curb/RammsCurbSeat.h"
 #include "GameFramework/Actor.h"
 #include "Level/RammsLevelAllocate.h"
@@ -35,11 +36,17 @@
  * centre linkage is jogged up or down still stands on those four (its weight
  * is between them): it pitches, and the wheels it stands on are then
  * centimetres apart in the chassis' frame. So each tick the flat ground the
- * baselines would rest on is worked out from the robot's centre of mass (the
- * curb controller's Tuning.CenterOfMass, as it stands: the mass that moves
- * with the legs is left out) and given with the legs
- * (FLegReach::StanceGroundZ, RammsLevel::StanceGround); in a level stance that
- * is the lowest wheel bottoms, as before.
+ * baselines would rest on is worked out from the robot's centre of mass and
+ * given with the legs (FLegReach::StanceGroundZ, RammsLevel::StanceGround); in
+ * a level stance that is the lowest wheel bottoms, as before. The centre of
+ * mass is the curb controller's model of it WHERE THE ROBOT STANDS
+ * (RammsCurb::FRobotModel::CenterOfMassAt): Tuning.CenterOfMass is the robot
+ * with every leg and the seat at their zero poses, and the mass that moves
+ * with the legs and with the seat (the rider on it) is carried from there to
+ * where the legs' baselines and the seat's commands have them. That is not a
+ * detail: a seat that rides well aft of its zero pose takes the weight from
+ * ahead of the centre wheels to behind them, and with it the wheels the robot
+ * stands on from the front and centre pairs to the centre and rear ones.
  *
  * THE SEAT. Where the curb controller describes a seat with a tilt motor (a
  * position motor of the registry), that motor is levelled too: the law's seat
@@ -59,6 +66,8 @@
  * never wrote the tilt after all leaves it there, and a hand-back takes it
  * back out (UnfoldSeatTrim).
  */
+DEFINE_LOG_CATEGORY_STATIC(LogRammsLevelPlant, Log, All);
+
 namespace RammsLevel
 {
 	namespace
@@ -74,6 +83,9 @@ namespace RammsLevel
 		 *  (rad for a crank, cm for a 5-bar). */
 		constexpr float	 CrankProbeRad = 0.01f;
 		constexpr double FiveBarProbeCm = 0.5;
+		/** The log says where the centre of mass is again once it has moved
+		 *  this far (cm). */
+		constexpr double CentreLogCm = 8.0;
 
 		bool SameBits(float A, float B)
 		{
@@ -194,6 +206,17 @@ namespace RammsLevel
 			TArray<FPlantLeg>									  Legs;
 			/** The robot's centre of mass on the chassis as the last MeasureLegs took it (cm). */
 			FVector2D CentreOfMassXY = FVector2D::ZeroVector;
+			/** What the centre of mass is reckoned from (Resolve): the curb
+			 *  controller's centre of mass at the zero poses, the robot's mass,
+			 *  each leg's moving mass and zero pose, the seat's lumps. No 4-bar
+			 *  tables: only FRobotModel::CenterOfMassAt is asked of it. */
+			RammsCurb::FRobotModel MassModel;
+			/** Where the centre of mass was when the log last said it. */
+			FVector2D CentreLoggedXY = FVector2D::ZeroVector;
+			bool	  bCentreLogged = false;
+			/** The centre of mass with the legs' wheels at WheelXZ (chassis x-z,
+			 *  cm, in the legs' order) and the seat as it is commanded. */
+			FVector2D CentreOfMassAt(TConstArrayView<FVector2D> WheelXZ) const;
 			bool	  bFoldRemembered = false;
 
 			// ---- the seat ----
@@ -314,6 +337,49 @@ namespace RammsLevel
 					}
 				}
 				Legs.Add(Leg);
+			}
+			// What the centre of mass is reckoned from. A leg or a seat with no
+			// zero pose to reckon its mass from, or masses that do not add up,
+			// leave that mass where the tuning's centre of mass has it.
+			MassModel = RammsCurb::FRobotModel();
+			bCentreLogged = false;
+			MassModel.CenterOfMass = RammsCurb::TunedCenterOfMass(CurbPtr->Tuning);
+			MassModel.MassKg = FMath::IsFinite(CurbPtr->Tuning.RobotMassKg) ? FMath::Max(0.0, static_cast<double>(CurbPtr->Tuning.RobotMassKg)) : 0.0;
+			double MovingKg = 0.0;
+			for (const FPlantLeg& Leg : Legs)
+			{
+				const FRammsCurbLeg&  CurbLeg = CurbPtr->Legs[Leg.CurbIndex];
+				RammsCurb::FModelLeg& ModelLeg = MassModel.Legs.AddDefaulted_GetRef();
+				bool				  bZero = false;
+				if (Leg.bFourBar)
+				{
+					ModelLeg.ZeroPose = URamms4BarKinematics::ComputeWheelCenter(CurbLeg.FourBar, 0.0f, bZero);
+				}
+				else if (const URamms5BarLinkageController* FiveBar = Leg.FiveBar.Get())
+				{
+					bZero = RammsCurb::FiveBarZeroPose(*FiveBar, ModelLeg.ZeroPose);
+				}
+				ModelLeg.MovingMassKg = bZero && FMath::IsFinite(CurbLeg.MovingMassKg) ? FMath::Max(0.0, static_cast<double>(CurbLeg.MovingMassKg)) : 0.0;
+				MovingKg += ModelLeg.MovingMassKg;
+			}
+			if (CurbPtr->Seat.IsSet())
+			{
+				const RammsCurb::FSeatPose Zero = RammsCurb::SeatForward(CurbPtr->Seat, FVector2D::ZeroVector);
+				const double			   Mechanism = CurbPtr->Seat.MechanismMassKg;
+				const double			   Payload = CurbPtr->Seat.PayloadMassKg;
+				if (Zero.bValid && FMath::IsFinite(Mechanism) && FMath::IsFinite(Payload) && Mechanism >= 0.0 && Payload >= 0.0)
+				{
+					MassModel.Seat.bHas = true;
+					MassModel.Seat.ZeroPivot = Zero.Pivot;
+					MassModel.Seat.MechanismMassKg = Mechanism;
+					MassModel.Seat.PayloadMassKg = Payload;
+					MassModel.Seat.PayloadOffset = FVector2D(CurbPtr->Seat.PayloadOffsetCm);
+					MovingKg += Mechanism + Payload;
+				}
+			}
+			if (!(MovingKg < MassModel.MassKg))
+			{
+				MassModel.MassKg = 0.0; // the centre of mass stays where the tuning has it
 			}
 			// The seat's tilt, where the robot has one that an offset can go
 			// on. One that cannot be levelled is no reason not to level the
@@ -566,8 +632,9 @@ namespace RammsLevel
 				Motor.bPrev = Motor.bNow;
 				Motor.bNow = BasePtr->GetMotorCommand(Motor.Id, Motor.NowBaseline);
 			}
-			const double LegSpeed = FMath::Max(0.0f, CurbPtr->Tuning.LegSpeed);
-			bool		 bAll = true;
+			const double						   LegSpeed = FMath::Max(0.0f, CurbPtr->Tuning.LegSpeed);
+			bool								   bAll = true;
+			TArray<FVector2D, TInlineAllocator<8>> WheelXZ;
 			for (FPlantLeg& Leg : Legs)
 			{
 				if (!CurbPtr->Legs.IsValidIndex(Leg.CurbIndex))
@@ -609,6 +676,7 @@ namespace RammsLevel
 					Leg.MinZ = FMath::Min(Leg.HeightRange.X, Leg.BaseZ);
 					Leg.MaxZ = FMath::Max(Leg.HeightRange.Y, Leg.BaseZ);
 					Reach.XY = FVector2D(BaseCentre.X, CurbLeg.Wheel.Position.Y);
+					WheelXZ.Add(BaseCentre);
 					Reach.BaseZ = Leg.BaseZ;
 					Reach.MeasuredZ = JointCentre.Y;
 					const double CrankRate = Crank.MaxVelocity > 0.0 ? Crank.MaxVelocity : static_cast<double>(CurbLeg.MaxCrankRateRadS);
@@ -664,6 +732,7 @@ namespace RammsLevel
 					Leg.MinZ = FMath::Min(Leg.ScannedRange.X, Leg.BaseZ);
 					Leg.MaxZ = FMath::Max(Leg.ScannedRange.Y, Leg.BaseZ);
 					Reach.XY = FVector2D(BaseEndpoint.X * Hand, CurbLeg.Wheel.Position.Y);
+					WheelXZ.Add(FVector2D(BaseEndpoint.X * Hand, BaseEndpoint.Y));
 					Reach.BaseZ = Leg.BaseZ;
 					Reach.MeasuredZ = JointEndpoint.Y;
 					if (HipA.MaxVelocity > 0.0 || HipB.MaxVelocity > 0.0)
@@ -699,9 +768,44 @@ namespace RammsLevel
 			// The flat ground the baselines rest on: who stands is judged from it
 			// (a stance one linkage has been jogged out of does not stand level
 			// in the chassis' frame, and the robot stands on those wheels still).
-			CentreOfMassXY = FVector2D(CurbPtr->Tuning.CenterOfMass.X, CurbPtr->Tuning.CenterOfMass.Y);
+			// By the centre of mass where the robot stands, not at its zero poses.
+			CentreOfMassXY = CentreOfMassAt(WheelXZ);
+			if (!bCentreLogged || FVector2D::Distance(CentreOfMassXY, CentreLoggedXY) > CentreLogCm)
+			{
+				// (Once, and again when it has moved a hand's breadth: who
+				// stands follows from it, so a run's log should say where it was.)
+				bCentreLogged = true;
+				CentreLoggedXY = CentreOfMassXY;
+				UE_LOG(LogRammsLevelPlant, Log, TEXT("[Level] '%s': centre of mass where the robot stands (%+.1f, %+.1f) cm on the chassis; (%+.1f, %+.1f) at the zero poses"),
+					*GetNameSafe(CurbPtr->GetOwner()), CentreOfMassXY.X, CentreOfMassXY.Y, MassModel.CenterOfMass.X, MassModel.CenterOfMass.Y);
+			}
 			StanceGround(OutLegs, TConstArrayView<double>(), CentreOfMassXY);
 			return true;
+		}
+
+		FVector2D FLegPlant::CentreOfMassAt(TConstArrayView<FVector2D> WheelXZ) const
+		{
+			const URammsRobotBaseComponent*		   BasePtr = Base.Get();
+			const URammsCurbNegotiationController* CurbPtr = Curb.Get();
+			FVector								   Centre = MassModel.CenterOfMassAt(WheelXZ);
+			if (BasePtr && CurbPtr && MassModel.Seat.bHas)
+			{
+				// The seat as it is commanded (where nothing has commanded it,
+				// as it stands): its own commands, under any trim of ours.
+				const FRammsCurbSeat& Seat = CurbPtr->Seat;
+				const auto			  Commanded = [BasePtr](FName Motor) {
+					   float Value = 0.0f;
+					   return static_cast<double>(BasePtr->GetMotorCommand(Motor, Value) ? Value : BasePtr->GetMotorValue(Motor));
+				};
+				const RammsCurb::FSeatPose Zero = RammsCurb::SeatForward(Seat, FVector2D::ZeroVector);
+				const RammsCurb::FSeatPose Pose = RammsCurb::SeatForward(Seat, FVector2D(Commanded(Seat.Linkage.ProximalMotorA), Commanded(Seat.Linkage.ProximalMotorB)));
+				if (Zero.bValid && Pose.bValid)
+				{
+					const double PitchRad = RammsCurb::SeatPlatformPitch(Seat, Pose.LinkAngle, Zero.LinkAngle, Seat.TiltMotor.IsNone() ? 0.0 : Commanded(Seat.TiltMotor));
+					Centre = MassModel.CenterOfMassAt(WheelXZ, Pose.Pivot, PitchRad);
+				}
+			}
+			return FMath::IsFinite(Centre.X) && FMath::IsFinite(Centre.Y) ? FVector2D(Centre.X, Centre.Y) : FVector2D(MassModel.CenterOfMass.X, MassModel.CenterOfMass.Y);
 		}
 
 		void FLegPlant::RestLegsAt(TConstArrayView<double> Z, TArrayView<FLegReach> InOutLegs) const

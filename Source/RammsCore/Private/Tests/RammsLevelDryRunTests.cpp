@@ -4545,6 +4545,9 @@ namespace RammsLevelDryRunTests
 // partly in the base; at half that speed, where the cap can slow the robot on the break, the rule asks nothing and
 // the slope is held level as before. No look-ahead: the tilt RATE over a sharp crest at full stick stays far over the
 // rider's limit, as it is switched off (reported, not bounded).
+// (The rule is OFF as built, FCarryTuning::bCrest: it cannot tell a slope that ends in a crest from a ramp that ends on
+// a landing, and what it leaves in the base on every fast slope cost more in the simulator than it saved at a crest.
+// It is switched on here: this is what it does, kept to be measured against.)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunCarriedAtSpeed,
 	"Ramms.Level.DryRun.CarriedAtSpeed",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -4559,9 +4562,10 @@ bool FRammsLevelDryRunCarriedAtSpeed::RunTest(const FString& Parameters)
 		const double Span = Which == 0 ? 70.0 : OnFourSpanCm;
 		for (const double GradeDeg : { 2.5, 4.0, 6.0 })
 		{
-			const FGround  Ground = CrestOf(GradeDeg);
-			const FOptions Options = DrivenOver(Kit, 120.0);
-			FOptions	   OffOptions = Options;
+			const FGround Ground = CrestOf(GradeDeg);
+			FOptions	  Options = DrivenOver(Kit, 120.0);
+			Options.Carry.bCrest = true;
+			FOptions OffOptions = Options;
 			OffOptions.bEnabledAtStart = false;
 			FOptions NoRule = Options;
 			NoRule.Carry.bCrest = false;
@@ -4596,8 +4600,9 @@ bool FRammsLevelDryRunCarriedAtSpeed::RunTest(const FString& Parameters)
 	{
 		const FKit	   Kit = SlowLifts();
 		const FGround  Ground = CrestOf(6.0);
-		const FOptions Options = DrivenOver(Kit, 60.0);
-		FOptions	   OffOptions = Options;
+		FOptions	   Options = DrivenOver(Kit, 60.0);
+		Options.Carry.bCrest = true;
+		FOptions OffOptions = Options;
 		OffOptions.bEnabledAtStart = false;
 		const FResult	  Result = DryRun::Run(Kit.Robot, Ground, Options);
 		const FResult	  Off = DryRun::Run(Kit.Robot, Ground, OffOptions);
@@ -4693,6 +4698,10 @@ bool FRammsLevelDryRunRollAtACrawl::RunTest(const FString& Parameters)
 		// Levelled standing for 5 s; full stick for 7 s; the stick let go; 6 s standing.
 		FOptions Options = MakeOptions(Kit, 0);
 		Options.Carry.bThreePoint = bRule;
+		// (Roll carried up to 15 cm/s and out from 40: this case's own speeds, so that its figures do not move with the
+		// rule's as built.)
+		Options.Carry.ThreePointFullCmS = 15.0;
+		Options.Carry.ThreePointNoneCmS = 40.0;
 		Options.SpeedCmS = 0.0;
 		Options.MaxSeconds = 18.0;
 		Options.PitchPerAccelDeg = BodyPitchPerAccel;
@@ -4876,6 +4885,137 @@ bool FRammsLevelDryRunJoggedLegs::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("centre legs jogged %+.0f cm: the rider no further off than the base (%.2f against %.2f deg)"), Cm, Rider[0], Base[0]), Rider[0] <= Base[0] + 0.1);
 		TestTrue(FString::Printf(TEXT("centre legs jogged %+.0f cm: (with the lowest wheels taken for the ground the rider goes %.2f deg off)"), Cm, Rider[1]), Rider[1] >= 2.0);
 	}
+	return true;
+}
+
+// Catches: a roll the robot has DECIDED not to carry held against the tilt policy's bound. Across a 5 deg fall with a
+// roll preferred the other way, 7.5 deg of roll correction would hold the reference and the roll limit is 6: standing,
+// the robot is at reach, 1.5 deg short. Driven off at a speed at which a three-point robot carries no roll, all 7.5
+// deg is left in the base. Where the base is wanted was bounded to the policy's 5 deg off the reference, as it is for
+// what the LEGS leave; the base then stood 2.5 deg from where it was wanted for as long as the fall lasted, an error
+// no leg may close, and the speed cap slowed for it (a simulator's finding, on 6 deg with 8 wanted: a quarter of the
+// stick across the whole cross fall, and the course timed out). What the speed leaves in the base is added whole to
+// where the legs' reach has it wanted, and is not called being past reach.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunEasedRollIsNotPastReach,
+	"Ramms.Level.DryRun.RollEasedForTheSpeedIsNotPastReach",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunEasedRollIsNotPastReach::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	const FKit	  Kit = SlowLifts();
+	const FGround Fall = Plane(0.0, 5.0);
+	// Which way the fall rolls the base, standing with the assist's reference level.
+	FVector2D GroundDeg = FVector2D::ZeroVector;
+	{
+		FOptions Options = MakeOptions(Kit, 0);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 4.0;
+		Options.bKeepTrace = true;
+		const FResult Result = DryRun::Run(Kit.Robot, Fall, Options);
+		if (!TestTrue(TEXT("(a standing run with a trace)"), !Result.Trace.IsEmpty()))
+		{
+			return false;
+		}
+		GroundDeg = Result.Trace.Last().Out.GroundDeg;
+	}
+	if (!TestTrue(FString::Printf(TEXT("(the fall reads as 5 deg of roll: %.2f)"), GroundDeg.Y), FMath::Abs(FMath::Abs(GroundDeg.Y) - 5.0) <= 0.3))
+	{
+		return false;
+	}
+	// A roll preferred 2.5 deg the other way: 7.5 deg of correction wanted, 6 to be had.
+	FOptions Options = MakeOptions(Kit, 0);
+	Options.Tuning.LevelReferenceDeg = FVector2D(0.0, -2.5 * FMath::Sign(GroundDeg.Y));
+	Options.SpeedCmS = 0.0;
+	Options.MaxSeconds = 17.0;
+	Options.PitchPerAccelDeg = BodyPitchPerAccel;
+	Options.Drive.bOn = true;
+	Options.bKeepTrace = true;
+	Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, 120.0));
+	const FResult Result = DryRun::Run(Kit.Robot, Fall, Options);
+	double		  StandingRoll = 0.0, CruiseScale = 1.0, CruiseSpeed = 0.0, CruiseRoll = 0.0, CruiseError = 0.0;
+	bool		  bStandingAtReach = false, bCruisePastReach = false;
+	for (const FSample& Sample : Result.Trace)
+	{
+		if (Sample.Seconds > 4.0 && Sample.Seconds < 5.0)
+		{
+			StandingRoll = FMath::Max(StandingRoll, FMath::Abs(Sample.Out.AppliedDeg.Y));
+			bStandingAtReach = bStandingAtReach || Sample.Out.Status == EStatus::AtReach;
+		}
+		if (Sample.Seconds > 12.0)
+		{
+			CruiseScale = FMath::Min(CruiseScale, Sample.Out.SpeedScale);
+			CruiseSpeed = FMath::Max(CruiseSpeed, FMath::Abs(Sample.SpeedCmS));
+			CruiseRoll = FMath::Max(CruiseRoll, FMath::Abs(Sample.Out.AppliedDeg.Y));
+			CruiseError = FMath::Max(CruiseError, Sample.Out.ErrorDeg);
+			bCruisePastReach = bCruisePastReach || Sample.Out.Status == EStatus::PastReach;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("standing: roll carried %.2f deg, at reach %d | from 7 s after the stick: least scale %.3f, top speed %.0f cm/s, roll carried %.2f deg, past reach %d"),
+		StandingRoll, bStandingAtReach ? 1 : 0, CruiseScale, CruiseSpeed, CruiseRoll, bCruisePastReach ? 1 : 0));
+	TestTrue(FString::Printf(TEXT("standing: all of the roll limit is carried and the robot is at reach (%.2f deg)"), StandingRoll), StandingRoll >= 5.8 && bStandingAtReach);
+	TestTrue(FString::Printf(TEXT("at speed the roll is out (%.2f deg carried)"), CruiseRoll), CruiseRoll <= 0.05);
+	TestTrue(FString::Printf(TEXT("... the drive is not held for it (least scale %.3f)"), CruiseScale), CruiseScale >= 0.95);
+	TestTrue(FString::Printf(TEXT("... the robot at its speed (%.0f cm/s)"), CruiseSpeed), CruiseSpeed >= 110.0);
+	TestFalse(TEXT("... and that is not called being past reach"), bCruisePastReach);
+	// (Where the base is wanted is where the roll left in it has it: a wanted attitude held to the tilt policy's bound
+	// would stand 2.5 deg from the base for as long as the fall lasts, an error no leg may close.)
+	TestTrue(FString::Printf(TEXT("... the base is where it is wanted (%.2f deg from it at most)"), CruiseError), CruiseError <= 0.5);
+	return true;
+}
+
+// Catches: a drive slowed for a turn of the ground that no leg is answering. At a speed at which a three-point robot
+// carries no roll, a cross fall that comes on under it turns the ground in roll faster than its lifts could follow;
+// the speed cap, which slows the robot to the speed at which the legs can follow the ground, slowed it to a crawl for
+// a roll it had decided not to follow at all (the simulator: full stick over a course whose cross fall comes and goes,
+// down to a fifth of the stick for ten seconds). With the roll out, neither the ground's turning in roll nor the roll
+// it leaves between the base and where it is wanted asks anything of the drive; nor is a fall of more than the tilt
+// policy's bound, left in the base that way, counted as past reach on a tick the allocation is cut (the drive put on
+// the scale's floor). At a walk the roll is carried onto the fall as before.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunNoCapForRollNotCarried,
+	"Ramms.Level.DryRun.NoSpeedCapForARollThatIsNotCarried",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunNoCapForRollNotCarried::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	const FKit Kit = SlowLifts();
+	// Flat for 6 m; then a 6 deg cross fall comes on over 60 cm (faster than these lifts turn the roll at any speed
+	// over a crawl) and stays.
+	const FGround Course = [](double X, double Y) {
+		const double Share = X < 600.0 ? 0.0 : X < 660.0 ? (X - 600.0) / 60.0
+														 : 1.0;
+		return Y * FMath::Tan(FMath::DegreesToRadians(6.0)) * Share;
+	};
+	double		 LeastScale[2] = { 1.0, 1.0 };
+	double		 RollCarried[2] = { 0.0, 0.0 };
+	const double Sticks[2] = { 120.0, 40.0 };
+	for (int32 Which = 0; Which < 2; ++Which)
+	{
+		FOptions Options = MakeOptions(Kit, 0);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 40.0;
+		Options.DistanceCm = 1200.0;
+		Options.PitchPerAccelDeg = BodyPitchPerAccel;
+		Options.Drive.bOn = true;
+		Options.bKeepTrace = true;
+		Options.Events.Add(MakeEvent(2.0, EEvent::SetSpeed, 0.0, Sticks[Which]));
+		const FResult Result = DryRun::Run(Kit.Robot, Course, Options);
+		TestTrue(FString::Printf(TEXT("at %.0f cm/s: driven to its end"), Sticks[Which]), Result.TravelCm >= Options.DistanceCm);
+		for (const FSample& Sample : Result.Trace)
+		{
+			// From a span before the fall to two after it is whole.
+			if (Sample.TravelCm > 540.0 && Sample.TravelCm < 800.0)
+			{
+				LeastScale[Which] = FMath::Min(LeastScale[Which], Sample.Out.SpeedScale);
+				RollCarried[Which] = FMath::Max(RollCarried[Which], FMath::Abs(Sample.Out.AppliedDeg.Y));
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("a 6 deg cross fall coming on over 60 cm | at 120 cm/s: least scale %.3f, roll carried %.2f deg | at 40 cm/s: least scale %.3f, roll carried %.2f deg"), LeastScale[0], RollCarried[0], LeastScale[1], RollCarried[1]));
+	TestTrue(FString::Printf(TEXT("at 120 cm/s no roll is carried onto the fall (%.2f deg)"), RollCarried[0]), RollCarried[0] <= 0.05);
+	TestTrue(FString::Printf(TEXT("... and the drive is not slowed for the fall's coming on (least scale %.3f)"), LeastScale[0]), LeastScale[0] >= 0.95);
+	TestTrue(FString::Printf(TEXT("at 40 cm/s the roll is carried onto the fall (%.2f deg)"), RollCarried[1]), RollCarried[1] >= 5.0);
 	return true;
 }
 

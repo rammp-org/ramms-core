@@ -752,6 +752,11 @@ namespace RammsLevel
 		 *  are no less than it (within FullDeg), so that a correction taken up
 		 *  on the move (a hand-back's plane) is walked down, not cut. */
 		FVector2D CarriedDeg = FVector2D::ZeroVector;
+		/** The ground's roll as the terrain estimate has it (deg; NeededDeg.Y
+		 *  is this less the reference's roll), where it is known; where not,
+		 *  the three-point rule's dead band goes by NeededDeg alone. */
+		double GroundRollDeg = 0.0;
+		bool   bGroundRollKnown = false;
 	};
 
 	/**
@@ -767,16 +772,25 @@ namespace RammsLevel
 	 *             no slower than the speed scale's floor of V
 	 *             (bCrest; an axis with no leg rate, no span, or V under
 	 *             QuietSpeedCmS is not limited)
-	 *   3 point : with bThreePoint (the robot's and the rule's), target.Y =
-	 *             min(target.Y, FullDeg.Y times the line from 1 at
-	 *             ThreePointFullCmS to 0 at ThreePointNoneCmS, at the larger of
-	 *             V and AskedSpeedCmS), and 0 while
+	 *   3 point : with bThreePoint (the robot's and the rule's), target.Y = 0
+	 *             while the roll is OUT for the speed: out from
+	 *             ThreePointNoneCmS up, in again from ThreePointFullCmS down,
+	 *             between them as it was (the speed being AskedSpeedCmS where
+	 *             the drive can say, or V less a start's overshoot,
+	 *             ThreePointOvershoot, where that is more; V alone where it
+	 *             cannot); and 0 while
 	 *             roll is not engaged: engaged from |NeededDeg.Y| >=
-	 *             RollEngageDeg until it is under RollLetGoDeg
+	 *             RollEngageDeg until it is under RollLetGoDeg (until the
+	 *             robot has moved RollSpotCm from where the ground's roll last
+	 *             read with no roll carried, the roll needed is counted from
+	 *             that reading: FCarryTuning::RollSpotCm)
 	 *   rising  : without bMayRise an axis' target is no more than the limit
-	 *             it has
+	 *             it has; nor is a three-point robot's roll target while it
+	 *             is faster than its stick asks (it is being slowed)
 	 *
-	 * and the limits move to the target within the tilt policy's rate and
+	 * (a three-point robot's roll limit goes to its target at once on the
+	 * tick roll becomes engaged, where it may rise), and otherwise
+	 * the limits move to the target within the tilt policy's rate and
 	 * acceleration (FTiltTarget, both axes together): what they take out of the
 	 * correction, or give back, turns the rider, and that is a deliberate
 	 * change of the rider's attitude like any other. The first tick takes the
@@ -802,13 +816,16 @@ namespace RammsLevel
 		bool	  IsSeeded() const { return bSeeded; }
 		/** Roll is being corrected at all (the three-point rule's hysteresis). */
 		bool IsRollEngaged() const { return bRollEngaged; }
+		/** The three-point rule has the roll out for the speed (or on its way
+		 *  out: the limit is walked there). */
+		bool IsRollOut() const { return bThreePoint && bRollOut; }
 		/**
-		 * The speed (cm/s) a three-point robot may be driven at while it still
-		 * carries RollCorrectionDeg of roll, of the FullRollDeg it may carry
-		 * at most: the three-point rule's line read the other way (FullCmS
-		 * with all of it, NoneCmS with the last of it). 0: no such limit (not
-		 * that kind of robot as of the last tick, the rule or bHoldSpeed off,
-		 * or the roll under RollClearDeg).
+		 * The speed (cm/s) a three-point robot may be driven at while its roll
+		 * is being eased out for the speed and it still carries
+		 * RollCorrectionDeg of it: ThreePointFullCmS, the most it may go at
+		 * with roll on. 0: no such limit (not that kind of robot as of the
+		 * last tick, the roll not out for the speed, the rule or bHoldSpeed
+		 * off, or the roll under RollClearDeg).
 		 */
 		double HoldSpeedCmS(double RollCorrectionDeg, double FullRollDeg) const;
 
@@ -817,6 +834,15 @@ namespace RammsLevel
 		bool		bSeeded = false;
 		bool		bRollEngaged = false;
 		bool		bThreePoint = false;
+		/** The three-point rule has the roll out for the speed. */
+		bool bRollOut = false;
+		/** Roll was engaged at the last tick. */
+		bool bWasRollEngaged = false;
+		/** The ground's roll as last read with no roll carried (deg), and how
+		 *  far the robot has moved since (cm). */
+		double		FreeGroundRoll = 0.0;
+		bool		bHasFreeGround = false;
+		double		MovedCm = 0.0;
 		double		Speed = 0.0;
 		bool		bHasSpeed = false;
 	};

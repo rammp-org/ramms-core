@@ -26,15 +26,16 @@ namespace
 {
 	// What a robot may carry at speed, and the speed cap's first sign of a break: switches for measuring each
 	// against the law without it (RammsLevel::FCarryTuning, FSpeedCapTuning). Read every tick.
-	TAutoConsoleVariable<int32> CVarLevelCrestRule(TEXT("Ramms.Level.CrestRule"), 1,
-		TEXT("Level assist: 1 = carry no more correction than the legs can take back out while a grade break passes under them at the speed the robot has (a crest then costs no more than switched off; a slope taken fast is left partly in the base). 0 = level all of every slope at any speed."));
-	TAutoConsoleVariable<int32> CVarLevelThreePointRule(TEXT("Ramms.Level.ThreePointRule"), 1,
-		TEXT("Level assist, on a robot whose roll correction stands it on three points: 1 = roll levelled standing and at a crawl only, eased out as the speed rises, not brought back while braking, and a roll under the dead band not corrected. 0 = roll levelled at any speed."));
-	TAutoConsoleVariable<int32> CVarLevelThreePointHoldSpeed(TEXT("Ramms.Level.ThreePointHoldSpeed"), 1,
+	// (Each starts as RammsLevel::FCarryTuning has it: the defaults are kept there.)
+	TAutoConsoleVariable<int32> CVarLevelCrestRule(TEXT("Ramms.Level.CrestRule"), RammsLevel::FCarryTuning().bCrest ? 1 : 0,
+		TEXT("Level assist: 1 = carry no more correction than the legs can take back out while a grade break passes under them at the speed the robot has (a crest then costs no more than switched off; a slope taken fast is left partly in the base). 0 = level all of every slope at any speed (the default: the rule cannot tell a slope that ends in a crest from one that does not, and on slow legs it costs every fast slope more than it saves at a crest)."));
+	TAutoConsoleVariable<int32> CVarLevelThreePointRule(TEXT("Ramms.Level.ThreePointRule"), RammsLevel::FCarryTuning().bThreePoint ? 1 : 0,
+		TEXT("Level assist, on a robot whose roll correction stands it on three points: 1 = roll levelled standing and up to a walk, eased out as the speed rises past that, not brought back while the robot is being slowed, and a roll under the dead band not corrected. 0 = roll levelled at any speed."));
+	TAutoConsoleVariable<int32> CVarLevelThreePointHoldSpeed(TEXT("Ramms.Level.ThreePointHoldSpeed"), RammsLevel::FCarryTuning().bHoldSpeed ? 1 : 0,
 		TEXT("Level assist, with the three-point rule: 1 = the drive is held to the speed the roll still carried allows while that roll is eased out. 0 = the drive is not held."));
-	TAutoConsoleVariable<float> CVarLevelThreePointFullCmS(TEXT("Ramms.Level.ThreePointFullCmS"), 15.0f,
+	TAutoConsoleVariable<float> CVarLevelThreePointFullCmS(TEXT("Ramms.Level.ThreePointFullCmS"), static_cast<float>(RammsLevel::FCarryTuning().ThreePointFullCmS),
 		TEXT("Level assist, three-point rule: up to this speed (cm/s) all of the roll limit may be carried."));
-	TAutoConsoleVariable<float> CVarLevelThreePointNoneCmS(TEXT("Ramms.Level.ThreePointNoneCmS"), 40.0f,
+	TAutoConsoleVariable<float> CVarLevelThreePointNoneCmS(TEXT("Ramms.Level.ThreePointNoneCmS"), static_cast<float>(RammsLevel::FCarryTuning().ThreePointNoneCmS),
 		TEXT("Level assist, three-point rule: from this speed (cm/s) no roll is carried."));
 	TAutoConsoleVariable<int32> CVarLevelEarlyCap(TEXT("Ramms.Level.EarlyCap"), 1,
 		TEXT("Level assist: 1 = the speed cap slows at the first sign of a grade break (the ground's reading before the terrain estimate's filter), held through the break. 0 = only the filtered turn, as before."));
