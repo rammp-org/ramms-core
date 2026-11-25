@@ -364,7 +364,10 @@ bool FRammsLevelGen1ShapeStands::RunTest(const FString& Parameters)
 
 // Catches: a roll correction given to a pair that roll does not reach; a base left tilted, or hunting, on the three
 // points a roll correction puts it on (both drive wheels and one wheel of the rear pair, the other in the air); a
-// drive wheel off the ground there; and a cross slope past the roll allowed taken for a fault.
+// drive wheel off the ground there; and a cross slope past the roll allowed taken for a fault. And roll carried at
+// speed: on three points this kind of robot swings about its heavier drive wheel when it is braked, so roll is
+// levelled at a crawl only (FCarryTuning's three-point rule) and at a walk the robot is on all four wheels along the
+// fall, the fall left in the base.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelGen1ShapeThreePoints,
 	"Ramms.Level.Gen1Shape.CrossSlopeOnThreePoints",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -379,35 +382,56 @@ bool FRammsLevelGen1ShapeThreePoints::RunTest(const FString& Parameters)
 		// Driven from the flat onto a cross fall that comes on over a metre and a half, along it, and off again.
 		for (const double CrossDeg : { 2.0, 5.0 })
 		{
-			FOptions Options = MakeOptions(Rate);
-			Options.SpeedCmS = 60.0;
-			Options.DistanceCm = 1100.0;
-			// (A warp from a cross fall one way to the other is twice the roll: two of them make on and off.)
-			const FGround On = Warp(CrossDeg / 2.0, 150.0, 150.0);
-			const FGround Course = [On, CrossDeg](double X, double Y) {
-				// Level, falling to -Y by CrossDeg from 300 to 700, level again from 850.
-				const double Tan = FMath::Tan(FMath::DegreesToRadians(CrossDeg));
-				const double Share = X < 150.0 ? 0.0 : X < 300.0 ? (X - 150.0) / 150.0
-					: X < 700.0									 ? 1.0
-					: X < 850.0									 ? 1.0 - (X - 700.0) / 150.0
-																 : 0.0;
-				return Y * Tan * Share;
-			};
-			const FResult Result = DryRun::Run(Robot, Course, Options);
-			const FString Case = FString::Printf(TEXT("a %.0f deg cross fall at 60 cm/s, %s"), CrossDeg, FrameNames[Rate]);
-			Report(*this, *Case, Rate, Result);
-			ExpectSound(*this, Case, Result, Options.Tuning);
-			TestTrue(Case + TEXT(": driven to its end"), Result.TravelCm >= Options.DistanceCm);
-			const FPassage Along = PassageBetween(Result, Options.Tuning, 450.0, 650.0, Options.FrameSeconds);
-			const FPassage Whole = PassageBetween(Result, Options.Tuning, 0.0, 1100.0, Options.FrameSeconds);
-			AddInfo(FString::Printf(TEXT("%s | along the fall %.2f deg, %d to %d wheels down; over the whole course %.2f deg at %.1f deg/s"), *Case, Along.PeakDeg, Along.LeastTouching, Along.MostTouching, Whole.PeakDeg,
-				Whole.RateDegPerSec));
-			TestTrue(Case + FString::Printf(TEXT(": level along the fall (%.2f deg)"), Along.PeakDeg), Along.PeakDeg <= 0.3);
-			// Three points: both drive wheels and the rear wheel on the high side.
-			TestEqual(Case + TEXT(": on three wheels along the fall"), Along.MostTouching, 3);
-			TestEqual(Case + TEXT(": never on fewer"), Along.LeastTouching, 3);
-			TestTrue(Case + FString::Printf(TEXT(": the rider turned gently coming on and off it (%.1f deg/s, %.2f deg)"), Whole.RateDegPerSec, Whole.PeakDeg), Whole.RateDegPerSec <= 4.0 && Whole.PeakDeg <= 1.5);
-			TestTrue(Case + FString::Printf(TEXT(": level again on the flat (%.2f deg)"), Result.FinalTiltDeg), Result.FinalTiltDeg <= 0.3);
+			for (const double Speed : { 12.0, 60.0 })
+			{
+				const bool bCrawl = Speed < 15.0;
+				FOptions   Options = MakeOptions(Rate);
+				Options.SpeedCmS = Speed;
+				Options.MaxSeconds = 120.0;
+				Options.DistanceCm = 1100.0;
+				// (A warp from a cross fall one way to the other is twice the roll: two of them make on and off.)
+				const FGround On = Warp(CrossDeg / 2.0, 150.0, 150.0);
+				const FGround Course = [On, CrossDeg](double X, double Y) {
+					// Level, falling to -Y by CrossDeg from 300 to 700, level again from 850.
+					const double Tan = FMath::Tan(FMath::DegreesToRadians(CrossDeg));
+					const double Share = X < 150.0 ? 0.0 : X < 300.0 ? (X - 150.0) / 150.0
+						: X < 700.0									 ? 1.0
+						: X < 850.0									 ? 1.0 - (X - 700.0) / 150.0
+																	 : 0.0;
+					return Y * Tan * Share;
+				};
+				const FResult Result = DryRun::Run(Robot, Course, Options);
+				const FString Case = FString::Printf(TEXT("a %.0f deg cross fall at %.0f cm/s, %s"), CrossDeg, Speed, FrameNames[Rate]);
+				Report(*this, *Case, Rate, Result);
+				ExpectSound(*this, Case, Result, Options.Tuning);
+				TestTrue(Case + TEXT(": driven to its end"), Result.TravelCm >= Options.DistanceCm);
+				const FPassage Along = PassageBetween(Result, Options.Tuning, 450.0, 650.0, Options.FrameSeconds);
+				const FPassage Whole = PassageBetween(Result, Options.Tuning, 0.0, 1100.0, Options.FrameSeconds);
+				AddInfo(FString::Printf(TEXT("%s | along the fall %.2f deg, %d to %d wheels down; over the whole course %.2f deg at %.1f deg/s"), *Case, Along.PeakDeg, Along.LeastTouching, Along.MostTouching, Whole.PeakDeg,
+					Whole.RateDegPerSec));
+				if (bCrawl)
+				{
+					TestTrue(Case + FString::Printf(TEXT(": level along the fall (%.2f deg)"), Along.PeakDeg), Along.PeakDeg <= 0.3);
+					// Three points: both drive wheels and the rear wheel on the high side.
+					TestEqual(Case + TEXT(": on three wheels along the fall"), Along.MostTouching, 3);
+					TestEqual(Case + TEXT(": never on fewer"), Along.LeastTouching, 3);
+					TestTrue(Case + FString::Printf(TEXT(": the rider turned gently coming on and off it (%.1f deg/s, %.2f deg)"), Whole.RateDegPerSec, Whole.PeakDeg), Whole.RateDegPerSec <= 4.0 && Whole.PeakDeg <= 1.5);
+				}
+				else
+				{
+					// At a walk no roll is carried: all four wheels down along the fall, which is left in the base.
+					TestEqual(Case + TEXT(": on all four wheels along the fall"), Along.LeastTouching, 4);
+					TestTrue(Case + FString::Printf(TEXT(": the fall left in the base (%.2f deg)"), Along.PeakDeg), Along.PeakDeg >= CrossDeg - 0.3 && Along.PeakDeg <= CrossDeg + 0.3);
+					TestTrue(Case + FString::Printf(TEXT(": the rider turned no faster than the ground turns (%.1f deg/s)"), Whole.RateDegPerSec), Whole.RateDegPerSec <= 4.0);
+					double MostRoll = 0.0;
+					for (const FSample& Sample : Result.Trace)
+					{
+						MostRoll = FMath::Max(MostRoll, FMath::Abs(Sample.Out.AppliedDeg.Y));
+					}
+					TestTrue(Case + FString::Printf(TEXT(": no roll correction carried at any time (%.3f deg)"), MostRoll), MostRoll <= 0.05);
+				}
+				TestTrue(Case + FString::Printf(TEXT(": level again on the flat (%.2f deg)"), Result.FinalTiltDeg), Result.FinalTiltDeg <= 0.3);
+			}
 		}
 
 		// Parked across a fall past what roll is allowed (6 deg): held at the limit, the rest taken as tilt, no fault.
@@ -471,7 +495,10 @@ bool FRammsLevelGen1ShapeRamp::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("%s | rider %.2f deg at %.1f deg/s (switched off %.2f at %.1f); speed kept %.2f, least scale %.2f, least speed %.1f cm/s; on the ramp %.2f deg at %.1f cm/s; most wheels down %d"), *Case,
 				On.PeakDeg, On.RateDegPerSec, Was.PeakDeg, Was.RateDegPerSec, Kept, Result.MinSpeedScale, On.LeastSpeedCmS, Steady.PeakDeg, Steady.MeanSpeedCmS, On.MostTouching));
 			TestTrue(Case + FString::Printf(TEXT(": never slowed to a stop (%.1f cm/s)"), On.LeastSpeedCmS), On.LeastSpeedCmS >= Speed * Options.Tuning.MinSpeedScale);
-			TestTrue(Case + FString::Printf(TEXT(": level on the ramp (%.2f deg)"), Steady.PeakDeg), Steady.PeakDeg <= 0.4);
+			if (Speed <= 60.0)
+			{
+				TestTrue(Case + FString::Printf(TEXT(": level on the ramp (%.2f deg)"), Steady.PeakDeg), Steady.PeakDeg <= 0.4);
+			}
 			TestTrue(Case + FString::Printf(TEXT(": driven up it at the speed the stick asks (%.1f cm/s)"), Steady.MeanSpeedCmS), Steady.MeanSpeedCmS >= 0.95 * Speed);
 			TestTrue(Case + FString::Printf(TEXT(": the rider turned no faster than switched off (%.1f against %.1f deg/s)"), On.RateDegPerSec, Was.RateDegPerSec), On.RateDegPerSec <= Was.RateDegPerSec + 0.1);
 			TestTrue(Case + FString::Printf(TEXT(": level again at the end (%.2f deg)"), Result.FinalTiltDeg), Result.FinalTiltDeg <= 0.3);
@@ -488,7 +515,12 @@ bool FRammsLevelGen1ShapeRamp::RunTest(const FString& Parameters)
 				// At full speed the ramp's foot turns the ground faster than the rear lift can follow: the drive is
 				// led down for the breaks, and what is left is far under switched off.
 				TestTrue(Case + FString::Printf(TEXT(": the drive slowed for the breaks (scale %.2f)"), Result.MinSpeedScale), Result.MinSpeedScale <= 0.9);
-				TestTrue(Case + FString::Printf(TEXT(": the rider within 2.5 deg (%.2f; switched off %.2f)"), On.PeakDeg, Was.PeakDeg), On.PeakDeg <= 2.5 && On.PeakDeg <= 0.5 * Was.PeakDeg);
+				// (At full speed this robot carries only the correction its slow rear lift can take back out while a
+				// break passes under it, FCarryTuning's crest rule: most of the ramp is left in the base on the way
+				// up, and the ramp's ends then throw the rider no further than they do switched off. Before the rule
+				// the ramp was held level and the rider was within 2.5 deg here; a crest twice as sharp threw the
+				// levelled rider half as far again as the one switched off.)
+				TestTrue(Case + FString::Printf(TEXT(": the rider no worse than the ramp's own grade (%.2f; switched off %.2f)"), On.PeakDeg, Was.PeakDeg), On.PeakDeg <= GradeDeg + 0.5 && On.PeakDeg <= 0.8 * Was.PeakDeg);
 				TestTrue(Case + FString::Printf(TEXT(": most of the pace kept (%.2f)"), Kept), Kept >= 0.6);
 			}
 		}

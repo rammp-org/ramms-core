@@ -82,6 +82,8 @@ namespace RammsLevelDryRunTests
 		 *  aft and across, as the law takes it): the speed cap keeps it to the
 		 *  speed at which a grade's end turns the ground 6 deg/s under them. */
 		double SpanCm = 0.0;
+		/** How much correction it may carry at speed (FCarryLimit::Tuning). */
+		FCarryTuning Carry;
 	};
 
 	/** The six-wheeled robot: four corner legs and two centre legs. */
@@ -117,6 +119,11 @@ namespace RammsLevelDryRunTests
 		Kit.Name = TEXT("drive pairs");
 		Kit.Robot = MakeTwoDrivePairsRobot();
 		Kit.Tuning.MaxCorrectionDeg = FVector2D(15.0, 6.0);
+		// Its courses show the law's own roll levelling, at a walk. That a robot
+		// of this kind is to carry roll at a crawl only (it stands on three
+		// points with any) is tried where that rule is the subject
+		// (RollCarriedAtACrawlOnly); here the rule is off.
+		Kit.Carry.bThreePoint = false;
 		Kit.GradeDeg = 3.0;
 		Kit.CrossDeg = 5.0;
 		Kit.RampLegs.Add(2);
@@ -143,10 +150,23 @@ namespace RammsLevelDryRunTests
 		return Out;
 	}
 
+	/**
+	 * A kit for the cases whose subject is how the legs FOLLOW the ground at speed, or what the speed cap and the seat
+	 * do for that: the crest rule (how much correction a robot may carry at the speed it has, FCarryTuning) is off, so
+	 * that the base is levelled all the way up a slope at any speed, as those cases were written for. What the rule
+	 * does, and costs, is CarriedAtSpeed's subject.
+	 */
+	FKit FollowingOnly(FKit Kit)
+	{
+		Kit.Carry.bCrest = false;
+		return Kit;
+	}
+
 	FOptions MakeOptions(const FKit& Kit, int32 Rate)
 	{
 		FOptions Options;
 		Options.Tuning = Kit.Tuning;
+		Options.Carry = Kit.Carry;
 		Options.FrameSeconds = FrameSeconds[Rate];
 		Options.SpeedCmS = Kit.SpeedCmS;
 		Options.MaxSeconds = 40.0;
@@ -1618,8 +1638,9 @@ bool FRammsLevelDryRunAtSpeed::RunTest(const FString& Parameters)
 
 	const double	   Speeds[3] = { 40.0, 80.0, 120.0 };
 	const TCHAR* const Cases[3] = { TEXT("grade break at 40 cm/s"), TEXT("grade break at 80 cm/s"), TEXT("grade break at 120 cm/s") };
-	for (const FKit& Kit : Kits())
+	for (const FKit& Each : Kits())
 	{
+		const FKit	  Kit = FollowingOnly(Each);
 		const FGround Course = RampUp(Kit.GradeDeg, 900.0);
 		for (int32 Rate = 0; Rate < 3; ++Rate)
 		{
@@ -2503,8 +2524,9 @@ bool FRammsLevelDryRunAtSpeedBody::RunTest(const FString& Parameters)
 	using namespace RammsLevelDryRunTests;
 
 	const double Speeds[3] = { 40.0, 80.0, 120.0 };
-	for (const FKit& Kit : Kits())
+	for (const FKit& Each : Kits())
 	{
+		const FKit	  Kit = FollowingOnly(Each);
 		const FGround Course = RampUp(Kit.GradeDeg, 900.0);
 		for (int32 Rate = 0; Rate < 3; ++Rate)
 		{
@@ -3189,7 +3211,7 @@ bool FRammsLevelDryRunSpeedCap::RunTest(const FString& Parameters)
 {
 	using namespace RammsLevelDryRunTests;
 
-	const FKit				   Kit = QuickOnFour();
+	const FKit				   Kit = FollowingOnly(QuickOnFour());
 	const TArray<FReachCourse> Courses = ReachCourses();
 	const int32				   Rates[2] = { 0, 2 };
 	for (const FReachCourse& Course : Courses)
@@ -3913,7 +3935,7 @@ bool FRammsLevelDryRunSeatCover::RunTest(const FString& Parameters)
 	// held to the speed at which the slope's end turns the ground as fast as
 	// they can follow, and the crest turns it twice as far.
 	{
-		FKit Slow = QuickOnFour();
+		FKit Slow = FollowingOnly(QuickOnFour());
 		Slow.Name = TEXT("quick on four, a slow plane");
 		Slow.Tuning.MaxCorrectionRateDegPerSec = 4.0;
 		const FReachCourse& Crest = Courses[0];
@@ -3949,7 +3971,7 @@ bool FRammsLevelDryRunSeatCover::RunTest(const FString& Parameters)
 	// The speed cap's courses as they are: no seam worse for the seat, quick
 	// or slow. And what sending the seat ahead by the ground's last turn buys
 	// there (FSeatCoverTuning::GroundAhead).
-	const FKit Kit = QuickOnFour();
+	const FKit Kit = FollowingOnly(QuickOnFour());
 	double	   SumWithout = 0.0;
 	double	   SumWith = 0.0;
 	double	   SumAhead = 0.0;
@@ -4132,7 +4154,7 @@ bool FRammsLevelDryRunUnlockedCrest::RunTest(const FString& Parameters)
 {
 	using namespace RammsLevelDryRunTests;
 
-	const FKit				   Kit = QuickOnFour();
+	const FKit				   Kit = FollowingOnly(QuickOnFour());
 	const TArray<FReachCourse> Courses = ReachCourses();
 	// The 12 deg crest and the 6 deg break.
 	for (int32 CourseIndex = 0; CourseIndex < 2 && CourseIndex < Courses.Num(); ++CourseIndex)
@@ -4180,7 +4202,9 @@ bool FRammsLevelDryRunUnlockedCrest::RunTest(const FString& Parameters)
 				// The pose it steers by is most of a frame old: that much is lost, and no more.
 				TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider as level as frame-locked, but for the pose's age (%.2f against %.2f deg)"), Uneven.PeakOffDeg, Even.PeakOffDeg)),
 					Uneven.PeakOffDeg <= Even.PeakOffDeg + 0.7);
-				TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider turned as gently (%.1f against %.1f deg/s)"), Uneven.RateDegPerSec, Even.RateDegPerSec)), Uneven.RateDegPerSec <= Even.RateDegPerSec + 2.0);
+				// (Half a degree a second more than it was held to: frame-locked, the speed cap now slows at a break's
+				// first sign, which a pose most of a frame old shows that much later.)
+				TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider turned as gently (%.1f against %.1f deg/s)"), Uneven.RateDegPerSec, Even.RateDegPerSec)), Uneven.RateDegPerSec <= Even.RateDegPerSec + 2.5);
 				TestTrue(Say(Seam.Name, FString::Printf(TEXT("the rider far better off than with the switch off (%.2f against %.2f deg)"), Uneven.PeakOffDeg, Was.PeakOffDeg)), Uneven.PeakOffDeg <= 0.4 * Was.PeakOffDeg);
 			}
 			// What the fault was, kept measured: the same frames and poses with the law on the tick's clock.
@@ -4320,7 +4344,7 @@ bool FRammsLevelDryRunCapOnALoop::RunTest(const FString& Parameters)
 {
 	using namespace RammsLevelDryRunTests;
 
-	const FKit				   Kit = QuickOnFour();
+	const FKit				   Kit = FollowingOnly(QuickOnFour());
 	const TArray<FReachCourse> Courses = ReachCourses();
 	if (!TestTrue(TEXT("the courses"), Courses.Num() >= 4))
 	{
@@ -4449,6 +4473,408 @@ bool FRammsLevelDryRunCapOnALoop::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("reverse downhill: steady at the stick's speed three seconds on (%.0f to %.0f cm/s)"), Late.X, Late.Y), Late.X >= 57.0 && Late.Y <= 63.0);
 		TestTrue(FString::Printf(TEXT("reverse downhill: (as the cap was, the speed swung by half: down to %.0f cm/s)"), WasEarly.X), WasEarly.X <= 0.6 * 60.0);
 		TestTrue(TEXT("reverse downhill: the rider level"), Result.SteadyRiderResidualDeg <= 0.3);
+	}
+	return true;
+}
+
+namespace RammsLevelDryRunTests
+{
+	/**
+	 * A made-up robot of the drive-pairs kind with slow lifts and a top speed: two drive legs each on its own lift
+	 * (roll reaches them), a rear pair on one slow lift 70 cm aft, the front pair carried 8 cm clear. Its lifts turn a
+	 * pitch correction at under 6 deg/s; it is driven at 60 and at 120 cm/s. Roll is capped at 6 deg.
+	 */
+	FKit SlowLifts()
+	{
+		FKit Kit;
+		Kit.Name = TEXT("slow lifts");
+		const auto Leg = [](double X, double Y, double Half, double Radius, double Z, double Rate, bool bRoll) {
+			FRobotLeg Out;
+			Out.XY = FVector2D(X, Y);
+			Out.PairHalfTrackCm = Half;
+			Out.RadiusCm = Radius;
+			Out.StanceZ = Z;
+			Out.MinZ = Z - 12.0;
+			Out.MaxZ = Z + 12.0;
+			Out.MaxRateCmS = Rate;
+			Out.MaxAccelCmS2 = 200.0;
+			Out.bRoll = bRoll;
+			return Out;
+		};
+		Kit.Robot.Legs.Add(Leg(0.0, -30.0, 0.0, 17.0, -15.0, 9.0, true));
+		Kit.Robot.Legs.Add(Leg(0.0, 30.0, 0.0, 17.0, -15.0, 9.0, true));
+		Kit.Robot.Legs.Add(Leg(-70.0, 0.0, 11.0, 7.5, -24.5, 6.0, false));
+		Kit.Robot.Legs.Add(Leg(30.0, 0.0, 18.0, 7.5, -16.5, 10.0, false));
+		Kit.Robot.CentreOfMass = FVector(-17.0, 0.0, 20.0);
+		Kit.Tuning.MaxCorrectionDeg = FVector2D(10.0, 6.0);
+		Kit.Tuning.MaxCorrectionRateDegPerSec = 8.0;
+		Kit.SpeedCmS = 120.0;
+		Kit.SpanCm = 60.0;
+		return Kit;
+	}
+
+	/** Up Grade for 6 m from 300 cm, down again for 6 m: a crest of twice Grade at 900 cm. */
+	FGround CrestOf(double GradeDeg)
+	{
+		const FVector2D Knots[3] = { { 300.0, 0.0 }, { 900.0, Rise(600.0, GradeDeg) }, { 1500.0, 0.0 } };
+		return Profile(MakeArrayView(Knots));
+	}
+
+	/** Levelled where it stands for three seconds, then driven at Stick over a course 19 m long, on a drive that is a
+	 *  speed loop and with a body that pitches as it is pushed. */
+	FOptions DrivenOver(const FKit& Kit, double Stick)
+	{
+		FOptions Options = MakeOptions(Kit, 0);
+		Options.SpeedCmS = 0.0;
+		Options.DistanceCm = 1900.0;
+		Options.MaxSeconds = 90.0;
+		Options.PitchPerAccelDeg = BodyPitchPerAccel;
+		Options.Drive.bOn = true;
+		Options.bKeepTrace = true;
+		Options.Events.Add(MakeEvent(3.0, EEvent::SetSpeed, 0.0, Stick));
+		return Options;
+	}
+} // namespace RammsLevelDryRunTests
+
+// Catches: a robot levelled on a slope it takes fast being thrown further over the crest than one that was never
+// levelled. The correction it carries up the slope is wrong by twice the slope on the far side, and legs that cannot
+// take it back out while the crest passes under them leave the rider with the difference (a robot on slow lifts at
+// full stick over a 12 deg crest: half as far again as switched off). With the crest rule (FCarryTuning) the robot
+// carries no more correction than its legs can take back out in that time, slowed as the speed cap will slow it: over
+// every crest it is then thrown no further than switched off, at the price of a slope taken at full speed being left
+// partly in the base; at half that speed, where the cap can slow the robot on the break, the rule asks nothing and
+// the slope is held level as before. No look-ahead: the tilt RATE over a sharp crest at full stick stays far over the
+// rider's limit, as it is switched off (reported, not bounded).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunCarriedAtSpeed,
+	"Ramms.Level.DryRun.CarriedAtSpeed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunCarriedAtSpeed::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	for (int32 Which = 0; Which < 2; ++Which)
+	{
+		// The slow lifts at their full speed; the quick legs at twice theirs (where the rule first binds on them).
+		const FKit	 Kit = Which == 0 ? SlowLifts() : QuickOnFour();
+		const double Span = Which == 0 ? 70.0 : OnFourSpanCm;
+		for (const double GradeDeg : { 2.5, 4.0, 6.0 })
+		{
+			const FGround  Ground = CrestOf(GradeDeg);
+			const FOptions Options = DrivenOver(Kit, 120.0);
+			FOptions	   OffOptions = Options;
+			OffOptions.bEnabledAtStart = false;
+			FOptions NoRule = Options;
+			NoRule.Carry.bCrest = false;
+			const FResult	  Result = DryRun::Run(Kit.Robot, Ground, Options);
+			const FResult	  Without = DryRun::Run(Kit.Robot, Ground, NoRule);
+			const FResult	  Off = DryRun::Run(Kit.Robot, Ground, OffOptions);
+			const double	  From = 880.0, To = 900.0 + Span + 120.0;
+			const FRiderSwing On = RiderOver(Result, From, To, Options.FrameSeconds);
+			const FRiderSwing Was = RiderOver(Without, From, To, Options.FrameSeconds);
+			const FRiderSwing None = RiderOver(Off, From, To, Options.FrameSeconds);
+			const FPassage	  Climb = PassageBetween(Result, Kit.Tuning, 550.0, 850.0, Options.FrameSeconds);
+			const FString	  Case = FString::Printf(TEXT("%s at 120 cm/s over a %.0f deg crest"), Kit.Name, 2.0 * GradeDeg);
+			AddInfo(FString::Printf(TEXT("%s | rider %.2f deg at %.1f deg/s; without the rule %.2f at %.1f; switched off %.2f at %.1f | on the climb the base %.2f deg off at %.0f cm/s | %.1f s, without the rule %.1f, switched off %.1f"), *Case,
+				On.PeakOffDeg, On.RateDegPerSec, Was.PeakOffDeg, Was.RateDegPerSec, None.PeakOffDeg, None.RateDegPerSec, Climb.PeakDeg, Climb.MeanSpeedCmS, Result.Seconds - 3.0, Without.Seconds - 3.0, Off.Seconds - 3.0));
+			ExpectSound(*this, Kit, 0, Result);
+			TestTrue(Case + TEXT(": driven to its end"), Result.TravelCm >= Options.DistanceCm && Off.TravelCm >= Options.DistanceCm);
+			TestTrue(Case + FString::Printf(TEXT(": the rider thrown no further than switched off (%.2f against %.2f deg)"), On.PeakOffDeg, None.PeakOffDeg), On.PeakOffDeg <= None.PeakOffDeg + 0.1);
+			TestTrue(Case + FString::Printf(TEXT(": ... nor turned faster (%.1f against %.1f deg/s)"), On.RateDegPerSec, None.RateDegPerSec), On.RateDegPerSec <= None.RateDegPerSec + 0.5);
+			TestTrue(Case + FString::Printf(TEXT(": the slope is never left whole in the base (%.2f of %.1f deg)"), Climb.PeakDeg, GradeDeg), Climb.PeakDeg <= GradeDeg - 0.5);
+			if (GradeDeg >= (Which == 0 ? 4.0 : 6.0))
+			{
+				TestTrue(Case + FString::Printf(TEXT(": (without the rule the rider is thrown further than switched off: %.2f against %.2f deg)"), Was.PeakOffDeg, None.PeakOffDeg), Was.PeakOffDeg >= None.PeakOffDeg + 0.3);
+				TestTrue(Case + TEXT(": the correction is held back for the speed on the climb, and that is not being at reach"), Result.Trace.ContainsByPredicate([](const FSample& Sample) {
+					return Sample.TravelCm > 600.0 && Sample.TravelCm < 850.0 && Sample.Out.bEased && Sample.Out.Status == EStatus::Levelling;
+				}));
+			}
+			TestTrue(Case + FString::Printf(TEXT(": the pace kept (%.1f s against %.1f switched off)"), Result.Seconds - 3.0, Off.Seconds - 3.0), Result.Seconds - 3.0 <= 1.25 * (Off.Seconds - 3.0));
+		}
+	}
+	// At half the slow lifts' speed the cap can slow the robot on the break: nothing is held back, the 6 deg slope is
+	// level all the way up, and the crest is no worse than switched off all the same.
+	{
+		const FKit	   Kit = SlowLifts();
+		const FGround  Ground = CrestOf(6.0);
+		const FOptions Options = DrivenOver(Kit, 60.0);
+		FOptions	   OffOptions = Options;
+		OffOptions.bEnabledAtStart = false;
+		const FResult	  Result = DryRun::Run(Kit.Robot, Ground, Options);
+		const FResult	  Off = DryRun::Run(Kit.Robot, Ground, OffOptions);
+		const FPassage	  Climb = PassageBetween(Result, Kit.Tuning, 550.0, 850.0, Options.FrameSeconds);
+		const FRiderSwing On = RiderOver(Result, 880.0, 1090.0, Options.FrameSeconds);
+		const FRiderSwing None = RiderOver(Off, 880.0, 1090.0, Options.FrameSeconds);
+		AddInfo(FString::Printf(TEXT("slow lifts at 60 cm/s over a 12 deg crest | on the climb the base %.2f deg off | rider over the crest %.2f deg at %.1f deg/s; switched off %.2f at %.1f"), Climb.PeakDeg, On.PeakOffDeg, On.RateDegPerSec,
+			None.PeakOffDeg, None.RateDegPerSec));
+		TestTrue(FString::Printf(TEXT("at 60 cm/s: the 6 deg slope held level (%.2f deg)"), Climb.PeakDeg), Climb.PeakDeg <= 0.4);
+		TestTrue(TEXT("at 60 cm/s: nothing held back for the speed on the climb"), !Result.Trace.ContainsByPredicate([](const FSample& Sample) { return Sample.TravelCm > 600.0 && Sample.TravelCm < 850.0 && Sample.Out.bEased; }));
+		TestTrue(FString::Printf(TEXT("at 60 cm/s: the crest no worse than switched off (%.2f against %.2f deg)"), On.PeakOffDeg, None.PeakOffDeg), On.PeakOffDeg <= None.PeakOffDeg + 0.1);
+	}
+	return true;
+}
+
+// Catches: a speed cap that hears of a grade break only through two low-passes (a third of a second, half a span at
+// full speed), and one that answers things that are not ground. The first sign of a break is read where it shows
+// first and the drive slowed from then: the rider is turned more gently onto a grade than with that term off, at no
+// lower a speed than a first sign is trusted with. And a start from rest, whose drive overshoots what its stick asks
+// as it arrives, costs nothing (it took the scale to two thirds for a third of a second), nor does a speed that
+// wanders about what is asked at a steady pace.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunCapFirstSign,
+	"Ramms.Level.DryRun.SpeedCapFirstSignAndStarts",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunCapFirstSign::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	for (int32 Which = 0; Which < 2; ++Which)
+	{
+		// (The crest rule off: the base is levelled all the way, and what the cap does for a break is all there is.)
+		const FKit	   Kit = FollowingOnly(Which == 0 ? SlowLifts() : QuickOnFour());
+		const double   Span = Which == 0 ? 70.0 : OnFourSpanCm;
+		const FGround  Ground = CrestOf(4.0);
+		const FOptions Options = DrivenOver(Kit, 120.0);
+		FOptions	   Late = Options;
+		Late.SpeedCap.EarlyHeldSpans = 0.0;
+		const FResult	  Result = DryRun::Run(Kit.Robot, Ground, Options);
+		const FResult	  Before = DryRun::Run(Kit.Robot, Ground, Late);
+		const FRiderSwing On = RiderOver(Result, 280.0, 300.0 + Span + 120.0, Options.FrameSeconds);
+		const FRiderSwing Was = RiderOver(Before, 280.0, 300.0 + Span + 120.0, Options.FrameSeconds);
+		const FVector2D	  Speeds = SpeedsOver(Result, 280.0, 300.0 + Span + 120.0);
+		AddInfo(FString::Printf(TEXT("%s at 120 cm/s onto 4 deg | rider %.2f deg at %.1f deg/s; without the first sign %.2f at %.1f | least speed %.0f cm/s"), Kit.Name, On.PeakOffDeg, On.RateDegPerSec, Was.PeakOffDeg, Was.RateDegPerSec, Speeds.X));
+		TestTrue(FString::Printf(TEXT("%s onto 4 deg: the rider turned more gently for the first sign (%.1f against %.1f deg/s)"), Kit.Name, On.RateDegPerSec, Was.RateDegPerSec), On.RateDegPerSec <= Was.RateDegPerSec - 0.3);
+		TestTrue(FString::Printf(TEXT("%s onto 4 deg: ... and left no further off (%.2f against %.2f deg)"), Kit.Name, On.PeakOffDeg, Was.PeakOffDeg), On.PeakOffDeg <= Was.PeakOffDeg + 0.02);
+		TestTrue(FString::Printf(TEXT("%s onto 4 deg: never brought near a stand (%.0f cm/s)"), Kit.Name, Speeds.X), Speeds.X >= 0.45 * 120.0);
+
+		// Starts from rest on the flat, and the cruise after, with a little noise on the attitude.
+		for (const double Stick : { 30.0, 60.0, 120.0 })
+		{
+			FOptions Start = MakeOptions(Kit, 0);
+			Start.SpeedCmS = 0.0;
+			Start.MaxSeconds = 12.0;
+			Start.PitchPerAccelDeg = BodyPitchPerAccel;
+			Start.Drive.bOn = true;
+			Start.NoiseDeg = 0.02;
+			Start.bKeepTrace = true;
+			Start.Events.Add(MakeEvent(3.0, EEvent::SetSpeed, 0.0, Stick));
+			FOptions AsItWas = Start;
+			AsItWas.SpeedCap.OverspeedSettleSeconds = 0.0;
+			AsItWas.SpeedCap.OverspeedBandShare = 0.0;
+			AsItWas.SpeedCap.OverspeedBandCmS = 0.0;
+			AsItWas.SpeedCap.OverspeedGain = 2.0;
+			const FResult Run = DryRun::Run(Kit.Robot, Plane(0.0, 0.0), Start);
+			const FResult Old = DryRun::Run(Kit.Robot, Plane(0.0, 0.0), AsItWas);
+			AddInfo(FString::Printf(TEXT("%s, a start to %.0f cm/s | least scale %.3f; as the over-speed term was %.3f"), Kit.Name, Stick, Run.MinSpeedScale, Old.MinSpeedScale));
+			TestTrue(FString::Printf(TEXT("%s, a start to %.0f cm/s and the cruise after: nothing asked of the drive (%.3f)"), Kit.Name, Stick, Run.MinSpeedScale), Run.MinSpeedScale >= 0.999);
+			TestTrue(FString::Printf(TEXT("%s, a start to %.0f cm/s: (as it was, the start's overshoot took the scale to %.2f)"), Kit.Name, Stick, Old.MinSpeedScale), Old.MinSpeedScale <= 0.85);
+		}
+	}
+	return true;
+}
+
+// Catches: roll carried at speed by a robot that a roll correction stands on three points. Both drive wheels and one
+// wheel of the rear pair on the ground, the drive wheels unequally loaded: braked hard there, such a robot swings
+// about its heavier wheel (a simulator's finding; this dry run has no yaw and cannot show the swing, only which
+// wheels are down when). So on this kind of robot roll is levelled standing and at a crawl and eased out as the speed
+// rises: driven off across a 5 deg fall the roll correction is walked out within the tilt policy while the drive is
+// held to the speed the roll still carried allows, from 40 cm/s on the robot is on all four wheels, it is on all four
+// through a hard stop and for as long as the base is settling after, and it levels again standing. Roll reaches every
+// leg of a six-wheeler: it carries roll at any speed, as before.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunRollAtACrawl,
+	"Ramms.Level.DryRun.RollCarriedAtACrawlOnly",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunRollAtACrawl::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	const FKit	  Kit = SlowLifts();
+	const FGround Fall = Plane(0.0, 5.0);
+	for (const bool bRule : { true, false })
+	{
+		// Levelled standing for 5 s; full stick for 7 s; the stick let go; 6 s standing.
+		FOptions Options = MakeOptions(Kit, 0);
+		Options.Carry.bThreePoint = bRule;
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 18.0;
+		Options.PitchPerAccelDeg = BodyPitchPerAccel;
+		Options.Drive.bOn = true;
+		Options.bKeepTrace = true;
+		Options.Events.Add(MakeEvent(5.0, EEvent::SetSpeed, 0.0, 120.0));
+		Options.Events.Add(MakeEvent(12.0, EEvent::SetSpeed, 0.0, 0.0));
+		const FResult Result = DryRun::Run(Kit.Robot, Fall, Options);
+		ExpectSound(*this, Kit, 0, Result);
+		// Standing before the stick; while faster than 40 cm/s; from the stick let go until half a second after the
+		// robot stands; at the end.
+		double StandingRoll = 0.0, StandingOff = 0.0, FastRoll = 0.0, StopRoll = 0.0, WalkRate = 0.0, FastestWithRoll = 0.0, StoodAt = -1.0;
+		int32  FastFloating = 0, StopFloating = 0;
+		for (int32 Index = 1; Index < Result.Trace.Num(); ++Index)
+		{
+			const FSample& Sample = Result.Trace[Index];
+			const double   Roll = FMath::Abs(Sample.Out.AppliedDeg.Y);
+			if (Sample.Seconds > 4.0 && Sample.Seconds < 5.0)
+			{
+				StandingRoll = FMath::Max(StandingRoll, Roll);
+				StandingOff = FMath::Max(StandingOff, Inclination(Sample.TrueAttitudeDeg));
+			}
+			if (Sample.Seconds > 5.0 && Sample.Seconds < 12.0)
+			{
+				WalkRate = FMath::Max(WalkRate, (Sample.Out.RiderWantedDeg - Result.Trace[Index - 1].Out.RiderWantedDeg).Size() / Options.FrameSeconds);
+				if (Roll > 0.5)
+				{
+					FastestWithRoll = FMath::Max(FastestWithRoll, FMath::Abs(Sample.SpeedCmS));
+				}
+				if (FMath::Abs(Sample.SpeedCmS) > 45.0)
+				{
+					FastRoll = FMath::Max(FastRoll, Roll);
+					FastFloating = FMath::Max(FastFloating, Sample.Floating);
+				}
+			}
+			if (Sample.Seconds >= 12.0)
+			{
+				if (StoodAt < 0.0 && FMath::Abs(Sample.SpeedCmS) < 2.0)
+				{
+					StoodAt = Sample.Seconds;
+				}
+				if (StoodAt < 0.0 || Sample.Seconds <= StoodAt + 0.2)
+				{
+					StopRoll = FMath::Max(StopRoll, Roll);
+					StopFloating = FMath::Max(StopFloating, Sample.Floating);
+				}
+			}
+		}
+		const TCHAR* Name = bRule ? TEXT("roll at a crawl only") : TEXT("(the rule off)");
+		AddInfo(FString::Printf(TEXT("%s | standing: roll carried %.2f deg, %.2f deg off | moving over 45 cm/s: roll carried %.2f deg, %d wheels in the air; fastest with half a degree of roll carried %.0f cm/s; the wanted attitude walked at %.2f deg/s | through the stop (stood at %.2f s): roll carried %.2f deg, %d wheels in the air | at the end %.2f deg off, roll carried %.2f"),
+			Name, StandingRoll, StandingOff, FastRoll, FastFloating, FastestWithRoll, WalkRate, StoodAt, StopRoll, StopFloating, Result.FinalTiltDeg, Result.Trace.IsEmpty() ? 0.0 : FMath::Abs(Result.Trace.Last().Out.AppliedDeg.Y)));
+		TestTrue(FString::Printf(TEXT("%s: standing, the fall is levelled (%.2f deg off, %.2f carried)"), Name, StandingOff, StandingRoll), StandingOff <= 0.3 && StandingRoll >= 4.5);
+		TestTrue(FString::Printf(TEXT("%s: standing again at the end, levelled again (%.2f deg off)"), Name, Result.FinalTiltDeg), Result.FinalTiltDeg <= 0.3);
+		if (bRule)
+		{
+			TestTrue(FString::Printf(TEXT("moving faster than 45 cm/s no roll is carried (%.3f deg)"), FastRoll), FastRoll <= 0.05);
+			TestEqual(TEXT("... and no wheel of a pair that stands is in the air"), FastFloating, 0);
+			TestTrue(FString::Printf(TEXT("the drive is held while roll is still carried (%.0f cm/s at most with half a degree on)"), FastestWithRoll), FastestWithRoll <= 45.0);
+			TestTrue(FString::Printf(TEXT("the roll is walked out within the tilt policy (%.2f deg/s)"), WalkRate), WalkRate <= Kit.Tuning.TiltRateDegPerSec + 0.05);
+			TestTrue(FString::Printf(TEXT("through the stop next to no roll comes back before the robot stands (%.3f deg, from a crawl on)"), StopRoll), StopRoll <= 0.35);
+			TestEqual(TEXT("... the robot on all its wheels throughout"), StopFloating, 0);
+			TestTrue(TEXT("the robot reached its speed once the roll was out"), SpeedsOver(Result, 0.0, 1.0e6).Y >= 110.0);
+			TestTrue(TEXT("the roll left in the base at speed is not called being at reach"), Result.Trace.ContainsByPredicate([](const FSample& Sample) { return Sample.Seconds > 10.0 && Sample.Seconds < 12.0 && Sample.Out.bEased && Sample.Out.Status == EStatus::Levelling; }));
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("(with the rule off the roll is carried at full speed: %.2f deg, a wheel in the air)"), FastRoll), FastRoll >= 4.5 && FastFloating >= 1);
+		}
+	}
+	// A six-wheeler, every leg of which roll reaches: nothing eased, at its full speed across the fall.
+	{
+		const FKit Six = QuickOnFour();
+		FOptions   Options = MakeOptions(Six, 0);
+		Options.SpeedCmS = 60.0;
+		Options.MaxSeconds = 10.0;
+		Options.bKeepTrace = true;
+		const FResult Result = DryRun::Run(Six.Robot, Fall, Options);
+		TestTrue(FString::Printf(TEXT("quick on four at 60 cm/s across the fall: levelled (%.2f deg off)"), Result.SteadyResidualDeg), Result.SteadyResidualDeg <= 0.3);
+		TestTrue(TEXT("... nothing held back for the speed"), !Result.Trace.ContainsByPredicate([](const FSample& Sample) { return Sample.Out.bEased; }));
+	}
+	return true;
+}
+
+// Catches: a release that walks to the ground's attitude as the JOINTS read it. Joints that stand off their commands
+// under the load make a plane of their own with no offset on at all; taken for ground, the walk back goes past the
+// stance by that plane and the open-loop ramp then brings the base back. The release goes to the stance as the
+// joints will stand in it: read while there were no offsets, at the start.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunReleaseOnSaggingJoints,
+	"Ramms.Level.DryRun.ReleaseEndsOnTheStanceOfSaggingJoints",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunReleaseOnSaggingJoints::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	for (const FKit& Kit : { SlowLifts(), DrivePairs(), SixWheel() })
+	{
+		// Switched on where it has been standing a while (its joints settled under the load), off again at 10 s.
+		FOptions Options = MakeOptions(Kit, 0);
+		Options.SpeedCmS = 0.0;
+		Options.MaxSeconds = 18.0;
+		Options.SagCm = 0.6;
+		Options.bKeepTrace = true;
+		Options.bEnabledAtStart = false;
+		FOptions OffOptions = Options;
+		Options.Events.Add(MakeEvent(2.0, EEvent::Enable));
+		Options.Events.Add(MakeEvent(10.0, EEvent::Disable));
+		const FGround Ground = Plane(3.0, 0.0);
+		const FResult Result = DryRun::Run(Kit.Robot, Ground, Options);
+		const FResult Off = DryRun::Run(Kit.Robot, Ground, OffOptions);
+		if (!TestTrue(TEXT("the runs"), !Result.Trace.IsEmpty() && !Off.Trace.IsEmpty()))
+		{
+			return false;
+		}
+		const double Stance = Off.Trace.Last().TrueAttitudeDeg.X;
+		double		 Past = 0.0, SagDeg = 0.0;
+		for (const FSample& Sample : Result.Trace)
+		{
+			SagDeg = FMath::Max(SagDeg, FMath::Abs(Sample.Out.SagDeg.X));
+			if (Sample.Seconds > 10.0)
+			{
+				Past = FMath::Max(Past, FMath::Abs(Sample.TrueAttitudeDeg.X) - FMath::Abs(Stance));
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%s | the stance stands at %.2f deg on 3 deg (its joints make %.2f deg of their own); the release went %.3f deg past it and ended at %.2f"), Kit.Name, Stance, SagDeg, Past, Result.Trace.Last().TrueAttitudeDeg.X));
+		ExpectSound(*this, Kit, 0, Result);
+		TestTrue(FString::Printf(TEXT("%s: levelled before the release"), Kit.Name), PeakTiltBetween(Result, Kit.Tuning, 8.0, 10.0) <= 0.3);
+		TestTrue(FString::Printf(TEXT("%s: the release ends off, on the stance"), Kit.Name), Result.FinalState == EState::Off && FMath::Abs(Result.Trace.Last().TrueAttitudeDeg.X - Stance) <= 0.02 && Result.FinalMaxOffsetCm == 0.0);
+		// (The drive-pairs robot's joints stand off their commands one way with no offsets on and the other way
+		// levelled, the load having moved onto other legs: nothing is taken off its walk, and it goes as far past
+		// as it did.)
+		TestTrue(FString::Printf(TEXT("%s: ... without going past it (%.3f deg)"), Kit.Name, Past), Past <= (Kit.Robot.Legs.Num() == 4 && Kit.SpanCm == 40.0 ? 0.15 : 0.04));
+	}
+	return true;
+}
+
+// Catches: a jogged linkage read as ground by the law. The centre legs' height jogged up and down under a robot
+// levelled on a 6 deg grade, standing on its centre and rear legs: with who stands judged from the ground the stance
+// rests on (as a plant gives it by the robot's centre of mass) the base stays within a quarter of a degree and the
+// rider with it; judged from the lowest wheels in the chassis' frame the centre legs read as lifted, the base goes two
+// degrees off and the seat adds as much again at the rider.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelDryRunJoggedLegs,
+	"Ramms.Level.DryRun.JoggedLegsAreNotGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelDryRunJoggedLegs::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevelDryRunTests;
+	for (const double Cm : { 3.0, -3.0 })
+	{
+		double Rider[2] = { 0.0, 0.0 }, Base[2] = { 0.0, 0.0 };
+		for (int32 Which = 0; Which < 2; ++Which)
+		{
+			FKit Kit = QuickOnFour();
+			Kit.Robot.bStanceRests = Which == 0;
+			FOptions Options = MakeOptions(Kit, 0);
+			Options.SpeedCmS = 0.0;
+			Options.MaxSeconds = 14.0;
+			Options.bKeepTrace = true;
+			for (const int32 Leg : { 2, 3 })
+			{
+				Options.Events.Add(MakeEvent(6.0, EEvent::StanceRamp, 1.5, Cm, Leg));
+				Options.Events.Add(MakeEvent(7.5, EEvent::StanceRamp, 1.5, -Cm, Leg));
+			}
+			const FResult Result = DryRun::Run(Kit.Robot, Plane(6.0, 0.0), Options);
+			for (const FSample& Sample : Result.Trace)
+			{
+				if (Sample.Seconds >= 5.9 && Sample.Seconds <= 11.0)
+				{
+					Rider[Which] = FMath::Max(Rider[Which], FMath::Abs(Sample.RiderDeg.X));
+					Base[Which] = FMath::Max(Base[Which], FMath::Abs(Sample.TrueAttitudeDeg.X));
+				}
+			}
+			if (Which == 0)
+			{
+				ExpectSound(*this, Kit, 0, Result);
+				TestTrue(FString::Printf(TEXT("centre legs jogged %+.0f cm on 6 deg: level again after"), Cm), Result.FinalRiderTiltDeg <= 0.3);
+			}
+		}
+		AddInfo(FString::Printf(TEXT("centre legs jogged %+.0f cm on 6 deg | the base %.2f deg off, the rider %.2f; with the lowest wheels taken for the ground: %.2f and %.2f"), Cm, Base[0], Rider[0], Base[1], Rider[1]));
+		TestTrue(FString::Printf(TEXT("centre legs jogged %+.0f cm: the base stays level (%.2f deg)"), Cm, Base[0]), Base[0] <= 0.5);
+		TestTrue(FString::Printf(TEXT("centre legs jogged %+.0f cm: the rider no further off than the base (%.2f against %.2f deg)"), Cm, Rider[0], Base[0]), Rider[0] <= Base[0] + 0.1);
+		TestTrue(FString::Printf(TEXT("centre legs jogged %+.0f cm: (with the lowest wheels taken for the ground the rider goes %.2f deg off)"), Cm, Rider[1]), Rider[1] >= 2.0);
 	}
 	return true;
 }

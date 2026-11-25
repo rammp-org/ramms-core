@@ -553,7 +553,7 @@ namespace RammsLevel::DryRun
 		FVector2D		Kick = FVector2D::ZeroVector;
 		double			KickSeconds = 0.0;
 		// The body's own pitch under the drive's acceleration (deg, nose up).
-		double		 BodyPitch = 0.0;
+		double BodyPitch = 0.0;
 		// The drive's speed loop (FDriveLoop): its integral, the push it gives,
 		// and when it is next closed.
 		double		 DriveIntegral = 0.0;
@@ -608,6 +608,7 @@ namespace RammsLevel::DryRun
 		Law.Ground.Tuning = Options.Ground;
 		Law.SpeedScale.Cap = Options.SpeedCap;
 		Law.SeatTrim.Cover = Options.SeatCover;
+		Law.Carry.Tuning = Options.Carry;
 		FRandomStream Random(Options.Seed);
 		FVector2D	  LastReading = FVector2D::ZeroVector;
 		bool		  bHaveReading = false;

@@ -22,6 +22,24 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogRammsLevel, Log, All);
 
+namespace
+{
+	// What a robot may carry at speed, and the speed cap's first sign of a break: switches for measuring each
+	// against the law without it (RammsLevel::FCarryTuning, FSpeedCapTuning). Read every tick.
+	TAutoConsoleVariable<int32> CVarLevelCrestRule(TEXT("Ramms.Level.CrestRule"), 1,
+		TEXT("Level assist: 1 = carry no more correction than the legs can take back out while a grade break passes under them at the speed the robot has (a crest then costs no more than switched off; a slope taken fast is left partly in the base). 0 = level all of every slope at any speed."));
+	TAutoConsoleVariable<int32> CVarLevelThreePointRule(TEXT("Ramms.Level.ThreePointRule"), 1,
+		TEXT("Level assist, on a robot whose roll correction stands it on three points: 1 = roll levelled standing and at a crawl only, eased out as the speed rises, not brought back while braking, and a roll under the dead band not corrected. 0 = roll levelled at any speed."));
+	TAutoConsoleVariable<int32> CVarLevelThreePointHoldSpeed(TEXT("Ramms.Level.ThreePointHoldSpeed"), 1,
+		TEXT("Level assist, with the three-point rule: 1 = the drive is held to the speed the roll still carried allows while that roll is eased out. 0 = the drive is not held."));
+	TAutoConsoleVariable<float> CVarLevelThreePointFullCmS(TEXT("Ramms.Level.ThreePointFullCmS"), 15.0f,
+		TEXT("Level assist, three-point rule: up to this speed (cm/s) all of the roll limit may be carried."));
+	TAutoConsoleVariable<float> CVarLevelThreePointNoneCmS(TEXT("Ramms.Level.ThreePointNoneCmS"), 40.0f,
+		TEXT("Level assist, three-point rule: from this speed (cm/s) no roll is carried."));
+	TAutoConsoleVariable<int32> CVarLevelEarlyCap(TEXT("Ramms.Level.EarlyCap"), 1,
+		TEXT("Level assist: 1 = the speed cap slows at the first sign of a grade break (the ground's reading before the terrain estimate's filter), held through the break. 0 = only the filtered turn, as before."));
+} // namespace
+
 namespace RammsLevel
 {
 	/** The robot moved further than this (cm) between two ticks: it was put
@@ -653,6 +671,18 @@ void URammsLevelAssistComponent::StepLaw(double ClockDt, bool bYield, bool bResu
 		In.ResumeDz = Adoption->Dz;
 	}
 
+	// (The switches: as they stand now.)
+	{
+		const FCarryTuning	  CarryDefaults;
+		const FSpeedCapTuning CapDefaults;
+		FCarryTuning&		  Carry = R.Law.Carry.Tuning;
+		Carry.bCrest = CVarLevelCrestRule.GetValueOnGameThread() != 0;
+		Carry.bThreePoint = CVarLevelThreePointRule.GetValueOnGameThread() != 0;
+		Carry.bHoldSpeed = CVarLevelThreePointHoldSpeed.GetValueOnGameThread() != 0;
+		Carry.ThreePointFullCmS = FMath::Max(0.0f, CVarLevelThreePointFullCmS.GetValueOnGameThread());
+		Carry.ThreePointNoneCmS = FMath::Max(static_cast<float>(Carry.ThreePointFullCmS), CVarLevelThreePointNoneCmS.GetValueOnGameThread());
+		R.Law.SpeedScale.Cap.EarlyHeldSpans = CVarLevelEarlyCap.GetValueOnGameThread() != 0 ? CapDefaults.EarlyHeldSpans : 0.0;
+	}
 	const FOutputs Out = FLaw::Step(In, Dt, R.LawTuning, R.Law);
 
 	// --- the motors' part of what the law answered ---
@@ -949,8 +979,17 @@ void URammsLevelAssistComponent::ResumeFrom(const UObject* Taker, const FRammsDr
 		// the legs carry (a ride height among them), nothing stepping.
 		const RammsLevel::FState& Was = *R.PreYieldLaw;
 		RammsLevel::FAttitude	  Now;
-		const bool				  bTurned = R.bFoldedMotors && Was.Arbiter.HasOffsets() && R.PreYieldAttitudeDeg.IsSet() && R.Attitude && R.Attitude->Read(Now)
-			&& RammsLevel::Inclination(Now.Deg - *R.PreYieldAttitudeDeg) > R.LawTuning.SettleErrorDeg;
+		// (Or has simply had the legs a while: a crossing that ran, wherever it
+		// ended, ends in another moment than it began in, and the law as it
+		// stood then -- its ground, its integral, what it asked of the drive --
+		// is from before. Only a take-over that never ran, refused in the tick
+		// it was asked or the next, finds the law as it left it. Whether a
+		// crossing "ended where it began" was a matter of a few tenths of a
+		// degree in where the far side happened to leave the base; no crossing
+		// of one kind of robot ever met it.)
+		const bool bRan = R.bTakerSeenActive || R.TakerTicks > 1;
+		const bool bTurned = R.bFoldedMotors && Was.Arbiter.HasOffsets()
+			&& (bRan || (R.PreYieldAttitudeDeg.IsSet() && R.Attitude && R.Attitude->Read(Now) && RammsLevel::Inclination(Now.Deg - *R.PreYieldAttitudeDeg) > R.LawTuning.SettleErrorDeg));
 		if (bTurned)
 		{
 			RammsLevel::FAdoption Kept;

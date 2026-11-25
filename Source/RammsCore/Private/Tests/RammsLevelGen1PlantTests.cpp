@@ -1517,7 +1517,9 @@ bool FRammsLevelAssistGen1Preference::RunTest(const FString& Parameters)
 		return false;
 	}
 	IRammsControlContributor* Controls = R.Level;
-	R.GroundDeg = FVector2D(3.0, -2.0);
+	// (3 deg across: with the 1.5 preferred there is a degree and a half of roll to correct, which is past the band
+	// under which this kind of robot corrects no roll at all.)
+	R.GroundDeg = FVector2D(3.0, -3.0);
 	R.Pose();
 	R.Frames(3);
 	{

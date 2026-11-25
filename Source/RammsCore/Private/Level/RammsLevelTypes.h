@@ -140,6 +140,15 @@ namespace RammsLevel
 	 *  height every leg shares, so the second round already agrees with the
 	 *  first; the others are for a plane cut at the legs' reach. */
 	constexpr int32 AdoptPasses = 4;
+	/** What each leg's joint sits off its command by (FLaw::Step's step 1) is
+	 *  low-passed over this long (s): a joint's standing shortfall under the
+	 *  load, not what a leg on the move is behind by for a moment. */
+	constexpr double SagFilterSeconds = 1.0;
+	/** A release's walk to the stance waits while the ground itself is
+	 *  turning under the robot faster than this (deg/s, the speed cap's own
+	 *  reading of it): one deliberate change of the rider's attitude at a
+	 *  time, and a grade break is one already. */
+	constexpr double ReleaseWaitTurnDegPerSec = 1.5;
 
 	/**
 	 * The level assist's tuning. A plain mirror of the reflected
@@ -349,7 +358,44 @@ namespace RammsLevel
 		 *  sides while the drive's loop still holds the climb, and the robot
 		 *  runs away by half its speed again, turning the ground under it that
 		 *  much faster, before the loop has unwound. 0: none. */
-		double OverspeedGain = 2.0;
+		double OverspeedGain = 4.0;
+		/** ... counted only from this far past the ask (a share of the speed
+		 *  asked, and no less than so many cm/s): a speed read from two poses
+		 *  wanders by a part in fifty about what is asked, and without a band
+		 *  the drive is told a different speed every other tick for nothing.
+		 *  And not at all for OverspeedSettleSeconds (s) after the STICK's own
+		 *  ask has changed by more than UnsteadyAskCmS2: a drive overshoots
+		 *  its ask as it arrives at it (every start does), which is the
+		 *  drive's own doing and passes; it is not a robot running away. */
+		double OverspeedBandShare = 0.1;
+		double OverspeedBandCmS = 3.0;
+		double OverspeedSettleSeconds = 1.5;
+		/** THE FIRST SIGN OF A BREAK. The ground's turning is also read where
+		 *  it shows first: off the ground as the gate lets it be read (the
+		 *  attitude's own short low-pass behind it, not the terrain
+		 *  estimate's and the turn filter's on top), low-passed over
+		 *  EarlyFilterSeconds (s). Once that is over EarlyStartShare of what
+		 *  the legs can follow, with the drive asked steadily, it is taken as
+		 *  a turn per cm travelled (the ground turns in proportion to the
+		 *  speed) and the drive is asked for the speed at which THAT turns at
+		 *  the legs' rate. The largest read in the next EarlyOpenSeconds (s)
+		 *  is kept (the first reading catches a break part way into a tick;
+		 *  the body has not yet begun to pitch under the braking that
+		 *  answers it) and then stands, whatever the estimate does under that
+		 *  braking, until the robot has moved EarlyHeldSpans spans on from
+		 *  the first sign: through the break, not only while the filters
+		 *  still show it. 0 spans: no such term. */
+		double EarlyFilterSeconds = 0.08;
+		double EarlyStartShare = 1.0;
+		double EarlyOpenSeconds = 0.15;
+		double EarlyHeldSpans = 1.0;
+		/** ... and never for less than this share of what the stick asks: the
+		 *  first sign's part is to slow SOONER. A drive asked for half its
+		 *  speed in one go at the foot of a ramp, where the grade is already
+		 *  taking speed off it, runs on down to a quarter before its loop has
+		 *  it back; how far down a break is worth is left to the turn as it is
+		 *  read through the filters, which has seen more of it. */
+		double EarlyMinScale = 0.6;
 		/** The ground's turning rate is the terrain estimate's, low-passed
 		 *  over this long (s): one tick's change of an estimate is mostly its
 		 *  sensor's noise. */
@@ -370,6 +416,83 @@ namespace RammsLevel
 		/** Slower than this (cm/s) the robot is not being driven anywhere:
 		 *  the speed its stick asks for is not worked out from it. */
 		double MinSpeedCmS = 2.0;
+	};
+
+	/**
+	 * How much correction the robot may CARRY at the speed it has (FCarryLimit).
+	 * Not part of FTuning, as FGroundTuning is not: FTuning mirrors the
+	 * reflected tuning member for member, and what a robot brings to this (how
+	 * fast its legs turn the correction, how far apart they stand, whether a
+	 * roll correction stands it on three points) is read off the legs.
+	 *
+	 * Two rules, each of which can be switched off to measure against.
+	 *
+	 * THE CREST RULE. A robot levelled on a slope carries a correction that
+	 * the far side of a crest makes wrong by twice the slope: over the crest
+	 * the levelled robot is thrown further than one that was never levelled,
+	 * by as much of its correction as the legs cannot take back out while the
+	 * break passes under them. So it carries no more than they can: on each
+	 * axis, the rate the legs turn the correction at times the time a break
+	 * takes to pass under the standing legs, slowed for as the speed cap will
+	 * slow for it (CrestLagSeconds and what follows). Standing and at a walk
+	 * that is more than any slope asks; at a robot's full speed on slow legs
+	 * it is a few degrees, the rest of the slope is left in the base (in the
+	 * seat's share, on a robot whose seat tilts), and a crest then costs no
+	 * more than it does switched off. Nothing short of seeing the crest
+	 * coming does better: the speed cap can only answer a break that has
+	 * begun.
+	 *
+	 * THE THREE-POINT RULE, for a robot whose roll is made by some of its
+	 * legs only (two wheels each on its own lift, the others on axles that are
+	 * rigid across the robot): any roll correction at all lifts one wheel of
+	 * each rigid pair, the robot stands on three points with its drive wheels
+	 * unequally loaded, and braked or driven hard in that stance it swings
+	 * about the heavier wheel. So roll is levelled standing and at a crawl and
+	 * eased out as the speed rises, to nothing at NoneCmS: whenever the robot
+	 * can be swung it is on all its wheels. The drive is held to the speed
+	 * the roll still carried allows (bHoldSpeed: it slows, it never stops),
+	 * the roll comes back only once the base moves steadily again (not while
+	 * it is being braked), and a roll under RollEngageDeg is not corrected at
+	 * all (and is let go again under RollLetGoDeg): a split of the lifts with
+	 * no roll to speak of to correct is wound out, where it would otherwise
+	 * stand for good, one wheel in the air on flat ground.
+	 */
+	struct FCarryTuning
+	{
+		bool bCrest = true;
+		bool bThreePoint = true;
+		bool bHoldSpeed = true;
+		/** The crest rule's reckoning of how long a break takes to pass under
+		 *  the standing legs. It has been under them CrestLagSeconds (s)
+		 *  before anything answers it (the attitude's low-pass, a command
+		 *  interval, the drive's own lag): the robot covers that at the speed
+		 *  it has, and the legs take nothing out meanwhile. From there the
+		 *  speed cap slows the robot for it, by CrestBrakeCmS2 (cm/s^2: half
+		 *  of what the cap may brake at, which is what a drive led down in
+		 *  proportion gives) and no lower than the cap's floor; the rest of
+		 *  the span is covered at that falling speed, and the legs turn the
+		 *  correction all the while. The robot may carry CrestShare of what
+		 *  they take out in that time. So at a walk, where the cap can all but
+		 *  stand the robot on the break, the rule asks nothing; it binds at
+		 *  the speeds where the break is past before the robot has slowed. */
+		double CrestLagSeconds = 0.2;
+		double CrestBrakeCmS2 = 75.0;
+		double CrestShare = 0.8;
+		/** The three-point rule: all of the roll limit up to FullCmS (cm/s),
+		 *  none of it from NoneCmS, a straight line between. */
+		double ThreePointFullCmS = 15.0;
+		double ThreePointNoneCmS = 40.0;
+		/** ... and the roll that would hold the reference (deg) from which
+		 *  roll is corrected at all, and under which it is let go again. */
+		double RollEngageDeg = 0.75;
+		double RollLetGoDeg = 0.5;
+		/** A roll correction under this (deg) is none: the robot is on all its
+		 *  wheels, and the drive is not held for it. */
+		double RollClearDeg = 0.05;
+		/** The speed the rules go by is the larger of the speed there is and
+		 *  its low-pass over this long (s): up at once, down only as the robot
+		 *  has really slowed. */
+		double SpeedFilterSeconds = 0.3;
 	};
 
 	/**

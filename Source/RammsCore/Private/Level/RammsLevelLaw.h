@@ -508,6 +508,16 @@ namespace RammsLevel
 		 *  part, a release with no attitude, a fault): W is then the measured
 		 *  attitude, not a target moved on the tilt policy. */
 		bool bOpenLoop = false;
+		/** The most correction per axis the robot may carry at the speed it
+		 *  has (deg; FCarryLimit, within the tuning's own limits as the law
+		 *  counts them), and whether that is less than those limits on either
+		 *  axis: the correction is then held back for the speed, which is not
+		 *  being at reach. As the last Active step left them. */
+		FVector2D CarryDeg = FVector2D::ZeroVector;
+		bool	  bEased = false;
+		/** The plane the legs' joints make of their baselines by what they
+		 *  stand off their commands by under the load (deg; step 1). */
+		FVector2D SagDeg = FVector2D::ZeroVector;
 	};
 
 	/** Everything the law keeps between steps. Default-constructed is Off. */
@@ -525,12 +535,24 @@ namespace RammsLevel
 		FTiltTarget Tilt;
 		/** The part of the rider's wanted pitch the seat holds (deg, in X; Y
 		 *  is not used), moved within the tilt policy too. */
-		FTiltTarget		 SeatShare;
-		FLevelLoop		 Loop;
-		FSeatTrim		 SeatTrim;
-		FSpeedScale		 SpeedScale;
-		FQuiet			 Quiet;
-		FDivergence		 Divergence;
+		FTiltTarget SeatShare;
+		FLevelLoop	Loop;
+		FSeatTrim	SeatTrim;
+		FSpeedScale SpeedScale;
+		FQuiet		Quiet;
+		FDivergence Divergence;
+		/** How much correction the robot may carry at the speed it has. */
+		FCarryLimit Carry;
+		/** The limits it left, and whether they are under the tuning's. */
+		FVector2D CarryDeg = FVector2D::ZeroVector;
+		bool	  bEased = false;
+		/** What each leg's joint stands off its command by (cm, positive: the
+		 *  wheel higher than told), low-passed (SagFilterSeconds). Empty: none
+		 *  read yet. And the plane a release took those for when it began
+		 *  (deg), once it has. */
+		FLegValues SagCm;
+		FVector2D  ReleaseSagDeg = FVector2D::ZeroVector;
+		bool	   bReleaseSag = false;
 
 		/** C: the slewed correction plane (deg). */
 		FVector2D CorrectionDeg = FVector2D::ZeroVector;

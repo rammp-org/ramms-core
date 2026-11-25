@@ -976,7 +976,8 @@ bool FRammsLevelLawSeatTrim::RunTest(const FString& Parameters)
 		Out = RunWatching(Toy, 8.0, MostRate, MostTrim);
 		TestTrue(FString::Printf(TEXT("Walked level: the rider's wanted attitude within the tilt policy (%.3f deg/s)"), MostRate), MostRate <= Toy.Tuning.TiltRateDegPerSec + 1.0e-6 && MostRate >= 2.5);
 		TestTrue(FString::Printf(TEXT("... the seat not moving on the way (%.3f deg)"), MostTrim), MostTrim <= 0.05);
-		TestTrue(TEXT("Level: the base"), Inclination(Toy.Attitude()) <= 0.2);
+		TestTrue(FString::Printf(TEXT("Level: the base (%.3f deg; carried %.2f of %.2f, eased %d, wanted %.3f, ground %.3f)"), Inclination(Toy.Attitude()), Out.AppliedDeg.X, Out.CarryDeg.X, Out.bEased ? 1 : 0, Out.WantedDeg.X, Out.GroundDeg.X),
+			Inclination(Toy.Attitude()) <= 0.2);
 		TestTrue(TEXT("Level: no trim left but the cover of the loop's own deadband"), FMath::Abs(Out.SeatTrimDeg) <= 0.15 && Out.SeatShareDeg == 0.0);
 	}
 
@@ -988,6 +989,9 @@ bool FRammsLevelLawSeatTrim::RunTest(const FString& Parameters)
 		MakeToy(Toy);
 		Toy.GroundDeg = FVector2D::ZeroVector;
 		Toy.Tuning.MaxCorrectionRateDegPerSec = 1.0;
+		// (Legs this slow may not carry 4 deg at this speed, by the crest rule:
+		// off here, where the seat's cover of slow legs is the subject.)
+		Toy.State.Carry.Tuning.bCrest = false;
 		Toy.Run(2.0);
 		Toy.GroundDeg = FVector2D(4.0, 0.0);
 		FOutputs	 Out = Toy.Step(Frame);
@@ -1409,8 +1413,9 @@ bool FRammsLevelLawSpeedCap::RunTest(const FString& Parameters)
 		// asked (run away downhill), the drive is asked for less at once; with
 		// the drive not saying what is asked, the speed there is, is all the
 		// cap has, and it is not taken for a run-away.
-		Free.In.AskedSpeedCmS = 40.0;
-		Free.In.SpeedCmS = 60.0;
+		// (The stick's own ask stands: one that has just changed is a drive
+		// arriving at a new speed, whose overshoot is left to pass.)
+		Free.In.SpeedCmS = 108.0;
 		Out = Free.Step(Frame);
 		TestNearlyEqual(TEXT("Half as fast again as its stick asks: asked for the floor"), Out.SpeedScale, Free.Tuning.MinSpeedScale, 1.0e-9);
 		Free.In.AskedSpeedCmS = -1.0;
@@ -2895,6 +2900,74 @@ bool FRammsLevelLawRestOnLevel::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("driving on (%.0f, %.0f) deg, legs giving 0.85: (%.3f, %.3f) deg off level"), GroundDeg.X, GroundDeg.Y, Off.X, Off.Y));
 			TestTrue(TEXT("driving: inside the loop's deadband"), FMath::Abs(Off.X) <= Toy.Tuning.DeadbandDeg + 0.02 && FMath::Abs(Off.Y) <= Toy.Tuning.DeadbandDeg + 0.02);
 			TestTrue(TEXT("driving: and not trimmed further (the deadband's edge on the axis with the slope)"), FMath::Abs(Off.X) >= Toy.Tuning.DeadbandDeg - 0.03);
+		}
+	}
+	return true;
+}
+
+// Catches: the most correction per axis counted from the chassis' own frame on a robot whose stance leans. A stance
+// that stands 2 deg nose up on the flat spends 2 deg of its pitch correction before any ground has turned: with a
+// limit of 3 deg, ground rising 2.5 deg asked for 4.5 and was refused 1.5 of it ("at reach", the base left tilted),
+// though the limit was meant for how much GROUND is taken out. Counted from the stance the limit is the tuning's plus
+// the lean: that ground is levelled, and ground rising past the limit itself is still held at it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsLevelLawCapFromTheStance,
+	"Ramms.Level.Law.AxisLimitCountedFromAStanceThatLeans",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsLevelLawCapFromTheStance::RunTest(const FString& Parameters)
+{
+	using namespace RammsLevel;
+	const double LeanDeg = 2.0;
+	const double Frame = 1.0 / 16.0;
+	for (const double RiseDeg : { 2.5, 4.0 })
+	{
+		// Four legs at (+-40, +-25); the front pair let down and the rear drawn up so that the stance stands LeanDeg
+		// nose up on the flat, every wheel on the ground it rests on.
+		TArray<FLegReach> Legs;
+		for (const double X : { 40.0, -40.0 })
+		{
+			for (const double Y : { -25.0, 25.0 })
+			{
+				FLegReach& Leg = Legs.AddDefaulted_GetRef();
+				Leg.XY = FVector2D(X, Y);
+				Leg.RadiusCm = 9.0;
+				Leg.BaseZ = -30.0 - X * FMath::Tan(FMath::DegreesToRadians(LeanDeg));
+				Leg.MeasuredZ = Leg.BaseZ;
+				Leg.MinZ = Leg.BaseZ - 12.0;
+				Leg.MaxZ = Leg.BaseZ + 12.0;
+				Leg.StanceGroundZ = Leg.BaseZ - Leg.RadiusCm;
+			}
+		}
+		FTuning Tuning;
+		Tuning.MaxCorrectionDeg = FVector2D(3.0, 3.0);
+		FState	 State;
+		FOutputs Out;
+		// The base reads the stance's lean and the ground's rise, less the plane its legs have made.
+		for (int32 Index = 0; Index < 480; ++Index)
+		{
+			FInputs In;
+			In.Legs = Legs;
+			In.bEnable = true;
+			const FVector2D Made = MeasuredCorrection(Legs);
+			In.AttitudeDeg = FVector2D(LeanDeg + RiseDeg, 0.0) - Made;
+			Out = FLaw::Step(In, Frame, Tuning, State);
+			for (int32 Leg = 0; Leg < Legs.Num() && Leg < Out.Dz.Num(); ++Leg)
+			{
+				Legs[Leg].MeasuredZ = Legs[Leg].BaseZ + Out.Dz[Leg];
+			}
+		}
+		const double OffDeg = LeanDeg + RiseDeg - MeasuredCorrection(Legs).X;
+		AddInfo(FString::Printf(TEXT("a stance leaning %.0f deg on ground rising %.1f deg, a limit of 3 deg | the base %.2f deg off, %.2f deg corrected, status %d"), LeanDeg, RiseDeg, OffDeg, Out.AppliedDeg.X, static_cast<int32>(Out.Status)));
+		if (RiseDeg <= 3.0)
+		{
+			TestTrue(FString::Printf(TEXT("ground rising %.1f deg, inside the limit: levelled (%.2f deg off)"), RiseDeg, OffDeg), FMath::Abs(OffDeg) <= 0.3);
+			TestTrue(TEXT("... and not at reach"), Out.Status != EStatus::AtReach && Out.Status != EStatus::PastReach);
+			TestTrue(FString::Printf(TEXT("... with more correction than the limit read from the chassis' frame (%.2f deg)"), Out.AppliedDeg.X), Out.AppliedDeg.X >= 4.2);
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("ground rising %.1f deg, past the limit: 3 deg of it taken out and the rest left (%.2f deg off)"), RiseDeg, OffDeg), FMath::Abs(OffDeg - (RiseDeg - 3.0)) <= 0.3);
+			TestTrue(TEXT("... said as being at reach, on the axis' limit"), Out.Status == EStatus::AtReach && Out.ReachLimit == EReachLimit::AxisLimit);
 		}
 	}
 	return true;

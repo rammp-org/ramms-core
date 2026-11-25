@@ -431,6 +431,8 @@ namespace RammsLevel::DryRun
 		double SeatRoomDeg = 1.0e6;
 		/** What the seat's cover goes by (FSeatTrim::Cover). */
 		FSeatCoverTuning SeatCover;
+		/** How much correction the robot may carry at speed (FCarryLimit::Tuning). */
+		FCarryTuning Carry;
 		/** The rider's preferred tilt (deg; pitch, roll), over
 		 *  Tuning.LevelReferenceDeg. Held as the level assist's component
 		 *  holds it (SplitPreference): on a robot with a seat, with the

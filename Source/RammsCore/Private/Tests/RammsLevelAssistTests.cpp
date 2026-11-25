@@ -4176,8 +4176,8 @@ bool FRammsLevelAssistAskedSpeed::RunTest(const FString& Parameters)
 	{
 		DriveOn();
 	}
-	// Twice the excess: a quarter over is half the speed asked for.
-	TestEqual(TEXT("a quarter faster than its stick asks: the drive is asked for half, at once"), Drive->GetDriveSpeedScale(), 0.5f, 0.03f);
+	// Four times what is past the band of a tenth: a quarter over is 0.4 of the speed asked for.
+	TestEqual(TEXT("a quarter faster than its stick asks: the drive is asked for two fifths, at once"), Drive->GetDriveSpeedScale(), 0.4f, 0.03f);
 	Speed = Asked;
 	for (int32 Index = 0; Index < 3; ++Index)
 	{

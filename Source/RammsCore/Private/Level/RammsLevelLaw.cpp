@@ -135,6 +135,8 @@ namespace RammsLevel
 			State.bReleaseOpen = false;
 			State.bLoopOpen = false;
 			State.PrevGroundDeg = State.Terrain.Get();
+			// What may be carried starts again from what is carried.
+			State.Carry.Reset();
 		}
 
 		/** The legs with who stands, each lifted leg's clearance and how far
@@ -225,10 +227,10 @@ namespace RammsLevel
 			}
 			// A lifted leg let down is not the plane's business.
 			const auto Counts = [&Legs](int32 Index, double Move) { return Legs[Index].bSupport || Move > 0.0; };
-			double Use = 0.0;
-			double SupportSum = 0.0;
-			double AllSum = 0.0;
-			int32  SupportCount = 0;
+			double	   Use = 0.0;
+			double	   SupportSum = 0.0;
+			double	   AllSum = 0.0;
+			int32	   SupportCount = 0;
 			for (int32 Index = 0; Index < Legs.Num(); ++Index)
 			{
 				const double Move = InOutDz[Index] - From[Index];
@@ -334,6 +336,18 @@ namespace RammsLevel
 			State.NearestLimit = Alloc.NearestLimit;
 		}
 
+		/** The plane the legs make of their baselines when each stands Cm[i]
+		 *  (cm) off its baseline: MeasuredCorrection's, with its weights. */
+		FVector2D PlaneOfHeights(const FLegs& Legs, TConstArrayView<double> Cm)
+		{
+			FLegs At = Legs;
+			for (int32 Index = 0; Index < At.Num(); ++Index)
+			{
+				At[Index].MeasuredZ = At[Index].BaseZ + (Cm.IsValidIndex(Index) ? Cm[Index] : 0.0);
+			}
+			return MeasuredCorrection(At);
+		}
+
 		/**
 		 * Whether a leg's baseline has moved from where it was last found
 		 * still (BaselineStillCm); when one has, every leg's is taken as found.
@@ -389,6 +403,7 @@ namespace RammsLevel
 		{
 			State.PrevBaseZ.Reset();
 			State.StillBaseZ.Reset();
+			State.SagCm.Reset();
 		}
 
 		// Every number the legs and the points come with, not only the two
@@ -415,6 +430,8 @@ namespace RammsLevel
 
 		// What the last step left, for "is anything moving" further down.
 		const FVector2D PrevGroundDeg = State.PrevGroundDeg;
+		const FVector2D PrevSeenDeg = State.Ground.Get();
+		const bool		bSeenBefore = State.Ground.IsSeeded();
 		// ... and for what the seat is to cover: where the ground as the seat
 		// hears it, and the correction, stood.
 		const bool	 bSeatGroundBefore = State.SeatGround.IsSeeded();
@@ -430,6 +447,8 @@ namespace RammsLevel
 
 		// ---- 1. Sensing ----
 		FVector2D AchievedDeg = FVector2D::ZeroVector;
+		FVector2D SagDeg = FVector2D::ZeroVector;
+		FVector2D NowSagDeg = FVector2D::ZeroVector;
 		if (bValid)
 		{
 			// The correction the joints have really made, not the one asked
@@ -450,6 +469,40 @@ namespace RammsLevel
 				LawImpl::MaskLegs(In, Tuning, State.Support, State.LastDz, Sensed);
 			}
 			AchievedDeg = MeasuredCorrection(Sensed);
+			// What each joint stands off its BASELINE by with no offset on it:
+			// its standing shortfall under the load, read while there are no
+			// offsets (so that a leg whose travel is not what its model says,
+			// short of its offset by a share of it, is not taken for one that
+			// sags) and kept from there. The plane the joints make of that (the
+			// correction they read with nothing asked of them) is what a
+			// release must not take for ground, and what the underside's
+			// clearance is short by.
+			{
+				const TConstArrayView<double> Told = bResumeDz ? In.ResumeDz : TConstArrayView<double>(State.LastDz);
+				bool						  bNoOffsets = true;
+				for (const double Dz : Told)
+				{
+					bNoOffsets = bNoOffsets && Dz == 0.0;
+				}
+				const bool bSeedSag = State.SagCm.Num() != NumLegs;
+				if (bSeedSag)
+				{
+					State.SagCm.Init(0.0, NumLegs);
+				}
+				if (bNoOffsets)
+				{
+					const double Share = SagFilterSeconds > 0.0 ? FMath::Clamp(Dt / SagFilterSeconds, 0.0, 1.0) : 1.0;
+					for (int32 Index = 0; Index < NumLegs; ++Index)
+					{
+						const FLegReach& Leg = In.Legs[Index];
+						const double	 Off = Leg.bHasBaseline ? Leg.MeasuredZ - Leg.BaseZ : 0.0;
+						State.SagCm[Index] = bSeedSag ? Off : State.SagCm[Index] + (Off - State.SagCm[Index]) * Share;
+					}
+				}
+				SagDeg = LawImpl::PlaneOfHeights(Sensed, State.SagCm);
+				// ... and what they stand off the plane they are TOLD by now.
+				NowSagDeg = AchievedDeg - LawImpl::PlaneOfHeights(Sensed, Told);
+			}
 			const FVector2D Filtered = State.Attitude.Tick(In.AttitudeDeg, Dt, Tuning.AttitudeFilterSeconds);
 			// The ground as far as it can have turned: by the distance
 			// travelled over the standing legs' span, and by what the legs'
@@ -550,6 +603,7 @@ namespace RammsLevel
 			case EAction::BeginRelease:
 				State.ReleaseSeconds = 0.0;
 				State.bReleaseOpen = false;
+				State.bReleaseSag = false;
 				State.Quiet.Reset();
 				break;
 			case EAction::Freeze:
@@ -581,11 +635,60 @@ namespace RammsLevel
 		{
 			Standing = LawImpl::PrepareLegs(In, Tuning, State, Legs);
 		}
+		// THE LIMITS AS THE LAW COUNTS THEM, and the underside as it stands.
+		//  - The most correction per axis is counted from the STANCE: a robot
+		//    whose stance leans on the flat (FLegReach::StanceGroundZ) spends
+		//    that lean of its correction before any ground has turned, so each
+		//    axis' limit is the tuning's plus the lean's size about it. (Either
+		//    way: against the lean the limit is then twice the lean past the
+		//    tuning's, where the legs' travel and the underside stop it first.)
+		//  - The underside's clearance is worked out from the baselines; the
+		//    joints stand off those under the load, and the ground lies under
+		//    the points where the JOINTS put it: each point's underside is
+		//    taken lower by the plane through what the standing legs' joints
+		//    stand off their commands by.
+		FTuning Full = Tuning;
+		Full.MaxCorrectionDeg = FVector2D(FMath::Max(0.0, Tuning.MaxCorrectionDeg.X), FMath::Max(0.0, Tuning.MaxCorrectionDeg.Y));
+		TArray<FClearancePoint, TInlineAllocator<8>> Points;
+		Points.Append(In.Points.GetData(), In.Points.Num());
+		if (bLegsValid && Legs.Num() > 0)
+		{
+			TArray<FVector2D, TInlineAllocator<8>> XY;
+			TArray<bool, TInlineAllocator<8>>	   Use;
+			TArray<bool, TInlineAllocator<8>>	   Roll;
+			FLegValues							   GroundZ;
+			bool								   bAnyStands = false;
+			for (const FLegReach& Leg : Legs)
+			{
+				XY.Add(Leg.XY);
+				Use.Add(Leg.bSupport);
+				Roll.Add(Leg.bRoll);
+				GroundZ.Add(Leg.StanceGroundZ);
+				bAnyStands = bAnyStands || Leg.bSupport;
+			}
+			FVector2D PlaneDeg = FVector2D::ZeroVector;
+			double	  HeightCm = 0.0;
+			// (Not while a stance is being changed: baselines on their way to
+			// a stance lean by what the ramp has yet to turn the base by, which
+			// is the ramp's to take out and not more correction to be had.)
+			if (bAnyStands && !In.bStanceChanging && FitPlane(XY, GroundZ, Use, TConstArrayView<bool>(), PlaneDeg, HeightCm))
+			{
+				Full.MaxCorrectionDeg += FVector2D(FMath::Abs(PlaneDeg.X), FMath::Abs(PlaneDeg.Y));
+			}
+			if (bAnyStands && State.SagCm.Num() == Legs.Num() && FitPlane(XY, State.SagCm, Use, Roll, PlaneDeg, HeightCm))
+			{
+				for (FClearancePoint& Point : Points)
+				{
+					Point.UndersideZ -= PlaneRise(Point.XY, true, PlaneDeg) + HeightCm;
+				}
+			}
+		}
+
 		if (bAdopted && bLegsValid)
 		{
 			// The offsets the plant has just put on the motors: the adopted
 			// plane, allocated with no ride shift and no slew.
-			LawImpl::KeepAllocation(State, Allocate(Legs, In.Points, State.CorrectionDeg, Tuning, 0.0, 0.0));
+			LawImpl::KeepAllocation(State, Allocate(Legs, Points, State.CorrectionDeg, Full, 0.0, 0.0));
 			if (bResumeDz)
 			{
 				// ... but for a leg the plant could not leave it on exactly:
@@ -623,8 +726,26 @@ namespace RammsLevel
 			// Where the base is wanted, and how much of the rider's wanted pitch
 			// the seat is to hold on top of that. A release gives the base back
 			// to its stance and the seat back to the rider.
-			FVector2D GoalDeg = GroundDeg;
+			// (The stance as the joints will stand in it with no offsets on: what
+			// they stand off their commands by under the load is not ground,
+			// and a walk to the ground's attitude as the joints read it would
+			// go past the stance by that and come back.)
+			// (Only as far as the joints stand off what they are told NOW the
+			// same way: a load that the correction has moved onto other legs
+			// leaves them standing otherwise, and then nothing is known.)
+			if (!bActive && !State.bReleaseSag)
+			{
+				const auto Agreed = [](double Then, double Now) { return Then * Now > 0.0 ? FMath::Sign(Then) * FMath::Min(FMath::Abs(Then), FMath::Abs(Now)) : 0.0; };
+				State.ReleaseSagDeg = FVector2D(Agreed(SagDeg.X, NowSagDeg.X), Agreed(SagDeg.Y, NowSagDeg.Y));
+				State.bReleaseSag = true;
+			}
+			FVector2D GoalDeg = GroundDeg - State.ReleaseSagDeg;
 			double	  ShareGoalDeg = 0.0;
+			// The limits the correction is held inside: the law's own, or less
+			// while the robot may not carry as much at the speed it has.
+			FTuning Eff = Full;
+			// Where the base would be wanted with only the legs' own limits.
+			FVector2D ReachGoalDeg = GoalDeg;
 			// Standing still with nothing left to walk and nothing moving the
 			// stance: all that is between here and a rest is the settle time.
 			bool bAboutToRest = false;
@@ -632,15 +753,49 @@ namespace RammsLevel
 			{
 				// Level where the legs can hold it; and how much they must
 				// leave, and why, said steadily (the gap between On and Off).
-				const FTiltGoal Goal = WantedTiltGoalWithLimit(GroundDeg, Legs, In.Points, Tuning);
+				// What may be carried at this speed (FCarryLimit): the base is left
+				// tilted by the rest, as by anything else the legs cannot give,
+				// but that is the speed's doing and not being at reach.
+				FCarryInputs CarryIn;
+				CarryIn.FullDeg = Full.MaxCorrectionDeg;
+				CarryIn.NeededDeg = GroundDeg - Ref;
+				CarryIn.SpeedCmS = In.SpeedCmS;
+				CarryIn.AskedSpeedCmS = In.AskedSpeedCmS;
+				CarryIn.SpanCm = StandingSpanCm(Legs);
+				CarryIn.LegsDegPerSec = FVector2D(PlaneRateDegPerSec(Legs, FVector2D(1.0, 0.0), Tuning), PlaneRateDegPerSec(Legs, FVector2D(0.0, 1.0), Tuning));
+				bool bStandsWithoutRoll = false, bRollReaches = false;
+				for (const FLegReach& Leg : Legs)
+				{
+					bStandsWithoutRoll = bStandsWithoutRoll || (Leg.bSupport && !Leg.bRoll);
+					bRollReaches = bRollReaches || (Leg.bSupport && Leg.bRoll);
+				}
+				CarryIn.bThreePoint = bStandsWithoutRoll && bRollReaches;
+				CarryIn.bMayRise = State.Ground.GetTrust() >= 1.0;
+				CarryIn.CarriedDeg = State.CorrectionDeg;
+				const FVector2D CarryDeg = State.Carry.Tick(CarryIn, Dt, Tuning);
+				Eff.MaxCorrectionDeg = FVector2D(FMath::Min(Full.MaxCorrectionDeg.X, CarryDeg.X), FMath::Min(Full.MaxCorrectionDeg.Y, CarryDeg.Y));
+				State.CarryDeg = Eff.MaxCorrectionDeg;
+				const bool bLower = Eff.MaxCorrectionDeg.X < Full.MaxCorrectionDeg.X - 1.0e-9 || Eff.MaxCorrectionDeg.Y < Full.MaxCorrectionDeg.Y - 1.0e-9;
+
+				const FTiltGoal Goal = WantedTiltGoalWithLimit(GroundDeg, Legs, Points, Eff);
 				GoalDeg = Goal.GoalDeg;
-				State.bShort = Goal.ShortDeg > (State.bShort ? AtReachOffDeg : AtReachOnDeg);
-				State.GoalLimit = Goal.Limit;
+				// (At reach is said of the legs' own limits, not of the speed's.)
+				const FTiltGoal Reach = bLower ? WantedTiltGoalWithLimit(GroundDeg, Legs, Points, Full) : Goal;
+				// Held back for the speed: the base is wanted somewhere else
+				// than the legs' own limits would have it.
+				State.bEased = bLower && (Goal.GoalDeg - Reach.GoalDeg).Size() > AxisLimitSlackDeg;
+				State.bShort = Reach.ShortDeg > (State.bShort ? AtReachOffDeg : AtReachOnDeg);
+				State.GoalLimit = Reach.Limit;
+				ReachGoalDeg = Reach.GoalDeg;
 				if (bSeatRuns)
 				{
 					// The pitch the rider prefers; and what the legs must leave
-					// the base tilted by, taken back out at the seat.
-					ShareGoalDeg = FMath::Clamp(In.SeatPreferenceDeg - (GoalDeg.X - Ref.X), SeatLowDeg, SeatHighDeg);
+					// the base tilted by, taken back out at the seat. (What
+					// the LEGS' reach leaves: a tilt left in the base because
+					// the robot may not carry more correction at the speed it
+					// has is not put in the seat, where it would be carried
+					// over a crest just the same.)
+					ShareGoalDeg = FMath::Clamp(In.SeatPreferenceDeg - (ReachGoalDeg.X - Ref.X), SeatLowDeg, SeatHighDeg);
 				}
 			}
 			const FVector2D ShareGoal(ShareGoalDeg, 0.0);
@@ -671,7 +826,9 @@ namespace RammsLevel
 					// (The rider's wanted attitude is what the policy is about;
 					// the seat's share of its pitch moves on the same limits,
 					// and the base's is the one less the other.)
-					if (In.bStanceChanging)
+					// (Nor does a release walk while the ground itself is turning
+					// under the robot: a grade break turns the rider already.)
+					if (In.bStanceChanging || (!bActive && State.SpeedScale.GetTurnDegPerSec().Size() > ReleaseWaitTurnDegPerSec))
 					{
 						State.Tilt.Brake(Dt, Tuning.TiltAccelDegPerSec2);
 						State.SeatShare.Brake(Dt, Tuning.TiltAccelDegPerSec2);
@@ -691,17 +848,20 @@ namespace RammsLevel
 				// (About to rest, the integral trims what a walk or a knock left
 				// in it down to a narrower band than the loop's: the rest is
 				// then on the wanted attitude, not on the deadband's edge.)
-				const FVector2D RawDeg = State.Loop.Tick(LoopAttitudeDeg, WantedNow, GroundDeg, Dt, bIntegrate, State.bSaturated, Tuning, bAboutToRest ? RestTrimDeadbandDeg : -1.0);
+				const FVector2D RawDeg = State.Loop.Tick(LoopAttitudeDeg, WantedNow, GroundDeg, Dt, bIntegrate, State.bSaturated, Eff, bAboutToRest ? RestTrimDeadbandDeg : -1.0);
 
 				// The per-axis limit is a limit like the legs' reach: asking to
 				// pass it is being at reach. (The loop holds its own integral
-				// on an axis that is at its limit.)
-				const FVector2D AskedDeg = ClampAxes(RawDeg, Tuning.MaxCorrectionDeg);
-				State.bAxisLimited = FMath::Abs(RawDeg.X - AskedDeg.X) > AxisLimitSlackDeg || FMath::Abs(RawDeg.Y - AskedDeg.Y) > AxisLimitSlackDeg;
+				// on an axis that is at its limit.) What the speed holds the
+				// correction back by is not: that is said of the law's own
+				// limits.
+				const FVector2D AskedDeg = ClampAxes(RawDeg, Eff.MaxCorrectionDeg);
+				const FVector2D WithinDeg = ClampAxes(RawDeg, Full.MaxCorrectionDeg);
+				State.bAxisLimited = FMath::Abs(RawDeg.X - WithinDeg.X) > AxisLimitSlackDeg || FMath::Abs(RawDeg.Y - WithinDeg.Y) > AxisLimitSlackDeg;
 
 				const FVector2D SlewedDeg = SlewCorrection(Legs, State.CorrectionDeg, AskedDeg, Dt, Tuning.MaxCorrectionRateDegPerSec, Tuning, RateUse, State.bRateLimited);
 
-				FAllocation Alloc = Allocate(Legs, In.Points, SlewedDeg, Tuning, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
+				FAllocation Alloc = Allocate(Legs, Points, SlewedDeg, Full, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
 				State.RideCm = Alloc.HeightCm;
 				State.bSaturated = Alloc.Fraction < 1.0;
 				State.CorrectionDeg = SlewedDeg;
@@ -711,7 +871,7 @@ namespace RammsLevel
 					// reach cut from the plane it was moving to, so the
 					// integral gives up its own part of that and no more.
 					State.CorrectionDeg = Alloc.AppliedDeg;
-					State.Loop.BackCalculate(SlewedDeg, Alloc.AppliedDeg, Tuning);
+					State.Loop.BackCalculate(SlewedDeg, Alloc.AppliedDeg, Eff);
 				}
 				bool	   bLiftedBehind = false;
 				const bool bPlaneHeld = LawImpl::LimitLegSteps(Legs, State.LastDz, Alloc.Dz, Dt, Tuning, RateUse, State.HeightRateCmS, bLiftedBehind);
@@ -765,7 +925,7 @@ namespace RammsLevel
 				const FVector2D PathDeg = State.Ramp.Tick(FVector2D::ZeroVector, Dt, Tuning.TiltRateDegPerSec, Tuning.TiltAccelDegPerSec2);
 				State.CorrectionDeg = SlewCorrection(Legs, State.CorrectionDeg, PathDeg, Dt, 0.0, Tuning, RateUse, State.bRateLimited);
 
-				FAllocation Alloc = Allocate(Legs, In.Points, State.CorrectionDeg, Tuning, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
+				FAllocation Alloc = Allocate(Legs, Points, State.CorrectionDeg, Full, State.RideCm, FMath::Max(0.0, Tuning.RideHeightRateCmPerSec) * Dt);
 				State.RideCm = Alloc.HeightCm;
 				State.bSaturated = Alloc.Fraction < 1.0;
 				State.bAxisLimited = false;
@@ -791,9 +951,12 @@ namespace RammsLevel
 
 		if (!bActive)
 		{
-			// Only levelling can be short of what would hold the reference.
+			// Only levelling can be short of what would hold the reference, or
+			// be held back for the speed.
 			State.bShort = false;
 			State.GoalLimit = EReachLimit::None;
+			State.bEased = false;
+			State.CarryDeg = Full.MaxCorrectionDeg;
 		}
 		const bool bHasOffsets = State.Arbiter.HasOffsets();
 
@@ -874,12 +1037,25 @@ namespace RammsLevel
 				{
 					Cap.GroundRateDegPerSec = (GroundDeg - PrevGroundDeg) / Dt;
 				}
+				// ... and where a break shows first: the ground as the gate
+				// lets it be read, before the estimate's own low-pass.
+				// (No break turns the ground faster than the sharpest the gate
+				// follows whole: what reads as more is not ground.)
+				Cap.MaxTurnDegPerCm = Cap.SpanCm > 0.0 ? FMath::Max(0.0, State.Ground.Tuning.BreakDeg) / Cap.SpanCm : 0.0;
+				Cap.bSeenRateKnown = Cap.bGroundRateKnown && bSeenBefore && State.Ground.IsSeeded();
+				if (Cap.bSeenRateKnown)
+				{
+					Cap.SeenRateDegPerSec = (State.Ground.Get() - PrevSeenDeg) / Dt;
+				}
 				// What the legs can turn the correction at: the lesser of the
 				// way the slope would be taken out and the way the ground is
 				// turning now, where there is either.
 				const double Along[2] = { PlaneRateDegPerSec(Legs, GroundDeg, Tuning), PlaneRateDegPerSec(Legs, Cap.GroundRateDegPerSec, Tuning) };
 				Cap.LegsDegPerSec = Along[0] > 0.0 && Along[1] > 0.0 ? FMath::Min(Along[0], Along[1]) : FMath::Max(Along[0], Along[1]);
 			}
+			// A three-point robot still carrying roll is kept to the speed
+			// that roll allows.
+			Cap.HoldSpeedCmS = bActive ? State.Carry.HoldSpeedCmS(State.CorrectionDeg.Y, Full.MaxCorrectionDeg.Y) : 0.0;
 			State.SpeedScale.Tick(Cap, Dt, Tuning);
 		}
 		else if (Now != EState::Holding)
@@ -945,6 +1121,9 @@ namespace RammsLevel
 		Out.RateUse = RateUse;
 		Out.bRateLimited = State.bRateLimited;
 		Out.bQuiet = bQuiet;
+		Out.CarryDeg = State.CarryDeg;
+		Out.bEased = State.bEased;
+		Out.SagDeg = SagDeg;
 
 		switch (Now)
 		{

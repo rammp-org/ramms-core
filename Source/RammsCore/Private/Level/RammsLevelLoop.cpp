@@ -521,6 +521,12 @@ namespace RammsLevel
 		{
 			// The drive says what its stick asks.
 			FreeSpeed = In.AskedSpeedCmS >= Cap.MinSpeedCmS ? In.AskedSpeedCmS : 0.0;
+			// A stick that has just asked for another speed: the drive will
+			// overshoot it as it arrives, and that is not a robot running away.
+			const double StickAccel = bHasFreeSpeed ? FMath::Abs(In.AskedSpeedCmS - LastFreeSpeedCmS) / Dt : 0.0;
+			LastFreeSpeedCmS = In.AskedSpeedCmS;
+			bHasFreeSpeed = true;
+			SinceStickSeconds = StickAccel > FMath::Max(0.0, Cap.UnsteadyAskCmS2) ? 0.0 : SinceStickSeconds + Dt;
 		}
 		else if (Speed >= Cap.MinSpeedCmS)
 		{
@@ -580,6 +586,50 @@ namespace RammsLevel
 			Target = FMath::Min(Target, Driven * Follow / Turning);
 		}
 
+		// The first sign of a break: the same turning where it shows first,
+		// kept as a turn per cm travelled until the break is past the legs.
+		{
+			FVector2D	 Seen = In.bSeenRateKnown && FMath::IsFinite(In.SeenRateDegPerSec.X) && FMath::IsFinite(In.SeenRateDegPerSec.Y) ? In.SeenRateDegPerSec : FVector2D::ZeroVector;
+			const double SeenSize = FMath::Max(0.0, Seen.Size() - Swung);
+			// (Read as it comes for a moment after the first sign; otherwise
+			// only as far as the drive is being asked steadily.)
+			const bool bOpen = HeldTurnPerCm > 0.0 && SinceHeldSeconds < Cap.EarlyOpenSeconds;
+			Early += (SeenSize - Early) * (LoopFilterShare(Dt, Cap.EarlyFilterSeconds) * (In.bSeenRateKnown && !bOpen ? Steady : 1.0));
+			SinceHeldCm += Speed * Dt;
+			SinceHeldSeconds += Dt;
+			if (Cap.EarlyHeldSpans > 0.0 && Follow > 0.0 && Speed >= Cap.MinSpeedCmS && Early > FMath::Max(0.0, Cap.EarlyStartShare) * Follow)
+			{
+				if (HeldTurnPerCm <= 0.0 && Steady >= 1.0 - 1.0e-9)
+				{
+					// The first sign.
+					HeldTurnPerCm = Early / Speed;
+					SinceHeldCm = 0.0;
+					SinceHeldSeconds = 0.0;
+				}
+				else if (bOpen)
+				{
+					HeldTurnPerCm = FMath::Max(HeldTurnPerCm, Early / Speed);
+				}
+			}
+			if (In.MaxTurnDegPerCm > 0.0)
+			{
+				HeldTurnPerCm = FMath::Min(HeldTurnPerCm, In.MaxTurnDegPerCm);
+			}
+			if (Cap.EarlyHeldSpans <= 0.0 || In.SpanCm <= 0.0 || SinceHeldCm > Cap.EarlyHeldSpans * In.SpanCm)
+			{
+				HeldTurnPerCm = 0.0;
+			}
+			if (HeldTurnPerCm > 0.0 && Follow > 0.0 && FreeSpeed > 0.0)
+			{
+				Target = FMath::Min(Target, FMath::Max(FMath::Clamp(Cap.EarlyMinScale, 0.0, 1.0), Follow / (HeldTurnPerCm * FreeSpeed)));
+			}
+		}
+		// A speed to keep under (a three-point robot still carrying roll).
+		if (In.HoldSpeedCmS > 0.0 && FreeSpeed > In.HoldSpeedCmS)
+		{
+			Target = FMath::Min(Target, In.HoldSpeedCmS / FreeSpeed);
+		}
+
 		// The slope the robot is levelled on will end, and the ground then
 		// comes back by all of it inside one span's travel: no faster than
 		// that can be followed.
@@ -632,6 +682,13 @@ namespace RammsLevel
 		{
 			Scale = FMath::Min(Target, Scale + FMath::Max(0.0, Tuning.SpeedScaleRisePerSec) * Dt);
 		}
+		// A speed to keep under that the robot has not yet reached is kept
+		// under at once: that brakes nothing, it only does not let the drive
+		// run up past it while the scale comes down at its own pace.
+		if (In.HoldSpeedCmS > 0.0 && FreeSpeed > In.HoldSpeedCmS && Speed <= 1.1 * In.HoldSpeedCmS)
+		{
+			Scale = FMath::Min(Scale, FMath::Max(Floor, In.HoldSpeedCmS / FreeSpeed));
+		}
 		// A robot running away past what its stick asks (gravity, down the far
 		// side of a crest, with the drive's loop still holding the climb): the
 		// further past, the less is asked, at once and for as long as it is
@@ -641,9 +698,12 @@ namespace RammsLevel
 		Out = Scale;
 		// (Only where the drive says what is asked: a speed taken for the
 		// speed asked cannot be over it.)
-		if (bAskKnown && FreeSpeed > 0.0 && Cap.OverspeedGain > 0.0 && Speed > FreeSpeed)
+		// (And only past a band, once the stick's own ask has stood a while: a
+		// start's overshoot and a speed that wanders are not a run-away.)
+		const double Band = FMath::Max(FMath::Max(0.0, Cap.OverspeedBandCmS), FMath::Max(0.0, Cap.OverspeedBandShare) * FreeSpeed);
+		if (bAskKnown && FreeSpeed > 0.0 && Cap.OverspeedGain > 0.0 && Speed > FreeSpeed + Band && LoopTimerHasRun(SinceStickSeconds, Cap.OverspeedSettleSeconds))
 		{
-			Out = FMath::Max(Floor, Scale - Cap.OverspeedGain * (Speed - FreeSpeed) / FreeSpeed);
+			Out = FMath::Max(Floor, Scale - Cap.OverspeedGain * (Speed - FreeSpeed - Band) / FreeSpeed);
 		}
 		return Out;
 	}
@@ -662,9 +722,114 @@ namespace RammsLevel
 		SinceSteepestCm = 0.0;
 		bHasAsked = false;
 		Steady = 1.0;
+		Early = 0.0;
+		HeldTurnPerCm = 0.0;
+		SinceHeldCm = 0.0;
+		SinceHeldSeconds = 0.0;
+		bHasFreeSpeed = false;
+		SinceStickSeconds = 1.0e6;
 		Scale = FMath::Min(1.0, Scale + FMath::Max(0.0, Tuning.SpeedScaleRisePerSec) * Dt);
 		Out = Scale;
 		return Out;
+	}
+
+	FVector2D FCarryLimit::Tick(const FCarryInputs& In, double Dt, const FTuning& LawTuning)
+	{
+		const FVector2D Full(FMath::Max(0.0, In.FullDeg.X), FMath::Max(0.0, In.FullDeg.Y));
+		if (Dt <= 0.0 && bSeeded)
+		{
+			return Limit.Get();
+		}
+		// The speed the rules go by: up at once, down only as the robot slows.
+		const double Now = FMath::IsFinite(In.SpeedCmS) ? FMath::Abs(In.SpeedCmS) : 0.0;
+		Speed = bHasSpeed ? Speed + (Now - Speed) * LoopFilterShare(Dt, Tuning.SpeedFilterSeconds) : Now;
+		bHasSpeed = true;
+		const double V = FMath::Max(Now, Speed);
+
+		FVector2D Target = Full;
+		// No more than the legs can take back out while a break passes under
+		// them.
+		if (Tuning.bCrest && V >= QuietSpeedCmS && In.SpanCm > 0.0)
+		{
+			// How long the break is under the legs once they have begun to
+			// answer it: the robot slowed for it as the speed cap will.
+			const double Lag = FMath::Max(0.0, Tuning.CrestLagSeconds);
+			const double Brake = FMath::Max(0.0, Tuning.CrestBrakeCmS2);
+			const double Floor = FMath::Max(QuietSpeedCmS, FMath::Min(V, LoopSpeedFloor(LawTuning) * V));
+			const double Left = FMath::Max(0.0, In.SpanCm - V * Lag);
+			double		 Seconds = 0.0;
+			if (Brake <= 0.0)
+			{
+				Seconds = Left / V;
+			}
+			else if ((V * V - Floor * Floor) / (2.0 * Brake) >= Left)
+			{
+				Seconds = (V - FMath::Sqrt(FMath::Max(0.0, V * V - 2.0 * Brake * Left))) / Brake;
+			}
+			else
+			{
+				Seconds = (V - Floor) / Brake + (Left - (V * V - Floor * Floor) / (2.0 * Brake)) / Floor;
+			}
+			Seconds *= FMath::Clamp(Tuning.CrestShare, 0.0, 1.0);
+			if (In.LegsDegPerSec.X > 0.0)
+			{
+				Target.X = FMath::Min(Target.X, In.LegsDegPerSec.X * Seconds);
+			}
+			if (In.LegsDegPerSec.Y > 0.0)
+			{
+				Target.Y = FMath::Min(Target.Y, In.LegsDegPerSec.Y * Seconds);
+			}
+		}
+		// A roll correction that stands the robot on three points: at a crawl
+		// only, and only for a roll worth correcting.
+		bThreePoint = In.bThreePoint && Tuning.bThreePoint;
+		if (bThreePoint)
+		{
+			const double Needed = FMath::IsFinite(In.NeededDeg.Y) ? FMath::Abs(In.NeededDeg.Y) : 0.0;
+			bRollEngaged = bRollEngaged ? Needed >= FMath::Min(Tuning.RollLetGoDeg, Tuning.RollEngageDeg) : Needed >= Tuning.RollEngageDeg;
+			// (By the speed asked where that is more: the drive is being held
+			// to what the roll still carried allows.)
+			const double Going = FMath::IsFinite(In.AskedSpeedCmS) ? FMath::Max(V, In.AskedSpeedCmS) : V;
+			Target.Y = bRollEngaged ? FMath::Min(Target.Y, Full.Y * LoopRamp(Going, Tuning.ThreePointFullCmS, 1.0, Tuning.ThreePointNoneCmS, 0.0)) : 0.0;
+		}
+		else
+		{
+			bRollEngaged = true;
+		}
+		if (!bSeeded)
+		{
+			// (From what is carried already, where that is more: walked down.)
+			const FVector2D Carried(FMath::IsFinite(In.CarriedDeg.X) ? FMath::Min(Full.X, FMath::Abs(In.CarriedDeg.X)) : 0.0, FMath::IsFinite(In.CarriedDeg.Y) ? FMath::Min(Full.Y, FMath::Abs(In.CarriedDeg.Y)) : 0.0);
+			Limit.Reset(FVector2D(FMath::Max(Target.X, Carried.X), FMath::Max(Target.Y, Carried.Y)));
+			bSeeded = true;
+			return Limit.Get();
+		}
+		// Not back up while the base is being braked: it is on all its wheels,
+		// and stays so until it moves steadily again.
+		if (!In.bMayRise)
+		{
+			Target.X = FMath::Min(Target.X, FMath::Max(0.0, Limit.Get().X));
+			Target.Y = FMath::Min(Target.Y, FMath::Max(0.0, Limit.Get().Y));
+		}
+		// Nor does the roll of a three-point robot come back while it is still
+		// coming DOWN to what its stick asks, however gently: only once it is
+		// at the speed asked, or at a crawl.
+		if (bThreePoint && FMath::IsFinite(In.AskedSpeedCmS) && In.AskedSpeedCmS >= 0.0 && V > FMath::Max(In.AskedSpeedCmS, Tuning.ThreePointFullCmS) + QuietSpeedCmS)
+		{
+			Target.Y = FMath::Min(Target.Y, FMath::Max(0.0, Limit.Get().Y));
+		}
+		Limit.Tick(Target, Dt, LawTuning.TiltRateDegPerSec, LawTuning.TiltAccelDegPerSec2);
+		return FVector2D(FMath::Clamp(Limit.Get().X, 0.0, Full.X), FMath::Clamp(Limit.Get().Y, 0.0, Full.Y));
+	}
+
+	double FCarryLimit::HoldSpeedCmS(double RollCorrectionDeg, double FullRollDeg) const
+	{
+		const double Roll = FMath::Abs(RollCorrectionDeg);
+		if (!bThreePoint || !Tuning.bHoldSpeed || !(FullRollDeg > 0.0) || !(Roll > Tuning.RollClearDeg) || !(Tuning.ThreePointNoneCmS > Tuning.ThreePointFullCmS))
+		{
+			return 0.0;
+		}
+		return LoopRamp(Roll / FullRollDeg, 0.0, Tuning.ThreePointNoneCmS, 1.0, Tuning.ThreePointFullCmS);
 	}
 
 	bool FQuiet::Tick(double SpeedCmS, double ErrorDeg, bool bStick, bool bMayRest, double Dt, const FTuning& Tuning)

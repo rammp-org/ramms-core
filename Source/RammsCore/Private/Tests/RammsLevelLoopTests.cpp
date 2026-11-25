@@ -2076,20 +2076,41 @@ bool FRammsLevelSpeedScaleLed::RunTest(const FString& Parameters)
 		Near(*this, TEXT("a small way down: a quarter of the gap in a sixteenth of a second"), Scale.Tick(In, Dt, Tuning), 1.0 - 0.075 * Dt / 0.25, 1e-9);
 	}
 	{
-		// Faster than its stick asks: asked for less by twice the excess, at once, and back at once.
+		// Faster than its stick asks by more than a tenth: asked for less by four times what is past that band, at
+		// once, and back at once.
 		FSpeedScale		Scale;
 		FSpeedCapInputs In;
 		In.AskedSpeedCmS = 60.0;
 		In.SpeedCmS = 60.0;
 		Near(*this, TEXT("at the speed asked: full"), Scale.Tick(In, Dt, Tuning), 1.0, 1e-12);
 		In.SpeedCmS = 66.0;
-		Near(*this, TEXT("a tenth over: asked for a fifth less, at once"), Scale.Tick(In, Dt, Tuning), 0.8, 1e-9);
+		Near(*this, TEXT("a tenth over, the band's edge: nothing asked (a speed that wanders is not a run-away)"), Scale.Tick(In, Dt, Tuning), 1.0, 1e-9);
+		In.SpeedCmS = 75.0;
+		Near(*this, TEXT("a quarter over: asked for four times what is past the band less, at once"), Scale.Tick(In, Dt, Tuning), 1.0 - 4.0 * (0.25 - 0.1), 1e-9);
 		In.SpeedCmS = 120.0;
 		Near(*this, TEXT("twice the speed asked: the floor, never under it"), Scale.Tick(In, Dt, Tuning), Tuning.MinSpeedScale, 1e-12);
-		In.SpeedCmS = 63.0;
-		Near(*this, TEXT("nearly back: nearly full, at once (it fades as the robot comes back)"), Scale.Tick(In, Dt, Tuning), 0.9, 1e-9);
+		In.SpeedCmS = 69.0;
+		Near(*this, TEXT("nearly back: nearly full, at once (it fades as the robot comes back)"), Scale.Tick(In, Dt, Tuning), 1.0 - 4.0 * (0.15 - 0.1), 1e-9);
 		In.SpeedCmS = 55.0;
 		Near(*this, TEXT("under the speed asked: full"), Scale.Tick(In, Dt, Tuning), 1.0, 1e-12);
+		// A start: the stick's ask steps, and the drive overshoots it as it arrives. That is the drive's own doing:
+		// nothing is asked for a second and a half after the stick moved, and then it is.
+		FSpeedScale		Launch;
+		FSpeedCapInputs Start;
+		Start.AskedSpeedCmS = 0.0;
+		Start.SpeedCmS = 0.0;
+		Launch.Tick(Start, Dt, Tuning);
+		Start.AskedSpeedCmS = 60.0;
+		double LeastEarly = 1.0, LeastLate = 1.0;
+		for (int32 Index = 0; Index < 48; ++Index)
+		{
+			// (At the speed asked in half a second, and a fifth over it from there on.)
+			Start.SpeedCmS = FMath::Min(72.0, 144.0 * (Index + 1) * Dt);
+			const double Given = Launch.Tick(Start, Dt, Tuning);
+			(Index < 20 ? LeastEarly : LeastLate) = FMath::Min(Index < 20 ? LeastEarly : LeastLate, Given);
+		}
+		Near(*this, TEXT("a start's overshoot, a fifth over the ask within a second of the stick: nothing asked of the drive"), LeastEarly, 1.0, 1e-9);
+		Near(*this, TEXT("... still a fifth over three seconds on: that is a robot running away, and it is asked for less"), LeastLate, 1.0 - 4.0 * (0.2 - 0.1), 1e-9);
 		// A drive that cannot say what its stick asks: no such term (the speed there is, is all that is known).
 		FSpeedScale		Blind;
 		FSpeedCapInputs Unknown;
